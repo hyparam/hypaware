@@ -1418,16 +1418,16 @@ export async function collectHypAwareStatus(opts = {}) {
   // plugin remove` reads as not installed; for the reported shape (an object
   // missing `install_dir`) `removePlugin` falls back to the conventional
   // install directory and clears the row.
-  // The repair names the row by position, never by key: the key is
+  // The repair names the row by line, never by key: the key is
   // hand-edited text, and a repair line is one an operator may paste, so no
   // byte of it belongs there. The sanitized label stays in the message, where
   // it identifies the row but is not offered as a command (issue #2115).
-  const { malformed, malformedPositions } = manifests.installed
+  const { malformed, malformedLines } = manifests.installed
   for (const name of malformed) {
     const label = sanitizeLabel(name, MAX_ACTIVATION_MESSAGE_CHARS) ?? '<unnamed>'
     const lockPath = pluginLockPath(stateRoot)
-    const position = malformedPositions.get(name)
-    const row = position === undefined ? 'that entry' : `entry ${position} in its plugins object`
+    const line = malformedLines.get(name)
+    const row = line === undefined ? 'that entry' : `the entry on line ${line}`
     diagnostics.push({
       severity: 'error',
       kind: 'plugin_lock_entry_invalid',
@@ -4172,7 +4172,7 @@ async function discoverStatusManifests({ stateDir }) {
   /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
   let bundled = { loaded: [], excluded: [] }
   /** @type {DiscoverInstalledResult} */
-  let installed = { loaded: [], failed: [], lockEntries: [], malformed: [], malformedPositions: new Map() }
+  let installed = { loaded: [], failed: [], lockEntries: [], malformed: [], malformedLines: new Map() }
   try {
     bundled = await discoverBundledPlugins()
   } catch { /* bundled discovery failure is non-fatal */ }

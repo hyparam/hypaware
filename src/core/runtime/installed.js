@@ -4,7 +4,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { loadLock } from '../plugin_install/install.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { loadManifest } from '../manifest.js'
-import { isUsableEntry } from '../plugin_install/lock.js'
+import { isUsableEntry, readLockKeyLines } from '../plugin_install/lock.js'
 
 /**
  * @import { PluginLockEntry, PluginName } from '../../../hypaware-plugin-kernel-types.js'
@@ -41,7 +41,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
   // object carries no `name` field to read.
   const names = Object.keys(lock.plugins).sort()
   if (names.length === 0) {
-    return { loaded: [], failed: [], lockEntries: [], malformed: [], malformedPositions: new Map() }
+    return { loaded: [], failed: [], lockEntries: [], malformed: [], malformedLines: new Map() }
   }
 
   // `readLock` validates the lock container and nothing inside it, and the file
@@ -67,15 +67,16 @@ export async function discoverInstalledPlugins({ stateDir }) {
   }
   // Where each malformed row sits in the file, so a repair can point at it
   // without repeating its key: the key is hand-edited text and must not reach
-  // a line an operator may paste into a shell (issue #2115). Object.keys is
-  // the file's own order for every key that is not an integer index.
+  // a line an operator may paste into a shell (issue #2115). Only read when
+  // a row is malformed.
   /** @type {Map<PluginName, number>} */
-  const malformedPositions = new Map()
+  const malformedLines = new Map()
   if (malformed.length > 0) {
-    const bad = new Set(malformed)
-    Object.keys(lock.plugins).forEach(function(key, i) {
-      if (bad.has(key)) malformedPositions.set(key, i + 1)
-    })
+    const lines = await readLockKeyLines(stateDir)
+    for (const name of malformed) {
+      const line = lines.get(name)
+      if (line !== undefined) malformedLines.set(name, line)
+    }
   }
 
   const log = getLogger('kernel')
@@ -134,7 +135,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
     }
   }
 
-  return { loaded, failed, lockEntries: entries, malformed, malformedPositions }
+  return { loaded, failed, lockEntries: entries, malformed, malformedLines }
 }
 
 /**

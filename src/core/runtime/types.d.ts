@@ -185,11 +185,11 @@ export interface DiscoverInstalledResult {
    */
   malformed: PluginName[]
   /**
-   * 1-based position of each `malformed` key among the lock's `plugins`
-   * keys, in file order, so a repair can point at the row without
-   * repeating its untrusted key.
+   * 1-based line of each `malformed` key in plugin-lock.json, so a repair
+   * can point at the row without repeating its untrusted key. A key whose
+   * line could not be read is absent.
    */
-  malformedPositions: Map<PluginName, number>
+  malformedLines: Map<PluginName, number>
 }
 
 // --- activation ---
