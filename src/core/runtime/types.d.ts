@@ -68,6 +68,12 @@ export interface BootKernelOptions {
   env?: NodeJS.ProcessEnv
   /** Override OS temp root (tests). */
   tmpRoot?: string
+  /**
+   * A preview boot (`hyp setup --dry-run`): plugins activate as usual, but
+   * their durable state and cache dirs are not created and each activation
+   * context carries `preview: true` (LLP 0525).
+   */
+  preview?: boolean
   /** Apply-engine facade to expose on activation contexts (daemon only). */
   configControl?: ConfigControlFacade
 }

@@ -33,6 +33,7 @@ import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synt
 import { colorizeStderr } from './style.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { setupUnsupportedNote } from '../daemon/platform.js'
+import { booleanFlagValue } from './verb_codec.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { noteCommandTransition, noteInvocation, productAdapters, startInvocationDelivery, withProductInvocation } from '../product_telemetry/client.js'
 
@@ -324,6 +325,7 @@ async function dispatchInternal(argv, opts) {
     kernel = opts.kernel
   } else {
     const bootProfile = decideBootProfile(argv, registry)
+    const preview = isSetupPreview(earlyMatch)
     const boot = await bootKernel({
       hypHome: obsEnv.hypHome,
       mode: 'cli',
@@ -334,6 +336,7 @@ async function dispatchInternal(argv, opts) {
       workspaceDir: opts.workspaceDir,
       tmpRoot: opts.tmpRoot,
       env,
+      preview,
     })
     kernel = boot.runtime
     activePlugins = boot.activePlugins
@@ -353,7 +356,8 @@ async function dispatchInternal(argv, opts) {
     // `sink_plugin_not_active` warning per configured sink. The daemon's
     // own materialization (src/core/daemon/runtime.js) is untouched, so a
     // sink that genuinely fails to materialize there still surfaces.
-    if (bootProfileActivatesPlugins(bootProfile)) {
+    // A preview boot opens no sink either: creating one makes its directory.
+    if (bootProfileActivatesPlugins(bootProfile) && !preview) {
       sinkPass = { config: boot.config, withheldByProfile: boot.withheldByProfile }
     }
   }
@@ -755,6 +759,30 @@ function resolveGroupHelp(registry, argv) {
 /** @param {unknown} stream */
 function isInteractiveStream(stream) {
   return !!stream && typeof stream === 'object' && /** @type {{ isTTY?: boolean }} */ (stream).isTTY === true
+}
+
+/**
+ * Whether this argv is a setup preview (`hyp setup --dry-run`, any form,
+ * preset included), read the way the codec reads a boolean so
+ * `--dry-run=true` counts and `--dry-run=false` does not. A malformed value
+ * makes it a preview whatever follows: the codec refuses the first bad value,
+ * so the command never runs, and a refused preview should have created
+ * nothing on the way.
+ *
+ * @param {ReturnType<ReturnType<typeof createCommandRegistry>['match']>} matched
+ * @returns {boolean}
+ * @ref LLP 0525#preview-boot [implements]: an explicit setup dry-run boots as a preview
+ */
+function isSetupPreview(matched) {
+  if (matched?.command.name !== 'setup') return false
+  let preview = false
+  for (const token of matched.rest) {
+    if (token !== '--dry-run' && !token.startsWith('--dry-run=')) continue
+    const read = booleanFlagValue('dry-run', token === '--dry-run' ? undefined : token.slice('--dry-run='.length))
+    if (!read.ok) return true
+    preview = read.value
+  }
+  return preview
 }
 
 /**

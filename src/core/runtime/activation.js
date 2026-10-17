@@ -125,10 +125,11 @@ function defaultCacheRoot() {
  * @param {PluginPaths}      args.paths
  * @param {JsonObject}       [args.config]
  * @param {NodeJS.ProcessEnv} [args.env]
+ * @param {boolean}          [args.preview]
  * @returns {PluginActivationContext}
  * @ref LLP 0004#the-activation-context [implements]: per-plugin ctx: config slice, registry facades, scoped logger, requireCapability
  */
-export function createActivationContext({ runtime, plugin, paths, config, env }) {
+export function createActivationContext({ runtime, plugin, paths, config, env, preview }) {
   // `ctx.plugin` is the kernel's own record of who this plugin is, and the
   // sink materializer reads it again after `activate()` has run, so a plugin
   // that could rename it would move its sinks' owner record, labels and
@@ -164,6 +165,8 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     clients: runtime.clients,
     // @ref LLP 0025#apply-engine-is-kernel-surface [implements]: plugins reach the apply engine only through this narrow facade; absent outside the daemon
     ...(runtime.configControl ? { configControl: runtime.configControl } : {}),
+    // @ref LLP 0525#preview-boot [implements]: present only on a preview boot, so a real activation's ctx is unchanged
+    ...(preview ? { preview: true } : {}),
     /**
      * @template T
      * @param {CapabilityName} name
