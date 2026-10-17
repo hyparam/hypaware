@@ -2431,6 +2431,62 @@ test('a plain folder named from its parent still saves after the link and cwd ch
   await assert.rejects(fs.stat(draft), { code: 'ENOENT' })
 })
 
+test('save that runs out of space mid-copy leaves no slot, nothing to list or publish, and the draft intact', async (t) => {
+  const pages = { 'report.md': '# Brief\n', 'usage.md': '# Usage\n', 'work.md': '# Work\n' }
+  const { ctx, err, out, draft, name, store } = await storeFixture(t, { pages })
+  // Fault injection: the third page writes a partial file, then the disk is
+  // full. Before LLP 0519 the first two pages sat in a visible slot of that
+  // name, which `list --local` showed and `publish <name>` sent.
+  const original = fs.copyFile
+  let copies = 0
+  t.after(() => { fs.copyFile = original })
+  fs.copyFile = /** @type {any} */ (async (/** @type {string} */ src, /** @type {string} */ dest, /** @type {number | undefined} */ mode) => {
+    if (++copies === 3) {
+      await fs.writeFile(dest, '# Wo')
+      throw Object.assign(new Error('ENOSPC: no space left on device, copyfile'), { code: 'ENOSPC' })
+    }
+    return original(src, dest, mode)
+  })
+  assert.equal(await runReportSave([draft], ctx), 1)
+  assert.match(err.join(''), /could not copy .* into the store: ENOSPC: no space left on device, copyfile; the source is untouched and nothing was saved\n$/)
+  assert.doesNotMatch(err.join(''), /hidden partial copy/)
+  assert.deepEqual(await fs.readdir(store), [])
+  assert.deepEqual((await fs.readdir(draft)).sort(), Object.keys(pages))
+  for (const [page, text] of Object.entries(pages)) assert.equal(await fs.readFile(path.join(draft, page), 'utf8'), text)
+
+  out.length = 0
+  assert.equal(await runReportList(['--local'], ctx), 0)
+  assert.doesNotMatch(out.join(''), new RegExp(name))
+  // From a directory with no draft of that name, so the bare name can only
+  // resolve to the store.
+  ctx.cwd = path.dirname(store)
+  const { calls } = stubServer(t, () => ({ status: 201, json: {} }))
+  assert.equal(await runReportPublish([name, '--kind', 'k', '--period', 'p'], ctx), 2)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /no saved report of that name/)
+
+  // With space again, the retry takes the name itself, not `-2`.
+  fs.copyFile = original
+  out.length = 0
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.deepEqual(await fs.readdir(store), [name])
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), Object.keys(pages))
+})
+
+test('save names a hidden partial copy it could not remove', async (t) => {
+  const { ctx, err, draft, store } = await storeFixture(t)
+  const copy = fs.copyFile
+  const rmdir = fs.rmdir
+  t.after(() => { fs.copyFile = copy; fs.rmdir = rmdir })
+  fs.copyFile = /** @type {any} */ (async () => { throw Object.assign(new Error('ENOSPC: no space left on device, copyfile'), { code: 'ENOSPC' }) })
+  fs.rmdir = /** @type {any} */ (async () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }) })
+  assert.equal(await runReportSave([draft], ctx), 1)
+  const [left] = await fs.readdir(store)
+  assert.match(left, /^\.saving-/)
+  assert.match(err.join(''), new RegExp(`nothing was saved; a hidden partial copy is left at ${path.join(store, left).replaceAll('.', '\\.')} \\(EBUSY`))
+  assert.deepEqual(await fs.readdir(path.join(store, left)), [])
+})
+
 test('save leaves a draft folder in place when a file appeared during the move, and names it', async (t) => {
   const { ctx, out, draft, name, store } = await storeFixture(t)
   // Validation ran against a clean folder; the stray file lands after. The

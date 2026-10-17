@@ -293,23 +293,49 @@ export async function runReportSave(argv, ctx) {
       ctx.stderr.write(`hyp report save: ${err instanceof Error ? err.message : String(err)}\n`)
       return 2
     }
+    // The pages land in a hidden folder inside the store, on the same
+    // filesystem, and only a complete copy is renamed over the slot. A copy
+    // that fails midway (a full disk) leaves no slot for `list` or `publish`
+    // to find, and its cleanup unlinks only the pages this copy started.
+    // @ref LLP 0519#staging [implements]: copy into a dot folder in the store, rename it over the claimed slot once every page landed
     /** @type {string} */
-    let dest
+    let staging
     try {
       await fs.mkdir(root, { recursive: true })
-      dest = await claimStoreSlot(root, name)
+      staging = await fs.mkdtemp(path.join(root, '.saving-'))
     } catch (err) {
       span.setAttribute('error_kind', 'store')
       ctx.stderr.write(`hyp report save: could not create the store under ${esc(root)}: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
     }
+    /** @type {string[]} */
+    const started = []
     try {
       for (const page of pages) {
-        await fs.copyFile(path.join(abs, page), path.join(dest, page), fs.constants.COPYFILE_EXCL)
+        started.push(page)
+        await fs.copyFile(path.join(abs, page), path.join(staging, page), fs.constants.COPYFILE_EXCL)
       }
     } catch (err) {
       span.setAttribute('error_kind', 'copy')
-      ctx.stderr.write(`hyp report save: could not copy into ${esc(dest)}: ${err instanceof Error ? err.message : String(err)}; the source is untouched\n`)
+      ctx.stderr.write(`hyp report save: could not copy ${esc(source)} into the store: ${err instanceof Error ? err.message : String(err)}; the source is untouched and nothing was saved${await discardStaging(staging, started)}\n`)
+      return 1
+    }
+    /** @type {string} */
+    let dest
+    try {
+      dest = await claimStoreSlot(root, name)
+    } catch (err) {
+      span.setAttribute('error_kind', 'store')
+      ctx.stderr.write(`hyp report save: could not claim a folder in ${esc(root)}: ${err instanceof Error ? err.message : String(err)}; the source is untouched and nothing was saved${await discardStaging(staging, pages)}\n`)
+      return 1
+    }
+    try {
+      // POSIX rename replaces the empty directory this save just claimed.
+      await fs.rename(staging, dest)
+    } catch (err) {
+      await fs.rmdir(dest).catch(() => {})
+      span.setAttribute('error_kind', 'store')
+      ctx.stderr.write(`hyp report save: could not move the copy into ${esc(dest)}: ${err instanceof Error ? err.message : String(err)}; the source is untouched and nothing was saved${await discardStaging(staging, pages)}\n`)
       return 1
     }
     const savedName = path.basename(dest)
@@ -1933,6 +1959,30 @@ async function claimStoreSlot(root, name) {
     }
   }
   throw new Error(`${STORE_SLOT_LIMIT} folders already share the name '${name}'`)
+}
+
+/**
+ * Remove a staging folder a failed save left: unlink only the named pages,
+ * absent ones included (a copy that failed before creating its file), then a
+ * plain `rmdir`. Never recursive. Returns '' when the folder is gone, else a
+ * clause naming the hidden folder that is left.
+ *
+ * @param {string} staging
+ * @param {string[]} pages
+ * @returns {Promise<string>}
+ */
+async function discardStaging(staging, pages) {
+  try {
+    for (const page of pages) {
+      await fs.unlink(path.join(staging, page)).catch((err) => {
+        if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
+      })
+    }
+    await fs.rmdir(staging)
+    return ''
+  } catch (err) {
+    return `; a hidden partial copy is left at ${esc(staging)} (${err instanceof Error ? err.message : String(err)})`
+  }
 }
 
 /**
