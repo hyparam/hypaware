@@ -1193,7 +1193,8 @@ test('a job launchd never releases still loses its plist, and the uninstall says
     () => uninstallLaunchAgent(uninstallOpts(home, lc, sleeps)),
     (err) => {
       assert.ok(err instanceof Error)
-      assert.match(err.message, /did not unload/)
+      assert.match(err.message, /never confirmed the job unloaded/)
+      assert.match(err.message, /still listed the job when the wait ran out/)
       // What the operator has to act on: which service is still held, and
       // that the removal half already happened.
       assert.match(err.message, /gui\/501\/com\.hyperparam\.hypaware/)
@@ -1252,14 +1253,190 @@ test('a probe the adapter could not run still removes the plist, and still fails
     () => uninstallLaunchAgent(uninstallOpts(home, /** @type {any} */ (unspawnable), sleeps)),
     (err) => {
       assert.ok(err instanceof Error)
-      assert.match(err.message, /did not unload/)
-      assert.match(err.message, /spawn launchctl ENOENT/, 'the reason the unload went unconfirmed reaches the operator')
+      assert.match(err.message, /never confirmed the job unloaded/)
+      assert.match(err.message, /launchctl print could not be run \(.*spawn launchctl ENOENT/, 'the reason the unload went unconfirmed reaches the operator')
       return true
     },
   )
 
   assert.equal(fs.existsSync(plistPath), false, 'a probe that could not run cost the operator the removal')
   assert.deepEqual(sleeps, [], 'the very first probe rejected, so nothing was ever waited out')
+})
+
+// Issue #2338. The unload poll used to stop on any non-zero `print`, so a
+// probe that merely failed (a denied lookup, a launchd that was busy) ended the
+// wait as though launchd had confirmed the release, and the uninstall then
+// reported success and let clients be detached. Only 113, launchd's "service
+// not found", confirms a release; every other failure keeps the bounded poll
+// going and, if it never resolves, fails the uninstall after the unlink.
+
+/**
+ * `lc` with the next `times` probes after its bootout answering `exitCode`
+ * (`Infinity` for all of them), before the fake's own answer resumes. The
+ * fake launchd releases the job inside the bootout, so the resumed answer is
+ * 113 unless the test arranged otherwise.
+ *
+ * @param {ReturnType<typeof fakeLaunchd>} lc
+ * @param {number} exitCode
+ * @param {number} times
+ * @returns {ReturnType<typeof fakeLaunchd>}
+ */
+function probeFailsAfterBootout(lc, exitCode, times) {
+  const { print, bootout } = lc
+  let left = 0
+  return {
+    ...lc,
+    async bootout(args) {
+      const res = await bootout(args)
+      left = times
+      return res
+    },
+    async print(args) {
+      if (left <= 0) return print(args)
+      left -= 1
+      lc.calls.push(['print', ...args])
+      return { exitCode, stdout: '', stderr: 'Could not print: Operation not permitted' }
+    },
+  }
+}
+
+test('an uninstall whose probe keeps failing removes the plist and refuses to report success (#2338)', async (t) => {
+  const home = tmpHome('uninstall-probe-non113')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const staged = stageCtx(home)
+  const lc = probeFailsAfterBootout(fakeLaunchd({ loadedAtStart: true }), 5, Infinity)
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  const code = await runDaemonUninstall([], staged.ctx, {
+    uninstallDaemon: (o) => uninstallDaemon({
+      ...o,
+      ...uninstallOpts(home, lc, sleeps),
+      platform: /** @type {const} */ ('darwin'),
+    }),
+  })
+
+  assert.equal(code, 1, 'a release launchd never confirmed was reported as a removed daemon')
+  assert.doesNotMatch(staged.out(), /Daemon removed/)
+  assert.match(staged.err(), /never confirmed the job unloaded/)
+  // A failed probe is reported as one, not as proof the job is still there.
+  assert.match(staged.err(), /launchctl print kept failing \(last exit 5: Could not print: Operation not permitted\)/)
+  assert.match(staged.err(), /whether the job is still loaded is unknown/)
+  assert.doesNotMatch(staged.err(), /still listed the job/)
+  assert.equal(fs.existsSync(plistPath), false, 'the plist survived an uninstall whose probe failed')
+  assert.equal(sleeps.reduce((a, b) => a + b, 0), DAEMON_STOP_TIMEOUT_MS, 'the failed probe ended the wait early')
+  assert.equal(count(lc.calls, 'print'), sleeps.length, 'one probe per interval, never a busy loop')
+})
+
+test('an uninstall rides out a probe that failed and then saw the job gone (#2338)', async (t) => {
+  const home = tmpHome('uninstall-probe-transient')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = probeFailsAfterBootout(fakeLaunchd({ loadedAtStart: true }), 5, 2)
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.equal(count(lc.calls, 'print'), 3, 'kept polling through two failed probes to the 113')
+  assert.equal(sleeps.length, 2)
+  assert.equal(fs.existsSync(plistPath), false)
+})
+
+test('a bootout that rejects while the job is still loaded fails the uninstall and keeps its reason (#2341)', async (t) => {
+  const home = tmpHome('uninstall-bootout-rejects-loaded')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true, bootoutRejects: 'launchctl: could not spawn' })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await assert.rejects(
+    () => uninstallLaunchAgent(uninstallOpts(home, lc, sleeps)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /^tried to boot out /, 'the message claims a bootout that never ran')
+      assert.match(err.message, /the bootout could not be run \(launchctl: could not spawn\)/)
+      assert.match(err.message, /still listed the job when the wait ran out/)
+      assert.ok(err.cause instanceof Error && err.cause.message === 'launchctl: could not spawn', 'the original rejection was dropped')
+      return true
+    },
+  )
+  assert.equal(fs.existsSync(plistPath), false, 'the plist survived a rejected bootout')
+})
+
+test('a failed bootout and a failed probe both reach the operator, the bootout first (#2340)', async (t) => {
+  const bootoutStderr = 'Boot-out failed: 5: Input/output error'
+  for (const shape of ['probe rejects', 'probe keeps failing']) {
+    const home = tmpHome('uninstall-mixed-diagnostics')
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+    const base = fakeLaunchd({ loadedAtStart: true })
+    const probeErr = new Error("failed to run 'launchctl print': spawn launchctl EAGAIN")
+    const failedBootout = { ...base, async bootout() { return { exitCode: 5, stdout: '', stderr: bootoutStderr } } }
+    const lc = shape === 'probe rejects'
+      ? { ...failedBootout, print() { return Promise.reject(probeErr) } }
+      : probeFailsAfterBootout(failedBootout, 1, Infinity)
+    stagePlist(home)
+
+    await assert.rejects(
+      () => uninstallLaunchAgent(uninstallOpts(home, lc, [])),
+      (err) => {
+        assert.ok(err instanceof Error)
+        const bootoutAt = err.message.indexOf(`the bootout exited 5 (${bootoutStderr})`)
+        const probeAt = err.message.indexOf(shape === 'probe rejects'
+          ? 'launchctl print could not be run (failed to run \'launchctl print\': spawn launchctl EAGAIN)'
+          : 'launchctl print kept failing (last exit 1: ')
+        assert.ok(bootoutAt > 0, `${shape}: the bootout's reason is missing: ${err.message}`)
+        assert.ok(probeAt > bootoutAt, `${shape}: the probe's reason is missing or leads: ${err.message}`)
+        assert.equal(/** @type {any} */ (err).exitCode, 5)
+        assert.equal(/** @type {any} */ (err).stderr, bootoutStderr)
+        if (shape === 'probe rejects') assert.equal(err.cause, probeErr)
+        return true
+      },
+    )
+  }
+})
+
+test('macOS stop keeps polling through a failed probe, and fails only once the window ran out (#2338)', async () => {
+  const { stopLaunchAgent } = await import('../../src/core/daemon/macos.js')
+  /** @type {number[]} */
+  const transientSleeps = []
+  const transient = probeFailsAfterBootout(fakeLaunchd({ loadedAtStart: true }), 5, 2)
+  await stopLaunchAgent(darwinOpts('/unused', transient, { sleep: async (/** @type {number} */ ms) => { transientSleeps.push(ms) } }))
+  assert.equal(count(transient.calls, 'print'), 4, 'the status print, two failed probes, then the 113')
+  assert.equal(transientSleeps.length, 2)
+
+  /** @type {number[]} */
+  const sleeps = []
+  const stuck = probeFailsAfterBootout(fakeLaunchd({ loadedAtStart: true }), 5, Infinity)
+  await assert.rejects(
+    stopLaunchAgent(darwinOpts('/unused', stuck, { sleep: async (/** @type {number} */ ms) => { sleeps.push(ms) } })),
+    /failed to print .*Operation not permitted/,
+  )
+  assert.equal(sleeps.reduce((a, b) => a + b, 0), DAEMON_STOP_TIMEOUT_MS, 'a failed probe ended the stop window early')
+})
+
+test('a reinstall waits out a failing probe on its own bound before writing the new plist (#2338)', async (t) => {
+  for (const [times, expectedSleeps] of [[2, 2], [30, 30]]) {
+    const home = tmpHome('reinstall-probe-non113')
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+    const lc = probeFailsAfterBootout(fakeLaunchd({ loadedAtStart: true, spawnOnKickstart: true }), 5, times)
+    /** @type {number[]} */
+    const sleeps = []
+    /** @type {number | undefined} */
+    let sleptBeforeBootstrap
+    const bootstrap = lc.bootstrap
+    lc.bootstrap = async (args) => { sleptBeforeBootstrap ??= sleeps.length; return bootstrap(args) }
+
+    await installLaunchAgent(darwinOpts(home, lc, { sleep: async (/** @type {number} */ ms) => { sleeps.push(ms) } }))
+
+    // Two failed probes and then the 113 cost two intervals; a probe that
+    // never recovers costs the 3s reinstall budget and no more, after which
+    // the bootstrap's own retry is what handles a label still held.
+    assert.equal(sleptBeforeBootstrap, expectedSleeps, `${times} failed probes`)
+    assert.equal(count(lc.calls, 'bootstrap'), 1)
+  }
 })
 
 test('an uninstall with no plist on disk touches launchd not at all', async (t) => {

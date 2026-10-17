@@ -22,6 +22,8 @@ import { LaunchAgentError, plistPathFor } from '../../src/core/daemon/macos.js'
 import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
 import { runRoot } from '../../src/core/observability/span_helpers.js'
 
+/** @import { TestContext } from 'node:test' */
+
 const LABEL = 'com.hypaware.test.agent'
 const OK = { exitCode: 0, stdout: '', stderr: '' }
 
@@ -71,9 +73,16 @@ function fakeLaunchctl(script) {
   }
 }
 
-/** @returns {string} */
-function tmpHome() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-daemon-op-span-'))
+/**
+ * A temp root removed when the test ends, pass or fail (#2366).
+ *
+ * @param {TestContext} t
+ * @returns {string}
+ */
+function tmpHome(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-daemon-op-span-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  return home
 }
 
 /**
@@ -94,8 +103,8 @@ function spanNamed(spans, name) {
   return found
 }
 
-test('a failed daemon operation does not leave a status=ok attribute on its span', async () => {
-  const home = tmpHome()
+test('a failed daemon operation does not leave a status=ok attribute on its span', async (t) => {
+  const home = tmpHome(t)
   const plistDir = path.join(home, 'LaunchAgents')
   seedPlist(plistDir)
   // Loaded before the bootout and still loaded after it: the unload is never
@@ -119,12 +128,13 @@ test('a failed daemon operation does not leave a status=ok attribute on its span
   assert.equal(span.attributes.error_kind, 'unhandled_exception')
 })
 
-test('a successful daemon operation still records status=ok and no error_kind', async () => {
-  const home = tmpHome()
+test('a successful daemon operation still records status=ok and no error_kind', async (t) => {
+  const home = tmpHome(t)
   const plistDir = path.join(home, 'LaunchAgents')
   const plistPath = seedPlist(plistDir)
-  // Loaded on the pre-check, gone on the next probe: the unload is confirmed.
-  const launchctl = fakeLaunchctl({ print: [0, 1] })
+  // Still loaded on the first probe after the bootout, and gone (113, the
+  // only answer that confirms a release) on the next: the unload is confirmed.
+  const launchctl = fakeLaunchctl({ print: [0, 113] })
 
   const { spans, thrown } = await captureSpans(() => uninstallDaemon({
     platform: 'darwin',
@@ -144,8 +154,8 @@ test('a successful daemon operation still records status=ok and no error_kind', 
   assert.equal(span.attributes.error_kind, undefined, 'a clean run carries no error_kind')
 })
 
-test('a daemon operation that fails after its partial work still reports failed', async () => {
-  const home = tmpHome()
+test('a daemon operation that fails after its partial work still reports failed', async (t) => {
+  const home = tmpHome(t)
   const plistDir = path.join(home, 'LaunchAgents')
   // Never bootstrapped, so the install writes the plist and bootstraps, and
   // `print` then never reports a pid: the job is registered on disk and the
