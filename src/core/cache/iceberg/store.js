@@ -1026,7 +1026,8 @@ async function scanFileForScopedRows(filePath, resolver, plan, deletedPositions)
   let start = 0
   for (const group of metadata.row_groups) {
     const end = start + Number(group.num_rows)
-    const scoped = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
+    /** @type {Record<string, unknown>[] | undefined} */
+    let scoped = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
       file, metadata, columns: scopeColumns, rowStart: start, rowEnd: end,
     }))
     /** @type {{ pos: number, owner: O, key: string, row: Record<string, unknown> | undefined }[]} */
@@ -1046,6 +1047,10 @@ async function scanFileForScopedRows(filePath, resolver, plan, deletedPositions)
       if (first < 0) first = pos
       last = pos
     }
+    // Drop the group's scope rows before the value pass awaits: `hits` holds
+    // the candidates it still compares, and the binding would otherwise keep
+    // every other scope row reachable through the whole value decode (#2345).
+    scoped = undefined
     const values = first < 0 ? [] : /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
       file, metadata, columns: valueColumns, rowStart: first, rowEnd: last + 1,
     }))
