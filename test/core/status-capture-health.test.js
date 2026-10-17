@@ -18,6 +18,7 @@ import {
   writeStatusFile,
 } from '../../src/core/daemon/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
+import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
@@ -874,6 +875,66 @@ test('an unreadable tree and a missing probe both answer uncertain, never health
   }
 })
 
+// The record shape the confirmation reads is Claude Code's, so any other
+// descriptor that declares a probe must answer uncertain without scanning:
+// its transcripts would never match, and an empty match reads as healthy.
+test('only the built-in claude descriptor is confirmed from transcripts; any other answers uncertain unscanned', async () => {
+  const home = await makeProbeHome()
+  const names = ['readdir', 'opendir', 'open', 'stat', 'lstat', 'realpath', 'readFile']
+  const spied = /** @type {Record<string, any>} */ (fsp)
+  /** @type {Record<string, any>} */
+  const real = {}
+  /** @type {string[]} */
+  const calls = []
+  try {
+    // A Codex rollout tree whose mtime would nominate it, holding records a
+    // Claude-shaped reader cannot recognize.
+    const dir = path.join(home, '.codex', 'sessions', '2026', '09', '29')
+    await fs.mkdir(dir, { recursive: true })
+    const rollout = path.join(dir, 'rollout-2026-09-29T18-30-00-x.jsonl')
+    await fs.writeFile(rollout, [
+      { timestamp: '2026-09-29T18:30:00.000Z', type: 'response_item', payload: { type: 'message', role: 'assistant' } },
+      { timestamp: '2026-09-29T18:30:01.000Z', type: 'event_msg', payload: { type: 'token_count' } },
+    ].map((l) => JSON.stringify(l)).join('\n') + '\n')
+    await fs.utimes(rollout, new Date('2026-09-29T18:31:00.000Z'), new Date('2026-09-29T18:31:00.000Z'))
+    // And a Claude-shaped turn, so a scan that slipped through would find one.
+    await writeTranscript(home, [assistantRecord('2026-09-29T18:30:00.000Z')], '2026-09-29T18:31:00.000Z')
+
+    const descriptors = [
+      { plugin: '@hypaware/codex', name: 'codex', skillDir: '.codex/skills', activityProbe: { dir: '.codex/sessions', file_suffix: '.jsonl' } },
+      // The identity is both halves: a third-party plugin naming its client
+      // claude, or the claude plugin under another client name, is not it.
+      { plugin: '@acme/claude', name: 'claude', skillDir: '.claude/skills', activityProbe: { dir: '.claude/projects', file_suffix: '.jsonl' } },
+      { plugin: '@hypaware/claude', name: 'claude-desktop', skillDir: '.claude/skills', activityProbe: { dir: '.claude/projects', file_suffix: '.jsonl' } },
+    ]
+    for (const name of names) {
+      real[name] = spied[name]
+      spied[name] = (/** @type {any[]} */ ...args) => {
+        calls.push(`${name} ${String(args[0])}`)
+        return real[name](...args)
+      }
+    }
+    for (const descriptor of descriptors) {
+      const confirmed = await confirmClientActivityFromDescriptor({
+        descriptor: /** @type {any} */ (descriptor),
+        homeDir: home,
+        env: {},
+        sinceMs: Date.parse('2026-09-29T18:00:00.000Z'),
+      })
+      assert.deepEqual(confirmed, { certain: false }, `${descriptor.plugin} ${descriptor.name}`)
+    }
+    assert.equal(calls.length, 0, `no filesystem call expected, got: ${calls.join(', ')}`)
+
+    // The claude descriptor still runs the parser over the same home.
+    const confirmed = await confirmIn(home, '2026-09-29T18:00:00.000Z')
+    assert.deepEqual(confirmed, { activityAt: '2026-09-29T18:30:00.000Z', certain: true })
+    assert.ok(calls.some((c) => c.startsWith('open ')), 'the claude descriptor opens its transcript')
+  } finally {
+    for (const name of Object.keys(real)) spied[name] = real[name]
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('a corner of the tree the walk could not read answers uncertain, never healthy', { skip: process.getuid?.() === 0 ? 'runs as root, where a mode-000 directory is still readable' : false }, async () => {
   const home = await makeProbeHome()
   const hidden = path.join(home, '.claude', 'projects', '-Users-t-hidden')
@@ -1065,6 +1126,92 @@ test('an unconfirmable suspicion reports unknown: no gap claimed, no health clai
 
     const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache') })
     assert.equal(json.capture_health[0].state, 'unknown')
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+test('a non-claude client with a probe and real post-baseline turns reports unknown, never ok', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const now = Date.now()
+  const lastEventAt = new Date(now - 5 * HOUR)
+  const turnAt = new Date(now - 2 * MIN)
+  const name = '@acme/rollout'
+  // An installed adapter declaring the same generic `activity_probe` key the
+  // claude manifest does, with a Codex-shaped trail behind it.
+  const installDir = path.join(stateRoot, 'plugins', '@acme', 'rollout')
+  await fs.mkdir(installDir, { recursive: true })
+  await fs.writeFile(path.join(installDir, 'hypaware.plugin.json'), JSON.stringify({
+    schema_version: 1,
+    name,
+    version: '1.0.0',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './index.js',
+    contributes: {
+      client: {
+        name: 'rollout',
+        skill_dir: '.rollout/skills',
+        attach_probe: { format: 'json', settings_file: '.rollout/settings.json', marker_key: '_hypaware' },
+        activity_probe: { dir: '.rollout/sessions', file_suffix: '.jsonl' },
+      },
+    },
+  }))
+  await fs.writeFile(path.join(installDir, 'index.js'), 'export async function activate() {}\n')
+  await writeLock(stateRoot, {
+    schema_version: 1,
+    plugins: {
+      [name]: {
+        name,
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: installDir, path: installDir },
+        install_dir: installDir,
+        content_hash: 'a'.repeat(64),
+        manifest_hash: 'b'.repeat(64),
+        installed_at: '2026-10-17T00:00:00.000Z',
+      },
+    },
+  })
+  const configPath = defaultConfigPath(hypHome)
+  const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  config.plugins.push({ name })
+  await fs.writeFile(configPath, JSON.stringify(config) + '\n')
+
+  const home = await makeClientHome()
+  await fs.mkdir(path.join(home, '.rollout'), { recursive: true })
+  await fs.writeFile(path.join(home, '.rollout', 'settings.json'), JSON.stringify({
+    _hypaware: { attached_at: new Date(now - 24 * HOUR).toISOString(), version: '1.0.0', port: 8787, mode: 'otel' },
+  }) + '\n')
+  const sessions = path.join(home, '.rollout', 'sessions')
+  await fs.mkdir(sessions, { recursive: true })
+  // Real model turns in Codex's record shape, and a Claude-shaped one beside
+  // them: recognition must come from the descriptor, not coincidental bytes.
+  const rollout = path.join(sessions, 'rollout-a.jsonl')
+  await fs.writeFile(rollout, [
+    { timestamp: turnAt.toISOString(), type: 'event_msg', payload: { type: 'user_message', message: 'hi' } },
+    { timestamp: turnAt.toISOString(), type: 'response_item', payload: { type: 'message', role: 'assistant' } },
+    assistantRecord(turnAt),
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n')
+  await fs.utimes(rollout, new Date(now - 1 * MIN), new Date(now - 1 * MIN))
+  try {
+    writeStatusFile(stateRoot, /** @type {any} */ ({
+      state: 'healthy',
+      sources: [
+        { name: 'rollout-telemetry', plugin: name, state: 'started', details: { last_event_at: lastEventAt.toISOString() } },
+      ],
+      sinks: [],
+    }))
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+    const entry = report.captureHealth.find((h) => h.client === 'rollout')
+    assert.equal(entry?.state, 'unknown')
+    // No confirmed activity invented from the trail, and no gap claimed.
+    assert.equal(entry?.lastTranscriptActivityAt?.slice(0, 19), new Date(now - 1 * MIN).toISOString().slice(0, 19))
+    assert.ok((entry?.gapMs ?? 0) > 4 * HOUR)
+    assert.equal(report.diagnostics.some((d) => d.kind === 'capture_gap'), false)
+
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    assert.match(stdout.text(), /\[capture unconfirmed\]/)
   } finally {
     await cleanup(hypHome, home)
   }
