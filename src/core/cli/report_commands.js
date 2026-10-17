@@ -252,11 +252,28 @@ export async function runReportSave(argv, ctx) {
       ctx.stderr.write(`hyp report save: folder name must match ${SAVED_NAME_RE.source} (got '${esc(name)}'); rename it, e.g. hypaware-report-<from>-to-<to>\n`)
       return 2
     }
+    // A move through a link would unlink the pages inside its target, leave
+    // the link behind, and name the slot after the link; a move of the folder
+    // the shell stands in strands that shell in a deleted directory. Both are
+    // refused, --keep included, before anything is read or created.
+    // @ref LLP 0518#refusals [implements]: save refuses a symlinked source and a source holding the cwd
+    if ((await fs.lstat(abs)).isSymbolicLink()) {
+      span.setAttribute('error_kind', 'symlink')
+      ctx.stderr.write(`hyp report save: ${esc(source)} is a symbolic link; a move would empty its target and leave the link. Save the folder it points to\n`)
+      return 2
+    }
+    const cwd = ctx.cwd ?? process.cwd()
     const root = reportsStoreRoot(ctx)
     // The store's own members are already saved; refuse early rather than
     // copying a folder onto a sibling of itself. Realpath on both ends so a
     // symlinked HYP_HOME compares equal to its target.
-    const [realRoot, realAbs] = await Promise.all([fs.realpath(root).catch(() => root), fs.realpath(abs).catch(() => abs)])
+    const [realRoot, realAbs, realCwd] = await Promise.all([fs.realpath(root).catch(() => root), fs.realpath(abs).catch(() => abs), fs.realpath(cwd).catch(() => cwd)])
+    const fromSource = path.relative(realAbs, realCwd)
+    if (fromSource === '' || (!fromSource.startsWith('..') && !path.isAbsolute(fromSource))) {
+      span.setAttribute('error_kind', 'contains-cwd')
+      ctx.stderr.write(`hyp report save: ${esc(source)} holds the current directory; a move would delete the directory you are in. Run it from the folder's parent: hyp report save ${shellWord(name)}\n`)
+      return 2
+    }
     if (path.dirname(realAbs) === realRoot) {
       span.setAttribute('error_kind', 'already-saved')
       ctx.stderr.write(`hyp report save: ${esc(name)} is already in the store (${esc(root)}); 'hyp report list --local' shows it\n`)
