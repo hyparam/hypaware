@@ -49,12 +49,16 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
       if (plugins.has(name)) continue
 
       const meta = metadataFromManifest(entry.manifest)
-      plugins.set(name, {
+      /** @type {PluginCatalogEntry} */
+      const catalogEntry = {
         name,
         version: entry.manifest.version,
         metadata: meta,
         contributes: entry.manifest.contributes,
-      })
+      }
+      const requiresPlugins = Object.keys(entry.manifest.requires?.plugins ?? {})
+      if (requiresPlugins.length > 0) catalogEntry.requiresPlugins = requiresPlugins
+      plugins.set(name, catalogEntry)
       pluginMetadata.set(name, meta)
 
       // @ref LLP 0213#d1 [implements]: a rider names the plugins whose composition pulls it in
