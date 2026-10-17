@@ -21,14 +21,15 @@ import { sanitizeLabel } from '../util/json_util.js'
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ waitBeforeBindRetry?: () => Promise<'elapsed' | 'signalled'> }} [deps] Test seam for the retry wait.
  */
-export async function runDaemonRun(argv, ctx) {
+export async function runDaemonRun(argv, ctx, deps = {}) {
   const parsed = parseDaemonRunArgs(argv)
   if (parsed.error) {
     ctx.stderr.write(`hyp daemon run: ${parsed.error}\n`)
     return 2
   }
-  const { runGatewayDaemon: runDaemon } = await import('../daemon/gateway.js')
+  const { runGatewayDaemon: runDaemon, waitBeforeBindRetry, BIND_RETRY_INTERVAL_MS } = await import('../daemon/gateway.js')
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would put the daemon's state root at ./.hyp)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   try {
@@ -46,6 +47,21 @@ export async function runDaemonRun(argv, ctx) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon run: ${message}\n`)
+    const { addressInUse } = await import('../daemon/port_owner.js')
+    const { detectSupervisor } = await import('../update/self_update.js')
+    // A service manager relaunches this process the moment it exits, so a
+    // port that stays taken would otherwise boot it every few seconds for as
+    // long as the conflict lasts (#137). Exiting is still how it retries: each
+    // attempt is a fresh process, so the updater's pre-boot lane and its
+    // stuck-boot re-probe see every one, and nothing of a failed boot
+    // survives into the next. A foreground run nobody relaunches fails fast.
+    // @ref LLP 0521#pacing [implements]: supervised port conflicts wait one interval before exiting into the relaunch
+    if (detectSupervisor(ctx.env) && addressInUse(err)) {
+      ctx.stderr.write(`hyp daemon run: retrying in ${Math.round(BIND_RETRY_INTERVAL_MS / 1000)}s; 'hyp daemon restart' retries now\n`)
+      // A stop or restart the operator asked for ends the wait as the
+      // gateway's own SIGTERM handler would have ended a serving run.
+      if (await (deps.waitBeforeBindRetry ?? waitBeforeBindRetry)() === 'signalled') return 0
+    }
     return 1
   }
 }
