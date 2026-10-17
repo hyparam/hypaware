@@ -300,9 +300,22 @@ export async function runGatewayDaemon(opts = {}) {
     // while the run still reports green (#1531). The SIGKILL the deadline
     // exists for happens either way.
     // @ref LLP 0038#lifecycle-and-operator-behavior [implements]: a stuck child or an open stream cannot strand the stop
+    /** @type {NodeJS.Timeout | undefined} */
+    let lastResort
     const deadline = setTimeout(() => {
       child?.kill('SIGKILL')
-      if (opts.installSignalHandlers !== false) process.exit(code)
+      if (opts.installSignalHandlers === false) return
+      // A run that relaunches itself on 75 needs this stop to finish, not to
+      // exit: the kill releases the wait on the child, so the stop completes
+      // and the relaunch follows. The exit stays, one window later, for a stop
+      // that is stuck in this process as well.
+      // @ref LLP 0529#deadline [implements]: past the deadline a self-relaunching run kills the child and finishes the stop instead of exiting
+      if (opts.relaunchesOnRestart) {
+        lastResort = setTimeout(() => process.exit(code), STOP_DEADLINE_MS)
+        lastResort.unref()
+        return
+      }
+      process.exit(code)
     }, STOP_DEADLINE_MS)
     deadline.unref()
     const stoppedChild = child
@@ -332,6 +345,7 @@ export async function runGatewayDaemon(opts = {}) {
       }
     } finally {
       clearTimeout(deadline)
+      clearTimeout(lastResort)
       setGatewayProcessTransport(undefined)
       // `stopped` is the record that a shutdown completed, and a boot that
       // threw never served, so writing it here reads a relaunch loop as the

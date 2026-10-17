@@ -1036,6 +1036,12 @@ export interface RunDaemonOptions {
    * the run still reports green.
    */
   installSignalHandlers?: boolean
+  /**
+   * The caller relaunches this run when it ends with 75 (LLP 0529), so a stop
+   * past its deadline kills the processing child and lets the stop finish
+   * instead of exiting, exiting only one deadline later if it still has not.
+   */
+  relaunchesOnRestart?: boolean
   /** Whether the runtime reports foreground mode (default true). */
   foreground?: boolean
   /** Temp directory root for sink materialization scratch files. */
