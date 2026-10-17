@@ -699,6 +699,110 @@ test('a rejected snapshot body is drained only up to a cap, while a small one st
 })
 
 
+/**
+ * Send raw bytes to the listener and collect what comes back until the
+ * connection closes or `ms` passes, keeping the body flowing from `pump`.
+ *
+ * @param {string} endpoint
+ * @param {string} head
+ * @param {{ chunk?: Buffer, ms?: number }} [opts]
+ */
+function rawExchange(endpoint, head, opts = {}) {
+  return new Promise((resolve) => {
+    const socket = net.connect(Number(new URL(endpoint).port), '127.0.0.1')
+    let received = ''
+    let closed = false
+    const timer = setTimeout(() => { socket.destroy(); finish() }, opts.ms ?? 1000)
+    function finish() {
+      clearTimeout(timer)
+      resolve({ received, closed })
+    }
+    function pump() {
+      const chunk = opts.chunk
+      if (!chunk) return
+      const frame = `${chunk.length.toString(16)}\r\n`
+      while (!socket.destroyed) {
+        if (!socket.write(frame) || !socket.write(chunk) || !socket.write('\r\n')) {
+          socket.once('drain', pump)
+          return
+        }
+      }
+    }
+    socket.on('connect', () => {
+      socket.write(head)
+      pump()
+    })
+    socket.on('data', (data) => { received += data.toString('utf8') })
+    socket.on('error', () => {})
+    socket.on('close', () => {
+      closed = true
+      finish()
+    })
+  })
+}
+
+// GET / reads no body, but answering without touching the request leaves
+// Node's `_dump()` fallback reading whatever the sender attaches to EOF
+// (issue #1344). The route discards a body under the shared drain cap and
+// refuses one declared past it.
+test('the readiness route bounds the body it discards and keeps a bodiless probe reusable', async () => {
+  /** @type {net.Socket[]} */
+  const serverSockets = []
+  const createServer = http.createServer
+  http.createServer = (/** @type {any[]} */ ...args) => {
+    const server = createServer(...args)
+    server.on('connection', (socket) => serverSockets.push(socket))
+    return server
+  }
+  const listener = await startListener().finally(() => {
+    http.createServer = createServer
+  })
+  try {
+    // A bodiless probe is unchanged: 200, the same shape, and a connection
+    // left open for the next request.
+    const probe = /** @type {{ received: string, closed: boolean }} */ (
+      await rawExchange(listener.endpoint, 'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n', { ms: 300 })
+    )
+    assert.match(probe.received, /^HTTP\/1\.1 200 /)
+    assert.doesNotMatch(probe.received, /\r\nconnection: close\r\n/i)
+    assert.match(probe.received, /"status":"ready"/)
+    assert.equal(probe.closed, false, 'a bodiless readiness probe closed its connection')
+
+    // An endless chunked body is cut at the cap rather than read to EOF.
+    serverSockets.length = 0
+    const endless = /** @type {{ received: string, closed: boolean }} */ (
+      await rawExchange(
+        listener.endpoint,
+        'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\ntransfer-encoding: chunked\r\n\r\n',
+        { chunk: Buffer.alloc(16 * 1024, 'x'), ms: 3000 }
+      )
+    )
+    assert.equal(endless.closed, true, 'the listener kept reading an endless readiness body')
+    const [served] = serverSockets
+    assert.ok(served, 'the chunked probe opened no server connection to measure')
+    assert.ok(served.bytesRead < 3 * 64 * 1024, `the listener read ${served.bytesRead} bytes of a readiness body`)
+    if (endless.received) {
+      assert.match(endless.received, /^HTTP\/1\.1 200 /)
+      assert.match(endless.received, /\r\nconnection: close\r\n/i)
+    }
+
+    // A body declared past the cap is refused with a 413 the caller can read
+    // (on a raw socket, since fetch will not send a GET body).
+    const oversized = /** @type {{ received: string, closed: boolean }} */ (
+      await rawExchange(
+        listener.endpoint,
+        `GET / HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-length: ${1024 * 1024}\r\n\r\n`,
+        { ms: 1000 }
+      )
+    )
+    assert.match(oversized.received, /^HTTP\/1\.1 413 /)
+    assert.match(oversized.received, /\r\nconnection: close\r\n/i)
+    assert.match(oversized.received, /request body too large/)
+  } finally {
+    await listener.cleanup()
+  }
+})
+
 test('invalid exclusions disable OpenCode capture while its listener remains available', async () => {
   const env = await startListener(true)
   try {
