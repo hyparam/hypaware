@@ -1547,6 +1547,157 @@ test('fix: a real keypress still lifts the deadline for good', { timeout: 5000 }
   assert.equal(launches[0].launcher.client, 'codex', 'the deadline must not outlive a real keypress')
 })
 
+/* ---------- the listing pickers' deadline (#2400) ---------- */
+
+// With no id, `hyp report fix` asks which report and then which of its
+// recommendations, behind the same tty gate the client picker sits behind
+// and with the same blindness to a terminal nobody is at. These two have no
+// pick to fall through to (the command starts an agent that edits the
+// repository), so an unanswered one ends the run as one that cannot prompt
+// does: a usage error naming the id form and the listing, exit 2, nothing
+// started. Each displayed picker carries its own deadline.
+// @ref LLP 0459#decision [tests]: an unanswered listing picker is exit 2 with the usage line, per picker, never a pick
+
+/** @param {string} text */
+function assertUnanswered(text) {
+  assert.match(text, /no answer at the picker - nothing started\./)
+  assert.match(text, /usage: hyp report fix <id>/)
+  assert.match(text, /'hyp report list'/)
+}
+
+test('fix: an allocated tty nobody answers at the report picker exits 2 with the usage line and starts nothing', { timeout: 5000 }, async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const { deps, launches } = fixDeps()
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([], ctx, deps), 2)
+  assertUnanswered(err.join(''))
+  assert.match(stdout.text(), /Which report\?/)
+  assert.doesNotMatch(stdout.text(), /Which recommendation|Nothing started|Starting/)
+  assert.equal(launches.length, 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports'], 'no page is fetched')
+})
+
+test('fix: a report picked by key, then silence at the recommendation picker, exits 2: the first keypress lifts only its own picker', { timeout: 5000 }, async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = keyedTtyIn([{ str: '\r', key: { sequence: '\r', name: 'return' } }])
+  const { deps, launches } = fixDeps()
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([], ctx, deps), 2)
+  assertUnanswered(err.join(''))
+  assert.match(stdout.text(), /Which recommendation should be fixed\?/)
+  assert.equal(launches.length, 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports'])
+})
+
+test('fix: a first keypress on each listing picker lifts its deadline, so a slow reader still picks', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  // Each enter lands well past the 300ms deadline; the down before it is
+  // what keeps the picker up. The second down is a fresh keypress for the
+  // recommendation picker's fresh deadline.
+  ctx.stdin = keyedTtyIn([
+    { key: { sequence: '\x1b[B', name: 'down' } },
+    { after: 700, str: '\r', key: { sequence: '\r', name: 'return' } },
+    { after: 800, key: { sequence: '\x1b[B', name: 'down' } },
+    { after: 1400, str: '\r', key: { sequence: '\r', name: 'return' } },
+  ])
+  const { deps, launches } = fixDeps()
+  delete deps.select
+  deps.pickDeadlineMs = 300
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.equal(err.join(''), '')
+  assert.equal(launches.length, 1)
+  assert.match(launches[0].prompt, new RegExp('`hyp report get ' + REC + '`'))
+})
+
+test('fix: each listing picker gets its own deadline, back starts a fresh one, and cancel still exits 0', async (t) => {
+  stubFixServer(t)
+  /** @type {AbortSignal[]} */
+  const signals = []
+  /** @param {any} spec */
+  const silent = (spec) => new Promise((resolve, reject) => {
+    spec.signal.addEventListener('abort', () => reject(new PromptCancelledError()), { once: true })
+  })
+  // Report picked, back out of its recommendations, then nobody answers the
+  // report picker shown again.
+  {
+    const { ctx, err } = ctxWith()
+    ctx.stdin.isTTY = true
+    ctx.stdout.isTTY = true
+    const script = [
+      (/** @type {any} */ spec) => spec.options[0].value,
+      () => { throw new PromptBackRequestedError() },
+      silent,
+    ]
+    const { deps, launches, prompts } = fixDeps({ pick: async (spec) => { signals.push(spec.signal); return script.shift()?.(spec) } })
+    deps.pickDeadlineMs = 50
+    assert.equal(await runReportFix([], ctx, deps), 2)
+    assertUnanswered(err.join(''))
+    assert.deepEqual(prompts.map((p) => p.title), ['Which report?', 'Which recommendation should be fixed?', 'Which report?'])
+    assert.equal(new Set(signals).size, 3, 'a controller per display')
+    assert.deepEqual(signals.map((s) => s.aborted), [false, false, true], 'only the unanswered display expired')
+    assert.equal(launches.length, 0)
+  }
+  // An explicit cancel at the recommendation picker is still a decline.
+  {
+    const { ctx, out, err } = ctxWith()
+    ctx.stdin.isTTY = true
+    ctx.stdout.isTTY = true
+    const script = [
+      (/** @type {any} */ spec) => spec.options[0].value,
+      () => { throw new PromptCancelledError() },
+    ]
+    const { deps, launches } = fixDeps({ pick: async (spec) => script.shift()?.(spec) })
+    deps.pickDeadlineMs = 50
+    assert.equal(await runReportFix([], ctx, deps), 0)
+    assert.match(out.join(''), /Nothing started/)
+    assert.equal(err.join(''), '')
+    assert.equal(launches.length, 0)
+  }
+})
+
+test('fix: a run whose stdin is not a terminal is the usage error it was, with no picker and no listing fetch', async (t) => {
+  const { calls } = stubFixServer(t)
+  for (const env of [{}, { HYP_NO_TUI: '1' }]) {
+    const { ctx, err } = ctxWith(env)
+    // stdout is a terminal; stdin is piped (or the TUI is vetoed).
+    ctx.stdout.isTTY = true
+    if (env.HYP_NO_TUI) ctx.stdin.isTTY = true
+    const { deps, prompts } = fixDeps()
+    deps.pickDeadlineMs = 50
+    assert.equal(await runReportFix([], ctx, deps), 2)
+    assert.match(err.join(''), /usage: hyp report fix <id>/)
+    assert.match(err.join(''), /run on a terminal to pick one from a list instead/)
+    assert.doesNotMatch(err.join(''), /no answer at the picker/)
+    assert.equal(prompts.length, 0)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('fix: an explicit id on an unattended tty never meets a listing picker and starts the fix', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  ctx.stdout = ttyOut()
+  ctx.stdin = silentTtyIn()
+  const { deps, launches } = fixDeps()
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.equal(err.join(''), '')
+  assert.equal(launches.length, 1)
+})
+
 test('fix with nothing launchable exits 1 with a runnable attach hint, before fetching the page', async (t) => {
   const { calls } = stubFixServer(t)
   const { ctx, err } = ctxWith()
