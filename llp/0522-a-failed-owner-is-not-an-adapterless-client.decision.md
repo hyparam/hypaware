@@ -35,7 +35,10 @@ skipped the lane outright, so even that was silent. Setup exited 0 either way.
   with the plugin and its error kind, writes one line naming the client, the
   plugin, and the kind, with `hyp status` and `hyp client attach` as the
   repair, and logs the same identity. The thrown message is plugin text and
-  is neither printed nor logged here; the loader already logged it.
+  is neither printed nor logged here; the loader already logged it. The kind
+  shown is one the loader assigns itself (`activate_failed`,
+  `activate_missing`): a throw's own `hypErrorKind` is plugin data too, so
+  any other value reads as `activate_failed`.
 - **The lane runs for it with no gateway.** A failed owner enters the lane on
   its own, like an endpoint-free adapter does (LLP 0306).
 - **Healthy clients carry on.** Nothing is rolled back and the wizard is not

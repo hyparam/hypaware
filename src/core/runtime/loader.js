@@ -143,6 +143,22 @@ function activationErrorKind(err) {
   return 'activate_failed'
 }
 
+/** The kinds the loader assigns itself; any other kind is a plugin's claim. */
+const LOADER_ACTIVATION_KINDS = new Set(['activate_failed', 'activate_missing'])
+
+/**
+ * A failed activation's kind, fit to show outside the loader. The recorded
+ * kind is whatever a thrown value's `hypErrorKind` said, which is arbitrary
+ * plugin data (a token, a path), so anything the loader did not assign itself
+ * reads as `activate_failed`.
+ *
+ * @param {string | undefined} errorKind
+ * @returns {string}
+ */
+export function loaderActivationKind(errorKind) {
+  return errorKind && LOADER_ACTIVATION_KINDS.has(errorKind) ? errorKind : 'activate_failed'
+}
+
 /**
  * @param {string} errorKind
  * @param {string} message

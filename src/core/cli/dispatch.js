@@ -23,7 +23,7 @@ import { createKernelRuntime, pluginRegistryFacades } from '../runtime/activatio
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
-import { activatePlugins } from '../runtime/loader.js'
+import { activatePlugins, loaderActivationKind } from '../runtime/loader.js'
 import { reclaimPluginTempDirs } from '../runtime/paths.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginScopedConfig } from '../config/plugin_scope.js'
@@ -313,7 +313,7 @@ async function dispatchInternal(argv, opts) {
     // (LLP 0219 #incomplete-activation-prunes-nothing).
     failedPlugins = boot.unavailablePlugins
     activations = boot.activations.map((r) =>
-      r.ok ? { ok: true, plugin: r.plugin } : { ok: false, plugin: r.plugin, errorKind: r.errorKind }
+      r.ok ? { ok: true, plugin: r.plugin } : { ok: false, plugin: r.plugin, errorKind: loaderActivationKind(r.errorKind) }
     )
     if (failedPlugins.length) noteInvocation({ degraded: true })
     if (boot.config) activeConfig = boot.config

@@ -17,6 +17,7 @@ import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
+import { loaderActivationKind } from '../runtime/loader.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
@@ -24,7 +25,6 @@ import { queuedLineAsker } from './line_asker.js'
 import { withSpinner } from './spinner.js'
 import { joinNames } from './wizard/express.js'
 import { groupThousands } from '../util/format_number.js'
-import { sanitizeLabel } from '../util/json_util.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -2331,9 +2331,8 @@ function failedClientOwners(clientsPicked, activations) {
     if (typeof client !== 'string' || !picked.has(client) || failed.has(client)) continue
     failed.set(client, {
       plugin: outcome.plugin.manifest.name,
-      // The kind is whatever a thrown value's `hypErrorKind` said, so it is
-      // cleaned like any other plugin-supplied label before it is printed.
-      errorKind: sanitizeLabel(outcome.errorKind) ?? 'activate_failed',
+      // Printed and logged, so only a kind the loader assigned itself.
+      errorKind: loaderActivationKind(outcome.errorKind),
     })
   }
   return failed

@@ -53,10 +53,11 @@ const FIXTURES = {
   throw new Error('half way through activation')`,
   },
   // Throws before registering anything, with a credential-shaped string in
-  // the message that must never reach the output.
+  // both the message and the claimed `hypErrorKind`; neither may reach the
+  // output.
   codex: {
     name: '@hypaware/codex',
-    body: `throw new Error('could not read token ${SECRET}')`,
+    body: `throw Object.assign(new Error('could not read token ${SECRET}'), { hypErrorKind: '${SECRET}' })`,
   },
   // Healthy and endpoint-free (LLP 0306).
   opencode: {
@@ -180,6 +181,10 @@ test('the fixture owners really threw through the real loader', async () => {
   const booted = await bootFixtures('loader')
   const failed = booted.boot.activations.filter((r) => !r.ok).map((r) => r.plugin.manifest.name).sort()
   assert.deepEqual(failed, ['@hypaware/claude', '@hypaware/codex'])
+  // The loader records the kind the throw claimed, so the finale is what keeps
+  // it off the output.
+  const codex = booted.boot.activations.find((r) => r.plugin.manifest.name === '@hypaware/codex')
+  assert.equal(codex && !codex.ok && codex.errorKind, SECRET)
   // The partial registration stayed behind: this is what the old lane would
   // have attached through.
   assert.ok(booted.boot.runtime.clients.getClient('claude'))
@@ -196,7 +201,8 @@ test('a solo pick whose owner threw, with no gateway, is reported as not attache
     { client: 'codex', dryRun: false, ok: false, activationFailed: true, plugin: '@hypaware/codex', errorKind: 'activate_failed' },
   ])
   assert.equal(result.stderr, CODEX_LINE)
-  assert.equal(result.stderr.includes(SECRET), false, 'the thrown message is never printed')
+  assert.equal(result.stderr.includes(SECRET), false, 'neither the thrown message nor its claimed kind is printed')
+  assert.equal(JSON.stringify(result.summary).includes(SECRET), false, 'nor carried on the summary')
   assert.deepEqual(attachCalls(), [])
 
   const log = records.find((r) => r.body === 'walkthrough.attach_owner_not_active')
@@ -205,7 +211,7 @@ test('a solo pick whose owner threw, with no gateway, is reported as not attache
   assert.equal(log.attributes.hyp_client, 'codex')
   assert.equal(log.attributes.error_kind, 'activate_failed')
   assert.equal(log.attributes.status, 'failed')
-  assert.equal(JSON.stringify(log).includes(SECRET), false, 'the thrown message is never logged here')
+  assert.equal(JSON.stringify(log).includes(SECRET), false, 'nor logged here')
 
   // The scripted run summary reports it as failed, not silently skipped.
   const summaryOut = makeBuf()
