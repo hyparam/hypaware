@@ -70,10 +70,13 @@ async function runBulkUpdate(prefix, build, edit = (text) => text) {
     plugins: [],
   })
   const code = await runPluginUpdate([], ctx)
-  const after = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+  const afterText = await fs.readFile(lockPath, 'utf8')
+  const after = JSON.parse(afterText)
+  // The line in the file as the command left it, which is the one an
+  // operator opens: writeLock sorts the keys.
   /** @param {string} key */
-  const skipped = (key) => `hyp plugin update: skipped the entry on line ${lineOfKey(text, key)} of ${lockPath}`
-  return { hypHome, lockPath, plugins, text, skipped, code, stdout: ctx.stdout.text(), stderr: ctx.stderr.text(), after }
+  const skipped = (key) => `hyp plugin update: skipped the entry on line ${lineOfKey(afterText, key)} of ${lockPath}`
+  return { hypHome, lockPath, plugins, text, afterText, skipped, code, stdout: ctx.stdout.text(), stderr: ctx.stderr.text(), after }
 }
 
 // The bulk refresh read `.name` off every row and upserted the result under
@@ -87,7 +90,7 @@ test('plugin update refreshes the valid row and reports the invalid one by line'
   try {
     assert.equal(run.code, 0)
     assert.equal(run.stdout, 'refreshed update state for 1 plugin(s)\n')
-    assert.equal(run.stderr, `${run.skipped('@third-party/broken')}: its name does not match its key\n`)
+    assert.equal(run.stderr, `${run.skipped('@third-party/broken')}: no usable name\n`)
     assert.deepEqual(Object.keys(run.after.plugins).sort(), ['@third-party/broken', '@third-party/echo'])
     assert.deepEqual(run.after.plugins['@third-party/broken'], run.plugins['@third-party/broken'])
     const echo = run.after.plugins['@third-party/echo']
@@ -117,7 +120,7 @@ test('plugin update over a mixed lock keeps every key and every invalid value', 
       `${run.skipped('@third-party/nulled')}: not an object`,
       `${run.skipped('@third-party/stringed')}: not an object`,
       `${run.skipped('@third-party/numbered')}: not an object`,
-      `${run.skipped('@third-party/no-name')}: its name does not match its key`,
+      `${run.skipped('@third-party/no-name')}: no usable name`,
       `${run.skipped('@third-party/no-source')}: no usable source`,
       `${run.skipped('@third-party/mismatch')}: its name does not match its key`,
     ])
@@ -149,6 +152,97 @@ test('plugin update names a skipped integer-like key by its own line', async () 
     assert.equal(run.stderr, `${run.skipped('42')}: not an object\n`)
     assert.equal(run.after.plugins['42'], null)
     assert.equal(run.after.plugins['@third-party/echo'].update.available, false)
+  } finally {
+    await fs.rm(run.hypHome, { recursive: true, force: true })
+  }
+})
+
+// A line read before the write named another row once writeLock sorted the
+// keys: "zhealthy" then "abroken" reported line 2, which after the write held
+// "zhealthy" (#2679 review). The reported line is checked in the final file.
+test('plugin update names a skipped row by its line in the file it leaves behind', async () => {
+  const run = await runBulkUpdate('hyp-plugin-update-resorted-', (dir) => ({
+    zhealthy: healthy('zhealthy', dir),
+    abroken: null,
+  }))
+  try {
+    assert.ok(lineOfKey(run.text, 'abroken') > lineOfKey(run.text, 'zhealthy'))
+    assert.ok(lineOfKey(run.afterText, 'abroken') < lineOfKey(run.afterText, 'zhealthy'))
+    assert.equal(run.code, 0)
+    assert.equal(run.stderr, `${run.skipped('abroken')}: not an object\n`)
+    const line = Number(/line (\d+)/.exec(run.stderr)?.[1])
+    assert.match(run.afterText.split('\n')[line - 1], /^\s*"abroken": null,?$/)
+  } finally {
+    await fs.rm(run.hypHome, { recursive: true, force: true })
+  }
+})
+
+// An empty key with an empty name passed the key/name match and was refreshed
+// and counted, though partitionEntries already rejects it (#2679 review).
+test('plugin update skips an empty key whose name is empty', async () => {
+  const run = await runBulkUpdate('hyp-plugin-update-empty-key-', (dir) => ({
+    '': healthy('', dir),
+    '@third-party/echo': healthy('@third-party/echo', dir),
+  }))
+  try {
+    assert.equal(run.code, 0)
+    assert.equal(run.stdout, 'refreshed update state for 1 plugin(s)\n')
+    assert.equal(run.stderr, `${run.skipped('')}: no usable name\n`)
+    assert.deepEqual(run.after.plugins[''], run.plugins[''])
+  } finally {
+    await fs.rm(run.hypHome, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Stage a lock file `text` and run the bulk update, returning the result and
+ * the file's bytes afterwards.
+ *
+ * @param {string} prefix
+ * @param {string} text
+ * @param {number} [mode]
+ */
+async function runOnLockText(prefix, text, mode) {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
+  const stateDir = path.join(hypHome, 'hypaware')
+  await fs.mkdir(stateDir, { recursive: true })
+  const lockPath = pluginLockPath(stateDir)
+  await fs.writeFile(lockPath, text)
+  if (mode !== undefined) await fs.chmod(lockPath, mode)
+  const ctx = /** @type {any} */ ({
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    stdout: makeBuf(),
+    stderr: makeBuf(),
+    plugins: [],
+  })
+  const code = await runPluginUpdate([], ctx)
+  if (mode !== undefined) await fs.chmod(lockPath, 0o600)
+  const after = await fs.readFile(lockPath, 'utf8')
+  return { hypHome, code, stdout: ctx.stdout.text(), stderr: ctx.stderr.text(), after }
+}
+
+// loadLock reads an unreadable lock as empty, and the bulk refresh then wrote
+// that empty lock over the file with exit 0 (#2679 review, older than #2120).
+test('plugin update leaves an unparseable lock alone and exits 1', async () => {
+  const text = '{"schema_version": 1, "plugins": {"@third-party/echo": {'
+  const run = await runOnLockText('hyp-plugin-update-bad-json-', text)
+  try {
+    assert.equal(run.code, 1)
+    assert.equal(run.stdout, '')
+    assert.match(run.stderr, /^hyp plugin update: plugin-lock\.json is not valid JSON/)
+    assert.equal(run.after, text)
+  } finally {
+    await fs.rm(run.hypHome, { recursive: true, force: true })
+  }
+})
+
+test('plugin update leaves an unreadable lock alone and exits 1', { skip: process.getuid?.() === 0 && 'root reads a mode-000 file' }, async () => {
+  const text = JSON.stringify({ schema_version: 1, plugins: { '@third-party/echo': healthy('@third-party/echo', '/x') } }, null, 2) + '\n'
+  const run = await runOnLockText('hyp-plugin-update-eacces-', text, 0o000)
+  try {
+    assert.equal(run.code, 1)
+    assert.match(run.stderr, /^hyp plugin update: .*EACCES/)
+    assert.equal(run.after, text)
   } finally {
     await fs.rm(run.hypHome, { recursive: true, force: true })
   }
