@@ -13,6 +13,7 @@ import { sanitizeLabel } from '../util/json_util.js'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { DaemonInstallOptions, DaemonServiceOptions } from '../../../src/core/daemon/types.js'
  * @import { uninstallDaemon as uninstallDaemonFn } from '../../../src/core/daemon/install.js'
+ * @import { RunDaemonOptions } from '../../../src/core/daemon/types.js'
  */
 
 /**
@@ -21,7 +22,12 @@ import { sanitizeLabel } from '../util/json_util.js'
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ waitBeforeBindRetry?: () => Promise<'elapsed' | 'signalled'> }} [deps] Test seam for the retry wait.
+ * @param {{
+ *   waitBeforeBindRetry?: () => Promise<'elapsed' | 'signalled'>,
+ *   runDaemon?: (opts: RunDaemonOptions) => Promise<{ done: Promise<number> }>,
+ *   hasLauncher?: () => boolean,
+ *   relaunch?: (opts: { env: NodeJS.ProcessEnv, stdout: { write(chunk: string): unknown }, stderr: { write(chunk: string): unknown }, stagedConfigPath: () => string }) => Promise<number>,
+ * }} [deps] Test seams for the retry wait, the gateway boot and the staged-restart relaunch.
  */
 export async function runDaemonRun(argv, ctx, deps = {}) {
   const parsed = parseDaemonRunArgs(argv)
@@ -29,7 +35,9 @@ export async function runDaemonRun(argv, ctx, deps = {}) {
     ctx.stderr.write(`hyp daemon run: ${parsed.error}\n`)
     return 2
   }
-  const { runGatewayDaemon: runDaemon, waitBeforeBindRetry, BIND_RETRY_INTERVAL_MS } = await import('../daemon/gateway.js')
+  const gateway = await import('../daemon/gateway.js')
+  const { waitBeforeBindRetry, BIND_RETRY_INTERVAL_MS } = gateway
+  const runDaemon = deps.runDaemon ?? gateway.runGatewayDaemon
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would put the daemon's state root at ./.hyp)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   try {
@@ -43,7 +51,24 @@ export async function runDaemonRun(argv, ctx, deps = {}) {
     ctx.stdout.write(`daemon: running (pid=${process.pid})\n`)
     const exitCode = await handle.done
     ctx.stdout.write('daemon: stopped\n')
-    return exitCode
+    // A staged restart (config apply, rollback, reload) needs a fresh process
+    // (LLP 0017). A service manager provides one; a foreground run nobody
+    // relaunches (a container) used to exit here and take the gateway down
+    // with it (#2513), so it relaunches itself instead. Supervised runs and
+    // runs a Node parent launched keep exiting 75 to whoever relaunches them.
+    // @ref LLP 0529#who-relaunches [implements]: detectSupervisor decides, and a Node parent with an IPC channel owns the relaunch
+    const { SELF_UPDATE_RESTART_EXIT_CODE, detectSupervisor } = await import('../update/self_update.js')
+    if (exitCode !== SELF_UPDATE_RESTART_EXIT_CODE || detectSupervisor(ctx.env)) return exitCode
+    const relaunchModule = await import('../daemon/relaunch.js')
+    if ((deps.hasLauncher ?? relaunchModule.hasLauncher)()) return exitCode
+    const { resolveCentralLayerPath } = await import('../config/apply.js')
+    const { defaultConfigPath } = await import('../config/schema.js')
+    return await (deps.relaunch ?? relaunchModule.relaunchForeground)({
+      env: ctx.env,
+      stdout: ctx.stdout,
+      stderr: ctx.stderr,
+      stagedConfigPath: () => resolveCentralLayerPath({ stateRoot: path.join(hypHome, 'hypaware') }) ?? parsed.configPath ?? defaultConfigPath(hypHome),
+    })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon run: ${message}\n`)

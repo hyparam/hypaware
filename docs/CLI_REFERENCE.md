@@ -1568,10 +1568,16 @@ Runs the daemon in the current terminal until it receives a stop signal.
 `daemon start` starts the installed service.
 
 When the daemon applies a new organization configuration or a plugin change,
-it exits with code `75` to be relaunched on the new code. An installed service
-relaunches automatically. In the foreground, nothing does, so whatever starts
-`hyp daemon run` has to run it again on `75`. This loop does that and exits with
-the daemon's own status otherwise, so a supervisor still sees a failed start:
+it restarts as a new process to load the new code. An installed service
+relaunches it automatically. A foreground run with no service manager (a
+container, say) relaunches itself with the same arguments, environment and
+output, up to 5 times in 10 minutes, waiting a little longer each time. Past
+that it stops, prints the staged configuration it was applying, and exits with
+code `75`. A run under systemd or launchd, or started by a Node process manager
+such as pm2, exits with `75` on every restart instead and leaves the relaunch to
+it. To keep relaunching after the limit, run it again on `75`. This loop does
+that and exits with the daemon's own status otherwise, so a supervisor still
+sees a failed start:
 
 ```sh
 rc=75
