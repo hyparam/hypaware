@@ -55,10 +55,11 @@ the codec refuses the first bad value, so the command never runs, and a
 refused preview must not have created anything on the way either.
 
 The preview covers the boot and the setup command, not the invocation's
-consented product telemetry. When the user has opted in, the outer invocation
-summary LLP 0393 requires is still recorded for a preview as for any other
-command; that opt-in is the consent for it, and a fresh or unenrolled install
-records nothing.
+consented product telemetry. When product telemetry is enabled (by
+enrollment or by an explicit local opt-in), the outer invocation summary
+LLP 0393 requires is still recorded for a preview as for any other command;
+that consent covers it. With product telemetry disabled, the default on a
+fresh install, a preview records nothing.
 
 A real boot is unchanged: LLP 0004's promise that a plugin's scoped dirs exist
 when `activate` runs still holds for every boot that is not a preview.
@@ -67,7 +68,7 @@ when `activate` runs still holds for every boot that is not a preview.
 
 - A preview in a fresh HOME, or over an existing install, leaves the file and
   directory tree byte-for-byte as it found it, apart from the consented
-  product-telemetry record above when the user has opted in.
+  product-telemetry record above when product telemetry is enabled.
 - A plugin that creates directories in `activate` has to honor
   `ctx.preview`. The bundled plugins that did so (local-fs) now do.
 - The setup guards that run before or during the command (the
