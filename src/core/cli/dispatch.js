@@ -32,7 +32,7 @@ import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
 import { colorizeStderr } from './style.js'
 import { compareStrings } from '../util/compare_strings.js'
-import { platformIsSupported } from '../daemon/platform.js'
+import { setupUnsupportedNote } from '../daemon/platform.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { noteCommandTransition, noteInvocation, productAdapters, startInvocationDelivery, withProductInvocation } from '../product_telemetry/client.js'
 
@@ -166,15 +166,15 @@ function sinkPluginExcludedByBootProfile(err, { config, activePlugins, withheldB
  * @returns {number | undefined}
  */
 function refuseUnsupportedSetupPlatform(stderr, platform = process.platform) {
-  if (platformIsSupported(platform)) return undefined
+  const note = setupUnsupportedNote(platform)
+  if (note === undefined) return undefined
   getLogger('cmd-dispatch').warn('dispatch.setup_refused', {
     [Attr.COMPONENT]: 'cmd-dispatch',
     [Attr.OPERATION]: 'setup.preflight',
     [Attr.ERROR_KIND]: 'unsupported_platform',
     platform,
   })
-  stderr.write(`hyp setup: unsupported platform: ${platform} (only macOS and Linux are supported)\n`)
-  stderr.write('  nothing was changed: no sign-in, enrollment or config write happened\n')
+  stderr.write(note)
   return 1
 }
 

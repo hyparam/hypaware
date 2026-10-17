@@ -8,6 +8,7 @@ import { Readable } from 'node:stream'
 
 import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { runInitWizard } from '../../src/core/cli/wizard/index.js'
 
 // Setup on a platform with no service manager used to sign in, enroll and
 // write config, and only then have the daemon installer refuse (#975). Every
@@ -115,6 +116,36 @@ test('every setup form refuses an unsupported platform before any sign-in, enrol
     assert.deepEqual(fetches, [], `${label}: no network call`)
     assert.deepEqual(await snapshot(home), before, `${label}: no file written under HOME`)
     assert.equal(stdout.text(), '', `${label}: no wizard or guide output`)
+  }
+})
+
+test('a direct runInitWizard call refuses an unsupported platform before any lane runs', async () => {
+  /** @type {Array<[string, object | undefined, string | undefined]>} */
+  const cases = [
+    ['interactive, platform option', undefined, 'win32'],
+    ['scripted picks, platform option', { sources: ['codex'] }, 'win32'],
+    ['interactive, process.platform', undefined, undefined],
+  ]
+  for (const [label, picks, platform] of cases) {
+    const { home, hypHome, env } = await makeHome()
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    /** @type {string[]} */
+    const calls = []
+    /** @param {string} name */
+    const seam = (name) => async () => { calls.push(name); throw new Error(`${name} ran`) }
+    const before = await snapshot(home)
+    const result = await onPlatform('win32', () => runInitWizard(/** @type {any} */ ({
+      stdout, stderr, env, ...(platform ? { platform } : {}), ...(picks ? { picks } : {}),
+      gate: seam('gate'), fork: seam('fork'), express: seam('express'), pick: seam('pick'),
+      configure: seam('configure'), finaleRunner: seam('finale'),
+      finale: { configPath: path.join(hypHome, 'hypaware-config.json') },
+    })))
+    assert.deepEqual(result, { exitCode: 1 }, `${label}: result`)
+    assert.deepEqual(calls, [], `${label}: no lane ran`)
+    assert.match(stderr.text(), /hyp setup: unsupported platform: win32 \(only macOS and Linux are supported\)/, `${label}: message`)
+    assert.deepEqual(await snapshot(home), before, `${label}: no file written under HOME`)
+    assert.equal(stdout.text(), '', `${label}: no output`)
   }
 })
 

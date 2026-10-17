@@ -42,7 +42,7 @@ import {
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
 import { ensureDurableBin } from '../global_install.js'
-import { platformIsSupported } from '../../daemon/platform.js'
+import { platformIsSupported, setupUnsupportedNote } from '../../daemon/platform.js'
 import { friendlyClientLabel } from '../../commands/ask.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { anyClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
@@ -98,6 +98,13 @@ import { offerWizardGithub, connectWizardGithub } from './github.js'
  * @returns {Promise<InitWizardResult>}
  */
 export async function runInitWizard(opts) {
+  // Dispatch refuses an unsupported platform before the boot (#975); this
+  // covers a direct call, before any lane can sign in, enroll or write.
+  const unsupported = setupUnsupportedNote(/** @type {NodeJS.Platform} */ (opts.platform ?? process.platform))
+  if (unsupported !== undefined) {
+    opts.stderr.write(unsupported)
+    return { exitCode: 1 }
+  }
   // The stream guard (LLP 0341): wrapped once, before any lane runs, so
   // no narration or warning can crash the run - a dying stream is
   // recorded here and acted on at the boundaries below, never thrown.
