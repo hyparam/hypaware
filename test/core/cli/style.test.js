@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { ANSI, colorizeStderr, paintChunk, paintLine, resyncLineStart } from '../../../src/core/cli/style.js'
+import { ANSI, colorizeStderr, displayWidth, paintChunk, paintLine, resyncLineStart } from '../../../src/core/cli/style.js'
 
 // The CLI severity palette (LLP 0189). Colour is applied once, where
 // `dispatch` binds stderr, so these tests pin two things: which leading word
@@ -215,4 +215,27 @@ test('non-string chunks pass through unexamined', () => {
   const buf = Buffer.from('error: raw bytes\n')
   wrapped.write(/** @type {any} */ (buf))
   assert.equal(sink.chunks[0], buf)
+})
+
+test('displayWidth: narrow, wide, emoji, and combining text take the cells a terminal draws', () => {
+  // Narrow: one cell a character.
+  assert.equal(displayWidth('abc'), 3)
+  // Wide: CJK and Hangul take two.
+  assert.equal(displayWidth('日本語'), 6)
+  assert.equal(displayWidth('한국'), 4)
+  // Emoji with default emoji presentation take two; a ZWJ sequence is one
+  // drawn glyph, so it takes two in all.
+  assert.equal(displayWidth('😀'), 2)
+  assert.equal(displayWidth('👩\u200d💻'), 2)
+  // Between anything but two pictographs a joiner joins nothing: both
+  // sides keep their width (#2701 R1).
+  assert.equal(displayWidth('a\u200db'), 2)
+  assert.equal(displayWidth('a\u200db'.repeat(30)), 60)
+  assert.equal(displayWidth('😀\u200db'), 3)
+  // A longer joined sequence is still one glyph.
+  assert.equal(displayWidth('👨\u200d👩\u200d👧'), 2)
+  // Combining marks add nothing to the base they sit on.
+  assert.equal(displayWidth('e\u0301'), 1)
+  // Style escapes are not drawn at all.
+  assert.equal(displayWidth(`${ANSI.dim}日本${ANSI.reset}x`), 5)
 })
