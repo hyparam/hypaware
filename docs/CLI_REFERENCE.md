@@ -640,9 +640,13 @@ more than one such client could be started, it asks which; a run given an id
 that cannot prompt takes the first of that set. That pick is also time-bounded
 on a terminal: unanswered for 10 seconds, it takes the first of that set and
 says so on stdout (`No answer at the client prompt - starting the first
-one.`), and the first keypress lifts the deadline. The deadline covers the
-client pick only, not the report and recommendation listings above, which wait
-for an answer. A declined pick succeeds, as does a listing that carries no
+one.`), and the first keypress lifts the deadline. The report and
+recommendation listings above each have their own 10-second deadline, which
+starts when that list is shown and is lifted by the first keypress on it;
+going back to the first list starts a fresh one. A listing left unanswered
+picks nothing and starts nothing: it prints `hyp report fix: no answer at the
+picker - nothing started.` with the usage line to stderr and returns `2`. A
+declined pick succeeds, as does a listing that carries no
 recommendations. A malformed id returns `2`. An unknown id, a recommendation
 page the report no longer carries, no launchable client, or a process-start
 failure returns `1`.
