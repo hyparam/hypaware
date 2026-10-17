@@ -1243,3 +1243,34 @@ test('renderOverview: a joiner between ordinary characters does not hide their w
     }
   }
 })
+
+test('renderOverview: the no-count and no-repo sentences wrap to the width', () => {
+  // #2701 R1: these are prose, not a table, so they fold like every other
+  // sentence rather than overflow a narrow terminal.
+  for (const columns of [40, 60, 80]) {
+    const out = renderOverview({
+      providerRows: [{ provider: 'anthropic', model: 'claude-x', input_tokens: 0 }],
+      dailyRows: [],
+      repoRows: [{ repo_root: null, sessions: 30 }],
+      columns,
+    })
+    assert.match(out, /none\s+with\s+token\s+counts\./)
+    assert.match(out, /No\s+repo\s+was\s+recorded\s+on\s+any\s+session/)
+    for (const line of out.split('\n')) {
+      assert.ok(displayWidth(line) <= columns, `${columns}: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
+test('renderOverview: a label of marks that draw nothing is still clipped to a bounded size', () => {
+  // #2701 R1: a hundred thousand combining accents draw one column, so
+  // width alone would print them all; the clip bounds code units too.
+  const model = 'a' + '́'.repeat(100_000)
+  const out = renderOverview({
+    providerRows: [{ provider: 'anthropic', model, input_tokens: 1, cached_tokens: 2, output_tokens: 3 }],
+    dailyRows: [],
+    columns: 80,
+  })
+  assert.ok(out.length < 4000, `${out.length} code units`)
+  assert.match(out, /á+…/)
+})

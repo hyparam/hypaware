@@ -300,6 +300,12 @@ const TABLE_INDENT = 2
 const COLUMN_GAP = 2
 
 /**
+ * Code units a clipped cell keeps per column: room for the longest joined
+ * emoji, with skin tones, and a bound on marks that draw nothing.
+ */
+const MAX_UNITS_PER_CELL = 8
+
+/**
  * Build the query runner from a command context. Runs the same executor,
  * refresh mode and caller cwd `hyp query sql` uses, so the overview shows
  * exactly what the user would see typing either query themselves - and
@@ -762,8 +768,8 @@ export function renderProviderMix(rows, color, showSql = false, sql = '', column
   if (shown.length === 0) {
     // Traffic exists but no provider reported usage: say that, rather than
     // printing an empty table under a "by volume" heading.
-    if (untokened === 0) return out + '  No token counts were recorded.\n'
-    return out + `  ${untokened} model${untokened === 1 ? ' was' : 's were'} recorded, none with token counts.\n`
+    if (untokened === 0) return out + prose('No token counts were recorded.', columns)
+    return out + prose(`${untokened} model${untokened === 1 ? ' was' : 's were'} recorded, none with token counts.`, columns)
   }
   out += renderTable({
     headers: ['provider', 'model', 'input', 'cached', 'output', SHARE_HEADER],
@@ -856,7 +862,7 @@ export function renderRepoMix(rows, color, showSql = false, sql = '', columns = 
 
   let out = renderHeading('Which repos the work happens in', sql, color, showSql, columns)
   if (shown.length === 0) {
-    return out + `  No repo was recorded on any session (${formatCount(loose)} of them).\n`
+    return out + prose(`No repo was recorded on any session (${formatCount(loose)} of them).`, columns)
   }
 
   // Scaled on the same metric the bar charts, so a row's width means the
@@ -961,8 +967,21 @@ function barKeyLine(color, columns) {
  * @returns {string}
  */
 function note(text, color, columns) {
+  return prose(text, columns, color ? ANSI.dim : '')
+}
+
+/**
+ * A sentence in a section's body, wrapped to the width with its
+ * continuation lines indented under the text, each line painted `style`.
+ *
+ * @param {string} text
+ * @param {number} columns
+ * @param {string} [style]
+ * @returns {string}
+ */
+function prose(text, columns, style = '') {
   return wrapText(text, columns - TABLE_INDENT)
-    .map((line, i) => paint(`${i === 0 ? '  ' : '    '}${line}`, ANSI.dim, color) + '\n')
+    .map((line, i) => paint(`${i === 0 ? '  ' : '    '}${line}`, style, style !== '') + '\n')
     .join('')
 }
 
@@ -1257,7 +1276,10 @@ function cell(value, width) {
  * @param {number} width
  */
 function truncate(text, width) {
-  if (displayWidth(escapeForDisplay(text)) <= width) return text
+  // Marks that draw nothing still cost bytes, so the clip also bounds
+  // the code units it keeps (#2701 R1).
+  const budget = width * MAX_UNITS_PER_CELL
+  if (text.length <= budget && displayWidth(escapeForDisplay(text)) <= width) return text
   const step = widthStepper()
   let out = ''
   let used = 0
@@ -1268,7 +1290,7 @@ function truncate(text, width) {
     const natural = step(/** @type {number} */ (ch.codePointAt(0)))
     const w = escaped === ch ? natural : escaped.length
     // One column stays free for the ellipsis.
-    if (used + w > width - 1) break
+    if (used + w > width - 1 || out.length + ch.length > budget) break
     out += ch
     used += w
   }
