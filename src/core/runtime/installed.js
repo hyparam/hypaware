@@ -41,7 +41,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
   // object carries no `name` field to read.
   const names = Object.keys(lock.plugins).sort()
   if (names.length === 0) {
-    return { loaded: [], failed: [], lockEntries: [], malformed: [] }
+    return { loaded: [], failed: [], lockEntries: [], malformed: [], malformedPositions: new Map() }
   }
 
   // `readLock` validates the lock container and nothing inside it, and the file
@@ -64,6 +64,18 @@ export async function discoverInstalledPlugins({ stateDir }) {
     } else {
       malformed.push(name)
     }
+  }
+  // Where each malformed row sits in the file, so a repair can point at it
+  // without repeating its key: the key is hand-edited text and must not reach
+  // a line an operator may paste into a shell (issue #2115). Object.keys is
+  // the file's own order for every key that is not an integer index.
+  /** @type {Map<PluginName, number>} */
+  const malformedPositions = new Map()
+  if (malformed.length > 0) {
+    const bad = new Set(malformed)
+    Object.keys(lock.plugins).forEach(function(key, i) {
+      if (bad.has(key)) malformedPositions.set(key, i + 1)
+    })
   }
 
   const log = getLogger('kernel')
@@ -122,7 +134,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
     }
   }
 
-  return { loaded, failed, lockEntries: entries, malformed }
+  return { loaded, failed, lockEntries: entries, malformed, malformedPositions }
 }
 
 /**

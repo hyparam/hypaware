@@ -184,6 +184,12 @@ export interface DiscoverInstalledResult {
    * no directory.
    */
   malformed: PluginName[]
+  /**
+   * 1-based position of each `malformed` key among the lock's `plugins`
+   * keys, in file order, so a repair can point at the row without
+   * repeating its untrusted key.
+   */
+  malformedPositions: Map<PluginName, number>
 }
 
 // --- activation ---

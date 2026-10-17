@@ -675,9 +675,11 @@ test('hyp status names the bad lock entry and hyp plugin list still lists the ot
       `plugin-lock.json entry '@third-party/broken' has no usable install_dir,`
         + ` so nothing it installed is running: ${lockPath}`
     )
-    // The repair runs: `removePlugin` falls back to the conventional install
-    // directory when the entry carries none, so it clears the lock row.
-    assert.deepEqual(diag.repair, ['hyp plugin remove @third-party/broken'])
+    // The repair points at the row by position, not by key (issue #2115).
+    assert.deepEqual(diag.repair, [
+      `open ${lockPath} and remove entry 2 in its plugins object,`
+        + ' or pass its exact key as one quoted argument to hyp plugin remove',
+    ])
 
     // The commands that used to exit 1 on a bare TypeError.
     const stdout = bufferWriter()
@@ -691,6 +693,56 @@ test('hyp status names the bad lock entry and hyp plugin list still lists the ot
     })
     assert.equal(exitCode, 0)
     assert.match(stdout.text(), /@third-party\/healthy@0\.1\.0/)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The repair line is one an operator may paste into a shell, and a lock key is
+// hand-edited text, so no byte of the key may reach it, not even a sanitized
+// or truncated copy that would name a different row (issue #2115). The key
+// never runs through a shell here: the test only reads the diagnostic.
+test('hyp status repair for a malformed lock row carries no byte of the key and names the row by position', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-hostile-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const hostile = `x'"; touch pwned \`id\` $(id)\n--force${'z'.repeat(400)}`
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      hostile,
+      null
+    )
+    const stateDir = path.join(hypHome, 'hypaware')
+    const result = await discoverInstalledPlugins({ stateDir })
+    assert.deepEqual(result.malformed, [hostile])
+    assert.equal(result.malformedPositions.get(hostile), 2)
+
+    const report = await collectHypAwareStatus({ env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
+    const diag = report.diagnostics.find((d) => d.kind === 'plugin_lock_entry_invalid')
+    assert.ok(diag, 'the hostile lock entry is reported')
+    assert.equal(diag.repair.length, 1)
+    const [repair] = diag.repair
+    assert.equal(
+      repair,
+      `open ${lockPath} and remove entry 2 in its plugins object,`
+        + ' or pass its exact key as one quoted argument to hyp plugin remove'
+    )
+    // Nothing of the key in any form: whole, sanitized, or any metacharacter it carries.
+    const fixed = repair.replace(lockPath, '')
+    assert.equal(fixed.includes(hostile), false)
+    assert.equal(fixed.includes('pwned'), false)
+    assert.equal(fixed.includes('zzzz'), false)
+    for (const ch of ["'", '"', ';', '`', '$', '(', '\n', '\r']) {
+      assert.equal(fixed.includes(ch), false, `repair carries ${JSON.stringify(ch)}`)
+    }
+    // The message still identifies the row, bounded and without control bytes.
+    assert.match(diag.message, /^plugin-lock\.json entry 'x'"; touch pwned `id` \$\(id\)/)
+    assert.equal(/[\n\r]/.test(diag.message), false)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
@@ -809,7 +861,7 @@ test('hyp plugin remove clears a lock row that is not an object, so the diagnost
 })
 
 // A lock key is a map key, not a validated plugin name, and `hyp status`
-// prints `hyp plugin remove <key>` as the repair for a malformed row, so a
+// used to print `hyp plugin remove <key>` as the repair for a malformed row, so a
 // key containing `..` turned the printed repair into a recursive delete
 // outside `<stateDir>/plugins` (issue #1967). Everything these tests can
 // delete is staged inside their own temp HYP_HOME.
