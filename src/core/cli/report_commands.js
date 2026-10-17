@@ -773,7 +773,7 @@ export async function runReportList(argv, ctx) {
   }
   for (const r of reports) {
     const title = typeof r.title === 'string' && r.title ? `\t${esc(r.title)}` : ''
-    ctx.stdout.write(`  ${esc(r.publishedAt)}\t${esc(r.kind)}/${esc(r.period)}\t${esc(r.id)}\t${esc(r.bytes)} bytes${title}\n`)
+    ctx.stdout.write(`  ${esc(r.publishedAt)}\t${esc(r.kind)}/${esc(r.period)}\t${esc(r.id)}\t${esc(r.bytes)} bytes${title}${coverageNotice(r)}\n`)
     // The server mints one id per `recommendation-<slug>` page and lists them
     // on the record, in page order, so a report's recommendations read
     // beneath it without fetching the report; the id is the token a caller
@@ -793,6 +793,35 @@ export async function runReportList(argv, ctx) {
   }
   if (inventory) writeLocalSection(ctx, inventory, { standalone: false })
   return 0
+}
+
+/**
+ * The optional notice cell for a listed report the server recorded as
+ * incomplete: `coverage.covered` of `coverage.slices` analyzed,
+ * `coverage.unenumerated` days the survey could not inventory (outside the
+ * slice count, so never added to it), and `truncated` when generation was cut
+ * short. Each field is read on its own and only a well-formed value speaks:
+ * absent coverage means the report was not surveyed, not that it is
+ * complete or incomplete, so an absent or malformed field adds nothing.
+ *
+ * @param {any} r a report record as the server lists it
+ * @returns {string}
+ */
+function coverageNotice(r) {
+  /** @type {string[]} */
+  const parts = []
+  const coverage = r?.coverage
+  if (coverage && typeof coverage === 'object') {
+    const { slices, covered, unenumerated } = coverage
+    if (Number.isSafeInteger(slices) && Number.isSafeInteger(covered) && covered >= 0 && covered < slices) {
+      parts.push(`${covered} of ${slices} slices analyzed`)
+    }
+    if (Number.isSafeInteger(unenumerated) && unenumerated > 0) {
+      parts.push(`${unenumerated} ${unenumerated === 1 ? 'day' : 'days'} not inventoried`)
+    }
+  }
+  if (r?.truncated === true) parts.push('generation cut short')
+  return parts.length > 0 ? `\tincomplete: ${parts.join('; ')}` : ''
 }
 
 /**

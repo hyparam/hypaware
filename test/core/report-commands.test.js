@@ -467,6 +467,55 @@ test('list prints each report\'s recommendations, by id, state and page, under i
   ])
 })
 
+// The server records coverage and truncation on the report record itself
+// (`coverage.slices`, `coverage.covered`, `coverage.unenumerated`,
+// `truncated`), so the grouped listing marks an incomplete report from the
+// one list request, and absent or malformed metadata claims nothing.
+test('list marks incomplete coverage, blind days and truncation on the report line, from the one list request', async (t) => {
+  const base = { kind: 'usage-review', period: '2026-W29', bytes: 1, publishedAt: 'T' }
+  const reports = [
+    { ...base, id: 'r-cov', title: 'A', coverage: { slices: 5, covered: 3 } },
+    { ...base, id: 'r-blind', title: 'B', coverage: { slices: 4, covered: 4, unenumerated: 2 } },
+    { ...base, id: 'r-one', coverage: { slices: 4, covered: 4, unenumerated: 1 } },
+    { ...base, id: 'r-trunc', title: 'C', truncated: true },
+    { ...base, id: 'r-all', title: 'D', coverage: { slices: 5, covered: 0, unenumerated: 3 }, truncated: true },
+    { ...base, id: 'r-full', title: 'E', coverage: { slices: 5, covered: 5 } },
+    { ...base, id: 'r-legacy', title: 'F' },
+    { ...base, id: 'r-bad', title: 'G', coverage: { slices: 3, covered: 5, unenumerated: -1 }, truncated: 'yes' },
+    { ...base, id: 'r-nan', title: 'H', coverage: { slices: '5', covered: 2.5, unenumerated: 1.5 } },
+    { ...base, id: 'r-null', title: 'I', coverage: null, truncated: false },
+    {
+      ...base, id: 'r-rec', title: 'J', coverage: { slices: 2, covered: 1 },
+      recommendations: [{ id: 'hyprec-0123456789abcdef', page: 'recommendation-x', title: 'Do X', status: { state: 'open' } }],
+    },
+  ]
+  const { calls } = stubServer(t, () => ({ status: 200, json: { reports } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList([], ctx), 0)
+  assert.equal(calls.length, 1)
+  const lines = out.join('').split('\n').filter(Boolean)
+  assert.deepEqual(lines, [
+    '  T\tusage-review/2026-W29\tr-cov\t1 bytes\tA\tincomplete: 3 of 5 slices analyzed',
+    '  T\tusage-review/2026-W29\tr-blind\t1 bytes\tB\tincomplete: 2 days not inventoried',
+    '  T\tusage-review/2026-W29\tr-one\t1 bytes\tincomplete: 1 day not inventoried',
+    '  T\tusage-review/2026-W29\tr-trunc\t1 bytes\tC\tincomplete: generation cut short',
+    '  T\tusage-review/2026-W29\tr-all\t1 bytes\tD\tincomplete: 0 of 5 slices analyzed; 3 days not inventoried; generation cut short',
+    '  T\tusage-review/2026-W29\tr-full\t1 bytes\tE',
+    '  T\tusage-review/2026-W29\tr-legacy\t1 bytes\tF',
+    '  T\tusage-review/2026-W29\tr-bad\t1 bytes\tG',
+    '  T\tusage-review/2026-W29\tr-nan\t1 bytes\tH',
+    '  T\tusage-review/2026-W29\tr-null\t1 bytes\tI',
+    '  T\tusage-review/2026-W29\tr-rec\t1 bytes\tJ\tincomplete: 1 of 2 slices analyzed',
+    '      hyprec-0123456789abcdef\t[open]\trecommendation-x\tDo X',
+  ])
+
+  // --json is the records as the server sent them, coverage included.
+  const json = ctxWith()
+  assert.equal(await runReportList(['--json'], json.ctx), 0)
+  assert.equal(calls.length, 2)
+  assert.equal(json.out.join(''), JSON.stringify(reports, null, 2) + '\n')
+})
+
 // @ref LLP 0516#listing-status [tests]: both listings display only explicit server states
 for (const flat of [false, true]) {
   test(`list ${flat ? 'flat' : 'grouped'} omits unknown states and preserves explicit states`, async (t) => {
