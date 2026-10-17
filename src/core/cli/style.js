@@ -97,7 +97,10 @@ const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u
 // zero-width format characters draw on the cell before them.
 const ZERO_WIDTH = /[\p{Mn}\p{Me}\u200b-\u200f\u2060-\u2064\ufeff]/u
 
+// A zero-width joiner fuses two pictographs into one drawn glyph; between
+// anything else it joins nothing, and both sides keep their width.
 const ZWJ = 0x200d
+const PICTOGRAPHIC = /\p{Extended_Pictographic}/u
 
 // Printable ASCII only: the common case, measured without a code-point walk.
 const PLAIN_ASCII = /^[\x20-\x7e]*$/
@@ -128,8 +131,10 @@ export function codePointWidth(cp) {
  *
  * The rule, in order: printable ASCII is one column; combining and
  * enclosing marks, variation selectors and the zero-width format
- * characters are zero; a code point after a zero-width joiner is zero, so
- * a joined emoji sequence counts as its first emoji; East Asian Wide and
+ * characters are zero; a pictograph joined to the pictograph before it by
+ * a zero-width joiner is zero, so a joined emoji sequence counts as its
+ * first emoji (a joiner between other characters joins nothing); East
+ * Asian Wide and
  * Fullwidth blocks ({@link WIDE_RANGES}) and default-emoji-presentation
  * characters are two; everything else is one. Not handled: a regional-
  * indicator pair (a flag) measures four where most terminals draw two.
@@ -140,14 +145,32 @@ export function codePointWidth(cp) {
 export function displayWidth(text) {
   const plain = stripSgr(text)
   if (PLAIN_ASCII.test(plain)) return plain.length
+  const step = widthStepper()
   let width = 0
-  let joined = false
-  for (const ch of plain) {
-    const cp = /** @type {number} */ (ch.codePointAt(0))
-    if (!joined) width += codePointWidth(cp)
-    joined = cp === ZWJ
-  }
+  for (const ch of plain) width += step(/** @type {number} */ (ch.codePointAt(0)))
   return width
+}
+
+/**
+ * A counter fed one code point at a time that returns each one's columns
+ * under the {@link displayWidth} rule, for a caller that has to stop part
+ * way along a string. It carries only whether the last drawn code point
+ * was a pictograph and whether a joiner followed it.
+ *
+ * @returns {(cp: number) => number}
+ */
+export function widthStepper() {
+  let pictograph = false
+  let joined = false
+  return (cp) => {
+    const isPictograph = cp >= 0x7f && PICTOGRAPHIC.test(String.fromCodePoint(cp))
+    const width = joined && isPictograph ? 0 : codePointWidth(cp)
+    joined = cp === ZWJ && pictograph
+    // Marks and selectors sit on the glyph before them, so they leave the
+    // pictograph state as it was.
+    if (width > 0 || isPictograph) pictograph = isPictograph
+    return width
+  }
 }
 
 /**

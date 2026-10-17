@@ -227,6 +227,13 @@ test('displayWidth: narrow, wide, emoji, and combining text take the cells a ter
   // drawn glyph, so it takes two in all.
   assert.equal(displayWidth('😀'), 2)
   assert.equal(displayWidth('👩\u200d💻'), 2)
+  // Between anything but two pictographs a joiner joins nothing: both
+  // sides keep their width (#2701 R1).
+  assert.equal(displayWidth('a\u200db'), 2)
+  assert.equal(displayWidth('a\u200db'.repeat(30)), 60)
+  assert.equal(displayWidth('😀\u200db'), 3)
+  // A longer joined sequence is still one glyph.
+  assert.equal(displayWidth('👨\u200d👩\u200d👧'), 2)
   // Combining marks add nothing to the base they sit on.
   assert.equal(displayWidth('e\u0301'), 1)
   // Style escapes are not drawn at all.

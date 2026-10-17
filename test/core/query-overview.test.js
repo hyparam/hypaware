@@ -1225,3 +1225,21 @@ test('hyp query overview --json: byte-identical whatever the terminal width', as
   assert.equal(await runQueryOverview(['--json'], narrow.ctx), 0)
   assert.equal(narrow.stdout.text(), piped.stdout.text())
 })
+
+test('renderOverview: a joiner between ordinary characters does not hide their width', () => {
+  // #2701 R1: a ZWJ outside an emoji sequence joins nothing, so a label
+  // full of them must be clipped by every character it draws.
+  const model = 'a\u200db'.repeat(30)
+  for (const columns of [80, 60]) {
+    const out = renderOverview({
+      providerRows: [{ provider: 'anthropic', model, input_tokens: 4502, cached_tokens: 450200, output_tokens: 4502 }],
+      dailyRows: [],
+      columns,
+    })
+    // Every drawn cell here is one column wide, and the joiner draws none.
+    for (const line of out.split('\n')) {
+      const cells = [...line.replace(/\u200d/g, '')].length
+      assert.ok(cells <= columns, `${columns}: ${cells} cells: ${JSON.stringify(line)}`)
+    }
+  }
+})

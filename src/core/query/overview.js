@@ -21,7 +21,7 @@ import { escapeForDisplay } from '../util/json_util.js'
 import { AUTO_REFRESH_FAILURE_MESSAGE, REFRESH_FAILURE_REASON_PREFIX, executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
 // @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
-import { ANSI, codePointWidth, displayWidth, paint } from '../cli/style.js'
+import { ANSI, displayWidth, paint, widthStepper } from '../cli/style.js'
 
 /** The dataset both overview queries read. Absent, there is nothing to show. */
 export const OVERVIEW_DATASET = 'ai_gateway_messages'
@@ -1258,17 +1258,19 @@ function cell(value, width) {
  */
 function truncate(text, width) {
   if (displayWidth(escapeForDisplay(text)) <= width) return text
+  const step = widthStepper()
   let out = ''
   let used = 0
-  let joined = false
   for (const ch of text) {
     const escaped = escapeForDisplay(ch)
-    const w = joined ? 0 : escaped === ch ? codePointWidth(/** @type {number} */ (ch.codePointAt(0))) : escaped.length
+    // Stepped for every character, escaped or not, so a joiner's state
+    // stays in line with what displayWidth measures.
+    const natural = step(/** @type {number} */ (ch.codePointAt(0)))
+    const w = escaped === ch ? natural : escaped.length
     // One column stays free for the ellipsis.
     if (used + w > width - 1) break
     out += ch
     used += w
-    joined = ch === '\u200d'
   }
   return `${out}…`
 }
