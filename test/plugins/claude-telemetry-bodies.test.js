@@ -22,7 +22,6 @@ import {
   deleteSpooledBodiesForEvents,
   loadSpooledBodies,
   requestBodyFacts,
-  spooledBodyGapMessages,
 } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/bodies.js'
 import {
   SESSION_BODY_FACTS_LIMIT,
