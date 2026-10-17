@@ -34,8 +34,10 @@ when every plugin was enabled but one failed to activate this run.
 The refusal walks the adapter's dependency closure in the static
 bundled-and-installed catalog: the adapter's plugin, the plugins its picker
 row composes (`requires_gateway` and friends, the same list the prompt uses),
-and, transitively, a provider for each capability a plugin in the closure
-`requires`. A provider the effective config already enables is preferred.
+and, transitively, every plugin a closure plugin names in `requires.plugins`
+and a provider for each capability it `requires`, the two edges the boot
+closure follows. A provider the effective config already enables is
+preferred.
 The walk visits each name once, so a dependency cycle terminates. A plugin
 name the catalog does not know, or a capability no catalog plugin provides,
 is recorded as unresolved instead of walked. The closure is computed once per
@@ -87,6 +89,5 @@ layer that enables nothing.
   overrides a disabled entry and never offers a no-op write. This decision
   only makes the refusal that follows truthful.
 - No new error code, so the server and the CLI reference are unaffected.
-- The walk follows catalog `requires.capabilities`. A plugin's
-  `requires.plugins` is not in the catalog metadata today; the bundled plugin
-  that uses it (Hermes, on the gateway) is covered by its picker row.
+- The catalog entry now carries a plugin's `requires.plugins` names, so the
+  walk can follow them; the entry is otherwise unchanged.

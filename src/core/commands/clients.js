@@ -993,8 +993,9 @@ async function resolveAttachEnablementState({ name, ctx }) {
 
 /**
  * The plugins `seeds` need, in breadth-first order from the seeds:
- * `requires` capabilities resolve to a catalog provider, preferring one the
- * effective config already enables. The catalog is finite and every name is
+ * `requires.plugins` by name, and `requires` capabilities through a catalog
+ * provider, preferring one the effective config already enables (the same
+ * two edges the boot closure in `../cli/dispatch.js` follows). The catalog is finite and every name is
  * visited once, so a dependency cycle terminates; a name the catalog does not
  * know, or a capability nothing provides, is returned in `unresolved` instead
  * of being walked.
@@ -1029,6 +1030,7 @@ function attachDependencyClosure({ seeds, catalog, enabled }) {
       continue
     }
     closure.push(current)
+    queue.push(...(catalog.plugins.get(current)?.requiresPlugins ?? []))
     for (const cap of Object.keys(meta.requires ?? {})) {
       const candidates = providers.get(cap)
       if (candidates) {

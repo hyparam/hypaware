@@ -523,6 +523,102 @@ test('a composed plugin the catalog does not know is named as not installed', as
   })
 })
 
+/**
+ * Stage an installed client whose manifest requires a dependency by name
+ * (`requires.plugins`), the edge the boot closure follows as well.
+ *
+ * @param {string} home
+ * @param {{ installDep: boolean }} opts
+ */
+async function stageDirectClient(home, { installDep }) {
+  /** @type {Record<string, unknown>[]} */
+  const manifests = [{
+    name: '@acme/direct-client',
+    requires: { plugins: { '@acme/direct-dep': '^1.0.0' } },
+    contributes: { client: { name: 'direct', skill_dir: '.direct/skills', attach_probe: probe('direct') } },
+  }]
+  if (installDep) manifests.push({ name: '@acme/direct-dep' })
+  await stageInstalledPlugins(home, manifests)
+}
+
+test('a locally disabled requires.plugins dependency is named', async () => {
+  await withTempHome(async (home) => {
+    await stageDirectClient(home, { installDep: true })
+    const before = writeLocalConfig(home, [
+      { name: '@acme/direct-client' },
+      { name: '@acme/direct-dep', enabled: false },
+    ])
+    const { text, payload } = await refusal(home, 'direct', { gatewayCapability: false })
+    assert.equal(
+      text,
+      `error: the direct adapter needs @acme/direct-dep, which is disabled in ${localConfigPath(home)}; ` +
+        `set "enabled": true on its plugins[] entry and run 'hyp daemon restart', ` +
+        `then re-run 'hyp client attach direct'\n`
+    )
+    assert.equal(payload.error_kind, 'adapter_not_enabled')
+    assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
+  })
+})
+
+test('a centrally disabled requires.plugins dependency reports adapter_disabled_central', async () => {
+  await withTempHome(async (home) => {
+    await stageDirectClient(home, { installDep: true })
+    writeCentralConfig(home, { version: 2, plugins: [{ name: '@acme/direct-dep', enabled: false }] })
+    const before = writeLocalConfig(home, [{ name: '@acme/direct-client' }])
+    const { text, payload } = await refusal(home, 'direct', { gatewayCapability: false })
+    assert.equal(
+      text,
+      `error: the direct adapter needs @acme/direct-dep, which is disabled by your central config; ` +
+        `a local config cannot override the central-managed setting\n`
+    )
+    assert.equal(payload.error_kind, 'adapter_disabled_central')
+    assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
+  })
+})
+
+test('an absent requires.plugins dependency keeps the add path, naming it', async () => {
+  await withTempHome(async (home) => {
+    await stageDirectClient(home, { installDep: true })
+    writeLocalConfig(home, [{ name: '@acme/direct-client' }])
+    const { text, payload } = await refusal(home, 'direct', { gatewayCapability: false })
+    assert.match(text, /^error: the direct adapter needs @acme\/direct-dep, which is not enabled on this install; /)
+    assert.equal(payload.error_kind, 'adapter_not_enabled')
+  })
+})
+
+test('a requires.plugins dependency that is not installed is named as not installed', async () => {
+  await withTempHome(async (home) => {
+    await stageDirectClient(home, { installDep: false })
+    writeLocalConfig(home, [{ name: '@acme/direct-client' }])
+    const { text, payload } = await refusal(home, 'direct', { gatewayCapability: false })
+    assert.equal(
+      text,
+      `error: the direct adapter needs @acme/direct-dep, which is not installed on this machine; ` +
+        `install it with 'hyp plugin install @acme/direct-dep', then re-run 'hyp client attach direct'\n`
+    )
+    assert.equal(payload.error_kind, 'adapter_not_enabled')
+  })
+})
+
+test('a requires.plugins cycle terminates and still names the disabled member', async () => {
+  await withTempHome(async (home) => {
+    await stageInstalledPlugins(home, [
+      {
+        name: '@acme/ring-client',
+        requires: { plugins: { '@acme/ring-dep': '^1.0.0' } },
+        contributes: { client: { name: 'ring', skill_dir: '.ring/skills', attach_probe: probe('ring') } },
+      },
+      { name: '@acme/ring-dep', requires: { plugins: { '@acme/ring-client': '^1.0.0' } } },
+    ])
+    writeLocalConfig(home, [
+      { name: '@acme/ring-client' },
+      { name: '@acme/ring-dep', enabled: false },
+    ])
+    const { text } = await refusal(home, 'ring', { gatewayCapability: false })
+    assert.match(text, /^error: the ring adapter needs @acme\/ring-dep, which is disabled in /)
+  })
+})
+
 test('a registered client still attaches unchanged', async () => {
   await withTempHome(async (home) => {
     const { ctx, stderr } = makeCtx({ home, registered: ['claude'] })
