@@ -61,10 +61,14 @@ plugin state from a failed activation survives into the next.
 ### Owner probe {#owner-probe}
 
 On that failure the gateway asks once who holds the port: `/proc/net/tcp{,6}`
-plus `/proc/<pid>/fd` on Linux, `lsof -F pc` on macOS, within a 1s budget and
-a cap on fd entries read. It reports a pid and an executable name, never a
-command line. A missing probe, a permission denial, a race, or a timeout reads
-as "the owner is unknown". The answer is appended to the boot-failure message,
+plus `/proc/<pid>/fd` on Linux, `lsof -F pctn` on macOS, within a 1s budget
+enforced on the whole probe (not only between reads) and a cap on fd entries
+read. Only a listener that could refuse a bind on the failing address counts:
+an IPv4 listener never refuses a specific IPv6 bind. It reports a pid and an
+executable name, never a command line. A missing probe, a permission denial,
+a race, a timeout, or candidate listeners held by more than one process reads
+as "the owner is unknown", because naming the wrong process is worse than
+naming none. The answer is appended to the boot-failure message,
 so the persisted `boot_failed` warning, the `daemon.boot_failed` log line and
 the service's stderr all carry it. The probe only reads: it never signals the
 owner, never binds elsewhere, and never edits config.

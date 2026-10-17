@@ -138,15 +138,67 @@ test('the owner probe says unknown when it cannot know', async () => {
   }
 })
 
+test('the Linux probe names only a listener that could refuse the failing bind, and one process or none', async () => {
+  const procRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-port-owner-family-'))
+  try {
+    await fs.mkdir(path.join(procRoot, 'net'))
+    const hexPort = (8787).toString(16).toUpperCase().padStart(4, '0')
+    const header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
+    const row = (/** @type {string} */ addr, /** @type {string} */ inode) =>
+      `   0: ${addr}:${hexPort} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 ${inode} 1 0000000000000000 100 0 0 10 0\n`
+    // Separate listeners: 127.0.0.1 in one process, ::1 in another.
+    await fs.writeFile(path.join(procRoot, 'net', 'tcp'), header + row('0100007F', '111'))
+    await fs.writeFile(path.join(procRoot, 'net', 'tcp6'), header + row('00000000000000000000000001000000', '333'))
+    for (const [pid, inode, comm] of [['4242', '111', 'v4'], ['4343', '333', 'v6']]) {
+      await fs.mkdir(path.join(procRoot, pid, 'fd'), { recursive: true })
+      await fs.symlink(`socket:[${inode}]`, path.join(procRoot, pid, 'fd', '3'))
+      await fs.writeFile(path.join(procRoot, pid, 'comm'), `${comm}\n`)
+    }
+    const probe = (/** @type {string | undefined} */ host) => probePortOwner(8787, { platform: 'linux', procRoot, host })
+    assert.deepEqual(await probe('::1'), { pid: 4343, executable: 'v6' }, 'an IPv4 listener never refuses an IPv6 bind')
+    assert.deepEqual(await probe('127.0.0.1'), { pid: 4242, executable: 'v4' })
+    assert.equal(await probe(undefined), undefined, 'two processes could hold it: unknown, not the first one found')
+    assert.equal(await probe('::'), undefined, 'a wildcard bind is refused by either: unknown')
+  } finally {
+    await fs.rm(procRoot, { recursive: true, force: true })
+  }
+})
+
+test('the owner probe answers within its budget even when one read hangs', async (t) => {
+  const procRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-port-owner-slow-'))
+  try {
+    await fs.mkdir(path.join(procRoot, 'net'))
+    const hexPort = (8787).toString(16).toUpperCase().padStart(4, '0')
+    await fs.writeFile(path.join(procRoot, 'net', 'tcp'),
+      `header\n   0: 0100007F:${hexPort} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 111 1 0000000000000000 100 0 0 10 0\n`)
+    await fs.mkdir(path.join(procRoot, '4242', 'fd'), { recursive: true })
+    await fs.symlink('socket:[111]', path.join(procRoot, '4242', 'fd', '3'))
+    const realReadlink = fs.readlink
+    t.mock.method(fs, 'readlink', async (/** @type {string} */ p) => {
+      await new Promise(resolve => setTimeout(resolve, 400))
+      return realReadlink(p)
+    })
+    const started = Date.now()
+    assert.equal(await probePortOwner(8787, { platform: 'linux', procRoot, host: '127.0.0.1', budgetMs: 100 }), undefined)
+    assert.ok(Date.now() - started < 300, `returned after ${Date.now() - started}ms`)
+  } finally {
+    await new Promise(resolve => setTimeout(resolve, 450))
+    await fs.rm(procRoot, { recursive: true, force: true })
+  }
+})
+
 test('the macOS probe reads lsof field output and folds every failure to unknown', async () => {
   /** @type {string[][]} */
   const calls = []
+  const lsofOut = 'p321\ncnc\nf3\ntIPv4\nn127.0.0.1:8787\np322\ncother\nf4\ntIPv6\nn[::1]:8787\n'
   const fakeExec = /** @type {any} */ ((/** @type {string} */ file, /** @type {string[]} */ args, /** @type {any} */ _opts, /** @type {Function} */ cb) => {
     calls.push([file, ...args])
-    cb(null, 'p321\ncnc\np322\ncother\n', '')
+    cb(null, lsofOut, '')
   })
-  assert.deepEqual(await probePortOwner(8787, { platform: 'darwin', execFile: fakeExec }), { pid: 321, executable: 'nc' })
-  assert.deepEqual(calls[0], ['lsof', '-nP', '-w', '-iTCP:8787', '-sTCP:LISTEN', '-Fpc'])
+  assert.deepEqual(await probePortOwner(8787, { platform: 'darwin', execFile: fakeExec, host: '127.0.0.1' }), { pid: 321, executable: 'nc' })
+  assert.deepEqual(calls[0], ['lsof', '-nP', '-w', '-iTCP:8787', '-sTCP:LISTEN', '-Fpctn'])
+  assert.deepEqual(await probePortOwner(8787, { platform: 'darwin', execFile: fakeExec, host: '::1' }), { pid: 322, executable: 'other' }, 'the IPv6 bind names the IPv6 holder')
+  assert.equal(await probePortOwner(8787, { platform: 'darwin', execFile: fakeExec }), undefined, 'two processes could hold it: unknown')
   const failing = /** @type {any} */ ((/** @type {string} */ _f, /** @type {string[]} */ _a, /** @type {any} */ _o, /** @type {Function} */ cb) => cb(new Error('spawn lsof ENOENT'), '', ''))
   assert.equal(await probePortOwner(8787, { platform: 'darwin', execFile: failing }), undefined)
 })

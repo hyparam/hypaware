@@ -2,6 +2,7 @@
 
 import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
+import net from 'node:net'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -19,7 +20,8 @@ import { sanitizeLabel } from '../util/json_util.js'
  * executable name only, never a command line, which can carry secrets.
  *
  * Every way of not knowing (no probe on this platform, a permission denial,
- * an owner that exited mid-scan, a probe past its budget) is `undefined`, so a
+ * an owner that exited mid-scan, a probe past its budget, listeners that could
+ * have refused the bind held by more than one process) is `undefined`, so a
  * caller says "unknown" rather than naming the wrong process.
  */
 
@@ -57,14 +59,27 @@ export function addressInUse(error) {
 export async function probePortOwner(port, opts = {}) {
   if (!Number.isInteger(port) || port <= 0 || port > 65_535) return undefined
   const platform = opts.platform ?? process.platform
-  const deadline = Date.now() + (opts.budgetMs ?? PROBE_BUDGET_MS)
+  const budgetMs = opts.budgetMs ?? PROBE_BUDGET_MS
+  const deadline = Date.now() + budgetMs
+  /** @type {Promise<PortOwner | undefined> | undefined} */
+  let probe
+  if (platform === 'linux') probe = probeProc(port, opts.host, opts.procRoot ?? '/proc', deadline)
+  else if (platform === 'darwin') probe = probeLsof(port, opts.host, opts.execFile ?? execFile, deadline)
+  if (!probe) return undefined
+  // A single slow read (a wedged /proc entry) can outlast every deadline check
+  // between awaits, so the budget is also enforced on the whole probe. A read
+  // still in flight when it expires finishes unobserved and is discarded.
+  /** @type {NodeJS.Timeout | undefined} */
+  let timer
+  const expired = new Promise(resolve => { timer = setTimeout(resolve, budgetMs, undefined) })
   try {
-    if (platform === 'linux') return await probeProc(port, opts.host, opts.procRoot ?? '/proc', deadline)
-    if (platform === 'darwin') return await probeLsof(port, opts.execFile ?? execFile, deadline)
+    return /** @type {PortOwner | undefined} */ (await Promise.race([probe.catch(() => undefined), expired]))
   } catch {
     // Any failure the probes did not already fold is still only "unknown".
+    return undefined
+  } finally {
+    clearTimeout(timer)
   }
-  return undefined
 }
 
 /**
@@ -103,6 +118,8 @@ async function probeProc(port, host, procRoot, deadline) {
   }
   if (inodes.size === 0 || Date.now() > deadline) return undefined
   let entries = 0
+  /** @type {string | undefined} */
+  let owner
   const pids = (await fsp.readdir(procRoot)).filter(name => /^\d+$/.test(name))
   for (const pid of pids) {
     if (Date.now() > deadline || entries >= MAX_FD_ENTRIES) return undefined
@@ -112,34 +129,78 @@ async function probeProc(port, host, procRoot, deadline) {
     // know, and never a reason to stop looking.
     try { fds = await fsp.readdir(fdDir) } catch { continue }
     for (const fd of fds) {
-      if (++entries > MAX_FD_ENTRIES) return undefined
+      if (++entries > MAX_FD_ENTRIES || Date.now() > deadline) return undefined
       let target
       try { target = await fsp.readlink(path.join(fdDir, fd)) } catch { continue }
       if (!inodes.has(target)) continue
-      return { pid: Number(pid), executable: await procExecutable(procRoot, pid) }
+      // One candidate listener: the first process holding it is the answer.
+      // Several (a v4 and a v6 listener when the failing host is unknown):
+      // only an answer if one process holds them all, so keep scanning.
+      if (inodes.size === 1) return { pid: Number(pid), executable: await procExecutable(procRoot, pid) }
+      if (owner !== undefined && owner !== pid) return undefined
+      owner = pid
+      break
     }
   }
-  return undefined
+  return owner === undefined ? undefined : { pid: Number(owner), executable: await procExecutable(procRoot, owner) }
 }
 
 /**
  * Whether a listener on this `/proc/net` address could be what refused a bind
- * on `host`: a wildcard listener, or one on that IPv4 address. A listener on
- * another specific address did not cause the failure and is not reported. An
- * unknown or non-IPv4 host matches any listener on the port.
+ * on `host`. An IPv4 bind is refused by a listener on that address or a
+ * wildcard of either family (a dual-stack `::` covers IPv4). A specific IPv6
+ * bind is refused only by an IPv6 listener on that address or on `::`; an
+ * IPv4 listener never conflicts with it. An unknown host, or a wildcard one,
+ * matches any listener on the port.
  *
  * @param {string} hex
  * @param {string | undefined} host
  * @returns {boolean}
  */
 function couldHoldHost(hex, host) {
-  if (!host || !/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true
-  if (/^0+$/.test(hex)) return true
-  // IPv4 is one little-endian word; a v4-mapped IPv6 address ends in it.
-  const v4 = hex.length === 8 ? hex : hex.startsWith('0000000000000000FFFF0000') ? hex.slice(24) : undefined
-  if (!v4) return false
-  const bytes = [6, 4, 2, 0].map(i => parseInt(v4.slice(i, i + 2), 16))
-  return bytes.join('.') === host
+  const family = host ? net.isIP(host.replace(/%.*$/, '')) : 0
+  if (family === 0) return true
+  const want = family === 4 ? ipv4ProcHex(host ?? '') : ipv6ProcHex(host?.replace(/%.*$/, '') ?? '')
+  if (want === undefined || /^0+$/.test(want)) return true
+  if (/^0+$/.test(hex)) return family === 4 || hex.length === 32
+  if (family === 6) return hex === want
+  // A v4-mapped IPv6 listener ends in the IPv4 word.
+  return hex === want || hex === `0000000000000000FFFF0000${want}`
+}
+
+/**
+ * An IPv4 address as `/proc/net/tcp` prints it: one little-endian word.
+ *
+ * @param {string} host
+ * @returns {string}
+ */
+function ipv4ProcHex(host) {
+  return host.split('.').reverse().map(b => Number(b).toString(16).padStart(2, '0')).join('').toUpperCase()
+}
+
+/**
+ * An IPv6 address as `/proc/net/tcp6` prints it: four little-endian words.
+ * `undefined` for a form this does not expand (an embedded IPv4 tail), which
+ * then matches any listener and leaves ambiguity to the caller.
+ *
+ * @param {string} host
+ * @returns {string | undefined}
+ */
+function ipv6ProcHex(host) {
+  if (host.includes('.')) return undefined
+  const [head, tail] = host.split('::')
+  const left = head ? head.split(':') : []
+  const right = tail ? tail.split(':') : []
+  const groups = host.includes('::')
+    ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right]
+    : left
+  if (groups.length !== 8) return undefined
+  let out = ''
+  for (let i = 0; i < 8; i += 2) {
+    const word = groups[i].padStart(4, '0') + groups[i + 1].padStart(4, '0')
+    out += word.match(/../g)?.reverse().join('') ?? ''
+  }
+  return out.toUpperCase()
 }
 
 /**
@@ -164,28 +225,49 @@ async function procExecutable(procRoot, pid) {
 }
 
 /**
- * `lsof -F pc` prints the pid and the short command name (not its arguments)
- * of each process with a listening socket on the port.
+ * `lsof -F pctn` prints, per process with a listening socket on the port, its
+ * pid and short command name (not its arguments), then each socket's family
+ * and local address. Only sockets that could refuse a bind on `host` count,
+ * by the same rule as on Linux, and sockets held by more than one process
+ * read as unknown.
  *
  * @param {number} port
+ * @param {string | undefined} host
  * @param {typeof execFile} run
  * @param {number} deadline
  * @returns {Promise<PortOwner | undefined>}
  */
-function probeLsof(port, run, deadline) {
+function probeLsof(port, host, run, deadline) {
   const timeout = Math.max(1, deadline - Date.now())
+  const bare = host?.replace(/%.*$/, '')
+  const family = bare ? net.isIP(bare) : 0
+  const wildcard = family === 0 || bare === '0.0.0.0' || bare === '::'
   return new Promise(resolve => {
-    run('lsof', ['-nP', '-w', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpc'], { timeout, killSignal: 'SIGKILL', maxBuffer: 64 * 1024, encoding: 'utf8' }, (error, stdout) => {
+    run('lsof', ['-nP', '-w', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpctn'], { timeout, killSignal: 'SIGKILL', maxBuffer: 64 * 1024, encoding: 'utf8' }, (error, stdout) => {
       if (error) { resolve(undefined); return }
+      /** @type {PortOwner | undefined} */
+      let owner
       /** @type {number | undefined} */
       let pid
       /** @type {string | undefined} */
       let executable
+      let type = ''
       for (const line of String(stdout).split('\n')) {
-        if (line.startsWith('p') && pid === undefined) pid = Number(line.slice(1))
-        else if (line.startsWith('c') && pid !== undefined && executable === undefined) executable = sanitizeLabel(line.slice(1), MAX_EXECUTABLE_CHARS)
+        const field = line.slice(1)
+        if (line.startsWith('p')) { pid = Number(field); executable = undefined; type = '' }
+        else if (line.startsWith('c')) executable = sanitizeLabel(field, MAX_EXECUTABLE_CHARS)
+        else if (line.startsWith('t')) type = field
+        else if (line.startsWith('n') && pid !== undefined && Number.isInteger(pid) && pid > 0) {
+          const address = field.slice(0, field.lastIndexOf(':')).replace(/^\[|\]$/g, '')
+          const holds = wildcard
+            || address === bare
+            || (address === '*' && (family === 4 || type === 'IPv6'))
+          if (!holds) continue
+          if (owner && owner.pid !== pid) { resolve(undefined); return }
+          owner = { pid, executable }
+        }
       }
-      resolve(pid !== undefined && Number.isInteger(pid) && pid > 0 ? { pid, executable } : undefined)
+      resolve(owner)
     })
   })
 }
