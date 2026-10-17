@@ -5,7 +5,10 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
+import { buildWalkthroughClientDescriptorMap } from '../../../../src/core/cli/walkthrough.js'
+import { materializeClientAssets } from '../../../../src/core/runtime/client_assets.js'
 import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import {
   anyClientLaunchable,
@@ -120,8 +123,9 @@ test('recordedReportClientLaunchable: none recorded, recorded but unverified, an
   const home = await temporaryDirectory('hyp-report-pointer-')
   const env = { HOME: home }
   const descriptors = /** @type {any} */ (new Map([
-    ['claude', { name: 'claude', skillDir: '.claude/skills', launch: { bin: 'claude', args: ['{prompt}'] } }],
+    ['claude', { name: 'claude', skillDir: '.claude/skills', agentDir: '.claude/agents', launch: { bin: 'claude', args: ['{prompt}'] } }],
     ['claude-desktop', { name: 'claude-desktop', skillDir: '.claude/skills' }],
+    ['codex', { name: 'codex', skillDir: '.codex/skills', launch: { bin: 'codex', args: ['{prompt}'] } }],
   ]))
   const onPath = { descriptors, resolve: async (/** @type {string} */ bin) => `/bin/${bin}` }
   const attached = finaleSummary([{ client: 'claude', dryRun: false, ok: true }])
@@ -148,8 +152,19 @@ test('recordedReportClientLaunchable: none recorded, recorded but unverified, an
   await fs.writeFile(skill, '# report\n')
   assert.equal(await recordedReportClientLaunchable(attached, env, { descriptors, resolve: async () => undefined }), false)
 
+  // The skill alone is not enough where the client has subagents: the report
+  // skill delegates to `hypaware-analyst`, so a missing worker, or one whose
+  // directory could not be created, leaves the client unverified.
+  assert.equal(await recordedReportClientLaunchable(attached, env, onPath), false)
+  const agentsDir = path.join(home, '.claude', 'agents')
+  await fs.writeFile(agentsDir, 'not a directory\n')
+  assert.equal(await recordedReportClientLaunchable(attached, env, onPath), false)
+  await fs.rm(agentsDir)
+  await fs.mkdir(agentsDir)
+  await fs.writeFile(path.join(agentsDir, 'hypaware-analyst.md'), '# analyst\n')
+
   // Verified: attached (or already attached on the team pathway), the CLI
-  // resolves, and the skill is installed.
+  // resolves, and the skill and its worker are installed.
   assert.equal(await recordedReportClientLaunchable(attached, env, onPath), true)
   const alreadyAttached = finaleSummary([{ client: 'claude', dryRun: false, ok: true, skipped: true }])
   assert.equal(await recordedReportClientLaunchable(alreadyAttached, env, onPath), true)
@@ -157,6 +172,45 @@ test('recordedReportClientLaunchable: none recorded, recorded but unverified, an
   // A failed daemon install withholds the pointer even then.
   const failedInstall = finaleSummary(attached.attach, { daemonInstall: { skipped: false, dryRun: false, failed: true } })
   assert.equal(await recordedReportClientLaunchable(failedInstall, env, onPath), false)
+
+  // A client with no subagent directory needs only its skill.
+  const codexSkill = path.join(home, '.codex', 'skills', 'hypaware-report', 'SKILL.md')
+  await fs.mkdir(path.dirname(codexSkill), { recursive: true })
+  await fs.writeFile(codexSkill, '# report\n')
+  const codex = finaleSummary([{ client: 'codex', dryRun: false, ok: true }])
+  assert.equal(await recordedReportClientLaunchable(codex, env, onPath), true)
+})
+
+test('recordedReportClientLaunchable: a Claude install whose analyst copy failed is not ready', async () => {
+  const home = await temporaryDirectory('hyp-report-worker-')
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+  const claude = /** @type {any} */ (descriptors.get('claude'))
+  const plugin = fileURLToPath(new URL('../../../../hypaware-core/plugins-workspace/claude/', import.meta.url))
+  const options = /** @type {any} */ ({
+    clients: ['claude'],
+    descriptors,
+    homeDir: home,
+    skills: { list: () => [{ name: 'hypaware-report', clients: ['claude'], plugin: '@hypaware/claude', sourceDir: path.join(plugin, 'skills', 'hypaware-report') }] },
+    agents: { list: () => [{ name: 'hypaware-analyst', clients: ['claude'], plugin: '@hypaware/claude', sourceFile: path.join(plugin, 'agents', 'hypaware-analyst.md') }] },
+    stderr: { write: () => true },
+  })
+  const env = { HOME: home }
+  const deps = { descriptors, resolve: async (/** @type {string} */ bin) => `/bin/${bin}` }
+  const attached = finaleSummary([{ client: 'claude', dryRun: false, ok: true }])
+
+  // A file where the agents directory belongs: the skill copies, the
+  // analyst does not, and the materializer carries on.
+  const agentsDir = path.join(home, claude.agentDir)
+  await fs.mkdir(path.dirname(agentsDir), { recursive: true })
+  await fs.writeFile(agentsDir, 'not a directory\n')
+  const mixed = await materializeClientAssets(options)
+  assert.deepEqual(mixed.installed.map((/** @type {any} */ a) => `${a.kind}:${a.name}`), ['skill:hypaware-report'])
+  assert.equal(await recordedReportClientLaunchable(attached, env, deps), false)
+
+  // The same install once the analyst lands.
+  await fs.rm(agentsDir)
+  await materializeClientAssets(options)
+  assert.equal(await recordedReportClientLaunchable(attached, env, deps), true)
 })
 
 test('runWizardSuggestSkill: a run that cannot prompt names the verb and starts nothing', async () => {

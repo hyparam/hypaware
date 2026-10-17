@@ -21,7 +21,9 @@
  */
 
 import { spawn } from 'node:child_process'
+import fsp from 'node:fs/promises'
 import os from 'node:os'
+import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -197,7 +199,11 @@ export async function anyClientLaunchable(env, deps = {}) {
  * nothing was a dry run, its CLI resolves on `$PATH`, and its
  * `hypaware-report` skill is on disk. The last two are the command's own
  * check (`reportSkillLaunchers`), so setup names the command only where
- * it would start something.
+ * it would start something. A client with a subagent directory must also
+ * hold the `hypaware-analyst` worker the report skill delegates to: there
+ * the skill stops to ask about a substitute when it is missing, so setup
+ * does not call that client ready. A client with no subagent directory
+ * (Codex) has its skill name a generic worker instead.
  *
  * Reads the finale's own results rather than probing attach state: this
  * boot cannot see it (see `runAskChild`), and the finale's record is the
@@ -228,7 +234,16 @@ export async function recordedReportClientLaunchable(summary, env, deps = {}) {
     })
     if (launchers.length === 0) return false
     const homeDir = env.HOME || os.homedir()
-    return (await reportSkillLaunchers({ launchers, descriptors, homeDir })).length > 0
+    for (const { launcher } of await reportSkillLaunchers({ launchers, descriptors, homeDir })) {
+      const agentDir = descriptors.get(launcher.client)?.agentDir
+      if (!agentDir) return true
+      try {
+        await fsp.access(path.join(homeDir, agentDir, 'hypaware-analyst.md'))
+        return true
+      } catch { // This client's report workflow is missing its worker.
+      }
+    }
+    return false
   } catch {
     return false
   }

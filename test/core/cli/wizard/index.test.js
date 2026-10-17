@@ -1776,15 +1776,21 @@ function finaleAttachedClaude(dryRun = false) {
 
 /**
  * A home with the report skill installed for Claude Code (when `skill`),
+ * its `hypaware-analyst` worker (when `agent`, which defaults to `skill`),
  * and a PATH holding an executable `claude`.
- * @param {{ skill: boolean }} opts
+ * @param {{ skill: boolean, agent?: boolean }} opts
  */
-async function reportReadyHome({ skill }) {
+async function reportReadyHome({ skill, agent = skill }) {
   const home = await tmpHome()
   if (skill) {
     const file = path.join(home, '.claude', 'skills', 'hypaware-report', 'SKILL.md')
     await fs.mkdir(path.dirname(file), { recursive: true })
     await fs.writeFile(file, '# report\n')
+  }
+  if (agent) {
+    const file = path.join(home, '.claude', 'agents', 'hypaware-analyst.md')
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '# analyst\n')
   }
   const bin = path.join(home, 'bin')
   await fs.mkdir(bin, { recursive: true })
@@ -1817,6 +1823,16 @@ test('runInitWizard: names `hyp report generate` only when an attached client ca
   })
   await runInitWizard(unverified.opts)
   assert.ok(!unverified.stdout.text().includes(REPORT_POINTER))
+
+  // Recorded but unverified: the skill is there, its analyst worker is not.
+  const noWorker = await reportReadyHome({ skill: true, agent: false })
+  const workerless = wizardOpts(noWorker.home, {
+    env: noWorker.env,
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleAttachedClaude(),
+  })
+  await runInitWizard(workerless.opts)
+  assert.ok(!workerless.stdout.text().includes(REPORT_POINTER))
 
   // None recorded: the skill and CLI are there, but this run attached nothing.
   const none = wizardOpts(ready.home, { env: ready.env, firstLook: firstLookWithRows() })
