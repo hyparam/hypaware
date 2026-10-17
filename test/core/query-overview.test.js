@@ -1244,6 +1244,22 @@ test('renderOverview: a joiner between ordinary characters does not hide their w
   }
 })
 
+test('renderOverview: an escaped mark between pictographs is clipped as printed', () => {
+  // #2701 R2: U+200E prints as an escape, which ends the emoji sequence,
+  // so the joined pictograph after it is drawn and must be counted.
+  const model = '\u{1F600}\u200e\u200d\u{1F600}'.repeat(30)
+  for (const columns of [100, 80, 60]) {
+    const out = renderOverview({
+      providerRows: [{ provider: 'anthropic', model, input_tokens: 1584212345, cached_tokens: 158420001234, output_tokens: 15842012 }],
+      dailyRows: [],
+      columns,
+    })
+    for (const line of out.split('\n')) {
+      assert.ok(displayWidth(line) <= columns, `${columns}: ${displayWidth(line)}: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
 test('renderOverview: the no-count and no-repo sentences wrap to the width', () => {
   // #2701 R1: these are prose, not a table, so they fold like every other
   // sentence rather than overflow a narrow terminal.

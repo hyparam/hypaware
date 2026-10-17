@@ -1284,11 +1284,11 @@ function truncate(text, width) {
   let out = ''
   let used = 0
   for (const ch of text) {
-    const escaped = escapeForDisplay(ch)
-    // Stepped for every character, escaped or not, so a joiner's state
-    // stays in line with what displayWidth measures.
-    const natural = step(/** @type {number} */ (ch.codePointAt(0)))
-    const w = escaped === ch ? natural : escaped.length
+    // Stepped over what is printed, not the raw character, so an escaped
+    // mark both costs its escape and breaks a joined pictograph the way
+    // displayWidth measures it (#2701 R2).
+    let w = 0
+    for (const printed of escapeForDisplay(ch)) w += step(/** @type {number} */ (printed.codePointAt(0)))
     // One column stays free for the ellipsis.
     if (used + w > width - 1 || out.length + ch.length > budget) break
     out += ch
