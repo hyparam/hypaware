@@ -70,7 +70,7 @@ async function skillsInstall({ skills = [], agents = [], env }) {
 
 test('the hint is the decided sentence, with no em dash', () => {
   assert.equal(CLAUDE_SKILL_RELOAD_HINT, HINT)
-  assert.doesNotMatch(CLAUDE_SKILL_RELOAD_HINT, /—/)
+  assert.doesNotMatch(CLAUDE_SKILL_RELOAD_HINT, /\u2014/)
 })
 
 test('hyp skills install prints the hint once after Claude skill copies, also beside other clients', async () => {
