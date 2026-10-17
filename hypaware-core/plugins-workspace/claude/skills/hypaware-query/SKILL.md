@@ -30,7 +30,7 @@ for discovery, queries, verification, and fallback guidance.
 2. Use the default refresh mode for most local SQL queries. Use `--refresh always` when the answer needs the newest captured rows; the default may leave pending rows out for up to two minutes after the last successful cache flush. Automatic refresh failures return committed data with a warning; forced refresh failures fail the query.
 3. Check the exit code and stderr before interpreting empty output as zero matching rows. Never discard or merge stderr (`2>/dev/null`, `2>&1`) or cut output with `| head`/`| tail`: merged notices break `--format json`, and a pager cuts rows silently. Bound output with `--max-bytes <n>` or `--output <file>` instead.
 4. To avoid CLI display truncation, use `--format json --output <file>`. This saves all rows and full cell values returned by the query, but does not bypass query, scan, or server limits. Check exit status and stderr for incomplete-result notices, then inspect the file in bounded sections or process it programmatically.
-5. Inspect unfamiliar tables with `hyp query schema <table>`, including each table in a cross-table query. For queryable datasets reporting `columns: 0`, use `SELECT * FROM <table> LIMIT 1` to inspect their inferred columns.
+5. Inspect unfamiliar tables with `hyp query schema <table>`, including each table in a cross-table query. A dataset reporting `columns: none declared` is still queryable: `SELECT * FROM <table> LIMIT 1` shows its columns, and reads the source to do it.
 
 ## Common Commands
 

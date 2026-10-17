@@ -21,6 +21,18 @@ export function schemaForDataset(registry, name) {
 }
 
 /**
+ * What an empty column list establishes, and no more. A registration with no
+ * declared columns (an S3 source with no `schema`, say) can still be queried:
+ * SQL reads the source's own columns when a query runs. The registry cannot
+ * tell an omitted declaration from an empty one, so this states only that
+ * nothing is declared and that the source was not opened to describe it,
+ * never that the dataset has zero columns. Shared by the CLI rendering and the
+ * MCP schema resource so both say the same thing.
+ */
+export const UNDECLARED_SCHEMA_NOTE =
+  'none declared (the source schema is not inspected here; SQL resolves its columns when a query runs)'
+
+/**
  * Render a `DatasetSchema` as a stable, line-oriented text block.
  * Used by `hyp query schema <name>` and surfaced verbatim in tests
  * that snapshot CLI output.
@@ -31,6 +43,13 @@ export function schemaForDataset(registry, name) {
 export function renderSchema(name, schema) {
   const lines = []
   lines.push(`dataset: ${name}`)
+  if (schema.columns.length === 0) {
+    lines.push(`columns: ${UNDECLARED_SCHEMA_NOTE}`)
+    // Not offered as a cheap probe: an S3 parquet source reads whole objects
+    // to set up any query, LIMIT or not.
+    lines.push(`  to see them: hyp query sql 'select * from ${name} limit 1' (this reads the source)`)
+    return lines.join('\n') + '\n'
+  }
   lines.push(`columns: ${schema.columns.length}`)
   for (const column of schema.columns) {
     const nullability = column.nullable ? 'NULL' : 'NOT NULL'
