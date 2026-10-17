@@ -23,7 +23,7 @@ import { createKernelRuntime, pluginRegistryFacades } from '../runtime/activatio
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
-import { activatePlugins } from '../runtime/loader.js'
+import { activatePlugins, loaderActivationKind } from '../runtime/loader.js'
 import { reclaimPluginTempDirs } from '../runtime/paths.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginScopedConfig } from '../config/plugin_scope.js'
@@ -36,7 +36,7 @@ import { materializeSinks } from '../sinks/materialize.js'
 import { noteCommandTransition, noteInvocation, productAdapters, startInvocationDelivery, withProductInvocation } from '../product_telemetry/client.js'
 
 /**
- * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobSinkConfigInstance, CommandActivationOutcome, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  * @import { MaterializeError } from '../../../src/core/sinks/types.js'
@@ -272,6 +272,13 @@ async function dispatchInternal(argv, opts) {
    * @type {string[]}
    */
   let failedPlugins = []
+  /**
+   * Per-plugin activation outcomes, message withheld. Left undefined when the
+   * caller pre-built the kernel, so a reader sees "unknown" rather than an
+   * empty list it would read as "nothing failed" (issue #596).
+   * @type {CommandActivationOutcome[] | undefined}
+   */
+  let activations
   /** @type {HypAwareV2Config} */
   let activeConfig = { version: 2 }
   const ownsKernel = !opts.kernel
@@ -305,6 +312,9 @@ async function dispatchInternal(argv, opts) {
     // short never put a plugin there at all
     // (LLP 0219 #incomplete-activation-prunes-nothing).
     failedPlugins = boot.unavailablePlugins
+    activations = boot.activations.map((r) =>
+      r.ok ? { ok: true, plugin: r.plugin } : { ok: false, plugin: r.plugin, errorKind: loaderActivationKind(r.errorKind) }
+    )
     if (failedPlugins.length) noteInvocation({ degraded: true })
     if (boot.config) activeConfig = boot.config
     noteInvocation({ adapters: productAdapters(activeConfig.plugins ?? []) })
@@ -508,6 +518,7 @@ async function dispatchInternal(argv, opts) {
       config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner, activePlugins) : activeConfig,
       plugins: activePlugins,
       failedPlugins,
+      activations,
       capabilities: ownerFacades ? ownerFacades.capabilities : kernel.capabilities,
       clients: kernel.clients,
       query: kernel.query,

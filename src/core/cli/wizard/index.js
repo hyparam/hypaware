@@ -1090,8 +1090,13 @@ async function runGuardedInitWizard(opts, guard) {
     sync_now: syncNow ? (syncNow.asked && syncNow.released ? 'released' : syncNow.reason) : 'skipped',
   })
 
+  // A picked client whose owning plugin did not activate was never attached.
+  // The lane warned and carried on with the healthy ones; the exit code is
+  // what tells a scripted setup that one did not land (issue #596). Ordinary
+  // attach refusals keep the warn-and-continue exit they always had.
+  const clientNotAttached = finaleSummary?.attach.some((a) => a.activationFailed === true) === true
   return {
-    exitCode: cancelled ? 130 : 0,
+    exitCode: cancelled ? 130 : clientNotAttached ? 1 : 0,
     ...(pathway ? { pathway } : {}),
     ...(cancelled ? { cancelled: true } : {}),
     configPath: picked.configPath,
@@ -1268,6 +1273,9 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         // A boot with a broken plugin contributes a partial asset set. The
         // finale still copies it; it must not read the hole as a retirement.
         ...(opts.ctx.failedPlugins?.length ? { failedPlugins: opts.ctx.failedPlugins } : {}),
+        // Which owners threw, so a picked client whose plugin failed to
+        // activate reads as not attached, not as adapterless (issue #596).
+        ...(opts.ctx.activations ? { activations: opts.ctx.activations } : {}),
         config: picked.config,
         configPath: picked.configPath,
         env: opts.env,
