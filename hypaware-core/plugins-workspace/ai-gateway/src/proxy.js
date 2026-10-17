@@ -46,11 +46,12 @@ const aliasesByRoutingTable = new WeakMap()
 // How long stop() lets an in-flight response finish before it cuts every
 // connection. An SSE stream never ends on its own, so without a bound a
 // graceful stop waits for the client and the service manager SIGKILLs the
-// daemon instead (#610). Kept under the gateway's own 4 s forced-exit
-// deadline (src/core/daemon/gateway.js STOP_DEADLINE_MS) so the cut streams
-// still have time to finalize before the process goes.
+// daemon instead (#610). Kept under the gateway's own forced-exit deadline
+// (src/core/daemon/gateway.js STOP_DEADLINE_MS) so the cut streams still have
+// time to finalize before the process goes.
 // @ref LLP 0038#lifecycle-and-operator-behavior [implements]: an indefinitely open stream cannot strand service restart
-export const STOP_GRACE_MS = 2_000
+// @ref LLP 0520#grace [implements]: five seconds of network drainage, measured once from the first stop
+export const STOP_GRACE_MS = 5_000
 
 /**
  * Start the HTTP proxy listener. Returns the bound host/port and a

@@ -322,7 +322,8 @@ test('macOS stop waits for asynchronous unload and rejects a stuck service', asy
   const { stopLaunchAgent } = await import('../../src/core/daemon/macos.js')
   launchctl.bootout = async () => OK
   await assert.rejects(stopLaunchAgent(options), /service did not unload/)
-  assert.ok(count(launchctl.calls, 'print') < 100, 'unload polling is bounded')
+  // One probe per 100ms poll across the stop window, plus the first.
+  assert.ok(count(launchctl.calls, 'print') <= DAEMON_STOP_TIMEOUT_MS / 100 + 1, 'unload polling is bounded')
   const print = launchctl.print
   let remaining = 2
   launchctl.print = async (args) => --remaining > 0

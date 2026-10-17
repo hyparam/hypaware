@@ -33,8 +33,10 @@ const RESTART_DELAY_MS = 1000
 // five-minute staleness window, so the status file has to keep being re-dated
 // even when nothing changed - but only on this cadence, not on every recompute.
 const STATUS_HEARTBEAT_MS = 30_000
-// Leave time for the CLI's five-second stop wait to observe the exit.
-const STOP_DEADLINE_MS = 4_000
+// The proxy's stop grace plus time for the turns it cut to settle, and still
+// inside the CLI's stop wait with the telemetry close after it.
+// @ref LLP 0520#window [implements]: grace, settlement, then the forced exit, all inside the stop window
+export const STOP_DEADLINE_MS = 8_000
 
 /**
  * Claim `stateRoot` for this daemon: refuse while another daemon holds it,

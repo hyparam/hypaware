@@ -6,6 +6,7 @@ import net from 'node:net'
 import test from 'node:test'
 
 import { STOP_GRACE_MS, startProxy } from '../../hypaware-core/plugins-workspace/ai-gateway/src/proxy.js'
+import { STOP_DEADLINE_MS } from '../../src/core/daemon/gateway.js'
 
 // stop() used to wait on `server.close()` alone, which waits for every open
 // connection to end. A proxied SSE stream never ends on its own, so a daemon
@@ -279,10 +280,14 @@ test('the port is rebindable once stop() resolves with a stream open', async () 
   }
 })
 
+// @ref LLP 0520#window [tests]: five seconds of grace, with settlement time left before the forced exit
 test('the stop grace stays inside the gateway daemon\'s forced-exit deadline', () => {
-  // src/core/daemon/gateway.js STOP_DEADLINE_MS (4 s) SIGKILLs the child and
-  // exits; a grace at or past it would have the exit cut the streams first,
-  // and the cut turns would never finalize. Half of it leaves the finalizers
-  // and the child's writes the rest.
-  assert.ok(STOP_GRACE_MS <= 2000, `grace ${STOP_GRACE_MS} ms leaves the finalizers time inside 4 s`)
+  // src/core/daemon/gateway.js STOP_DEADLINE_MS SIGKILLs the child and exits;
+  // a grace at or past it would have the exit cut the streams first, and the
+  // cut turns would never finalize. The grace is the five seconds #610
+  // settled, and the deadline leaves the finalizers and the child's writes
+  // three more.
+  assert.equal(STOP_GRACE_MS, 5_000)
+  assert.ok(STOP_GRACE_MS + 3_000 <= STOP_DEADLINE_MS,
+    `grace ${STOP_GRACE_MS} ms leaves the finalizers 3 s inside the ${STOP_DEADLINE_MS} ms deadline`)
 })
