@@ -8,7 +8,7 @@ import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
 import { isHelpFlag } from '../cli/group_help.js'
 import { runInitWizard } from '../cli/wizard/index.js'
 import { enableGithubCollection } from '../cli/wizard/pick.js'
-import { DEFAULT_RETENTION_DAYS, LOCAL_INSTALL_RETENTION_DAYS, orderPickerDescriptors, visiblePickerDescriptors } from '../cli/walkthrough.js'
+import { DEFAULT_RETENTION_DAYS, LOCAL_INSTALL_RETENTION_DAYS, orderPickerDescriptors, preflightLegacyProxyAttach, visiblePickerDescriptors } from '../cli/walkthrough.js'
 import { detectPickerSources } from '../cli/detect.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
@@ -626,6 +626,15 @@ async function runInitFromFile(flags, ctx) {
   // up before replacing. `--dry-run` gets the same answer and refusal
   // with no backup and no write.
   const dryRun = flags.dryRun
+  // @ref LLP 0524#refusal [implements]: --force replaces the file, not the transport a still-proxying client depends on
+  if (!(await preflightLegacyProxyAttach({
+    config: /** @type {HypAwareV2Config} */ (parsed),
+    configPath: targetPath,
+    env: ctx.env,
+    stderr: ctx.stderr,
+  }))) {
+    return 1
+  }
   const guard = await prepareLocalConfigWrite({ targetPath, force: flags.force, dryRun })
   if (!guard.proceed) {
     ctx.stderr.write(`hyp setup: ${guard.message}\n`)

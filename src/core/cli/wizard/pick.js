@@ -21,6 +21,7 @@ import {
   derivePickedClients,
   loadPickerCatalog,
   orderPickerDescriptors,
+  preflightLegacyProxyAttach,
   readsBackFromOwnPlugins,
   resolveHypHome,
   ridersInDefaultSet,
@@ -423,14 +424,16 @@ export async function runWizardPick(opts) {
   // Without `deferWrite` the write (and its guard) happens here, keeping
   // the standalone shape every direct caller and test relies on.
   if (!opts.deferWrite) {
-    const committed = await commitWizardPickedConfig({
-      stdout: opts.stdout,
-      stderr: opts.stderr,
-      interactive,
-      ...(opts.force !== undefined ? { force: opts.force } : {}),
-      configPath,
-      config,
-    })
+    const committed = await preflightLegacyProxyAttach({ config, configPath, env, stderr: opts.stderr })
+      ? await commitWizardPickedConfig({
+        stdout: opts.stdout,
+        stderr: opts.stderr,
+        interactive,
+        ...(opts.force !== undefined ? { force: opts.force } : {}),
+        configPath,
+        config,
+      })
+      : { ok: false }
     if (!committed.ok) {
       return overwriteAbortedResult({ configPath, config, sources, exportChoice, retentionDays, lockedSources })
     }

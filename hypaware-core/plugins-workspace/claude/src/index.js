@@ -689,22 +689,6 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(hypHome)
 
-  // A preset is a scripted non-interactive init (LLP 0011
-  // #non-interactive-entry), so it owes the same overwrite contract as every
-  // other local-layer writer: refuse an existing config, and back it up before
-  // replacing it under `--force`.
-  const guard = await prepareLocalConfigWrite({ targetPath: configPath, force, dryRun })
-  if (!guard.proceed) {
-    ctx.stderr.write(`hyp setup: ${guard.message}\n`)
-    return 1
-  }
-  if (guard.backupPath) {
-    // A dry run copied nothing, so it reports the backup it would have made.
-    ctx.stdout.write(dryRun
-      ? `(dry-run) would back up existing config to ${guard.backupPath}\n`
-      : `  backed up existing config to ${guard.backupPath}\n`)
-  }
-
   /** @type {HypAwareV2Config} */
   const config = {
     version: 2,
@@ -760,6 +744,28 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
         retention: { default_days: 90 },
       },
     },
+  }
+
+  // Ahead of the overwrite guard and its backup, so a refused run leaves
+  // nothing behind (the preset composes no proxy_mode, like the picker).
+  // @ref LLP 0524#check [implements]: the literal preset owes the same check as the picker fold
+  const { preflightLegacyProxyAttach } = await import('../../../../src/core/cli/walkthrough.js')
+  if (!(await preflightLegacyProxyAttach({ config, configPath, env: ctx.env, stderr: ctx.stderr }))) return 1
+
+  // A preset is a scripted non-interactive init (LLP 0011
+  // #non-interactive-entry), so it owes the same overwrite contract as every
+  // other local-layer writer: refuse an existing config, and back it up before
+  // replacing it under `--force`.
+  const guard = await prepareLocalConfigWrite({ targetPath: configPath, force, dryRun })
+  if (!guard.proceed) {
+    ctx.stderr.write(`hyp setup: ${guard.message}\n`)
+    return 1
+  }
+  if (guard.backupPath) {
+    // A dry run copied nothing, so it reports the backup it would have made.
+    ctx.stdout.write(dryRun
+      ? `(dry-run) would back up existing config to ${guard.backupPath}\n`
+      : `  backed up existing config to ${guard.backupPath}\n`)
   }
 
   if (!dryRun) {
