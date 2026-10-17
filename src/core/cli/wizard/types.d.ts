@@ -770,6 +770,13 @@ export interface WizardOutputGuard {
    */
   checkpoint(): Promise<boolean>
   /**
+   * Settle both streams' pending writes (bounded), so a failure either one
+   * has not reported yet reaches the guard's listener before `detach`. For
+   * a run that ends on its first write, such as the unsupported-platform
+   * refusal (#975).
+   */
+  settle(): Promise<void>
+  /**
    * Remove the guard's `error` listeners from the caller's streams. The
    * run owns them only while it is running; call this when it ends,
    * however it ends.

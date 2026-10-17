@@ -137,3 +137,19 @@ export function daemonIncompleteNote(platform, context) {
     ? `note: ${lead}the daemon install did not finish - run 'hyp daemon install'\n`
     : `note: ${lead}${platform} has no background service to install - nothing is captured on this machine\n`
 }
+
+/**
+ * What setup prints when it refuses a platform with no service manager, or
+ * `undefined` when the platform is supported (#975). Here for the same reason
+ * as `daemonIncompleteNote`: dispatch refuses every CLI setup form and the
+ * wizard refuses a direct `runInitWizard` call, and this leaf is reachable
+ * from both without an import cycle.
+ *
+ * @param {NodeJS.Platform} platform
+ * @returns {string | undefined}
+ */
+export function setupUnsupportedNote(platform) {
+  if (platformIsSupported(platform)) return undefined
+  return `hyp setup: unsupported platform: ${platform} (only macOS and Linux are supported)\n`
+    + '  nothing was changed: no sign-in, enrollment or config write happened\n'
+}

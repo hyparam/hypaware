@@ -52,6 +52,9 @@ export function guardWizardOutput({ stdout, stderr }) {
       await out.settle()
       return !out.dead()
     },
+    settle: async () => {
+      await Promise.all([out.settle(), err.settle()])
+    },
     // The guard's reach ends with the run. Its `error` listeners live on
     // streams it does not own, so leaving them attached would change the
     // caller's error semantics for good and, for a host that drives the

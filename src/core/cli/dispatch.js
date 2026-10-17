@@ -32,6 +32,7 @@ import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
 import { colorizeStderr } from './style.js'
 import { compareStrings } from '../util/compare_strings.js'
+import { setupUnsupportedNote } from '../daemon/platform.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { noteCommandTransition, noteInvocation, productAdapters, startInvocationDelivery, withProductInvocation } from '../product_telemetry/client.js'
 
@@ -157,6 +158,27 @@ function sinkPluginExcludedByBootProfile(err, { config, activePlugins, withheldB
 }
 
 /**
+ * The exit code for a setup run on a platform the daemon installer does not
+ * support, after saying so on `stderr`; `undefined` on a supported platform.
+ *
+ * @param {{ write(chunk: string): unknown }} stderr
+ * @param {NodeJS.Platform} [platform]
+ * @returns {number | undefined}
+ */
+function refuseUnsupportedSetupPlatform(stderr, platform = process.platform) {
+  const note = setupUnsupportedNote(platform)
+  if (note === undefined) return undefined
+  getLogger('cmd-dispatch').warn('dispatch.setup_refused', {
+    [Attr.COMPONENT]: 'cmd-dispatch',
+    [Attr.OPERATION]: 'setup.preflight',
+    [Attr.ERROR_KIND]: 'unsupported_platform',
+    platform,
+  })
+  stderr.write(note)
+  return 1
+}
+
+/**
  * Boot the kernel CLI and dispatch `argv` to a registered command.
  *
  * Lifecycle:
@@ -253,6 +275,14 @@ async function dispatchInternal(argv, opts) {
 
   // Past the help and version returns above, an empty argv is the walkthrough.
   if (argv.length === 0) noteInvocation({ command: 'setup', kind: 'execution' })
+  // Setup on a platform with no service manager would sign in, enroll and
+  // write config before the daemon installer refused (#975), so refuse every
+  // setup form here, ahead of the boot and the first network call. A help flag
+  // anywhere in its argv still reaches the setup help below.
+  if ((argv.length === 0 || earlyMatch?.command.name === 'setup') && !earlyMatch?.rest.some(isHelpFlag)) {
+    const refused = refuseUnsupportedSetupPlatform(stderr)
+    if (refused !== undefined) return refused
+  }
   if (earlyMatch?.command.name !== 'version' && !isHelpFlag(earlyMatch?.rest[0])) startInvocationDelivery()
 
   // Boot the kernel so plugin-contributed commands, sources, sinks,
