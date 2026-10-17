@@ -218,6 +218,115 @@ test('metadata that exists but cannot be opened is refused the same way', { skip
   }
 })
 
+/**
+ * Metadata that still parses but has lost part of the layout, metadata that
+ * is gone, and metadata that cannot be listed: each is refused before any
+ * generation is reserved, with the partition's files byte-identical.
+ *
+ * @type {{ name: string, root?: boolean, break: (metadataFile: string) => Promise<void>, mend?: (metadataFile: string) => Promise<void> }[]}
+ */
+const BREAKAGES = [
+  {
+    name: 'a sort order id that resolves to no sort order',
+    break: (file) => editMetadata(file, (meta) => { delete meta['sort-orders'] }),
+  },
+  {
+    name: 'a spec id that resolves to no partition spec',
+    break: (file) => editMetadata(file, (meta) => { delete meta['partition-specs'] }),
+  },
+  {
+    name: 'no published metadata file at all',
+    break: async (file) => {
+      for (const name of await fs.readdir(path.dirname(file))) {
+        if (name.endsWith('.metadata.json')) await fs.rm(path.join(path.dirname(file), name))
+      }
+    },
+  },
+  {
+    name: 'a metadata directory that cannot be listed',
+    root: true,
+    break: (file) => fs.chmod(path.dirname(file), 0o000),
+    mend: (file) => fs.chmod(path.dirname(file), 0o755),
+  },
+]
+
+/**
+ * @param {string} file
+ * @param {(meta: Record<string, unknown>) => void} edit
+ */
+async function editMetadata(file, edit) {
+  const meta = JSON.parse(await fs.readFile(file, 'utf8'))
+  edit(meta)
+  await fs.writeFile(file, JSON.stringify(meta))
+}
+
+for (const breakage of BREAKAGES) {
+  test(`a forced rewrite over ${breakage.name} is refused and changes nothing`, { skip: breakage.root && process.getuid?.() === 0 && 'root lists a mode-000 directory' }, async () => {
+    const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-forced-refusal-layout-'))
+    /** @type {string | undefined} */
+    let metadataFile
+    try {
+      await seed(cacheRoot, 'claude')
+      await seed(cacheRoot, 'codex')
+      const dir = partitionDir(cacheRoot, 'claude')
+      metadataFile = await currentMetadataFile(liveTableDir(dir))
+      await breakage.break(metadataFile)
+      if (breakage.mend) await breakage.mend(metadataFile)
+      const treeBefore = await snapshotTree(dir)
+      await breakage.break(metadataFile)
+
+      const report = await maintainCache({ cacheRoot, compactOnly: true, force: true, getDeclaration: () => DECLARATION })
+
+      if (breakage.mend) await breakage.mend(metadataFile)
+      const refused = report.partitions.find((p) => p.partition.source === 'claude')
+      assert.equal(refused?.failed, true, JSON.stringify(report.partitions))
+      assert.equal(refused?.errorKind, 'compaction_metadata_unavailable')
+      assert.equal(refused?.compacted, false)
+      assert.deepEqual(await snapshotTree(dir), treeBefore, 'no generation reserved, published or swapped')
+      const walked = report.partitions.find((p) => p.partition.source === 'codex')
+      assert.equal(walked?.compacted, true, 'the walk continues to the next partition')
+    } finally {
+      if (metadataFile && breakage.mend) await breakage.mend(metadataFile).catch(() => {})
+      await fs.rm(cacheRoot, { recursive: true, force: true })
+    }
+  })
+}
+
+test('a refusal leaves a stale compaction verdict unstamped, and the repaired partition still gets its retry', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-forced-refusal-stale-'))
+  try {
+    await seed(cacheRoot, 'claude')
+    const dir = partitionDir(cacheRoot, 'claude')
+    // A verdict recorded against an older writer generation: the shape
+    // LLP 0217 stamps when an attempt throws.
+    const cursor = readCursorSync(dir)
+    await writeCursor(dir, {
+      ...cursor,
+      compaction: { previousTableDir: 'table', compactedAt: '2026-08-12T00:00:00Z', resettleBaselineFiles: 3, writerGeneration: 0 },
+    })
+    const metadataFile = await currentMetadataFile(liveTableDir(dir))
+    const goodMetadata = await fs.readFile(metadataFile)
+    await fs.writeFile(metadataFile, 'not json at all')
+    const cursorBefore = await fs.readFile(path.join(dir, 'cursor.json'))
+    const treeBefore = await snapshotTree(dir)
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true, force: true, getDeclaration: () => DECLARATION })
+
+    assert.equal(report.partitions[0].errorKind, 'compaction_metadata_unavailable', JSON.stringify(report.partitions))
+    assert.deepEqual(await fs.readFile(path.join(dir, 'cursor.json')), cursorBefore)
+    assert.deepEqual(await snapshotTree(dir), treeBefore)
+
+    // The retry is still owed: once the metadata reads, an ordinary,
+    // unforced tick takes it.
+    await fs.writeFile(metadataFile, goodMetadata)
+    const repaired = await maintainCache({ cacheRoot, compactOnly: true, getDeclaration: () => DECLARATION })
+    assert.equal(repaired.partitions[0].failed ?? false, false, JSON.stringify(repaired.partitions))
+    assert.equal(repaired.partitions[0].compacted, true)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('a forced rewrite of a legacy epoch partition, which has no spec by construction, still compacts', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-forced-epoch-'))
   try {
