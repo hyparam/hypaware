@@ -6,7 +6,7 @@ import zlib from 'node:zlib'
 import { isControlPath } from '../control/session_ignore.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { isLoopbackHost } from '../util/loopback.js'
-import { drainRequestBody } from '../util/reject_body.js'
+import { declaresBodyOverDrainCap, drainRequestBody } from '../util/reject_body.js'
 
 /**
  * @import { IncomingMessage, Server } from 'node:http'
@@ -355,25 +355,37 @@ export function createOtlpJsonServer(options) {
       return
     }
 
+    // The banner and the refusals below read no body either. Answering
+    // without touching the request leaves Node's `_dump()` fallback reading
+    // whatever the sender attached to EOF, so each discards it under the
+    // drain cap, and the banner refuses a body declared past the cap outright.
     if (req.method === 'GET' && route === '/') {
+      drainRequestBody(req, res)
+      if (declaresBodyOverDrainCap(req)) {
+        respondJsonError(res, 413, 3, 'Request body too large')
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end(`${name} OTLP listener\n`)
       return
     }
 
     if (req.method !== 'POST') {
+      drainRequestBody(req, res)
       respondJsonError(res, 405, 12, 'Method not allowed')
       return
     }
 
     const signal = SIGNAL_ROUTES[route]
     if (!signal || !served.has(signal)) {
+      drainRequestBody(req, res)
       respondJsonError(res, 404, 5, 'Not found')
       return
     }
 
     const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
     if (contentType !== 'application/json') {
+      drainRequestBody(req, res)
       respondJsonError(
         res,
         415,
@@ -391,6 +403,7 @@ export function createOtlpJsonServer(options) {
     } else if (encoding === 'deflate') {
       decoder = req.pipe(zlib.createInflate())
     } else if (encoding && encoding !== 'identity') {
+      drainRequestBody(req, res)
       respondJsonError(res, 415, 3, `Unsupported Content-Encoding: ${encoding}`)
       return
     }

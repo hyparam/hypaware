@@ -6,8 +6,7 @@
 // branches and readiness route (`hypaware-core/plugins-workspace/opencode/src/listener.js`), the
 // AI gateway's refusals
 // (`hypaware-core/plugins-workspace/ai-gateway/src/proxy.js`), and the OTLP
-// listener's misdirected-Host and invalid-target refusals
-// (`src/core/otlp/server.js`).
+// listener's banner and refusals (`src/core/otlp/server.js`).
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
