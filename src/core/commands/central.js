@@ -16,7 +16,7 @@ import {
   readInstalledAssets,
 } from '../config/action_reconciler.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
-import { sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
+import { sameServer, serverDisplayName, syncDestinationName } from '../remote/builtin_remotes.js'
 import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
 import { buildClientDescriptorMap, detachClientViaCore, withAttachKeyLock } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
@@ -426,7 +426,7 @@ export async function runLeave(argv, ctx) {
   // lands here with work to do and finishes it - the marker is its own
   // "unfinished teardown" signal, no separate bookkeeping needed.
   if (centralLayerPath === null && unresolvableCentralLayer === null && attachedNames.length === 0) {
-    ctx.stdout.write('hyp leave: this machine is not connected to the cloud - nothing to do\n')
+    ctx.stdout.write('hyp leave: this machine is not connected to a HypAware server - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
     // and leave never edits the local layer (#111 doctrine), but a user
     // running `leave` to stop forwarding deserves to know where it lives.
@@ -447,7 +447,7 @@ export async function runLeave(argv, ctx) {
     },
     async (span) => {
       let failures = 0
-      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the cloud'}\n`)
+      ctx.stdout.write(`leaving ${syncDestinationName(urls)}\n`)
 
       // Every step below is best-effort and idempotent (force-rm, ENOENT-tolerant
       // unlink, idempotent detach), so a plain re-run of `hyp leave` redoes
