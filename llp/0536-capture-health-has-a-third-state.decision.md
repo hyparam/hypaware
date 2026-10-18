@@ -47,9 +47,11 @@ contract: the `--json` output carries it, and `CaptureHealthReport` in
 - `gap`: a conversation record, a `user` or `assistant` record that is not
   `isMeta`, is dated past the threshold. An mtime alone never produces `gap`.
 - `unknown`: the suspicion was neither confirmed nor ruled out. It claims
-  neither an interruption nor a working capture path. `gapMs` stays the
-  filesystem's unconfirmed suspicion, and `state` is what says nothing stands
-  behind it.
+  neither an interruption nor a working capture path. When the read found no
+  turn at all, `gapMs` stays the filesystem's unconfirmed suspicion. When it
+  found a turn inside the threshold but could not rule out a later one,
+  `gapMs` is measured from that turn. Either way `state`, not `gapMs`, says
+  whether anything stands behind the number.
 
 ### Rendering {#rendering}
 
@@ -84,9 +86,15 @@ only:
 
 ### The certainty obligation {#certainty-obligation}
 
-**`certain: true` means every post-baseline byte that could hold a turn was
-actually read in a format the parser understands.** A negative conclusion ("no
-turn here") has to earn that. Each of the following answers `certain: false`:
+**`certain: true` means nothing that could hold a newer turn went unread, in
+a format the parser understands.** The two conclusions earn it differently.
+A negative conclusion ("no turn here") needs full post-baseline coverage:
+every post-baseline byte that could hold a turn was read. A positive one can
+settle earlier. Each tail is scanned backwards, so the first dated
+conversation record found is that file's newest turn, and the older bytes the
+truncated tail never reached cannot change the answer. A tail longer than
+128 KiB that ends in a dated turn is certain without reaching back to the
+baseline. Each of the following answers `certain: false`:
 
 - the descriptor's record format is not the one the parser reads
   ([#format-ownership](#format-ownership));
@@ -101,21 +109,31 @@ turn here") has to earn that. Each of the following answers `certain: false`:
 - a line newer than the newest turn found (or anywhere in the tail, when no
   turn is found) could not be parsed, or was a conversation record with no
   usable timestamp;
-- a truncated tail that never reached back to the baseline.
+- a truncated tail that found no turn and never reached back to the baseline.
 
-A file whose mtime predates the baseline is never opened, because a record
-cannot postdate the file it is in. For the same reason the walk stops early
-once no remaining candidate's mtime could beat a turn already found. These
-skips do not cost certainty. A tail that reaches byte zero, or whose oldest
-timestamp already predates the baseline, has seen everything that matters.
+Some things are passed over without costing certainty:
+
+- A file whose mtime predates the baseline is never opened, because a record
+  cannot postdate the file it is in. For the same reason, the walk stops early
+  once no remaining candidate's mtime could beat a turn already found.
+- An entry that is simply missing (removed between listing and stat) holds
+  no records, and neither does a fifo, socket, or device node, so the walk
+  counts them as covered. A permission or I/O fault is the walk failing to
+  look, and that does cost certainty.
+- A tail that reaches byte zero, or whose oldest timestamp already predates
+  the baseline, has seen everything that matters for a negative conclusion.
 
 ### The read budget and its failure direction {#read-budget}
 
 **At most 16 candidate files (`MAX_CONFIRM_FILES`) are opened, newest mtime
 first, and at most 128 KiB (`MAX_CONFIRM_TAIL_BYTES`) is read from the end of
-each, so the worst case is 2 MiB read and parsed once per `hyp status`, and
-only on the path that would otherwise print a gap. Exhausting either limit
-answers `unknown`.**
+each (plus one boundary byte per tail). The worst case is therefore about
+2 MiB read and parsed once per `hyp status`, and only on the path that would
+otherwise print a gap. Exhausting either limit
+makes the read uncertain, and an uncertain read with no turn past the
+threshold answers `unknown`.** A turn it did find past the threshold still
+answers `gap` ([#positive-evidence](#positive-evidence)): running out of budget
+can cost an answer, but it cannot cancel a finding.
 
 The sizes come from the real transcripts measured for #2295. Sixteen files
 cover a sitting's worth of concurrently written sessions (a main transcript
@@ -147,9 +165,11 @@ format and a decision that extends this one, not a relaxed check.
 
 - `hyp status` raises `capture_gap` only on transcript content, never on an
   mtime. A user is told sessions went uncaptured only when a dated turn says so.
-- A machine whose transcript tree defeats the budget sees `[capture unconfirmed]`
-  with an `overall` that is not degraded. That is the honest result for a
-  question that was not answered.
+- A machine whose transcript tree defeats the budget, with no turn found past
+  the threshold, sees `[capture unconfirmed]` with an `overall` that is not
+  degraded. That is the honest result for a question that was not answered. If
+  the read did find such a turn, the machine sees `capture_gap` at its S17
+  severity, budget or no budget.
 - Any future change that adds a client format, widens the budget, or adds a
   status value has to keep the certainty obligation. The regression tests in
   `test/core/status-capture-health.test.js` pin each uncertain path to

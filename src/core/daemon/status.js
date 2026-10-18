@@ -4032,7 +4032,7 @@ const MAX_CONFIRM_TAIL_BYTES = 128 * 1024
  * as a clean bill of health and hide a real gap.
  *
  * @ref LLP 0257#status-and-health [implements]: "last transcript activity" is a conversation record, not a filesystem timestamp
- * @ref LLP 0536#certainty-obligation [implements]: certain only when every post-baseline byte that could hold a turn was read in the claude format
+ * @ref LLP 0536#certainty-obligation [implements]: certain only when nothing that could hold a newer turn went unread; a no-turn answer needs full post-baseline coverage
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv, sinceMs: number }} args
  * @returns {Promise<{ activityAt?: string, certain: boolean }>}
  */
