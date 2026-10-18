@@ -35,6 +35,7 @@ import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_his
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { isEphemeralRecordedBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
+import { clientAssetStateRoot, readClientAssetLedger } from '../runtime/client_asset_ledger.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
 import {
@@ -77,7 +78,7 @@ import {
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
- * @import { DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
+ * @import { ClientAssetLedgerRecord, DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
  */
@@ -3015,6 +3016,16 @@ export async function collectHypAwareStatus(opts = {}) {
     : diagnostics.some((d) => degradingKinds.has(d.kind)) ? 'degraded'
     : 'healthy'
 
+  // Read after `overall` and never pushed as a diagnostic: the notice reports
+  // coverage, not a fault, so it cannot move the verdict or the headline.
+  const assetCoverage = catalog
+    ? describeAssetCoverage({
+      records: await readClientAssetLedger(clientAssetStateRoot(env, homeDir)),
+      attached: clients.filter((c) => c.attached).map((c) => c.name),
+      labelOf: (name) => catalog.pickerDescriptors.get(name)?.label ?? name,
+    })
+    : null
+
   return {
     configPath,
     configExists,
@@ -3044,7 +3055,41 @@ export async function collectHypAwareStatus(opts = {}) {
     cacheFlushFailuresTotal,
     proxyTrust,
     selfUpdate: describeSelfUpdate({ stateRoot, env }),
+    assetCoverage,
   }
+}
+
+/** How many client names the coverage notice spells out before summarizing. */
+const ASSET_COVERAGE_MAX_NAMED = 3
+
+/**
+ * The informational notice for managed skills and agents that update-time
+ * installation will not refresh, or null when there are none.
+ *
+ * A client is covered when it is attached by the same settings-marker probe
+ * `skills install --attached` selects with (LLP 0458#attached-only); `attached`
+ * is that probe's result, already taken for the clients rows. The ledger only
+ * says HypAware once wrote assets for a client. It cannot say whether they are
+ * still present, edited, or older than this package, so the notice claims
+ * none of that, and it stands even right after a fresh explicit install.
+ *
+ * @ref LLP 0534#notice [implements]: ledger clients the attached probe does not select, named and bounded, never a diagnostic
+ * @param {{ records: ClientAssetLedgerRecord[], attached: string[], labelOf: (name: string) => string }} args
+ * @returns {string | null}
+ */
+export function describeAssetCoverage({ records, attached, labelOf }) {
+  const covered = new Set(attached)
+  /** @type {Set<string>} */
+  const uncovered = new Set()
+  for (const record of records) {
+    if (!covered.has(record.client)) uncovered.add(record.client)
+  }
+  if (uncovered.size === 0) return null
+  const names = [...uncovered].sort(compareStrings)
+  const shown = names.slice(0, ASSET_COVERAGE_MAX_NAMED).map(labelOf)
+  const rest = names.length - shown.length
+  const who = rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ')
+  return `Managed skills/agents for ${who} are outside automatic update coverage; run hyp skills install after package updates`
 }
 
 /**
