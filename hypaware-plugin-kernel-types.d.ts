@@ -1352,6 +1352,12 @@ export interface SinkEncoder {
 
 export interface SinkEncodeContext {
   log: PluginLogger
+  /**
+   * Kernel-owned scratch for staging. It may be reclaimed once the
+   * `Sink.exportBatch` call that encoded the blob settles (a CLI-owned
+   * kernel deletes it at teardown), so nothing staged here may be read
+   * after that. See `Sink.exportBatch`.
+   */
   tempDir: string
   /**
    * Column schema for the partition's dataset. Provided by the blob
@@ -1380,6 +1386,10 @@ export interface SinkEncodeContext {
 export interface SinkEncodedBlob {
   /** Filename (without directory) the destination should write under. */
   filename: string
+  /**
+   * An `AsyncIterable` may be consumed lazily, but only within the
+   * `Sink.exportBatch` call that encoded it. See `Sink.exportBatch`.
+   */
   bytes: Uint8Array | AsyncIterable<Uint8Array>
   bytesWritten?: number
   rowCount?: number
@@ -1590,6 +1600,12 @@ export interface Sink {
    * Called by the sink driver on the configured schedule. The driver
    * passes a batch of ready partitions from the cache; the sink writes
    * them to its destination in the configured format and acks.
+   *
+   * Before the returned promise settles, resolved or rejected, the sink
+   * has finished consuming every `SinkEncodedBlob` it encoded for the
+   * batch, or cancelled the work that depends on one, so nothing still
+   * reads `SinkEncodeContext.tempDir`. Streaming inside the call is
+   * fine; draining after it is not.
    */
   exportBatch(batch: ExportBatch, opts: ExportOptions): Promise<ExportResult>
   flush?(): Promise<void>
