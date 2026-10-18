@@ -129,6 +129,25 @@ test('s3 BlobStore preserves range headers and scoped keys', async () => {
   }
 })
 
+test('s3 BlobStore reports a 416 as the shared blob_range_unsatisfiable kind', async () => {
+  // local-fs gives an unsatisfiable range the same token, so a ranged reader
+  // can branch on it without knowing which provider it holds.
+  const client = {
+    ...makeFakeS3Client(),
+    async getObject() {
+      const err = /** @type {Error & { $metadata?: { httpStatusCode?: number } }} */ (
+        new Error('The requested range is not satisfiable')
+      )
+      err.name = 'InvalidRange'
+      err.$metadata = { httpStatusCode: 416 }
+      throw err
+    },
+  }
+  const store = createS3BlobStore({ bucket: 'bucket', client })
+  await assert.rejects(store.getObject({ key: 'data.parquet', range: 'bytes=10-' }),
+    { errorKind: 'blob_range_unsatisfiable', key: 'data.parquet' })
+})
+
 test('s3 BlobStore rejects a response that ignored the requested range', async () => {
   // A store may legally answer a ranged GET with 200 and the whole object.
   // Handing that body back as the requested slice would feed a reader the
