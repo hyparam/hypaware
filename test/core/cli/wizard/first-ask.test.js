@@ -153,6 +153,7 @@ test('resolveLaunchers: picked and resolvable only; a launch-less client is neve
 // picker in this order. Mixed case and non-ASCII on purpose: by code unit
 // every uppercase id sorts before every lowercase one and both before an
 // accented one, where a locale compare would interleave them.
+// @ref LLP 0456#decision [tests]: discovery order never decides which launcher is first
 test('resolveLaunchers: ascending client id by code unit, whatever order the clients arrive in', async () => {
   const ids = ['émile', 'zeta', 'Zulu', 'beta', 'Émile', 'alpha']
   const map = new Map(/** @type {any} */ (ids.map((id) => [id, { plugin: `@test/${id}`, name: id, skillDir: `.${id}`, launch: { bin: `bin-${id}`, args: ['{prompt}'] } }])))
@@ -241,12 +242,14 @@ test('launchClient: a prompt is substituted literally, not read as a replacement
 })
 
 test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is filled', async () => {
+  // At least one element carries the placeholder, and every occurrence is
+  // replaced: two elements here, one of them holding it twice.
   const spawner = recordingSpawn()
   const result = await runWizardFirstAsk({
     clients: ['x'],
     descriptors: new Map(/** @type {any} */ ([['x', {
       plugin: '@hypaware/x', name: 'x', skillDir: '.x',
-      launch: { bin: 'x', args: ['run', '--prompt', '{prompt}'], label: 'X' },
+      launch: { bin: 'x', args: ['run', '--prompt', '{prompt}', '--title={prompt}|{prompt}'], label: 'X' },
     }]])),
     stdout: makeBuf(),
     env: {},
@@ -257,8 +260,7 @@ test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is fil
     prepareEvidence: fakeEvidence,
   })
   assert.equal(result.launched, true)
-  assert.deepEqual(spawner.calls[0].args.slice(0, 2), ['run', '--prompt'])
-  assert.equal(spawner.calls[0].args[2], FIRST.prompt)
+  assert.deepEqual(spawner.calls[0].args, ['run', '--prompt', FIRST.prompt, `--title=${FIRST.prompt}|${FIRST.prompt}`])
 })
 
 // @ref LLP 0198#path-probe [tests]: nothing recorded and resolvable is one refusal, and the caller words it

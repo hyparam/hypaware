@@ -168,6 +168,7 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
       args: launch.args,
     })
   }
+  // @ref LLP 0456#decision [implements]: one order for every default and picker, ascending client id
   return out.sort((a, b) => compareStrings(a.client, b.client))
 }
 
