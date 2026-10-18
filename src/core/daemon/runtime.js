@@ -1042,7 +1042,7 @@ export async function runDaemon(opts = {}) {
     // with the tracer directly instead, so only this one call site's status
     // handling changes and `withSpan` (and everything else that calls it)
     // is untouched.
-    async function runMaintenance() {
+    async function maintenanceTick() {
       const tracer = getTracer('daemon')
       const attrs = buildAttrs({
         [Attr.COMPONENT]: 'daemon',
@@ -1159,16 +1159,24 @@ export async function runDaemon(opts = {}) {
           // (hyparam/hypaware#2363). `withSpan` writes this line for the
           // spans it owns; this tick owns its own, so it writes it here.
           span.setAttribute('status', 'failed')
-          span.setAttribute('error_kind', attrs.error_kind ?? 'unhandled_exception')
+          span.setAttribute('error_kind', 'unhandled_exception')
           throw err
         } finally {
           span.end()
         }
-      }).catch((err) => {
+      })
+    }
+
+    async function runMaintenance() {
+      // `maintenanceTick` is async so a throw in its span prologue arrives
+      // here as a rejection too: `maintenanceInFlight` has no catch of its
+      // own, and an unhandled rejection would end the daemon.
+      await maintenanceTick().catch((err) => {
         // Still reachable: partition discovery, the retired-generation
-        // sweep, and anything else outside the per-partition catch.
+        // sweep, and anything else outside the per-partition catch. Logged
+        // with the kind the span carries, so the line and the span agree.
         const message = err instanceof Error ? err.message : String(err)
-        fileLog.error('daemon.maintenance_failed', { message })
+        fileLog.error('daemon.maintenance_failed', { [Attr.ERROR_KIND]: 'unhandled_exception', message })
       })
       // Retention rides the tail of the same tick, so `maintenanceInFlight`
       // (and with it shutdown, which awaits it) covers a delete in progress.

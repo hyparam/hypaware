@@ -2,7 +2,7 @@
 
 /**
  * The maintenance tick owns its span rather than borrowing `withSpan`'s (the
- * note on `runMaintenance` in `src/core/daemon/runtime.js` says why), which
+ * note on `maintenanceTick` in `src/core/daemon/runtime.js` says why), which
  * means owning every attribute `withSpan` reconciles on the way out. Its
  * catch did not: it set the ERROR status code and `error_kind` but left the
  * `status` attribute reading the `ok` the opening bag had predicted, so a
@@ -119,6 +119,14 @@ test('a maintenance tick that throws exports no status=ok attribute', async () =
       span.attributes.status, 'failed',
       'no attribute may claim the failed tick succeeded - the opening bag predicted "ok"'
     )
+
+    // The rejection is caught so it cannot end the daemon, and the catch must
+    // not swallow it: the log line carries the same kind the span does.
+    const logPath = path.join(hypHome, 'hypaware', 'logs', 'daemon.log')
+    const line = await pollJsonlFor(logPath, (r) => r.event === 'daemon.maintenance_failed', 15_000)
+    assert.ok(line, 'the caught rejection must still be logged')
+    assert.equal(line.error_kind, 'unhandled_exception', 'the log line names the kind the span carries')
+    assert.match(line.message, /injected: the maintenance walk failed/)
   } finally {
     delete injection.__hypTickThrow
     if (handle) {
