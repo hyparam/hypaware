@@ -2126,6 +2126,51 @@ test('without a supervisor the automatic lanes install nothing, and hyp update s
   }
 })
 
+test('an unsupervised refusal reaches hyp status while that daemon lives, and a supervised pass clears it', async () => {
+  // @ref LLP 0539#record [tests]: recorded by the refusing pass, cleared by a supervised one, read only for a live daemon
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-refusal-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('99.1.0')
+    const refused = await runSelfUpdatePass({
+      stateRoot: dir, env: { XPC_SERVICE_NAME: '0' }, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(refused.reason, 'unsupervised')
+    assert.equal(readSelfUpdateState(dir).refusal, 'unsupervised')
+
+    // Stopped: nothing is refusing any more, so the plain line stands.
+    const stopped = describeSelfUpdate({ stateRoot: dir, env: {}, packageRoot })
+    assert.equal(stopped.line, 'self-update: 99.1.0 available (running 1.0.0)')
+    assert.equal(stopped.json.refusal, undefined)
+
+    // Live: a terminal's `hyp status` reads the daemon's record, not its own shell.
+    writePidFile(dir, { pid: process.pid, startedAt: new Date().toISOString(), runId: 'test', mode: 'foreground' })
+    const live = describeSelfUpdate({ stateRoot: dir, env: {}, packageRoot })
+    assert.match(String(live.line), /99\.1\.0 available.*not running under a service manager; run 'hyp update'/)
+    assert.equal(live.json.refusal, 'unsupervised')
+
+    // A replacement daemon under a service manager clears it on its first
+    // pass, before the probe is due again.
+    const supervisedPass = await runSelfUpdatePass({
+      stateRoot: dir, env: {}, supervised: true, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.deepEqual(supervisedPass, { action: 'none' })
+    assert.equal(readSelfUpdateState(dir).refusal, undefined)
+    assert.equal(describeSelfUpdate({ stateRoot: dir, env: {}, packageRoot }).line,
+      'self-update: 99.1.0 available (running 1.0.0)')
+
+    // `hyp update` typed in an unsupervised terminal is not the daemon
+    // evaluating its supervisor, so it records no refusal.
+    const manual = await runSelfUpdatePass({
+      stateRoot: dir, env: { XPC_SERVICE_NAME: '0' }, packageRoot, runner, fetchImpl: probe.impl, force: true,
+    })
+    assert.equal(manual.action, 'updated')
+    assert.equal(readSelfUpdateState(dir).refusal, undefined)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('repeated failed boots on an installed version reinstall the one it replaced', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-rollback-'))
   try {
