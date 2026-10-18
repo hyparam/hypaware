@@ -320,7 +320,7 @@ function buildCoreCommands(registry) {
       name: 'config',
       category: 'additional',
       audience: 'operator',
-      summary: 'Inspect or validate the HypAware config',
+      summary: 'Validate the HypAware config',
     }),
     {
       name: 'config validate',
