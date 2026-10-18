@@ -1449,7 +1449,12 @@ export interface PutObjectResult {
 
 export interface GetObjectInput {
   key: string
-  /** Single HTTP byte range, e.g. bytes=0-7 or bytes=-8. Ends are inclusive. */
+  /**
+   * Single HTTP byte range, e.g. bytes=0-7 or bytes=-8. Ends are inclusive.
+   * A range the object cannot satisfy, an empty object included, MUST throw
+   * with `error_kind=blob_range_unsatisfiable`, so a reader can tell it from
+   * any other storage failure and refetch the whole object.
+   */
   range?: string
 }
 

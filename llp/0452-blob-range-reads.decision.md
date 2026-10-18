@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-29
 **Related:** LLP 0014
+**Extended-by:** LLP 0544 (#range-contract's unsatisfiable-range error carries one kind, `blob_range_unsatisfiable`, from every provider: [LLP 0544#kind](./0544-an-unsatisfiable-range-has-one-error-kind.decision.md#kind))
 
 ## Why {#why}
 
