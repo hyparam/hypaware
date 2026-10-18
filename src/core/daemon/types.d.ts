@@ -490,9 +490,11 @@ export interface CaptureHealthReport {
   /**
    * Milliseconds of activity past the capture baseline (0 when none).
    *
-   * Under `state: 'unknown'` this is still the filesystem's unconfirmed
-   * suspicion, which is all it ever was: it is `state`, not this number,
-   * that says whether anything stands behind it.
+   * Under `state: 'unknown'` this is the filesystem's unconfirmed suspicion
+   * when the confirmation read found no turn, and the gap to the turn it did
+   * find when that turn sat inside the threshold but a later one could not
+   * be ruled out. Either way it is `state`, not this number, that says
+   * whether anything stands behind it.
    */
   gapMs: number
   /**
