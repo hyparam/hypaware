@@ -444,6 +444,57 @@ test('a service install that raised over a still-live daemon restarts it anyway'
 })
 
 
+// A join that ended `daemon_incomplete` skips the install rather than failing
+// it, so the failed-install gate above never engages and the restart ran into
+// `unsupported platform` on a host with no service manager, printing a
+// `daemon restart failed:` line under the note that had just said there is no
+// background service to install (#1382).
+
+test('a daemon_incomplete join on a platform with no service manager attempts no restart', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-incomplete-win32-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  const summary = await withPlatform('win32', () => runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false, skipDaemonInstall: true },
+  })))
+
+  assert.equal(stderr.text(), '', 'no restart-failed line follows the note that there is no service')
+  assert.deepEqual(
+    summary.daemonRestart,
+    { skipped: true, dryRun: false, ok: false },
+    'the restart is recorded as skipped, not as a run that failed'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// The supported-platform side keeps its one best-effort revival: a failed
+// systemd install leaves its unit behind, and the restart is what can still
+// bring it up.
+
+test('a daemon_incomplete join on linux still restarts the leftover unit', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-incomplete-linux-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  /** @type {Record<string, unknown>[]} */
+  const restarts = []
+  const summary = await withPlatform('linux', () => runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false, skipDaemonInstall: true },
+    daemonService: {
+      serviceDaemonStatus: async () => ({ installed: true, loaded: false, platform: 'linux' }),
+      restartServiceDaemon: async (/** @type {Record<string, unknown>} */ options) => { restarts.push(options) },
+    },
+  })))
+
+  assert.equal(restarts.length, 1, 'the restart is attempted on a platform that has a service manager')
+  assert.deepEqual(summary.daemonRestart, { skipped: false, dryRun: false, ok: true })
+  assert.doesNotMatch(stderr.text(), /daemon restart failed:/)
+  await fs.rm(home, { recursive: true, force: true })
+})
+
 test('a refused temporary CLI stops the finale before attach and threads force to the installer', async (t) => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-durable-'))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
