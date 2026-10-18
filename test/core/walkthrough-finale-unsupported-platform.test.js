@@ -112,7 +112,7 @@ test('a local-pathway setup on a platform with no service manager finishes attac
 test('daemonIncompleteNote without a context clause names the missing service and nothing else', () => {
   assert.equal(
     daemonIncompleteNote('win32'),
-    'note: win32 has no background service to install - nothing is captured on this machine\n'
+    'note: win32 has no background service to install\n'
   )
   assert.equal(
     daemonIncompleteNote('darwin'),
