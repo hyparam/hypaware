@@ -103,6 +103,20 @@ test('times out when the flight never settles', async () => {
   await assert.rejects(poller.waitForCode(), /timed out waiting for the browser login/)
 })
 
+test('the timeout says how to recover without claiming the sign-in worked', async () => {
+  const { fetchImpl } = scriptedFetch([{ status: 200, body: { status: 'pending' } }])
+  const { sleep } = recordingSleep()
+  const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, timeoutMs: 0, sleep })
+  const err = await poller.waitForCode().then(() => assert.fail('expected a timeout'), (e) => e)
+  assert.match(err.message, /^timed out waiting for the browser login to complete/)
+  assert.match(err.message, /finish any steps left in the browser, then retry the sign-in/)
+  assert.match(err.message, /if the browser already said setup succeeded, continue with that setup instead of starting it over/)
+  assert.doesNotMatch(err.message, /signed in|login succeeded|setup succeeded\./)
+  // Still a local failure: no server code rides it, so the CLI keeps its
+  // retriable login_failed classification.
+  assert.equal(err.callbackError, undefined)
+})
+
 test('a 429 sleeps for the retry-after hint instead of the poll interval', async () => {
   const { fetchImpl } = scriptedFetch([
     { status: 429, body: { error: 'rate_limited' }, headers: { 'retry-after': '7' } },
