@@ -16,7 +16,7 @@ import { withSpinner } from '../../../../src/core/cli/spinner.js'
  */
 
 // The wizard join phase (LLP 0135 #join, LLP 0134 #login-lane). A thin
-// narration wrapper around `runRemoteLogin`: it classifies a failed login
+// narration wrapper around `remoteLogin`: it classifies a failed login
 // into the fork-returning taxonomy (LLP 0129 #failed-join-returns-to-fork),
 // checks once for an applied org config, and locks the picker rows
 // the central layer owns.

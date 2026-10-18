@@ -159,10 +159,10 @@ export type LoginOutcomeReason =
 
 /**
  * What the login lane returns: the exit code `hyp remote login` reports, and
- * the reason behind it. `exitCode === 0` iff the sign-in path completed
- * (`reason === 'ok'`) or argv only asked for usage (`reason === 'help'`, which
- * signs nobody in). `daemon_incomplete` is the other exception the other way:
- * it carries the daemon installer's own non-zero code (LLP 0179#outcome).
+ * the reason behind it. `exitCode === 0` iff `reason` is `'ok'` (the sign-in
+ * path completed) or `'help'` (argv only asked for usage, which signs nobody
+ * in). `daemon_incomplete` is the one completed sign-in that exits non-zero:
+ * it carries the daemon installer's own code rather than 1 (LLP 0179#outcome).
  */
 export interface LoginOutcome {
   exitCode: number

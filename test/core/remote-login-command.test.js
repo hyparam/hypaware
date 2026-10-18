@@ -236,6 +236,13 @@ test('a usage error and the exclusivity gate are distinguishable, both exit 2', 
   await writeCentralSeed(hypHome, 'https://elsewhere.example')
   const login = /** @type {any} */ (async () => { throw new Error('the browser must never open here') })
   assert.deepEqual(await remoteLogin(['prod'], ctx, { login }), { exitCode: 2, reason: 'connected_elsewhere' })
+
+  // The unreadable arm is the same gate refusing, so it reports the same
+  // reason, not a login failure (LLP 0179#outcome).
+  const unreadableHome = await tmpHome()
+  const { ctx: unreadableCtx } = await makeCtx({ hypHome: unreadableHome })
+  await writeUnreadableCentralSeed(unreadableHome)
+  assert.deepEqual(await remoteLogin(['prod'], unreadableCtx, { login }), { exitCode: 2, reason: 'connected_elsewhere' })
 })
 
 test('runRemoteLogin stays the exit-code adapter over the same run', async () => {
