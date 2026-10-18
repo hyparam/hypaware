@@ -20,7 +20,7 @@ To disable automatic updates, set `"auto_update": false` and restart the daemon.
 Organization policy may control this setting. Each plugin owns its own `config` block. Use
 `hyp plugin info PLUGIN` to inspect an installed plugin's manifest.
 
-On an enrolled machine, a separate central layer under `config-control/` is
+On an enrolled host, a separate central layer under `config-control/` is
 authoritative. Local settings are additive and cannot override central locks.
 `hyp status --verbose` identifies each layer and any rejected local entries.
 Joining does not replace your local configuration; leaving removes central
@@ -85,7 +85,7 @@ from that cache, not a prerequisite for querying it.
 
 These `--export` flags select unattended setup; they are not extra choices
 inside the guided walkthrough. New guided setups default to local Parquet
-exports; interactive reconfiguration preserves the existing export choice. An enrolled machine may also have a
+exports; interactive reconfiguration preserves the existing export choice. An enrolled host may also have a
 centrally managed sync sink regardless of its local export choice.
 
 For previewing destinations and sending recordings now, see

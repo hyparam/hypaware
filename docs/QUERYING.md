@@ -5,8 +5,8 @@ start a question with `hyp ask` or ask the client you already have open to use
 HypAware. Search and SQL commands are also available below. To generate or share
 a report, see [reports](REPORTS.md).
 
-Queries use this machine's recordings by default. To search recordings in
-HypAware Cloud, including other machines and your team, tell your agent to use
+Queries use this host's recordings by default. To search recordings in
+HypAware Cloud, including other hosts and your team, tell your agent to use
 `--remote` on its query commands. This uses your default remote target;
 `--remote <target>` selects another. See [remote access](TEAM_SETUP.md#manage-remote-access)
 to configure a target and sign in.
@@ -43,7 +43,7 @@ which one to use.
 
 ## See what is available
 
-<!-- agent: Use HypAware to tell me what is recorded on this machine: which datasets, how fresh, and a summary of models, tokens, and tools. Over MCP, read the datasets with query_sql. -->
+<!-- agent: Use HypAware to tell me what is recorded on this host: which datasets, how fresh, and a summary of models, tokens, and tools. Over MCP, read the datasets with query_sql. -->
 ```sh
 hyp cache status
 hyp query overview
@@ -265,7 +265,7 @@ leads, not proof of what was decided. Check incomplete results and later
 relevant sessions before concluding whether a decision still stands.
 
 Team retrieval needs no replicated graph or additional client plugin. The
-server maintains the graph. This machine's own capture graph remains available
+server maintains the graph. This host's own capture graph remains available
 for local activity questions. If remote graph data is unavailable, use remote
 message searches and disclose that coverage limit.
 

@@ -198,13 +198,13 @@ them ([issue 2225](https://github.com/hyparam/hypaware/issues/2225)). v1.42.0
 stops new skips once the daemon restarts on it; `hyp daemon restart` makes
 sure. Nothing finds the rows already skipped, so recovery is a manual step for
 each destination. It reaches only rows the local cache still holds: rows that
-retention has removed are gone from this machine.
+retention has removed are gone from this host.
 
 <!-- @ref LLP 0345#central: central drops a replayed row it already has, by part id -->
 For HypAware Cloud, `hyp sync --history <client>` resends one client's
 retained `ai_gateway_messages` and leaves normal export progress alone. The
 server drops rows it already has, so a rerun is safe. Run it for each client
-that records on this machine, and read the preview first: the client must be
+that records on this host, and read the preview first: the client must be
 syncing, and the replay also sends rows it held back while it was local-only.
 Folders marked local-only stay withheld. Other datasets, such as traces and
 logs, have no Cloud replay.
@@ -243,7 +243,7 @@ back.
 
 ## A command is missing or rejects an option
 
-<!-- agent: A hyp command or flag from the docs is missing on this machine. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. -->
+<!-- agent: A hyp command or flag from the docs is missing on this host. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. -->
 ```sh
 hyp version
 hyp --help

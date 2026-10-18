@@ -4,7 +4,7 @@
 
 HypAware serves MCP in two places:
 
-- `hyp mcp serve`, over stdio, for an agent on your machine. It lists the tools core and your active plugins register.
+- `hyp mcp serve`, over stdio, for an agent on your host. It lists the tools core and your active plugins register.
 - hypaware-server's `/v1/mcp`, over HTTP, for an agent with a member session or an agent token. What it lists depends on the credential.
 
 Every tool below has a CLI command that does the same thing. Each tool's `tools/list` entry carries its title, description, input schema and hints, as shown here.

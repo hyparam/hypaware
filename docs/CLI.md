@@ -24,8 +24,8 @@ hyp setup
 ```
 
 Select **Sync to the cloud** to store your recordings on HypAware Cloud or
-choose **Local only** to keep recordings on your machine. To change this later,
-see [connect a machine](TEAM_SETUP.md#connect-a-machine).
+choose **Local only** to keep recordings on your host. To change this later,
+see [connect a host](TEAM_SETUP.md#connect-a-host).
 
 Setup then asks which AI clients to record, installs the background service,
 connects the clients you selected, and imports their supported session history.
@@ -85,7 +85,7 @@ attention, with guidance to help resolve problems. For capture checks, see
 The daemon keeps capture and scheduled sync running after you close the terminal.
 Setup installs it as a per-user service. On macOS, its LaunchAgent runs while
 you are logged in. On Linux, its systemd user service requires user-session
-support; see [headless deployment](TEAM_SETUP.md#long-lived-headless-machines)
+support; see [headless deployment](TEAM_SETUP.md#long-lived-headless-hosts)
 for hosts that must keep running after logout.
 
 ```sh
@@ -105,7 +105,7 @@ hyp setup
 ```
 
 Select **Reconfigure** in the menu. HypAware preserves a centrally managed
-configuration layer and changes only the choices this machine owns.
+configuration layer and changes only the choices this host owns.
 
 For unattended replacements and configuration files, see
 [repeatable configuration](CONFIGURATION.md#make-a-repeatable-setup).
@@ -163,7 +163,7 @@ detached, replacing `<client>` with its name, such as `claude` or `codex`.
 ## Uninstall
 
 ```sh
-hyp leave                  # if this machine is enrolled in Cloud
+hyp leave                  # if this host is enrolled in Cloud
 hyp daemon uninstall
 npm uninstall -g hypaware
 ```

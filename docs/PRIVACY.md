@@ -1,6 +1,6 @@
 # What HypAware records, and how to control it
 
-HypAware records AI activity on your machine. This page explains what is
+HypAware records AI activity on your host. This page explains what is
 captured, where it goes, and how to control it. If your team is rolling
 HypAware out, read this page before you enroll.
 
@@ -43,7 +43,7 @@ transcripts under `~/.claude/projects`.
 
 Spool cleanup works as follows:
 
-- A session you ignored, by `.hypignore`, by a machine-local marking, or with
+- A session you ignored, by `.hypignore`, by a host-local marking, or with
   `hyp session ignore`, has its bodies **deleted unread**, not skipped.
 - The default cap is 512 MB, configured as `telemetry.spool_max_bytes` in
   the `@hypaware/claude` plugin's config. The listener and Claude hooks enforce
@@ -101,7 +101,7 @@ organization unless you saved a preference. It is separate from session recordin
 
 Every directory subtree resolves to one class. Starting at the session's
 working directory, HypAware uses the nearest ancestor `.hypignore` file and
-the most-specific matching machine-local marking. It then takes the most
+the most-specific matching host-local marking. It then takes the most
 restrictive result across those sources: `ignore`, then `local-only`, then
 `sync`. This is not a merge of every ancestor file.
 
@@ -111,7 +111,7 @@ restrictive result across those sources: `ignore`, then `local-only`, then
 | `local-only` | yes              | never                        |
 | `ignore`     | never            | never                        |
 
-`local-only` rows stay fully queryable on your own machine; they are
+`local-only` rows stay fully queryable on your own host; they are
 withheld at the export seam, so no sink or remote query can see them.
 
 ## Marking directories
@@ -129,8 +129,8 @@ There are two authoring surfaces for the same classes:
 
   An empty or comment-only `.hypignore` also means `ignore`.
 
-- **A machine-local store** (`hyp privacy`) records the class privately on
-  this machine, never as a file in the repo. Use it when the marking itself
+- **A host-local store** (`hyp privacy`) records the class privately on
+  this host, never as a file in the repo. Use it when the marking itself
   is sensitive (a dotfile in a hidden directory is a breadcrumb pointing at
   exactly the thing you are hiding), or when the path is not a repo:
 
@@ -139,11 +139,11 @@ There are two authoring surfaces for the same classes:
   hyp privacy set <path> local-only    # recorded, never synced
   hyp privacy set <path> sync          # explicitly synced (not asked again)
   hyp privacy show [path]              # which class governs, and why
-  hyp privacy list                     # every machine-local entry
+  hyp privacy list                     # every host-local entry
   hyp privacy unset <path> [class]     # back to the implicit default
   ```
 
-On a machine connected to HypAware Cloud, folders you have not marked sync
+On a host connected to HypAware Cloud, folders you have not marked sync
 without asking. You can instead be asked, once per new folder, how to
 handle it, at the moment you open a session there:
 
@@ -155,9 +155,9 @@ hyp privacy folders        # report which is in force
 
 This gates the question only. In either setting, folders you already
 marked keep their class, `.hypignore` files are unaffected, and nothing
-already local-only or ignored starts syncing. The setting is machine-local
+already local-only or ignored starts syncing. The setting is host-local
 and reversible, `hyp setup` asks for it in its own step, and `hyp status`
-names it on an enrolled machine.
+names it on an enrolled host.
 
 Three caveats apply to both surfaces:
 
@@ -186,7 +186,7 @@ for them.
 
 ## Control a whole client's sharing
 
-Keep a locally configured client's recordings on this machine:
+Keep a locally configured client's recordings on this host:
 
 ```sh
 hyp privacy client codex local-only
@@ -237,7 +237,7 @@ to delete previously captured rows.
 
 ## Deleting what was already recorded
 
-`hyp privacy purge` permanently deletes rows from this machine's local cache:
+`hyp privacy purge` permanently deletes rows from this host's local cache:
 
 ```sh
 hyp privacy purge <path>          # rows whose cwd is at or under the path
@@ -248,14 +248,14 @@ hyp privacy purge --all           # everything, wholesale
 
 It prompts on a TTY; pass `--yes` for non-interactive use.
 
-> **Caution:** A session purge is the only form that reaches beyond this machine. It also
+> **Caution:** A session purge is the only form that reaches beyond this host. It also
 > deletes that session's rows from every configured or signed-in remote and
 > every enrolled server, and keeps the session from being recorded again. The
 > confirmation prompt names the servers it will contact:
 
 ```sh
-hyp privacy purge --session <id> --remote <target>  # this machine and one server
-hyp privacy purge --session <id> --local-only       # this machine only
+hyp privacy purge --session <id> --remote <target>  # this host and one server
+hyp privacy purge --session <id> --local-only       # this host only
 ```
 
 Deleting on a server uses your login, and needs you to be the session's owner
@@ -275,13 +275,13 @@ next batch write back rows you just deleted.
 ## Review before the first Cloud sync
 
 Before sharing recordings, review captured directories with the
-`hypaware-privacy` skill in Claude Code or Codex. It checks this machine's local
+`hypaware-privacy` skill in Claude Code or Codex. It checks this host's local
 cache, samples recordings, and proposes directory markings and deletions for
 your confirmation. A review cannot guarantee it will find every secret, and it
 does not automatically redact all recorded content. You can run it at any time,
 even without Cloud enrollment.
 
-<!-- agent: Run the hypaware-privacy skill: review what this machine has recorded, sample it, and propose which folders to mark local-only or ignore before anything syncs. Do not delete anything without asking me. -->
+<!-- agent: Run the hypaware-privacy skill: review what this host has recorded, sample it, and propose which folders to mark local-only or ignore before anything syncs. Do not delete anything without asking me. -->
 ```sh
 hyp privacy show
 hyp privacy list
@@ -290,8 +290,8 @@ hyp privacy list
 For the enrollment hold, deadline, and unattended behavior, see
 [the first-sync review](TEAM_SETUP.md#review-before-the-first-upload).
 
-For disconnecting a machine while retaining its local recordings, see
-[Cloud and teams](TEAM_SETUP.md#disconnect-a-machine).
+For disconnecting a host while retaining its local recordings, see
+[Cloud and teams](TEAM_SETUP.md#disconnect-a-host).
 
 ## The daemon's own telemetry
 
@@ -311,7 +311,7 @@ separate; see [data paths](CONFIGURATION.md#know-where-data-lives).
 
 Product telemetry reports how HypAware itself is running. It is enabled for an
 enrolled organization unless you saved an `off` or `local` preference. An
-already-enrolled machine starts reporting on its next CLI run or daemon start
+already-enrolled host starts reporting on its next CLI run or daemon start
 after an upgrade, without a new prompt. Standalone installations default to off.
 Check the effective state and destination:
 
@@ -320,7 +320,7 @@ Check the effective state and destination:
 hyp telemetry status
 ```
 
-Organization telemetry goes to the HypAware server this machine is enrolled
+Organization telemetry goes to the HypAware server this host is enrolled
 with, using its existing enrollment. The CLI does not send telemetry anywhere
 else. The server also copies the HypAware version, OS family, and configured
 client names to PostHog for product analytics, where they are kept until
