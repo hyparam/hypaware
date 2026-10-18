@@ -216,7 +216,7 @@ export class HermesStateDb {
           this.db.exec('COMMIT')
           return /** @type {HermesChangedSession[]} */ (/** @type {unknown} */ (marks))
         } catch (error) {
-          this.db.exec('ROLLBACK')
+          rollbackQuietly(this.db)
           throw error
         }
       }, this.retryOpts)
@@ -252,7 +252,7 @@ export class HermesStateDb {
         this.db.exec('COMMIT')
         return session ? { session, messages, mark: sessionMark(session, messages) } : null
       } catch (error) {
-        this.db.exec('ROLLBACK')
+        rollbackQuietly(this.db)
         throw error
       }
     }, this.retryOpts)
@@ -261,6 +261,22 @@ export class HermesStateDb {
   /** Close the underlying connection. Safe to call once; a second call throws per `node:sqlite`. */
   close() {
     this.db.close()
+  }
+}
+
+/**
+ * Best-effort recovery ROLLBACK for a read transaction that threw. SQLite may
+ * already have ended the transaction itself, and then ROLLBACK throws `cannot
+ * rollback - no transaction is active`; that failure must not replace the
+ * error the caller rethrows, which is the one `withBusyRetry` classifies and
+ * the poll source reports (issue #2281).
+ * @param {DatabaseSync} db
+ */
+function rollbackQuietly(db) {
+  try {
+    db.exec('ROLLBACK')
+  } catch {
+    // The transaction is already gone; the caller rethrows the original error.
   }
 }
 
