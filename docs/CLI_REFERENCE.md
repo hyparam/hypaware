@@ -70,7 +70,7 @@ clients with scheduled recovery still import history. Neither flag applies to
 a preset.
 
 With no arguments and no output terminal, setup prints an agent guide on
-stdout and exits `0` without configuring the machine. It lists detected
+stdout and exits `0` without configuring the host. It lists detected
 sources, recording disclosures, choices and commands, browser sign-in
 handoffs, and verification. An agent asks the person before selecting sources
 or enabling cloud sync, then runs explicit unattended flags. `hyp setup
@@ -497,9 +497,9 @@ hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--b
 ```
 
 Lists the newest reports visible to the selected organization, then this
-machine's saved reports (`$HYP_HOME/reports`, as `hyp report save` leaves
+host's saved reports (`$HYP_HOME/reports`, as `hyp report save` leaves
 them) in their own section, newest first by `report.md` mtime, at most 100
-with the rest counted. A machine with nothing saved prints no section.
+with the rest counted. A host with nothing saved prints no section.
 `--local` prints the saved section alone, with no remote read, and takes none
 of the remote's selectors or filters. When nothing selects or filters the
 remote and it cannot be read, the saved reports are still listed under a
@@ -727,7 +727,7 @@ hyp sync [instance] [--history <client>] [--yes] [--dry-run]
 
 Prints a destination and exclusion plan, confirms it, then forces the selected
 sink or every configured sink to export. `--dry-run` sends nothing. On a newly
-enrolled machine, an interactive all-destination sync can release the
+enrolled host, an interactive all-destination sync can release the
 first-sync review hold early. A single-instance sync can't release that hold.
 
 `--history <client>` is a separate mode: it previews and, after its own
@@ -1352,7 +1352,7 @@ hyp privacy show . --json
 hyp privacy set <path> sync|local-only|ignore
 ```
 
-Upserts an exact machine-local path marking. It doesn't write a dotfile or
+Upserts an exact host-local path marking. It doesn't write a dotfile or
 delete rows. An `ignore` marking prints a line naming
 `hyp privacy purge --ignored`, which deletes what was already recorded in
 every ignored folder.
@@ -1367,7 +1367,7 @@ hyp privacy set ./private-research local-only
 hyp privacy unset <path> [sync|local-only|ignore]
 ```
 
-Removes machine-local entries governing the path. Add a class to remove only
+Removes host-local entries governing the path. Add a class to remove only
 entries of that class. The operation is idempotent and doesn't delete rows.
 
 ```sh
@@ -1380,7 +1380,7 @@ hyp privacy unset ./private-research local-only
 hyp privacy list [--json]
 ```
 
-Lists machine-local path and client policy plus the new-folder prompt
+Lists host-local path and client policy plus the new-folder prompt
 preference. It can't globally enumerate `.hypignore` files; use
 `hyp privacy show PATH` for a specific path.
 
@@ -1397,7 +1397,7 @@ hyp privacy ignore [path]
 Writes a shareable `.hypignore` file in an existing directory at the explicit
 path. With no path, uses
 the repository root, or the current directory when outside a repository.
-Use `hyp privacy set <path> sync|local-only|ignore` for machine-local markings
+Use `hyp privacy set <path> sync|local-only|ignore` for host-local markings
 and `hyp privacy show [path]` to report without writing. The receipt names
 `hyp privacy purge --ignored` to delete what was already recorded in ignored
 folders.
@@ -1413,7 +1413,7 @@ hyp privacy unignore [path]
 ```
 
 Removes the nearest governing `.hypignore`. Use `hyp privacy unset <path>`
-to remove machine-local markings. It does not remove cached rows.
+to remove host-local markings. It does not remove cached rows.
 
 ```sh
 hyp privacy unignore ./customer-data
@@ -1455,7 +1455,7 @@ hyp privacy purge <path> | --session <id> [--remote <target> | --local-only] | -
 ```
 
 **Warning:** This operation permanently deletes matching rows from this
-machine's local cache. Select exactly one target. Every form also sweeps the
+host's local cache. Select exactly one target. Every form also sweeps the
 Claude raw-body spool so pending bodies can't recreate deleted rows. A terminal
 prompts for confirmation; a non-interactive call requires `--yes`.
 
@@ -1543,7 +1543,7 @@ Installs the persistent launchd or systemd user service. When invoked from an
 ephemeral `npx` path, it installs a durable global package before it writes the
 service. `--force` allows the existing CLI path if that global installation
 fails; removing that directory later can break capture. `--dry-run` renders
-the exact service definition without changing the machine; add `--json` for
+the exact service definition without changing the host; add `--json` for
 structured plan output.
 
 ```sh
@@ -1931,13 +1931,13 @@ hyp remote login [name] [--token-file <path>] [--org <org>] [--host <label>] [--
 Signs in through a browser by default, or reads a static token from
 `--token-file` or standard input. It stores the credential with mode `0600`.
 Omit `name` to sign in to the default target. Unless you set `--no-forward`,
-login can enroll this machine, set up sync, and install the daemon.
+login can enroll this host, set up sync, and install the daemon.
 
 - `--org <org>` selects an organization.
 - `--browser` forces browser sign-in when stdin is piped, unless an explicit
   `--token-file` is supplied.
 - `--no-browser` prints the sign-in URL instead of opening a browser.
-- `--host <label>` overrides the host label this machine syncs under, which defaults to the
+- `--host <label>` overrides the host label this host syncs under, which defaults to the
   hostname.
 - `--no-forward` signs in for queries only, with no organization enrollment.
 - `--no-daemon` sets up sync without installing the service.
@@ -1957,9 +1957,11 @@ hyp remote mint [name] [--scope query] [--label <label>] [--expires-days <n>]
 Mints a long-lived CI enrollment token from your logged-in session and prints
 it once, for pasting into CI secrets. It requires a session stored by
 `hyp remote login`. Omit `name` to mint against the default target.
-`--label` names the gateway the token is bound to, and `--expires-days`
+`--label` names the host the token is bound to, and `--expires-days`
 overrides the 365-day default. Every CI run that joins with the token shares
-that one gateway, and the token itself never rotates.
+that one host record, and the token itself never rotates. Mint prints its
+id on standard error, shown as gateway in the current CLI output; this is the
+host record.
 
 ```sh
 hyp remote mint team --label repo-ci --expires-days 90

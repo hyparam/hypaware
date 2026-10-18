@@ -1,7 +1,7 @@
 # HypAware documentation
 
 HypAware records sessions from your AI clients locally so you can search and
-query them on your machine. You can sync your recordings to HypAware Cloud so
+query them on your host. A host is any machine the collector runs on: a laptop, a build box, a remote agent's box. You can sync your recordings to HypAware Cloud so
 your team can search and query them.
 
 ## Quickstart
@@ -14,7 +14,7 @@ hyp setup
 ```
 
 Select **Sync to the cloud** to sync your recordings to HypAware Cloud, or
-choose **Local only** to keep recordings on your machine. Then ask your agent
+choose **Local only** to keep recordings on your host. Then ask your agent
 about your recordings:
 
 ```sh
