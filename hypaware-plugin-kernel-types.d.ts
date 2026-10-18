@@ -264,8 +264,9 @@ export interface PluginActivityProbeManifest {
 
 /**
  * A client's launch spec: the binary to look for on `$PATH` and the
- * argv to start it with. Exactly one `args` element must contain the
- * `{prompt}` placeholder, which is replaced with the user's question;
+ * argv to start it with. At least one `args` element must contain the
+ * `{prompt}` placeholder, and every occurrence is replaced literally with
+ * the user's question;
  * a spec without it would start the client mute, which looks like the
  * feature working (LLP 0198#split).
  */

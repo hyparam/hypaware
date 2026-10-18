@@ -5,7 +5,7 @@
 **Systems:** Onboarding, CLI, Plugins
 **Author:** Brendan / Claude
 **Date:** 2026-08-06
-**Extended-by:** LLP 0203 (#first-ask: the enrolled closing sequence gains a sync offer ahead of the ask), LLP 0398 (#first-ask: the list collapses to one question whose evidence is gathered before the launch; #onboarding-list: that question starts the client in a HypAware-owned run directory, and setup offers to run it instead of printing it), LLP 0456 (#path-probe: an RFC asking for the selection rule when the probe leaves more than one launchable client and the run cannot prompt), LLP 0460 (#real-launch: an RFC asking what exit code the no-argument ask reports when the chosen client fails to spawn)
+**Extended-by:** LLP 0203 (#first-ask: the enrolled closing sequence gains a sync offer ahead of the ask), LLP 0398 (#first-ask: the list collapses to one question whose evidence is gathered before the launch; #onboarding-list: that question starts the client in a HypAware-owned run directory, and setup offers to run it instead of printing it), LLP 0456 (#path-probe: the launchers the probe leaves are ordered by client id, and that order gives both the default for a run that cannot prompt and the picker order), LLP 0460 (#real-launch: an RFC asking what exit code the no-argument ask reports when the chosen client fails to spawn)
 **Related:** LLP 0135 (#first-look, #privacy, #finale: the closing sequence this appends to), LLP 0130 (#picker-block: manifest-contributed picker rows, the pattern the launch spec follows), LLP 0180 (client derivation from `contributes.client`), LLP 0107 (#gating: the skills that make these questions answerable ride attach), LLP 0011 (#no-architectural-names: the user asks in their own words)
 
 > Extends the closing sequence of [LLP 0135](./0135-install-experience-overhaul.design.md).
@@ -173,8 +173,10 @@ modes that take a prompt (`opencode run`, `pi -p`) answer once and exit,
 so the recommendation's offer to write the skill has no turn to be accepted
 in. They are recorded and not launchable until both hold.
 
-The launch block is `{ bin, args }`, where exactly one `args` element
-must contain the `{prompt}` placeholder. The validation is not ceremony:
+The launch block is `{ bin, args }`, where at least one `args` element
+must contain the `{prompt}` placeholder, and every occurrence, in every
+element, is replaced literally with the question. The validation is not
+ceremony:
 a launch spec that drops the placeholder starts the client with no
 question, which looks like the feature working and silently isn't. A
 malformed block makes the client unlaunchable rather than launchable and
