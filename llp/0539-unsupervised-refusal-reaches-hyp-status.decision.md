@@ -11,8 +11,8 @@ now leaves a line in `hyp status`)
 
 ## Context {#context}
 
-LLP 0365 has the automatic self-update lanes probe and install nothing when no
-service manager will relaunch the daemon. The pass logs
+LLP 0365 has the automatic self-update lanes probe but install nothing when
+no service manager will relaunch the daemon. The pass logs
 `self_update.unsupervised` and returns. Nothing it records says so, so
 `hyp status` shows a newer version as available, day after day, with no hint
 why it never arrives. The person reading the status has no way to learn that
@@ -24,9 +24,11 @@ The self-update state gains one optional field, `refusal`, whose only value is
 `unsupervised`.
 
 - The automatic pass that declines at the unsupervised gate records it.
-- The first automatic pass a supervised daemon makes clears it, before the
-  rollback and probe gates, so a replacement daemon under a service manager
-  does not wait a day for its next refusal to clear the last one.
+- The first automatic pass a supervised daemon makes that reaches the
+  supervisor check (automatic updates on, install provenance eligible) clears
+  it, before the rollback and probe gates, so a replacement daemon under a
+  service manager does not wait a day for its next refusal to clear the last
+  one. A pass that stops earlier, with automatic updates off, leaves it.
 - `hyp update` neither records nor clears it. It runs in a terminal, whose
   environment says nothing about how the daemon was started.
 - `hyp status` reads it only while the daemon that wrote the state is alive,
@@ -36,7 +38,9 @@ The self-update state gains one optional field, `refusal`, whose only value is
   says automatic updates are unavailable because the daemon is not running
   under a service manager, and names `hyp update`. With nothing available
   there is no line to add to, so a manual update ends the message.
-- `hyp status --json` carries the field under the same conditions.
+- `hyp status --json` carries the field whenever the daemon that wrote it is
+  alive, whether or not an update is available, since it reports the state
+  rather than a message.
 
 ## What this does not do {#non-goals}
 
