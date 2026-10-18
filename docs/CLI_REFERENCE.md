@@ -5,6 +5,8 @@ the canonical `hyp` spelling. The `hypaware` binary accepts the same arguments.
 
 For task guides, start at the [documentation index](README.md). This reference
 defines command syntax and behavior; the guides explain common workflows.
+Removed commands and their replacements are listed by version in the
+[upgrade notes](UPGRADE_NOTES.md).
 
 ## Read command syntax
 
