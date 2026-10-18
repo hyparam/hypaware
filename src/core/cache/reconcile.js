@@ -111,7 +111,7 @@ export async function reconcileCacheSnapshots(args) {
         if (!unreachable.every(outside => outside.has(part))) throw new Error(refusal)
         skipped.add(part)
         for (const plan of plans) {
-          getLogger('cache').warn('cache.retirement_skipped', { component: 'cache', dataset,
+          getLogger('cache').warn('cache.retirement_skipped', { [Attr.DATASET]: dataset,
             ...plan.scope.where, [Attr.OPERATION]: 'cache.reconcile', [Attr.STATUS]: 'degraded',
             [Attr.ERROR_KIND]: 'cursor_unreadable', partition_dir: part })
         }
@@ -146,7 +146,7 @@ export async function reconcileCacheSnapshots(args) {
       span.setAttribute('rows_deleted', rowsDeleted)
       span.setAttribute('retirement_skipped', skipped.size)
       plans.forEach((plan, index) => {
-        getLogger('cache').info('cache.snapshot_reconciled', { component: 'cache', dataset,
+        getLogger('cache').info('cache.snapshot_reconciled', { [Attr.DATASET]: dataset,
           ...plan.scope.where, rows_written: counts[index].rowsWritten, rows_deleted: counts[index].rowsDeleted,
           retirement_skipped: skipped.size, status: 'ok' })
       })
