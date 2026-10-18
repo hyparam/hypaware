@@ -58,18 +58,27 @@ test('load keeps only datasets still eligible to forward', async () => {
   assert.deepEqual(await readHeldDatasets(dir, URL_A), { datasets: [] })
 })
 
-test('an unparseable record reads as unreadable, never as empty, and load repairs it', async () => {
+test('an unparseable record reads as unreadable, never as empty, until every dataset is re-established', async () => {
   const dir = temporaryDirectory('hyp-held-')
   await fs.mkdir(dir, { recursive: true })
   await fs.writeFile(heldDatasetsPath(dir), '{"v":1,')
   assert.deepEqual(await readHeldDatasets(dir, URL_A), { unreadable: 'corrupt' })
 
+  // Loading alone asks no server, so it must not certify anything.
+  const store = createHeldDatasetStore({ stateDir: dir, destination: URL_A })
+  assert.equal(await store.load(new Set(['a', 'b', 'c'])), 'corrupt')
+  assert.deepEqual(await readHeldDatasets(dir, URL_A), { unreadable: 'corrupt' })
+  await store.hold('a')
+  await store.resolve(['c'])
+  assert.deepEqual(await readHeldDatasets(dir, URL_A), { unreadable: 'corrupt' }, 'b is still unknown')
+  await store.clear('b')
+  assert.deepEqual(await readHeldDatasets(dir, URL_A), { datasets: ['a'] })
+
   await fs.writeFile(heldDatasetsPath(dir), JSON.stringify({ v: 1, destination: 'x', datasets: [7] }))
   assert.deepEqual(await readHeldDatasets(dir, URL_A), { unreadable: 'invalid' })
-
-  const store = createHeldDatasetStore({ stateDir: dir, destination: URL_A })
-  await store.load(new Set(['a']))
-  assert.deepEqual(await readHeldDatasets(dir, URL_A), { datasets: [] })
+  const invalid = createHeldDatasetStore({ stateDir: dir, destination: URL_A })
+  assert.equal(await invalid.load(new Set()), 'invalid')
+  assert.deepEqual(await readHeldDatasets(dir, URL_A), { datasets: [] }, 'with nothing to forward, nothing can be held')
 })
 
 test('a failed write rejects and the next call rewrites the lost state', async () => {

@@ -292,6 +292,10 @@ export function createForwardSink(args) {
             batch_id: e.hyp_batch_id,
             chunks_sent: e.hyp_chunks_sent,
           })
+          // An accepted registration ends the capability hold even when the
+          // ingest after it fails: that is a transport failure, retried and
+          // reported as one, not a server that cannot take the dataset.
+          if (registeredDatasets.has(partition.dataset)) await settleHold(partition.dataset)
           return { success: false, bytesWritten: e.hyp_bytes_written ?? 0, message }
         }
       }
@@ -599,6 +603,39 @@ export async function initializeOpenDatasetRollouts({ query, storage, watermarks
  */
 export function eligibleOpenDatasetNames(query) {
   return new Set(query.listDatasets().filter(isEligibleOpenDataset).map((dataset) => dataset.name))
+}
+
+/**
+ * Eligible open datasets with no materialized or spool-pending partition:
+ * nothing of theirs is held locally, so an unreadable held-dataset record need
+ * not wait for a registration that has no partition to trigger it. A dataset
+ * whose discovery fails is left out, so it stays unknown.
+ *
+ * @param {QueryRegistry} query
+ * @param {QueryStorageService} storage
+ * @returns {Promise<string[]>}
+ */
+export async function openDatasetsWithoutPartitions(query, storage) {
+  const extended = /** @type {QueryStorageService & { hasPendingSync?: (tablePath: string) => boolean }} */ (storage)
+  /** @param {string} tablePath */
+  const holdsRows = (tablePath) => storage.tableExists(tablePath) || extended.hasPendingSync?.(tablePath) === true
+  /** @type {string[]} */
+  const names = []
+  for (const dataset of query.listDatasets()) {
+    if (!isEligibleOpenDataset(dataset)) continue
+    try {
+      const partitions = await dataset.discoverPartitions({
+        config: /** @type {HypAwareV2Config} */ ({ version: 2 }),
+        scope: { limit: 1_000_000 },
+        cacheDir: storage.cacheRoot,
+      })
+      const present = (partitions ?? []).some((partition) => partition.tablePath && holdsRows(partition.tablePath))
+      if (!present) names.push(dataset.name)
+    } catch {
+      // Unknown stays unknown.
+    }
+  }
+  return names
 }
 
 /** @param {DatasetRegistration} dataset */

@@ -95,4 +95,12 @@ test('an unreadable snapshot warns instead of reading as healthy', async () => {
   assert.equal(diags.length, 1)
   assert.match(diags[0].message, /^central: held-dataset state is unreadable \(corrupt\)/)
   assert.equal(report.overall, 'degraded')
+
+  // A restart loads the record without asking the server anything, so the
+  // warning survives it.
+  const restarted = createHeldDatasetStore({ stateDir: instanceDir, destination: URL })
+  await restarted.load(new Set(['claude_telemetry_events']))
+  const after = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.match(held(after)[0]?.message ?? '', /unreadable \(corrupt\)/)
+  assert.equal(after.overall, 'degraded')
 })

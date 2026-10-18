@@ -183,8 +183,15 @@ export interface SinkDiagnosticRecord {
  * call retries the write.
  */
 export interface HeldDatasetStore {
-  /** Read the snapshot once, dropping holds for another destination or for a name not in `keep`. */
-  load(keep: ReadonlySet<string>): Promise<void>
+  /**
+   * Read the snapshot once, dropping holds for another destination or for a
+   * name not in `keep`. Resolves to the reason when the snapshot could not be
+   * read: the record then stays as it is until every name in `keep` is held,
+   * cleared or passed to `resolve`.
+   */
+  load(keep: ReadonlySet<string>): Promise<string | undefined>
+  /** Datasets known to hold nothing without asking the destination (no local rows). */
+  resolve(names: Iterable<string>): Promise<void>
   /** Record that the destination refused `name`. */
   hold(name: string): Promise<void>
   /** Record that `name` no longer needs a hold. */

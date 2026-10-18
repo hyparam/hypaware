@@ -56,6 +56,12 @@ export function createHeldDatasetStore({ stateDir, destination }) {
   let written = 0
   /** @type {Promise<void>} */
   let chain = Promise.resolve()
+  // Set when load found a snapshot it could not read: the datasets whose
+  // capability nothing on disk can vouch for. While any remain, the unreadable
+  // record stays on disk, so status keeps warning rather than reading a
+  // partial set as every dataset forwarding.
+  /** @type {Set<string> | null} */
+  let unresolved = null
 
   // Writes are serialized and each writes the whole set as it stands when it
   // runs, so overlapping ticks land in order and the last write is the newest
@@ -75,34 +81,60 @@ export function createHeldDatasetStore({ stateDir, destination }) {
     return run
   }
 
+  /**
+   * Mark `names` established and write if the record is due: no capability
+   * is still unknown and the newest state has not landed.
+   *
+   * @param {Iterable<string>} names
+   */
+  async function settle(names) {
+    if (unresolved) {
+      for (const name of names) unresolved.delete(name)
+      if (unresolved.size > 0) return
+      unresolved = null
+    }
+    if (written !== revision) await persist()
+  }
+
   return {
     async load(keep) {
-      const before = await readHeldDatasetsFile(file, destination).catch((error) => {
-        revision += 1
-        throw error
-      })
-      const kept = 'datasets' in before ? before.datasets.filter((name) => keep.has(name)) : []
-      for (const name of kept) held.add(name)
-      const stale = 'unreadable' in before || before.stored !== kept.length
-      if (stale) {
-        revision += 1
-        await persist()
+      /** @type {Awaited<ReturnType<typeof readHeldDatasetsFile>>} */
+      let before
+      try {
+        before = await readHeldDatasetsFile(file, destination)
+      } catch (error) {
+        before = { unreadable: /** @type {NodeJS.ErrnoException} */ (error)?.code ?? 'read failed' }
       }
+      if ('unreadable' in before) {
+        // Rewriting an empty set here would certify every dataset forwarding
+        // with no server ever asked. Each one is re-established instead.
+        unresolved = new Set(keep)
+        revision += 1
+        await settle([])
+        return before.unreadable
+      }
+      const kept = before.datasets.filter((name) => keep.has(name))
+      for (const name of kept) held.add(name)
+      if (before.stored !== kept.length) revision += 1
+      await settle([])
+      return undefined
+    },
+
+    async resolve(names) {
+      await settle(names)
     },
 
     async hold(name) {
-      if (held.has(name) && written === revision) return
       if (!held.has(name)) {
         held.add(name)
         revision += 1
       }
-      await persist()
+      await settle([name])
     },
 
     async clear(name) {
-      if (!held.has(name) && written === revision) return
       if (held.delete(name)) revision += 1
-      await persist()
+      await settle([name])
     },
   }
 }

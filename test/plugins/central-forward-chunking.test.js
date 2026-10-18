@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 
-import { createForwardSink, initializeOpenDatasetRollouts } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { createForwardSink, initializeOpenDatasetRollouts, openDatasetsWithoutPartitions } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { createHeldDatasetStore, readHeldDatasets } from '../../src/core/sinks/held_datasets.js'
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 import { readRequestBody } from '../helpers/request_body.js'
@@ -1007,13 +1007,70 @@ test('a held registration is recorded, not counted or retried, and survives repr
   assert.deepEqual(await readHeldDatasets(dir, url), { datasets: [] })
 })
 
+test('an accepted registration clears the hold even when the ingest after it fails', async () => {
+  const dir = temporaryDirectory('hyp-central-held-')
+  const url = 'http://server:8740'
+  let count = 10
+  let now = 0
+  let putStatus = 404
+  const held = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await held.load(new Set(['claude_telemetry_events']))
+  const { sink, calls } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+    nowFn: () => now,
+    held,
+    responder: (c) => c.method === 'PUT' ? putStatus : 500,
+  })
+
+  await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+
+  putStatus = 202
+  count = 12
+  now = 5 * 60_000 + 1
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed', 'the ingest failure still retries')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT', 'POST'])
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: [] }, 'not reported as a server that cannot take it')
+})
+
+test('only open datasets with no local partition count as holding nothing', async () => {
+  /**
+   * @param {string} name
+   * @param {() => Promise<unknown[]>} discoverPartitions
+   */
+  const dataset = (name, discoverPartitions) => ({ name, discoverPartitions })
+  const query = {
+    listDatasets: () => [
+      dataset('stored', async () => [{ tablePath: '/t/stored' }]),
+      dataset('spooled', async () => [{ tablePath: '/t/spooled' }]),
+      dataset('empty', async () => []),
+      dataset('unmaterialized', async () => [{ tablePath: '/t/none' }]),
+      dataset('unknown', async () => { throw new Error('discovery failed') }),
+      dataset('logs', async () => []),
+    ],
+  }
+  const storage = {
+    cacheRoot: '/t',
+    tableExists: (/** @type {string} */ p) => p === '/t/stored',
+    hasPendingSync: (/** @type {string} */ p) => p === '/t/spooled',
+  }
+  assert.deepEqual(
+    await openDatasetsWithoutPartitions(/** @type {any} */ (query), /** @type {any} */ (storage)),
+    ['empty', 'unmaterialized'],
+  )
+})
+
 test('a hold that cannot be recorded fails the partition rather than reading as settled', async () => {
   const { sink } = buildSink({
     count: 10,
     signal: 'claude_telemetry',
     nowFn: () => 0,
     held: {
-      async load() {},
+      async load() { return undefined },
+      async resolve() {},
       async hold() { throw new Error('EACCES: held-datasets.json') },
       async clear() {},
     },

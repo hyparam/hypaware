@@ -9,7 +9,7 @@ import { validateCentralConfig } from './src/config.js'
 import { createConfigPullLoop } from './src/config_client.js'
 import { IdentityClient } from './src/identity_client.js'
 import { createDatasetRolloutStore } from './src/rollout.js'
-import { createForwardSink, eligibleOpenDatasetNames, initializeOpenDatasetRollouts } from './src/sink.js'
+import { createForwardSink, eligibleOpenDatasetNames, initializeOpenDatasetRollouts, openDatasetsWithoutPartitions } from './src/sink.js'
 
 /**
  * @import { PluginActivationContext, SinkCreateContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -82,12 +82,17 @@ export async function activate(ctx) {
       await initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log: sinkCtx.log })
 
       // Datasets this destination refused to register, kept on disk so
-      // `hyp status` can say their rows stay local. A failed read is not fatal:
-      // the next hold rewrites the record, and status reports an unreadable one.
+      // `hyp status` can say their rows stay local. An unreadable record is not
+      // fatal: status keeps reporting it until every dataset with local rows
+      // has registered or been held again, and only then is it rewritten.
       const instanceStateDir = instanceWatermarkStateDir(sinkCtx.paths.stateDir, sinkCtx.name)
       const held = createHeldDatasetStore({ stateDir: instanceStateDir, destination: config.url })
       try {
-        await held.load(eligibleOpenDatasetNames(query))
+        const unreadable = await held.load(eligibleOpenDatasetNames(query))
+        if (unreadable) {
+          sinkCtx.log.warn('central.forward.held_state_unreadable', { hyp_sink_instance: sinkCtx.name, reason: unreadable })
+          await held.resolve(await openDatasetsWithoutPartitions(query, storage))
+        }
       } catch (err) {
         sinkCtx.log.warn('central.forward.held_state_unavailable', {
           hyp_sink_instance: sinkCtx.name,

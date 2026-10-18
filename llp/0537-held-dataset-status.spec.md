@@ -32,8 +32,9 @@ zero bytes.
 - The hold is recorded before the partition counts as settled. If that write
   fails, the partition fails and retries, so a failed state write can never
   read as healthy forwarding.
-- Only a registration the server accepted clears a hold. The reprobe timer
-  expiring is not evidence of recovery.
+- Only a registration the server accepted clears a hold, and it clears it even
+  when the ingest after it fails: that failure is a transport failure, retried
+  and reported as one. The reprobe timer expiring is not evidence of recovery.
 - A privacy-withheld dataset (LLP 0305 #eligibility) keeps its intentional
   withholding and never becomes a hold; a withheld verdict clears any stale
   hold for that name.
@@ -54,6 +55,12 @@ Each central sink instance keeps `held-datasets.json` beside its watermarks:
   are serialized, so overlapping ticks land in call order and an older write
   cannot resurrect a cleared hold. A write that fails leaves the store dirty and
   the next hold or clear rewrites it.
+- A record that cannot be read or parsed is not rewritten on load: an empty
+  set there would certify forwarding no server was asked about. It stays on disk
+  until every dataset the sink forwards is accounted for again, by a hold, by a
+  clear (an accepted registration or a withheld verdict), or by having no local
+  partition, materialized or spool-pending, to hold. A dataset whose discovery
+  fails stays unaccounted for.
 
 ## Status warning {#status-warning}
 
@@ -67,5 +74,6 @@ and says their rows stay local; the repair is to upgrade the server.
 - It is a different kind from `sink_export_failing` (LLP 0453 #warning-rule), a
   transport failure, and privacy withholding produces no diagnostic.
 - A snapshot that cannot be read or parsed warns too, because an empty answer
-  would certify forwarding that nobody checked.
+  would certify forwarding that nobody checked. The warning lasts until the
+  record is rewritten under #snapshot; a restart alone does not end it.
 - A sink removed from config, or one whose plugin is disabled, is not read.

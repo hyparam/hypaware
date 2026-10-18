@@ -4722,7 +4722,7 @@ async function heldDatasetDiagnostics(stateRoot, config) {
         severity: 'warning',
         kind: 'sink_dataset_unsupported',
         message: `${label}: held-dataset state is unreadable (${sanitizeLabel(read.unreadable) ?? 'unknown'}), so it is unknown whether every dataset forwards`,
-        repair: ['let the next export rewrite it, or restart the daemon'],
+        repair: ['it is rewritten once every forwarded dataset with local rows has registered or been held again'],
       })
       continue
     }
