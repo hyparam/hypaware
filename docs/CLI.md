@@ -43,10 +43,11 @@ hyp setup --yes \
     --retention-days 90
 ```
 
-`--dry-run` reports what would be written and writes no configuration. It is
-not a whole-run preview: in a guided run the enrollment choice and the folder
-and sync-scope settings are applied before the flag takes effect. If a
-configuration already exists, add `--force` to replace it.
+`--dry-run` previews an unattended setup: it reports what would be written and
+writes no configuration. The flag always runs setup non-interactively, so name
+the choices to preview with `--yes`, `--source`, `--client`, or `--from-file`;
+on its own it stops with "no sources selected". The guided setup has no
+preview. If a configuration already exists, add `--force` to replace it.
 HypAware backs up the existing configuration before replacement.
 
 ## Check the installation
