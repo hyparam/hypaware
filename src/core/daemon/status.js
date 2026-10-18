@@ -1128,6 +1128,20 @@ function attachWritesNoMarker(clientName, config) {
 }
 
 /**
+ * Whether a client has an attach marker to wait for in its configured capture
+ * mode: it declares an `attach_probe`, and that mode writes the marker the
+ * probe reads. The clients row and the login attach-wait share this one gate.
+ *
+ * @param {string} clientName
+ * @param {ClientDescriptor} descriptor
+ * @param {HypAwareV2Config | null | undefined} config
+ * @returns {boolean}
+ */
+export function isClientAttachable(clientName, descriptor, config) {
+  return !!descriptor.attachProbe && !attachWritesNoMarker(clientName, config)
+}
+
+/**
  * Saved config and finite source snapshots are separate facts. A current route
  * needs the exact daemon generation, fresh heartbeat and resolved alias.
  * @ref LLP 0474#diagnostics [implements]: cheap capture evidence never queries datasets or treats retained stamps as current health
@@ -2362,7 +2376,7 @@ export async function collectHypAwareStatus(opts = {}) {
     const probe = descriptor.attachProbe
       ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
       : { attached: false }
-    const attachable = !!descriptor.attachProbe && !attachWritesNoMarker(clientName, config)
+    const attachable = isClientAttachable(clientName, descriptor, config)
     clients.push({
       name: clientName,
       plugin: descriptor.plugin,

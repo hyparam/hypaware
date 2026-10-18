@@ -8,6 +8,8 @@ import process from 'node:process'
 import { coreUsage, parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
+import { isEntryRecording } from '../config/client_recording.js'
+import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { BUILTIN_REMOTES, effectiveDefaultRemote, originOf, sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import {
@@ -33,7 +35,7 @@ import { readAllStdin } from './stdio.js'
 import { escapeForDisplay, hasDisplayUnsafeChars, isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
+import { isClientAttachable, loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { daemonIncompleteNote } from '../daemon/platform.js'
 
 /**
@@ -69,6 +71,12 @@ export const ATTACH_WAIT_DEFAULT_MS = 3000
  * with no published config, or a slow first pull), and the caller falls back to
  * pointing at `hyp status`.
  *
+ * When every configured client captures without a marker (transcript-mode
+ * Codex, a probe-less client), no poll could ever succeed, so there is no wait:
+ * the answer is `null` and the caller points at `hyp status` without claiming
+ * nothing is captured (#2071). A mixed install still waits for the clients
+ * that can attach.
+ *
  * @param {{
  *   env: NodeJS.ProcessEnv,
  *   homeDir?: string,
@@ -77,11 +85,13 @@ export const ATTACH_WAIT_DEFAULT_MS = 3000
  *   probe?: () => Promise<string[]>,
  *   sleep?: (ms: number) => Promise<void>,
  * }} opts
- * @returns {Promise<string[]>} attached client names (sorted), empty on timeout
+ * @returns {Promise<string[] | null>} attached client names (sorted), empty on timeout, `null` when no configured client writes a marker to wait for
  * @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile the follow-up made auto, not printing a pre-pull guess
  */
 export async function waitForClientAttach({ env, homeDir, timeoutMs = ATTACH_WAIT_DEFAULT_MS, intervalMs = 1000, probe, sleep = defaultSleep }) {
-  const attachProbe = probe ?? (await buildDefaultAttachProbe(env, homeDir))
+  const plan = probe ? { probe, markerless: false } : await buildDefaultAttachProbe(env, homeDir)
+  if (plan.markerless) return null
+  const attachProbe = plan.probe
   const deadline = Date.now() + timeoutMs
   for (;;) {
     /** @type {string[]} */
@@ -105,19 +115,46 @@ export async function waitForClientAttach({ env, homeDir, timeoutMs = ATTACH_WAI
 
 /**
  * Build the production attach probe: discover the (poll-invariant) client
- * descriptors once, then hand back a closure that re-reads their on-disk attach
- * markers on each call. Keeps plugin discovery / catalog build out of the poll
- * loop while the per-poll read stays a marker-only, throw-proof probe.
+ * descriptors and read the config once, then hand back a closure that re-reads
+ * their on-disk attach markers on each call. Keeps plugin discovery / catalog
+ * build and the config read out of the poll loop while the per-poll read stays
+ * a marker-only, throw-proof probe.
+ *
+ * `markerless` is true when at least one configured, recording client has a
+ * descriptor and none of them is attachable in its configured capture mode.
+ * No configured client at all is not markerless: the daemon's first org-config
+ * pull may still enable one, so that install keeps the wait.
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {string} [homeDir]
- * @returns {Promise<() => Promise<string[]>>}
+ * @returns {Promise<{ probe: () => Promise<string[]>, markerless: boolean }>}
  */
 async function buildDefaultAttachProbe(env, homeDir) {
-  const stateDir = readObservabilityEnv(env).stateDir
+  const { stateDir, hypHome } = readObservabilityEnv(env)
   const resolvedHome = homeDir ?? env.HOME ?? process.env.HOME ?? os.homedir()
   const descriptors = await loadClientDescriptors({ stateDir })
-  return () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
+  const probe = () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
+  const layered = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath: resolveConfigPath({ env, hypHome }) }).catch(() => null)
+  // A layer that exists but did not load is no evidence about capture mode,
+  // even when the other layer resolves: keep the wait. An absent layer is normal.
+  if (!layered || layerUnreadable(layered.localLoaded) || layerUnreadable(layered.centralLoaded)) return { probe, markerless: false }
+  const config = layered.effective
+  let configured = 0
+  for (const [clientName, descriptor] of descriptors) {
+    const entry = config?.plugins?.find((p) => p.name === descriptor.plugin)
+    if (!entry || entry.enabled === false || !isEntryRecording(entry)) continue
+    if (isClientAttachable(clientName, descriptor, config)) return { probe, markerless: false }
+    configured++
+  }
+  return { probe, markerless: configured > 0 }
+}
+
+/**
+ * @param {{ ok: boolean, errorKind?: string } | null | undefined} loaded
+ * @returns {boolean}
+ */
+function layerUnreadable(loaded) {
+  return !!loaded && !loaded.ok && loaded.errorKind !== 'config_missing'
 }
 
 /**
@@ -989,9 +1026,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // Compact reports nothing: the wizard's recap says what is recorded,
     // and its finish step attaches the clients itself.
     if (!compact) {
-      ctx.stdout.write(attached.length > 0
-        ? `capturing ${attached.join(', ')}\n`
-        : "no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
+      ctx.stdout.write(attached === null
+        ? "Check 'hyp status' for capture activity.\n"
+        : attached.length > 0
+          ? `capturing ${attached.join(', ')}\n`
+          : "no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
     if (!compact) ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }
