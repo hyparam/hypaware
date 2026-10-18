@@ -4640,12 +4640,15 @@ async function countDaemonLogErrors(logPath, sinceMs, rollbackAtMs) {
  * is evidence about nothing and is skipped on both sides, so a clock that ran
  * ahead cannot invent a warning and one that was set back cannot clear one.
  *
- * Nothing drains these files, so the directory is a growing ledger. Costs one
- * directory listing per configured sink and opens no file: the batch id
- * carries its own timestamp, and both answers accumulate in the same pass
- * with no sort and nothing retained per failure. The collector already walks
- * the whole cache tree with a `stat` per file (`measureCacheStats`), so this
- * sits well inside its budget.
+ * Costs one listing of `sinksDir` plus one listing per sink directory on
+ * disk, configured or not (the walk does not consult the config), and one
+ * open with a read of at most a 4 KiB prefix per recognized record, since
+ * `recordedAt` sits ahead of the partition inventory. A configured sink's
+ * driver keeps its outbox to a bounded history; one a removed sink left
+ * behind is not pruned. Both answers accumulate in the same pass with no sort
+ * and nothing retained per failure. The collector already walks the whole
+ * cache tree with a `stat` per file (`measureCacheStats`), so this sits well
+ * inside its budget.
  *
  * An outbox with no entry in `lastSuccess` belongs to a destination this
  * install no longer has, since the map is keyed by the configured sinks alone.
