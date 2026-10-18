@@ -22,6 +22,8 @@ import { loadClientDescriptors } from '../daemon/status.js'
  * landing rows in the exact same per-source Iceberg tables.
  */
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
+// Bound on a provider's `import_unavailable` note carried into the output.
+const MAX_NOTE_LENGTH = 240
 
 /**
  * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
@@ -211,7 +213,7 @@ export async function runBackfillList(argv, ctx) {
  *   devRunId?: string,
  *   sweep?: boolean,
  * }} args
- * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string }>}
+ * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string, note?: string }>}
  */
 export async function runBackfillProvider(args) {
   const { ctx, provider: providerName, dryRun } = args
@@ -236,6 +238,7 @@ export async function runBackfillProvider(args) {
     rowsWritten: result.rows_written,
     skipped: result.rows_skipped,
     ...(result.error_kind ? { errorKind: result.error_kind } : {}),
+    ...(result.note ? { note: result.note } : {}),
   }
 }
 
@@ -722,6 +725,10 @@ function handleEvent(args) {
     })
     return
   }
+  // @ref LLP 0538#note [implements]: the first note only, capped, so a provider cannot grow the result
+  if (event.event === 'import_unavailable' && typeof event.attributes?.note === 'string') {
+    result.note ??= event.attributes.note.slice(0, MAX_NOTE_LENGTH)
+  }
   log.info(`backfill.event.${event.event}`, {
     [Attr.COMPONENT]: 'backfill',
     [Attr.DEV_RUN_ID]: devRunId,
@@ -1074,6 +1081,7 @@ function renderRunResults(args) {
             rows_written: r.rows_written,
             rows_skipped: r.rows_skipped,
             ...(r.error ? { error: r.error } : {}),
+            ...(r.note ? { note: r.note } : {}),
           })),
         },
         null,
@@ -1087,6 +1095,7 @@ function renderRunResults(args) {
     stdout.write(`  ${r.provider}  [${r.status}]\n`)
     stdout.write(`    items_seen=${r.items_seen}  sessions=${r.sessions_seen}  rows_written=${r.rows_written}  rows_skipped=${r.rows_skipped}\n`)
     if (r.error) stdout.write(`    error: ${r.error}\n`)
+    if (r.note) stdout.write(`    note: ${r.note}\n`)
   }
 }
 

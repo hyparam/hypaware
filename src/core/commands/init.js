@@ -59,6 +59,7 @@ export function buildPickerBackfillRunner(ctx, skipOptional = false) {
         scanned: result.scanned,
         rowsWritten: result.rowsWritten,
         skipped: result.skipped,
+        ...(result.note ? { note: result.note } : {}),
       }
     },
   }
