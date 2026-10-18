@@ -56,8 +56,8 @@ Spool cleanup works as follows:
 ### Proxy mode and certificate cleanup
 
 Claude Code uses OTEL capture by default. An explicitly configured proxy routes
-HTTPS through the local gateway. The gateway decrypts hosts named by the
-configured capture adapters; other hosts are tunneled without decryption.
+HTTPS through the local gateway. The gateway decrypts AI provider hosts named
+by the configured capture adapters; other hosts are tunneled without decryption.
 Only supported provider API requests are recorded.
 
 The proxy's local certificate authority (CA) is stored under
