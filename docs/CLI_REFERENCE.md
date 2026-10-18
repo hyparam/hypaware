@@ -1469,6 +1469,15 @@ only with `--session`. Remote deletion uses your login credential and requires
 the session owner or an organization admin. Physical files remain until
 compaction, and copies in published reports aren't covered.
 
+With `--json`, each entry in a `--session` purge's `local.cache_cleanup`
+admits background file cleanup for one cache partition; it is not a durable
+deletion certificate. Its `job_id` names the partition (`job_scope:
+"cache_partition"`), so a later purge of the same partition reuses it. The
+cleanup status API reports `completed` only until maintenance retires the
+finished cleanup, with no minimum window, and `unverified` after that.
+`unverified` means the completion can no longer be certified, not that cleanup
+failed or that the files remain.
+
 The `<path>`, `--ignored`, and `--all` targets purge locally only. They never
 contact a sink or HypAware Cloud and can't retract exported copies.
 

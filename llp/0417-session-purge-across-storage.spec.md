@@ -258,6 +258,19 @@ unmanaged legacy tables, native transcripts and derived reports are outside
 this scope. Pre-upgrade position deletes without cleanup journals are not
 retroactively certified. Disabled maintenance postpones cleanup.
 
+The status answer is ephemeral, and the journal lifecycle above is its whole
+evidence. A cleanup id identifies a cache partition, not one purge
+invocation: a later purge of the same partition reuses it, so a retained
+completion bit could falsely certify that later work. `completed` is
+observable only while a valid journal remains and every generation it names
+has been verified absent. The next sweep or a retention eviction removes that
+journal, and the next sweep may run immediately, so no minimum window in which
+`completed` can be read is promised. After that the answer is `unverified`,
+which means certification is unavailable: it is not a failed cleanup and not
+proof that the bytes remain. The purge receipt's `cache_cleanup` entries admit
+the cleanup; they are not a durable deletion certificate. No completion record,
+time-to-live, per-invocation id or inferred completion extends this.
+
 Cost is one streaming full-generation rewrite per affected partition; this is
 more I/O than a subset merge but retires the entire snapshot history. Existing
 batch, row-group and open partition-writer memory bounds apply. Journals cap
