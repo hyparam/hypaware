@@ -842,22 +842,19 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   } catch (err) {
     const callbackError = /** @type {any} */ (err)?.callbackError
     ctx.stderr.write(`hyp remote login: ${explainLoginError(callbackError, err)}\n`)
-    // A server-surfaced callback error (org selection, membership) is already
-    // actionable. A local failure - most importantly a timeout, which is what a
-    // headless box hits when the opener silently fails - is not, so point at the
-    // headless escape hatches rather than leaving the user stuck (LLP 0058 D8).
-    if (!callbackError) {
-      ctx.stderr.write("  (on a machine with no browser, pass a static token with --token-file <path> or pipe it on stdin; --no-browser prints the URL to open elsewhere)\n")
-    }
+    // No headless hint follows: the poll lane already printed the URL to open
+    // from any machine before it waited, and a static token cures neither a
+    // server too old for the poll lane nor a pickup lost in transit.
+    // @ref LLP 0543#no-headless-hint [implements]: a poll-lane failure gets its own explanation and no static-token advice
     // The server's own refusal code, carried out as the reason: this is the
     // fact the wizard used to reconstruct by matching explainLoginError's
     // English back out of stderr (LLP 0179#no-prose-control-flow).
-    return { exitCode: 1, reason: loginFailureReason(callbackError) }
+    return { exitCode: 1, reason: loginFailureReason(callbackError, /** @type {any} */ (err)?.kind) }
   }
   // The single-use code is already spent by here, so a write failure (most
   // likely a lock timeout under a concurrent hyp process) is not a login
-  // failure: say the sign-in worked but the store did not, and do not print the
-  // headless hint, which would wrongly imply the browser flow itself failed.
+  // failure: say the sign-in worked but the store did not, without implying
+  // the browser flow itself failed.
   try {
     await writeSession(stateDir, name, session)
   } catch (err) {
@@ -1087,11 +1084,18 @@ const LOGIN_ORG_SELECTION_MESSAGE = 'this account has more than one org - re-run
  * OAuth error): retriable is the safe reading, since the alternative tells a
  * user to stop trying over a code we do not understand.
  *
+ * With no callback error, the poller's own typed `kind` names the one local
+ * failure that is not retriable: a server that predates the poll endpoint.
+ * It is read only there, so a server refusal can never be reported as one.
+ *
  * @param {string | undefined} callbackError
+ * @param {string | undefined} [kind] the poller's error kind, when it threw the error
  * @returns {LoginOutcome['reason']}
  * @ref LLP 0179#outcome [implements]: the D7 code the terminal explains, reported rather than re-derived
+ * @ref LLP 0543#typed [implements]: `no_poll_endpoint` comes from the poller's kind, never from `callbackError` or the message
  */
-function loginFailureReason(callbackError) {
+function loginFailureReason(callbackError, kind) {
+  if (!callbackError) return kind === 'no_poll_endpoint' ? 'no_poll_endpoint' : 'login_failed'
   switch (callbackError) {
     case 'no_membership':
       return 'no_membership'

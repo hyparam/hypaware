@@ -1019,7 +1019,10 @@ test('a callback error maps to a clear org-selection message', async () => {
   assert.match(err.join(''), /re-run with --org <name>/)
 })
 
-test('a browser login timeout points at the headless escape hatches', async () => {
+// The poll lane prints the URL to open from any machine before it waits, so a
+// failure after the wait gets its own explanation and no static-token advice.
+// @ref LLP 0543#no-headless-hint [tests]:
+test('a browser login timeout does not append the headless hint', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({ hypHome })
   // A local failure with no server callbackError (e.g. the poll timeout an
@@ -1030,7 +1033,8 @@ test('a browser login timeout points at the headless escape hatches', async () =
   const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 1)
   assert.match(err.join(''), /timed out/)
-  assert.match(err.join(''), /--token-file <path> or pipe it on stdin/)
+  assert.doesNotMatch(err.join(''), /--token-file/)
+  assert.doesNotMatch(err.join(''), /--no-browser/)
 })
 
 test('the real poll timeout reaches the CLI with its recovery guidance', async () => {
@@ -1048,7 +1052,82 @@ test('the real poll timeout reaches the CLI with its recovery guidance', async (
   assert.deepEqual(await remoteLogin(['prod'], ctx, { login }), { exitCode: 1, reason: 'login_failed' })
   const out = err.join('')
   assert.match(out, /^hyp remote login: timed out waiting for the browser login to complete - finish any steps left in the browser, then retry the sign-in; if the browser already said setup succeeded, continue with that setup instead of starting it over$/m)
-  assert.match(out, /--token-file <path> or pipe it on stdin/)
+  assert.doesNotMatch(out, /--token-file/)
+})
+
+/**
+ * A login seam that drives the real poller against `fetchImpl`, the way
+ * `loginWithBrowser` does, with a zero budget unless one is given.
+ *
+ * @param {any} fetchImpl
+ * @param {number} [timeoutMs]
+ */
+function realPollerLogin(fetchImpl, timeoutMs = 0) {
+  return /** @type {any} */ (async () => {
+    const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, timeoutMs, sleep: async () => {} })
+    try {
+      return await poller.waitForCode()
+    } finally {
+      poller.close()
+    }
+  })
+}
+
+// A server that predates the poll endpoint answers its own generic 404. The
+// poller's typed kind carries that out as its own reason, and the terminal
+// says what is wrong without advising a static token against it.
+// @ref LLP 0543#typed [tests]:
+test('a stale server reaches the outcome as no_poll_endpoint, with the upgrade message and no headless hint', async () => {
+  const { ctx, err } = await makeCtx({ hypHome: await tmpHome() })
+  const fetchImpl = /** @type {any} */ (async () => new Response(JSON.stringify({ error: 'unknown_path' }), { status: 404 }))
+  const outcome = await remoteLogin(['prod'], ctx, { login: realPollerLogin(fetchImpl, 60_000) })
+  assert.deepEqual(outcome, { exitCode: 1, reason: 'no_poll_endpoint' })
+  const out = err.join('')
+  assert.match(out, /^hyp remote login: this server does not support poll login yet - upgrade hypaware-server$/m)
+  assert.doesNotMatch(out, /--token-file/)
+  assert.doesNotMatch(out, /--no-browser/)
+  assert.doesNotMatch(out, /admin|member/)
+})
+
+// The reason is read off the poller's typed kind and nothing else: the same
+// English with no kind, or the same string arriving as a server refusal code,
+// stays retriable.
+test('no_poll_endpoint is never inferred from the message or from a callback error', async () => {
+  const { ctx: proseCtx } = await makeCtx({ hypHome: await tmpHome() })
+  const prose = /** @type {any} */ (async () => { throw new Error('this server does not support poll login yet - upgrade hypaware-server') })
+  assert.deepEqual(await remoteLogin(['prod'], proseCtx, { login: prose }), { exitCode: 1, reason: 'login_failed' })
+
+  const { ctx: refusalCtx } = await makeCtx({ hypHome: await tmpHome() })
+  const refusal = /** @type {any} */ (async () => {
+    throw Object.assign(new Error('login failed: no_poll_endpoint'), { callbackError: 'no_poll_endpoint', kind: 'no_poll_endpoint' })
+  })
+  assert.deepEqual(await remoteLogin(['prod'], refusalCtx, { login: refusal }), { exitCode: 1, reason: 'login_failed' })
+})
+
+// Any other 404 came from something between the client and the server (an
+// ingress error page, a proxy's own JSON) and is transient: the poller keeps
+// going, and a wait that runs out is the ordinary retriable timeout.
+test('a proxy 404 that runs the poll out is a retriable timeout, not a stale server', async () => {
+  for (const response of [
+    () => new Response('<html>404 Not Found</html>', { status: 404 }),
+    () => new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 }),
+  ]) {
+    const { ctx, err } = await makeCtx({ hypHome: await tmpHome() })
+    const fetchImpl = /** @type {any} */ (async () => response())
+    assert.deepEqual(await remoteLogin(['prod'], ctx, { login: realPollerLogin(fetchImpl) }), { exitCode: 1, reason: 'login_failed' })
+    assert.match(err.join(''), /timed out waiting for the browser login to complete/)
+    assert.doesNotMatch(err.join(''), /upgrade hypaware-server/)
+  }
+})
+
+// An ordinary denial at the provider rides the poll body as a D7 code and is
+// still the retriable `denied`, explained as before.
+test('a provider denial through the real poller is still denied', async () => {
+  const { ctx, err } = await makeCtx({ hypHome: await tmpHome() })
+  const fetchImpl = /** @type {any} */ (async () => new Response(JSON.stringify({ status: 'failed', error: 'access_denied' }), { status: 200 }))
+  assert.deepEqual(await remoteLogin(['prod'], ctx, { login: realPollerLogin(fetchImpl, 60_000) }), { exitCode: 1, reason: 'denied' })
+  assert.match(err.join(''), /^hyp remote login: login was denied at the provider$/m)
+  assert.doesNotMatch(err.join(''), /--token-file/)
 })
 
 test('a server callback error does not append the headless hint (it is already actionable)', async () => {
