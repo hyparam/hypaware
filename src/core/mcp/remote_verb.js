@@ -136,7 +136,7 @@ async function callRemoteTool({ url, token, verb, params }) {
     return { ok: false, error: text, exitCode: 1 }
   }
   const structured = toolResult?.structuredContent ?? parseTextContent(toolResult)
-  return { ok: true, result: structured, notices: serverCapNotices(structured) }
+  return { ok: true, result: structured, notices: serverCapNotices(verb, structured) }
 }
 
 /**
@@ -171,11 +171,20 @@ function isAuthError(err) {
  * cap (LLP 0033 §two-truncations). The exact field shape is server-owned
  * (out of tree); read it defensively.
  *
+ * @param {VerbRegistration} verb
  * @param {any} structured
  * @returns {string[]}
  */
-function serverCapNotices(structured) {
+function serverCapNotices(verb, structured) {
   if (!structured || typeof structured !== 'object' || !structured.truncated) return []
+  // A grep answer is capped by its hit limit, which grep's own render
+  // already reports (and its incomplete-walk notice beside it), and bulk
+  // Iceberg reads are not grep's way out. Only an answer of grep's shape
+  // drops this line: a malformed one keeps it, tool name or not.
+  if (verb.tool === 'grep_search' && Array.isArray(structured.hits) &&
+    typeof structured.truncated === 'boolean' && typeof structured.exhausted === 'boolean') {
+    return []
+  }
   const shown = Array.isArray(structured.rows) ? structured.rows.length : structured.row_count
   const cap = structured.server_cap?.rows ?? structured.cap?.rows ?? structured.limit
   const capPart = cap !== undefined ? ` (server cap rows:${cap})` : ''
