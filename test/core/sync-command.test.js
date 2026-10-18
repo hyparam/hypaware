@@ -857,6 +857,44 @@ test('when no dataset can be read the sync does not claim success', async () => 
   await fs.rm(hypHome, { recursive: true, force: true })
 })
 
+for (const stdoutTty of [false, true]) {
+  test(`a plugin-registered dataset name cannot drive the terminal (stdout TTY: ${stdoutTty})`, async () => {
+    const hypHome = await makeHome('discovery-escape')
+    const { ctx, stdout, stderr } = makeCtx({
+      hypHome, stdoutTty, sinks: [fakeSink('central', { url: 'https://hypaware.example.com' })],
+    })
+    const flushed = new Set()
+    /** @param {string} name @param {'complete' | 'failed' | 'partial'} mode */
+    const named = (name, mode) => ({
+      name,
+      async discoverPartitions() {
+        if (mode === 'failed' || (mode === 'partial' && flushed.has(name))) throw new Error('unreadable')
+        return [{ dataset: name, partition: { p: 'a' }, tablePath: name }]
+      },
+    })
+    const esc = '\x1b[8m'
+    ctx.query = {
+      listDatasets: () => [named(`logs${esc}`, 'complete'), named(`metrics${esc}`, 'failed'), named(`spans${esc}`, 'partial')],
+    }
+    ctx.storage = {
+      ...ctx.storage,
+      tableExists: () => true,
+      hasPendingSync: (/** @type {string} */ tablePath) => tablePath.startsWith('spans'),
+      async flushTable(/** @type {string} */ tablePath) { flushed.add(tablePath) },
+    }
+    assert.equal(await runSync(['--yes'], ctx), 1)
+    // The TTY's own styling and spinner may use SGR; a dataset name never does.
+    assert.doesNotMatch(stdout.text + stderr.text, /\x1b\[8m/)
+    assert.doesNotMatch(stderr.text, /\x1b/)
+    assert.match(stdout.text, /^ {2}logs\\u001b\[8m: 1 partition$/m)
+    assert.match(stdout.text, /^ {2}spans\\u001b\[8m: 1 partition \(incomplete\)$/m)
+    assert.match(stderr.text, /could not read metrics\\u001b\[8m for hypaware\.example\.com/)
+    assert.match(stderr.text, /read only part of spans\\u001b\[8m for hypaware\.example\.com/)
+    if (!stdoutTty) assert.doesNotMatch(stdout.text, /\x1b/)
+    await fs.rm(hypHome, { recursive: true, force: true })
+  })
+}
+
 test('a file-only sync still names its target and reports its result', async () => {
   const hypHome = await makeHome('file-only-plan')
   const { ctx, stdout } = makeCtx({

@@ -19,6 +19,7 @@ import {
 } from '../usage-policy/first_sync_hold.js'
 import { readClientSyncEntries, readLocalOnlyEntries } from '../usage-policy/index.js'
 import { groupThousands } from '../util/format_number.js'
+import { escapeForDisplay } from '../util/json_util.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -964,13 +965,14 @@ function renderResult(r, dest) {
 function renderPrepared(r) {
   return (r.datasets ?? [])
     .filter((d) => d.partitions > 0)
-    .map((d) => `  ${d.dataset}: ${plural(d.partitions, 'partition')}${d.discovery === 'partial' ? ' (incomplete)' : ''}\n`)
+    .map((d) => `  ${escapeForDisplay(d.dataset)}: ${plural(d.partitions, 'partition')}${d.discovery === 'partial' ? ' (incomplete)' : ''}\n`)
     .join('')
 }
 
 /**
  * One dataset this destination's discovery could not fully read. The cause
  * is plugin-owned and stays in the `sink.discover_partitions_failed` log.
+ * The dataset name is plugin-registered too, so it is escaped for display.
  *
  * @param {SinkDatasetDiscovery} d
  * @param {string} where
@@ -978,8 +980,8 @@ function renderPrepared(r) {
  */
 function renderUnread(d, where) {
   return d.discovery === 'failed'
-    ? `warning: could not read ${d.dataset} for ${where}; this sync left it out\n`
-    : `warning: read only part of ${d.dataset} for ${where}; this sync did not cover all of it\n`
+    ? `warning: could not read ${escapeForDisplay(d.dataset)} for ${where}; this sync left it out\n`
+    : `warning: read only part of ${escapeForDisplay(d.dataset)} for ${where}; this sync did not cover all of it\n`
 }
 
 /**
