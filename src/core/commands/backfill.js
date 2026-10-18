@@ -380,6 +380,12 @@ async function runProvider(args) {
         isPluginDetached: owners.isPluginDetached,
       })
 
+      // The step in flight when the loop throws, so a materializer or storage
+      // write that throws is traced to itself and not to the provider's
+      // iterator (issue #2262). Read off the loop rather than tagged onto the
+      // thrown value, which may be a primitive or frozen. The run still aborts.
+      /** @type {'provider_run_failed' | 'materialize_failed' | 'write_failed'} */
+      let failingStep = 'provider_run_failed'
       try {
         for await (const yielded of provider.run(runCtx)) {
           if (isEvent(yielded)) {
@@ -434,6 +440,7 @@ async function runProvider(args) {
             continue
           }
 
+          failingStep = 'materialize_failed'
           const rows = await materializeItem({
             materializer,
             item: yielded,
@@ -444,11 +451,13 @@ async function runProvider(args) {
             runToken,
             sweep,
           })
+          failingStep = 'provider_run_failed'
           if (!Array.isArray(rows) || (rows.length === 0 && !yielded.reconcile)) {
             result.rows_skipped += 1
             continue
           }
           result.sessions_seen += 1
+          failingStep = 'write_failed'
           const written = await writeRows({
             rows,
             dataset: yielded.dataset,
@@ -458,6 +467,7 @@ async function runProvider(args) {
             ctx,
             log,
           })
+          failingStep = 'provider_run_failed'
           result.rows_written += written.rowsWritten
           if (written.status === 'failed') {
             markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`, 'dataset_not_registered')
@@ -465,11 +475,11 @@ async function runProvider(args) {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        markProviderFailed(result, message, 'provider_run_failed')
+        markProviderFailed(result, message, failingStep)
         log.error('backfill.provider_error', {
           [Attr.COMPONENT]: 'backfill',
           provider: provider.name,
-          error_kind: 'provider_run_failed',
+          error_kind: failingStep,
           error: message,
         })
       }
