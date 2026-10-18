@@ -842,9 +842,10 @@ async function teardownBootOwnedKernel(kernel) {
   try {
     await kernel.sources.stopAll()
   } catch {
-    // Source cleanup is best-effort; command result rendering has
-    // already completed, and individual source stop failures are not
-    // actionable from the dispatcher layer.
+    // Source cleanup is best-effort and must never throw: teardown runs after
+    // a successful command and on the throw path alike, and a failure here
+    // would replace that outcome (or mask the original error) with its own.
+    // Individual source stop failures are not actionable from the dispatcher.
   }
   try {
     // The activation contexts are the only record of where this boot's temp dirs
@@ -856,9 +857,10 @@ async function teardownBootOwnedKernel(kernel) {
       Array.from(kernel.activationContexts.values(), (ctx) => ctx.paths.tempDir)
     )
   } catch {
-    // Same best-effort contract as source cleanup above: teardown runs after
-    // the command result is already computed, so a scratch dir we cannot
-    // resolve or remove is a leak, not something the dispatcher can act on.
+    // Same best-effort contract as source cleanup above: a throw here would
+    // stand in for the command's own success or failure, so a scratch dir we
+    // cannot resolve or remove is a leak, not something the dispatcher can
+    // act on.
   }
 }
 
