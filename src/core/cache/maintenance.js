@@ -162,15 +162,20 @@ const MAX_INPLACE_COMPACT_ROUNDS = 8
  * it. So a tick that commits as many snapshots as retention keeps hands
  * the next tick's expiry a metadata list holding nothing but this tick's
  * own commits, and a reader that opened the table before the tick loses
- * the snapshot it is reading out from under it. Spending strictly fewer
- * than `min_snapshots_to_keep` keeps at least one older snapshot alive
- * across every tick, so the window a reader gets is never shorter than a
- * maintenance interval regardless of how the two knobs are set.
+ * the snapshot it is reading out from under it. For
+ * `min_snapshots_to_keep >= 2` the cap is strictly fewer than retention
+ * keeps, so at least one pre-tick snapshot survives the tick's expiry by
+ * count. That is a count guarantee only: no minimum reader interval is
+ * promised, whatever the knobs are set to.
  *
- * Floor of one: a config that retains nothing has no window to protect,
- * and a cap of zero would stall compaction outright rather than slow it.
+ * Floor of one: a cap of zero would stall compaction outright rather than
+ * slow it. At `min_snapshots_to_keep` of 1 (or 0) the floor meets or
+ * exceeds retention, so no pre-tick snapshot is kept by count; one
+ * survives only if `max_snapshot_age_hours` still covers it. That is the
+ * one-snapshot window the config asked for.
  *
- * @ref LLP 0312#round-cap-under-retention [implements]: one tick may never spend the whole retention window.
+ * @ref LLP 0312#round-cap-under-retention [implements]: above the floor, one tick never spends the whole retention window.
+ * @ref LLP 0540#round-cap-floor-boundary: the invariant holds only above the floor; keep <= 1 keeps no pre-tick snapshot by count.
  * @param {MaintenanceConfig} cfg
  * @returns {number}
  */
@@ -184,6 +189,13 @@ export function inPlaceRoundCap(cfg) {
  * metadata versions no longer die with their directory; without a trim
  * they accumulate one per commit forever. The kept window is for
  * debugging a recent commit; nothing reads versions behind the hint.
+ *
+ * Not a fixed bound on the directory: versions past this count still go
+ * through the {@link ORPHAN_GRACE_MS} guard, so the retained set is this
+ * many plus every older version written within the grace window, which
+ * grows with commit rate.
+ *
+ * @ref LLP 0540#metadata-retained-set: the newest 20 plus younger protected versions, not a fixed 20 files.
  */
 const METADATA_VERSIONS_KEPT = 20
 
@@ -1044,6 +1056,8 @@ async function expireSnapshots(tableDir, cfg, opts) {
  * own bound now ({@link METADATA_VERSIONS_KEPT} plus the unreferenced-file
  * sweep, both of which run every tick regardless of dueness), so the
  * trigger is left to the legacy epoch layout, where a rewrite clears it.
+ * That bound follows commit rate rather than a fixed count: versions
+ * younger than the orphan grace window survive the trim too.
  * `--force` still routes a source table to the generation-swap writer.
  *
  * @ref LLP 0312#metadata-dueness [implements]: a dueness condition routine compaction cannot clear is not routine dueness.
@@ -1910,7 +1924,10 @@ function inPlaceVerdictCursor(cursor, liveDataFiles) {
  * top: nothing younger than {@link ORPHAN_GRACE_MS} is touched (a
  * concurrent append stages its files before its commit references them),
  * and metadata versions keep their newest {@link METADATA_VERSIONS_KEPT}
- * regardless. A data file's grep sidecar dies with it.
+ * regardless. Surplus metadata versions pass through the same grace
+ * guard, so a version younger than the grace window survives even past
+ * the newest {@link METADATA_VERSIONS_KEPT}. A data file's grep sidecar
+ * dies with it.
  *
  * Metadata staging names a crashed publish left behind are reclaimed here
  * too, in a pass that runs BEFORE the referenced-set walk: nothing
