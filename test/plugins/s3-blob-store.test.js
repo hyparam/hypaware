@@ -351,8 +351,6 @@ test('s3 BlobStore passes through a well-formed Content-Range', async () => {
     ['bytes=-99', 'bytes 0-15/16', '0123456789ABCDEF'],
     // a suffix whose total the store declined to state
     ['bytes=-3', 'bytes 13-15/*', 'DEF'],
-    // a range the provider does not model is not second-guessed
-    ['bytes=0-1, 4-5', 'bytes 0-1/16', '01'],
   ])) {
     const client = {
       ...makeFakeS3Client(),
@@ -370,6 +368,96 @@ test('s3 BlobStore passes through a well-formed Content-Range', async () => {
     assert.ok(got, `'${ContentRange}' must still answer '${range}'`)
     assert.equal(got.contentRange, ContentRange)
     assert.equal(got.contentLength, payload.length)
+  }
+})
+
+test('s3 BlobStore rejects a range spelling the contract does not admit before calling the store', async () => {
+  // Issue #2309: an unparsed request used to reach the store, and the
+  // response check then had nothing to compare against, so a well-formed but
+  // unrelated Content-Range passed as the answer. Every spelling outside the
+  // three LLP 0452 forms is the caller's error and costs no round trip.
+  for (const range of [
+    'bytes=-',
+    '0-7',
+    'bytes 0-7',
+    'Bytes=0-7',
+    'BYTES=0-7',
+    'bytes= 0-7',
+    'bytes=0 -7',
+    'bytes=0-7 ',
+    ' bytes=0-7',
+    'bytes=+0-7',
+    'bytes=0-+7',
+    'bytes=-0-7',
+    'bytes=0-7\n',
+    'bytes=0-7\r\n',
+    'bytes=0-1,4-5',
+    'bytes=0-1, 4-5',
+    'bytes=\u0661-7',
+    'bytes=0-\uff17',
+    'bytes=9007199254740992-',
+    'bytes=0-9007199254740992',
+    'bytes=-9007199254740992',
+    'items=0-7',
+    '',
+  ]) {
+    const calls = []
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject(input) {
+        calls.push(input)
+        return {
+          Body: Readable.from([Buffer.from('01234567')]),
+          ContentLength: 8,
+          ContentRange: 'bytes 0-7/16',
+          ETag: '"part"',
+        }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range }),
+      err => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_invalid')
+        assert.equal(/** @type {{ key?: string }} */ (err).key, 'data.parquet')
+        assert.doesNotMatch(/** @type {Error} */ (err).message, /not honored|Content-Range/)
+        return true
+      },
+      `${JSON.stringify(range)} must be rejected as caller input`,
+    )
+    assert.equal(calls.length, 0, `${JSON.stringify(range)} must not reach the store`)
+  }
+})
+
+test('s3 BlobStore still sends the three admitted range forms and whole reads', async () => {
+  // The largest safe integer is still a representable endpoint, so the
+  // pre-request check stops exactly where local-fs does.
+  for (const [range, ContentRange, payload] of /** @type {Array<[string | undefined, string | undefined, string]>} */ ([
+    ['bytes=2-4', 'bytes 2-4/16', '234'],
+    ['bytes=8-', 'bytes 8-15/16', '89ABCDEF'],
+    ['bytes=-3', 'bytes 13-15/16', 'DEF'],
+    ['bytes=0-9007199254740991', 'bytes 0-15/16', '0123456789ABCDEF'],
+    [undefined, undefined, '0123456789ABCDEF'],
+  ])) {
+    const calls = []
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject(input) {
+        calls.push(input)
+        return {
+          Body: Readable.from([Buffer.from(payload)]),
+          ContentLength: payload.length,
+          ...(ContentRange === undefined ? {} : { ContentRange }),
+          ETag: '"part"',
+        }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    const got = await store.getObject({ key: 'data.parquet', ...(range === undefined ? {} : { range }) })
+    assert.ok(got, `${JSON.stringify(range)} must still read`)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].Range, range)
+    assert.equal(got.contentRange, ContentRange)
   }
 })
 
