@@ -759,6 +759,13 @@ export interface HypAwareStatusReport {
    * version, cached auto_update flag, provenance, and the last probe.
    */
   selfUpdate: { line: string | null, json: Record<string, unknown> }
+  /**
+   * Informational notice naming clients whose ledger-recorded managed skills
+   * or agents update-time installation does not cover (LLP 0534). Null when
+   * there are none or the plugin catalog could not be read. Never a
+   * diagnostic, so it moves neither `overall` nor the headline.
+   */
+  assetCoverage?: string | null
 }
 
 export interface CollectStatusOptions {

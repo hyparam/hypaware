@@ -332,6 +332,7 @@ export function renderStatusSummary({ report, stdout }) {
     : sharingUnknown ? 'Unknown (organization config could not be read)' : 'No organization sync'}\n`)
   renderSharingNotices(report, stdout)
   if (report.selfUpdate?.line) stdout.write(`  ${printable(report.selfUpdate.line, MAX_ERROR_CHARS)}\n`)
+  if (report.assetCoverage) stdout.write(`  ${printable(report.assetCoverage, MAX_ERROR_CHARS)}\n`)
   for (const s of report.sources) {
     const line = sourceSummaryLine(s)
     if (line) stdout.write(`  ${line}\n`)
@@ -926,6 +927,9 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // skipped, degraded, or a newer release is waiting.
   if (report.selfUpdate?.line) {
     stdout.write(`  ${report.selfUpdate.line}\n`)
+  }
+  if (report.assetCoverage) {
+    stdout.write(`  ${printable(report.assetCoverage, MAX_ERROR_CHARS)}\n`)
   }
 
   renderStatusAttention(report, stdout)
