@@ -437,3 +437,103 @@ test('listChangedSessions catches the ended_at NULL -> set transition with no ne
     reader.close()
   }
 })
+
+// ---------------------------------------------------------------------------
+// Recovery ROLLBACK keeps the original error (issue #2281)
+// ---------------------------------------------------------------------------
+
+/**
+ * A connection that hands every call to a real read-only node:sqlite handle,
+ * except that preparing a statement whose SQL contains `trigger` first runs
+ * `onTrigger` against the real handle. Ending the transaction there puts the
+ * connection in the state SQLite's own auto-rollback leaves, so the COMMIT and
+ * the recovery ROLLBACK that follow fail with SQLite's real errors.
+ *
+ * @param {any} real
+ * @param {string} trigger
+ * @param {(db: any) => void} onTrigger
+ */
+function interceptPrepare(real, trigger, onTrigger) {
+  return /** @type {any} */ ({
+    prepare(/** @type {string} */ sql) {
+      if (sql.includes(trigger)) onTrigger(real)
+      return real.prepare(sql)
+    },
+    exec(/** @type {string} */ sql) {
+      return real.exec(sql)
+    },
+  })
+}
+
+const NO_WAIT = { attempts: 3, delayMs: 1, sleep: async () => {} }
+
+test('listChangedSessions rethrows the original error when SQLite already ended the transaction', async () => {
+  const dir = await tmpDir()
+  const real = new DatabaseSync(await buildFixtureStateDb(dir), { readOnly: true })
+  try {
+    const reader = new HermesStateDb(interceptPrepare(real, 'FROM sessions ORDER BY', (db) => db.exec('ROLLBACK')), NO_WAIT)
+    await assert.rejects(() => reader.listChangedSessions({}), (/** @type {any} */ err) => {
+      assert.equal(err.code, 'ERR_SQLITE_ERROR')
+      assert.match(err.message, /cannot commit - no transaction is active/, 'the COMMIT failure, not the recovery ROLLBACK one')
+      return true
+    })
+    assert.equal(reader.snapshot, undefined, 'a failed read publishes no snapshot')
+    assert.equal(reader.lastDataVersion, undefined, 'a failed read does not advance lastDataVersion')
+  } finally {
+    real.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a busy error behind an ended transaction still reaches withBusyRetry and is retried', async () => {
+  const dir = await tmpDir()
+  const real = new DatabaseSync(await buildFixtureStateDb(dir), { readOnly: true })
+  try {
+    let fired = 0
+    const reader = new HermesStateDb(interceptPrepare(real, 'FROM sessions ORDER BY', (db) => {
+      if (fired++ > 0) return
+      db.exec('ROLLBACK')
+      throw makeSqliteError('database is locked', 5)
+    }), NO_WAIT)
+    const changed = await reader.listChangedSessions({})
+    assert.equal(fired, 2, 'the busy attempt was retried once')
+    assert.deepEqual(changed.map((c) => c.session_id).sort(), [1, 2, 3])
+  } finally {
+    real.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('readSessionSnapshot rethrows the original error when SQLite already ended the transaction', async () => {
+  const dir = await tmpDir()
+  const real = new DatabaseSync(await buildFixtureStateDb(dir), { readOnly: true })
+  try {
+    const reader = new HermesStateDb(interceptPrepare(real, 'FROM sessions WHERE id = ?', (db) => db.exec('ROLLBACK')), NO_WAIT)
+    await assert.rejects(() => reader.readSessionSnapshot(1), (/** @type {any} */ err) => {
+      assert.equal(err.code, 'ERR_SQLITE_ERROR')
+      assert.match(err.message, /cannot commit - no transaction is active/, 'the COMMIT failure, not the recovery ROLLBACK one')
+      return true
+    })
+  } finally {
+    real.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a read that fails inside a live transaction still rolls it back', async () => {
+  const dir = await tmpDir()
+  const real = new DatabaseSync(await buildFixtureStateDb(dir), { readOnly: true })
+  try {
+    const reader = new HermesStateDb(interceptPrepare(real, 'FROM messages WHERE session_id', () => {
+      throw makeSqliteError('no such column: content', 1)
+    }), NO_WAIT)
+    await assert.rejects(() => reader.readSessionSnapshot(1), /no such column: content/)
+    // BEGIN would throw `cannot start a transaction within a transaction` had
+    // the recovery ROLLBACK been skipped.
+    real.exec('BEGIN')
+    real.exec('ROLLBACK')
+  } finally {
+    real.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
