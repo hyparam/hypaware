@@ -12,6 +12,7 @@ import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
 import { hasAppliedCentralConfig } from '../../src/core/config/apply.js'
 import { effectiveDefaultRemote } from '../../src/core/remote/builtin_remotes.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
+import { startLoginPoller } from '../../src/core/remote/login_poll.js'
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
 
 async function tmpHome() {
@@ -1030,6 +1031,24 @@ test('a browser login timeout points at the headless escape hatches', async () =
   assert.equal(code, 1)
   assert.match(err.join(''), /timed out/)
   assert.match(err.join(''), /--token-file <path> or pipe it on stdin/)
+})
+
+test('the real poll timeout reaches the CLI with its recovery guidance', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const fetchImpl = /** @type {any} */ (async () => new Response(JSON.stringify({ status: 'pending' }), { status: 200 }))
+  const login = /** @type {any} */ (async () => {
+    const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, timeoutMs: 0, sleep: async () => {} })
+    try {
+      return await poller.waitForCode()
+    } finally {
+      poller.close()
+    }
+  })
+  assert.deepEqual(await remoteLogin(['prod'], ctx, { login }), { exitCode: 1, reason: 'login_failed' })
+  const out = err.join('')
+  assert.match(out, /^hyp remote login: timed out waiting for the browser login to complete - finish any steps left in the browser, then retry the sign-in; if the browser already said setup succeeded, continue with that setup instead of starting it over$/m)
+  assert.match(out, /--token-file <path> or pipe it on stdin/)
 })
 
 test('a server callback error does not append the headless hint (it is already actionable)', async () => {

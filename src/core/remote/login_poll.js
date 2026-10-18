@@ -30,6 +30,9 @@ const POLL_REQUEST_TIMEOUT_MS = 10 * 1000
 // LLP 0342#d4), so an unreadable hint must not mean no backoff at all.
 const RATE_LIMITED_BACKOFF_MS = 10 * 1000
 const CLOSED_MESSAGE = 'login poller closed before a code arrived'
+// The CLI never received a code, so the guidance is conditional: it must not
+// claim the sign-in or setup worked, only say what to do in either case.
+const TIMEOUT_MESSAGE = 'timed out waiting for the browser login to complete - finish any steps left in the browser, then retry the sign-in; if the browser already said setup succeeded, continue with that setup instead of starting it over'
 
 /**
  * @param {number} ms
@@ -197,7 +200,7 @@ export function startLoginPoller({
 
         const remaining = deadline - Date.now()
         if (remaining <= 0) {
-          throw fail('timed out waiting for the browser login to complete', 'timeout')
+          throw fail(TIMEOUT_MESSAGE, 'timeout')
         }
         // Floor at 1ms so a non-positive intervalMs (test seam) cannot
         // busy-spin; cap at the remaining budget so we never oversleep it.
