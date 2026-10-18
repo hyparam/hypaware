@@ -137,7 +137,10 @@ path below, it takes no fallback client.
 With a question, skips the gather and starts a client on that question in the
 current directory, asking which client should answer when more than one could.
 A run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
-takes the first client of the offered set rather than failing. The pick is also
+takes the first client of the offered set rather than failing. The offered set,
+on the picker too, is in ascending order of client id (`claude` before
+`codex`), compared character by character rather than by locale, so a newly
+recorded client whose id sorts earlier becomes the first. The pick is also
 time-bounded on a terminal: unanswered for 10 seconds, it takes that same
 first client and says so on stdout (`No answer at the client prompt - starting
 the first one.`). The first keypress lifts the deadline, so a pick someone is
@@ -382,7 +385,8 @@ its transcript mode). Its CLI must also be on `PATH`, and the
 instructions set the period or focus; otherwise the skill uses the previous
 calendar month. If more than one such client could be started, it asks which;
 a run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
-takes the first client of the offered set rather than failing. That pick is
+takes the first client of the offered set rather than failing. The set is in
+the order `hyp ask` uses: ascending client id. That pick is
 also time-bounded on a terminal: unanswered for 10 seconds, it takes that same
 first client and says so on stdout (`No answer at the client prompt - starting
 the first one.`), and the first keypress lifts the deadline. The client keeps
@@ -644,7 +648,8 @@ and omitting it there returns `2`. The client offer set is the recorded one
 `hyp report generate` draws on, without the skill requirement: attached, or
 configured with no attach marker to write, and with its CLI on `PATH`. If
 more than one such client could be started, it asks which; a run given an id
-that cannot prompt takes the first of that set. That pick is also time-bounded
+that cannot prompt takes the first of that set, in the order `hyp ask` uses:
+ascending client id. That pick is also time-bounded
 on a terminal: unanswered for 10 seconds, it takes the first of that set and
 says so on stdout (`No answer at the client prompt - starting the first
 one.`), and the first keypress lifts the deadline. The report and

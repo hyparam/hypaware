@@ -149,6 +149,21 @@ test('resolveLaunchers: picked and resolvable only; a launch-less client is neve
   assert.equal(launchers[0].label, 'Claude Code')
 })
 
+// #671: every command that needs one launcher takes the first and offers its
+// picker in this order. Mixed case and non-ASCII on purpose: by code unit
+// every uppercase id sorts before every lowercase one and both before an
+// accented one, where a locale compare would interleave them.
+test('resolveLaunchers: ascending client id by code unit, whatever order the clients arrive in', async () => {
+  const ids = ['émile', 'zeta', 'Zulu', 'beta', 'Émile', 'alpha']
+  const map = new Map(/** @type {any} */ (ids.map((id) => [id, { plugin: `@test/${id}`, name: id, skillDir: `.${id}`, launch: { bin: `bin-${id}`, args: ['{prompt}'] } }])))
+  const launchers = await resolveLaunchers({ clients: ids, descriptors: map, env: {}, resolve: async (bin) => `/test-owned/${bin}` })
+  const order = launchers.map((l) => l.client)
+  assert.deepEqual(order, ['Zulu', 'alpha', 'beta', 'zeta', 'Émile', 'émile'])
+  assert.notDeepEqual(order, [...ids].sort((a, b) => a.localeCompare(b, 'en')), 'the order must not be a locale one')
+  // Order is all that changes: each launcher still carries its own resolution.
+  assert.deepEqual(launchers.map((l) => l.binPath), order.map((id) => `/test-owned/bin-${id}`))
+})
+
 test('resolveLaunchers: an unpicked client is not offered even when it resolves', async () => {
   const launchers = await resolveLaunchers({
     clients: ['claude'],

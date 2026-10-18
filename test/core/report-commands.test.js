@@ -28,6 +28,7 @@ import {
 import { parseControlFlags } from '../../src/core/cli/verb_codec.js'
 import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../src/core/cli/tui/index.js'
+import { resolveLaunchers } from '../../src/core/cli/wizard/first_ask.js'
 import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 /* ---------- endpoint derivation ---------- */
@@ -3005,4 +3006,95 @@ test('report generate help names the shipped skill\'s draft folder and says publ
   }
   const reference = (await fs.readFile(path.join(root, 'docs/CLI_REFERENCE.md'), 'utf8')).replace(/\s+/g, ' ')
   assert.match(reference, /The skill drafts `\.\/hypaware-report-<from>-to-<to>\/report\.md` and linked pages, using `-2`, `-3`, etc\. if the folder already exists/)
+})
+
+/* ---------- one launcher order for every command (#671) ---------- */
+
+// The default is the first client in ascending id order, compared by code
+// unit, and the picker offers that same order so its deadline fallback is
+// the same default. Mixed case and non-ASCII ids, scrambled, so neither the
+// input order nor a locale compare can pass for it.
+const MIXED_IDS = ['émile', 'zeta', 'Zulu', 'beta', 'Émile', 'alpha']
+const MIXED_ORDER = ['Zulu', 'alpha', 'beta', 'zeta', 'Émile', 'émile']
+
+/**
+ * The real `resolveLaunchers` over fixture clients. Their descriptors go
+ * into the map the command built, because `hyp report generate` reads each
+ * one's skill path off that same map afterwards.
+ *
+ * @param {any} deps
+ */
+function withMixedClients(deps) {
+  deps.resolveLaunchers = async (/** @type {any} */ args) => {
+    for (const id of MIXED_IDS) {
+      args.descriptors.set(id, { plugin: `@test/${id}`, name: id, skillDir: `.${id}/skills`, launch: { bin: `bin-${id}`, args: ['{prompt}'], label: `Label ${id}` } })
+    }
+    return resolveLaunchers({ ...args, clients: MIXED_IDS, resolve: async (bin) => `/test-owned/${bin}` })
+  }
+  return deps
+}
+
+/** @param {string} home */
+async function mixedReportSkills(home) {
+  for (const id of MIXED_IDS) {
+    const dir = path.join(home, `.${id}`, 'skills', 'hypaware-report')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'SKILL.md'), '# Report skill\n')
+  }
+}
+
+test('generate: the default and the picker share ascending client-id order', { timeout: 5000 }, async (t) => {
+  const { ctx, home } = await generateFixture(t)
+  await mixedReportSkills(home)
+  // A run that cannot prompt takes the first.
+  const piped = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, withMixedClients(piped.deps)), 0)
+  assert.equal(piped.launches[0].launcher.client, MIXED_ORDER[0])
+
+  // A terminal is offered the same order.
+  ctx.stdout = ttyOut()
+  ctx.stdin = silentTtyIn()
+  const picked = fixDeps({ pick: async () => 'émile' })
+  assert.equal(await runReportGenerate([], ctx, withMixedClients(picked.deps)), 0)
+  assert.deepEqual(picked.prompts[0].options.map((/** @type {any} */ o) => o.value), MIXED_ORDER)
+  assert.equal(picked.launches[0].launcher.client, 'émile')
+
+  // An unanswered picker falls back to that same first.
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const idle = fixDeps()
+  delete idle.deps.select
+  idle.deps.pickDeadlineMs = 50
+  assert.equal(await runReportGenerate([], ctx, withMixedClients(idle.deps)), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(idle.launches[0].launcher.client, MIXED_ORDER[0])
+})
+
+test('fix: the default and the picker share ascending client-id order', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  // A run that cannot prompt takes the first.
+  const { ctx } = ctxWith()
+  const piped = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, withMixedClients(piped.deps)), 0)
+  assert.equal(piped.launches[0].launcher.client, MIXED_ORDER[0])
+
+  // A terminal is offered the same order.
+  ctx.stdout = ttyOut()
+  ctx.stdin = silentTtyIn()
+  const picked = fixDeps({ pick: async () => 'émile' })
+  assert.equal(await runReportFix([REC], ctx, withMixedClients(picked.deps)), 0)
+  assert.deepEqual(picked.prompts[0].options.map((/** @type {any} */ o) => o.value), MIXED_ORDER)
+  assert.equal(picked.launches[0].launcher.client, 'émile')
+
+  // An unanswered picker falls back to that same first.
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const idle = fixDeps()
+  delete idle.deps.select
+  idle.deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, withMixedClients(idle.deps)), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(idle.launches[0].launcher.client, MIXED_ORDER[0])
 })
