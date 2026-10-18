@@ -165,7 +165,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'healthy: configured client and sharing policy render',
       okText,
-      (v) => /claude\s+Attached \(otel\)\s+Local only/.test(v)
+      (v) => /claude\s+Recording \(otel\)\s+Local only/.test(v)
     )
     expect.that(
       'healthy: no capture-gap tag',
