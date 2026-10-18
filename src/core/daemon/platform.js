@@ -121,8 +121,10 @@ export function platformIsSupported(platform = process.platform) {
  *
  * The remediation prints only where it can work. `hyp daemon install` is the
  * fix on a platform with a service manager; on one without, no run of it
- * would finish, so the note says the machine captures nothing instead of
- * naming a command that cannot help (#978).
+ * would finish, so the note names the missing service instead of a command
+ * that cannot help (#978). It stops there: `hyp daemon run --foreground`
+ * still captures on such a platform, so claiming nothing can be captured
+ * would be an absolute the CLI itself disproves (#1381).
  *
  * Here rather than beside either caller: it branches on `platformIsSupported`,
  * and this is the leaf both lanes reach without closing an import cycle.
@@ -135,7 +137,7 @@ export function daemonIncompleteNote(platform, context) {
   const lead = context ? `${context}, but ` : ''
   return platformIsSupported(platform)
     ? `note: ${lead}the daemon install did not finish - run 'hyp daemon install'\n`
-    : `note: ${lead}${platform} has no background service to install - nothing is captured on this machine\n`
+    : `note: ${lead}${platform} has no background service to install\n`
 }
 
 /**

@@ -476,7 +476,8 @@ test('daemonIncompleteNote: a platform with no service manager is not told to re
   const note = daemonIncompleteNote('win32', 'enrolled')
   assert.match(note, /^note: enrolled, but /)
   assert.doesNotMatch(note, /hyp daemon install/)
-  assert.match(note, /nothing is captured on this machine/)
+  assert.match(note, /win32 has no background service to install\n$/)
+  assert.doesNotMatch(note, /nothing is captured/, 'foreground capture still works there, so no absolute')
 })
 
 test('an enrolling login whose attach poll throws still reports the timeout fallback, not a failure (Major 1)', async () => {
