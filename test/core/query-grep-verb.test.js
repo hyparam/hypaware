@@ -571,6 +571,53 @@ test('a valid empty --remote answer still succeeds and keeps both completeness n
   assert.match(both.err, /stopped before covering every file/)
 })
 
+/**
+ * A server-shaped grep hit for the remote truncation tests.
+ *
+ * @param {number} i
+ */
+function remoteHit(i) {
+  return {
+    date: '2026-08-12', sessionId: `s${i}`, agentId: null, conversationId: null,
+    partId: `p${i}`, messageId: `m${i}`, messageCreatedAt: '2026-08-12T01:00:00Z',
+    matches: [{ column: 'content_text', snippet: `...needle ${i}...` }],
+  }
+}
+
+test('a capped --remote grep prints grep\'s own limit notice once, not the SQL-shaped server-cap line', async (t) => {
+  stubServer(t, { hits: [remoteHit(1)], truncated: true, exhausted: true })
+  const capped = await runRemoteGrep()
+  assert.equal(capped.code, 0)
+  assert.equal(capped.err.match(/more matches exist beyond the limit/g)?.length, 1)
+  assert.doesNotMatch(capped.err, /remote:|Iceberg archive/)
+
+  // The walk that also stopped early still says so, beside the limit line.
+  stubServer(t, { hits: [remoteHit(1)], truncated: true, exhausted: false })
+  const both = await runRemoteGrep()
+  assert.equal(both.code, 0)
+  assert.equal(both.err.match(/more matches exist beyond the limit/g)?.length, 1)
+  assert.match(both.err, /stopped before covering every file/)
+  assert.doesNotMatch(both.err, /remote:|Iceberg archive/)
+})
+
+test('a capped --remote grep keeps the client display-budget notice', async (t) => {
+  stubServer(t, { hits: [remoteHit(1), remoteHit(2), remoteHit(3)], truncated: true, exhausted: true })
+  const budget = await runRemoteGrep(['--max-bytes', '200'])
+  assert.equal(budget.code, 0)
+  assert.match(budget.err, /notice: showing \d+ of 3 rows \(200B row-data budget/)
+  assert.match(budget.err, /more matches exist beyond the limit/)
+  assert.doesNotMatch(budget.err, /remote:/)
+})
+
+test('a malformed --remote answer marked truncated keeps the generic server-cap line', async (t) => {
+  // Only an answer of grep's shape drops the line; the tool name alone does not.
+  stubServer(t, { hits: {}, truncated: true, exhausted: true })
+  const malformed = await runRemoteGrep()
+  assert.equal(malformed.code, 1)
+  assert.match(malformed.err, /remote: result truncated/)
+  assert.match(malformed.err, /the grep_search backend returned no hits array/)
+})
+
 // The injected-backend seam (LLP 0314 / LLP 0353). These drive
 // `operation` directly with a stubbed context, because the harness above
 // goes through the projected command, whose `buildOperationContext` never
