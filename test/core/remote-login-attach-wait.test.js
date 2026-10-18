@@ -116,3 +116,44 @@ test('remote login on a genuinely unattached install keeps the attach guidance',
   assert.match(text, /no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture/)
   assert.doesNotMatch(text, /for capture activity/)
 })
+
+test('an empty HYP_CONFIG reads the default config path, as boot does', async () => {
+  const { hypHome, homeDir, configPath, config } = await makeInstall([codexTranscript])
+  await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify(config))
+  await fs.rm(configPath)
+  const env = { HYP_HOME: hypHome, HYP_CONFIG: '' }
+  const result = await waitForClientAttach({ env, homeDir, timeoutMs: 60_000, intervalMs: 1, sleep: async () => {} })
+  assert.equal(result, null)
+})
+
+/**
+ * Write a central layer as the seed slot, where the resolver reads it before
+ * any applied slot exists.
+ *
+ * @param {string} hypHome
+ * @param {string} body
+ */
+async function writeCentral(hypHome, body) {
+  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(path.join(controlDir, 'seed.json'), body)
+}
+
+test('a bad local layer keeps the wait even when the central layer is transcript-only', async () => {
+  const { env, homeDir, hypHome, configPath } = await makeInstall([])
+  await writeCentral(hypHome, JSON.stringify({ version: 2, plugins: [codexTranscript] }))
+  await fs.writeFile(configPath, '{ not json')
+  const { calls, sleep } = countingSleep()
+  const result = await waitForClientAttach({ env, homeDir, timeoutMs: 20, intervalMs: 1, sleep })
+  assert.deepEqual(result, [])
+  assert.ok(calls.n > 0, 'the bounded wait ran')
+})
+
+test('a bad central layer keeps the wait even when the local layer is transcript-only', async () => {
+  const { env, homeDir, hypHome } = await makeInstall([codexTranscript])
+  await writeCentral(hypHome, '{ not json')
+  const { calls, sleep } = countingSleep()
+  const result = await waitForClientAttach({ env, homeDir, timeoutMs: 20, intervalMs: 1, sleep })
+  assert.deepEqual(result, [])
+  assert.ok(calls.n > 0, 'the bounded wait ran')
+})

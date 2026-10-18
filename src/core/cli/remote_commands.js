@@ -9,7 +9,7 @@ import { coreUsage, parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { isEntryRecording } from '../config/client_recording.js'
-import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { BUILTIN_REMOTES, effectiveDefaultRemote, originOf, sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import {
@@ -134,9 +134,10 @@ async function buildDefaultAttachProbe(env, homeDir) {
   const resolvedHome = homeDir ?? env.HOME ?? process.env.HOME ?? os.homedir()
   const descriptors = await loadClientDescriptors({ stateDir })
   const probe = () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
-  const layered = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath: env.HYP_CONFIG ?? defaultConfigPath(hypHome) }).catch(() => null)
-  // An unreadable config is no evidence about capture mode: keep the wait.
-  if (!layered) return { probe, markerless: false }
+  const layered = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath: resolveConfigPath({ env, hypHome }) }).catch(() => null)
+  // A layer that exists but did not load is no evidence about capture mode,
+  // even when the other layer resolves: keep the wait. An absent layer is normal.
+  if (!layered || layerUnreadable(layered.localLoaded) || layerUnreadable(layered.centralLoaded)) return { probe, markerless: false }
   const config = layered.effective
   let configured = 0
   for (const [clientName, descriptor] of descriptors) {
@@ -146,6 +147,14 @@ async function buildDefaultAttachProbe(env, homeDir) {
     configured++
   }
   return { probe, markerless: configured > 0 }
+}
+
+/**
+ * @param {{ ok: boolean, errorKind?: string } | null | undefined} loaded
+ * @returns {boolean}
+ */
+function layerUnreadable(loaded) {
+  return !!loaded && !loaded.ok && loaded.errorKind !== 'config_missing'
 }
 
 /**
