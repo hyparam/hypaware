@@ -3195,7 +3195,13 @@ export interface BackfillProvenance {
 
 export interface BackfillEvent {
   type: 'event'
-  /** Free-form event name (e.g. `scan_started`, `unsupported_location`). */
+  /**
+   * Free-form event name (e.g. `scan_started`, `unsupported_location`).
+   * `import_unavailable` with a string `attributes.note` tells the person
+   * the import could not run (a missing CLI, say) rather than found nothing:
+   * the runner keeps the first such note, capped, for the setup and
+   * `hyp backfill` output.
+   */
   event: string
   /** Optional structured attributes. */
   attributes?: Record<string, unknown>

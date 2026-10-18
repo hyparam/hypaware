@@ -207,6 +207,8 @@ export interface BackfillFinaleResult {
   scanned: number
   rowsWritten: number
   skipped: number
+  /** Why the import could not run, when the provider said so. */
+  note?: string
 }
 
 /**

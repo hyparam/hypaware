@@ -2218,10 +2218,12 @@ async function runFinaleBackfill(args) {
           )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
-          // Only an import that wrote rows or failed is news; a zero means
-          // there was nothing to do, and the scan counts go to the span.
+          // Only an import that wrote rows, failed, or could not run is news;
+          // a zero means there was nothing to do, and the scan counts go to
+          // the span.
           // @ref LLP 0437#finish [implements]: an import reports only what it imported or a failure
-          if (!entry.ok) {
+          // @ref LLP 0538#note [implements]: an import that could not run says so rather than reading as empty
+          if (!entry.ok || (entry.note && entry.scanned === 0)) {
             stdout.write(`${tag}${label(provider)} import ${describeBackfillResult(entry)}\n`)
           } else if (entry.rowsWritten > 0) {
             const rows = entry.rowsWritten === 1 ? 'row' : 'rows'
@@ -2277,11 +2279,17 @@ async function runFinaleBackfill(args) {
  * about the history on disk and must not be reported as one. It states
  * what the scan found and claims no import outcome.
  *
- * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, dryRun?: boolean }} entry
+ * A run that scanned nothing because the importer could not run at all
+ * (no `opencode` on PATH) carries the provider's note, and says that
+ * instead, dry run or not: "nothing to import" would claim an empty history
+ * nobody read.
+ *
+ * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, dryRun?: boolean, note?: string }} entry
  * @returns {string}
  */
 export function describeBackfillResult(entry) {
   if (!entry.ok) return `failed (scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})`
+  if (entry.note && entry.scanned === 0) return `unavailable: ${entry.note}`
   if (entry.dryRun) return entry.scanned === 0 ? 'nothing to import' : `scanned ${entry.scanned}`
   if (entry.rowsWritten === 0) {
     return entry.scanned === 0 ? 'nothing to import' : `nothing new to import (scanned ${entry.scanned})`
