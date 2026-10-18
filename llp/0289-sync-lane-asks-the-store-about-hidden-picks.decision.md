@@ -7,6 +7,7 @@
 **Date:** 2026-08-19
 **Related:** LLP 0276 (#no-candidates: the sentence this qualifies, and the counts it widens), LLP 0188 (#opt-out: the store the export seam reads; #locked: why an org row needs no such question; #never-silent: the rule the unqualified sentence broke), LLP 0202 (#carry-through: how a hidden row ends up among the picks), LLP 0192 (#fail-closed: the seam that does the withholding)
 **Extended-by:** [LLP 0509](./0509-unresolved-central-set-is-not-empty.decision.md) (§not-done below: the wizard now tells "no central rows" from "could not tell", and the sync lane says the team's configuration could not be confirmed instead of "nothing syncs")
+**Extended-by:** [LLP 0370](./0370-carried-gated-row-has-no-interactive-exit.rfc.md) (the pick lane may name a platform-gated row the config records, as a checked row marked unavailable; "the lane prints no hidden row" still holds for the sync lane, which names no withheld row)
 
 > Extends [LLP 0276 §no-candidates](./0276-hidden-rows-stay-off-the-sync-gate.decision.md#no-candidates):
 > the hidden *picks* cross into the sync lane as ids rather than a count,

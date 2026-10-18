@@ -72,7 +72,8 @@ export function enableGithubCollection(config) {
  * machine is probed once per run.
  *
  * Hidden rows (LLP 0202) are resolved here for the same reason: `visibleList`
- * is the single display filter's output, `defaultRows` is drawn from it so
+ * is the single display filter's output (plus any platform-gated row the
+ * config records, LLP 0370), `defaultRows` is drawn from it so
  * no screen can state a hidden row, and `carried` is the withheld-row
  * carry-through, decided off `seedOrigin` before any screen renders, so the
  * express gate's auto-accept and the pick lane's menu preserve a
@@ -189,7 +190,17 @@ export async function resolvePickSeeding(opts) {
   /** @type {SeedOrigin} */
   const seedOrigin = opts.initialSelection ? 'selection' : configured !== undefined ? 'config' : 'detected'
 
-  const visibleList = visiblePickerDescriptors(descriptorList, opts.platform)
+  // A row the `platforms` gate withholds (and only that gate: a `hidden` row
+  // stays unnamed) still renders when the config on disk records it, checked
+  // per the seed and marked unavailable, so keeping it is the default and
+  // unchecking it removes it. A fresh config has no record, so it is never
+  // offered there.
+  // @ref LLP 0370#decision [implements]: a configured platform-gated row is the user's explicit keep-or-remove choice, not an invisible carry
+  const shownIds = new Set(visiblePickerDescriptors(descriptorList, opts.platform).map((d) => d.id))
+  const unavailable = new Set(descriptorList
+    .filter((d) => d.hidden !== true && !shownIds.has(d.id) && configured?.has(d.id))
+    .map((d) => d.id))
+  const visibleList = descriptorList.filter((d) => shownIds.has(d.id) || unavailable.has(d.id))
   // A withheld row never renders, so no screen downstream can return one.
   // Carrying one through the selection is right when the config on disk
   // collects nothing the menu can show: then every row it does collect is
@@ -234,14 +245,9 @@ export async function resolvePickSeeding(opts) {
   // @ref LLP 0202#carry-through [implements]: it rides through the selection when the config collects nothing the menu can show, and stays there across a back-and-forward
   // @ref LLP 0297#carry-through [implements]: a hidden row with a non-derivative read-back carries off the config seed whatever else is checked
   //
-  // Keyed on what the display filter withheld rather than on `hidden` alone:
-  // a `platforms` gate removes a row from the same menu for the same kind of
-  // reason, so a config that already collects a gated row must survive a
-  // reconfigure on the platform that withholds it. Keyed on `hidden` this
-  // dropped `@hypaware/claude-desktop` out of a Linux config the moment the
-  // user walked the menu again, which is a choice refused rather than an
-  // offer withheld.
-  // @ref LLP 0368#display-only [implements]: a platform-gated row carries through a reconfigure exactly as a hidden one does
+  // Keyed on what this menu withholds rather than on `hidden` alone. A
+  // configured platform-gated row is not withheld (it renders above), so it
+  // never carries: it reaches the selection only through the user's answer.
   const visibleIds = new Set(visibleList.map((d) => d.id))
   const seededWithheld = descriptorList.filter((d) => !visibleIds.has(d.id) && seed.has(d.id))
   const seededVisible = visibleList.some((d) => seed.has(d.id))
@@ -264,6 +270,7 @@ export async function resolvePickSeeding(opts) {
     detected,
     seed,
     carried,
+    unavailable,
     interactive,
     defaultRows: visibleList.filter((d) => seed.has(d.id) || lockedSet.has(d.id)),
   }
@@ -318,7 +325,7 @@ export async function runWizardPick(opts) {
   const seeding = await resolvePickSeeding(opts)
   const {
     descriptors, composeWith, descriptorList, visibleList, lockedSources, lockedSet,
-    configPath, existing, configured, detected, seed, carried, interactive, defaultRows,
+    configPath, existing, configured, detected, seed, carried, unavailable, interactive, defaultRows,
   } = seeding
 
   await withSpan(
@@ -359,7 +366,7 @@ export async function runWizardPick(opts) {
     /** @type {{ rawSources: PickerSource[] } | { back: true }} */
     let selection
     try {
-      selection = await promptPickSelection({ opts, ask, visibleList, descriptors, seed, detected, lockedSet, defaultRows, carried })
+      selection = await promptPickSelection({ opts, ask, visibleList, descriptors, seed, detected, lockedSet, unavailable, defaultRows, carried })
     } catch (err) {
       if (isPromptCancelledError(err)) return cancelledResult(opts)
       throw err
@@ -605,12 +612,13 @@ export async function commitWizardPickedConfig(args) {
  *   seed: ReadonlySet<string>,
  *   detected: Set<PickerSource>,
  *   lockedSet: Set<string>,
+ *   unavailable: Set<string>,
  *   defaultRows: PickerDescriptor[],
  *   carried: string[],
  * }} args
  * @returns {Promise<{ rawSources: PickerSource[] } | { back: true }>}
  */
-async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, detected, lockedSet, defaultRows, carried }) {
+async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, detected, lockedSet, unavailable, defaultRows, carried }) {
   const withCarried = (/** @type {string[]} */ picked) =>
     /** @type {PickerSource[]} */ ([...new Set([...picked, ...carried])])
   // The express gate already accepted this lane (LLP 0201): state the rows
@@ -624,7 +632,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
     return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
   }
   try {
-    const options = visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet))
+    const options = visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet, unavailable))
     // Whether this menu arrives with a state worth keeping: a locked
     // row, or one the seed already checked (the config on disk, a
     // re-entry's selection, detection). Exactly the predicate behind
@@ -689,6 +697,8 @@ function stateRecording(opts, rows) {
  * seeded row (from the config on a reconfigure, a prior confirmed
  * selection on a re-entry, or detection on a first run) is checked,
  * carrying the ` · detected` suffix only when detection put it there;
+ * a platform-gated row the config records carries
+ * ` · unavailable on this platform` instead (LLP 0370);
  * otherwise the bare descriptor label. The retired `· stays on this
  * machine` suffix is deliberately absent: under LLP 0188 an addition on a
  * managed machine syncs by default, and on an enrolled run this menu is
@@ -700,14 +710,17 @@ function stateRecording(opts, rows) {
  * @param {ReadonlySet<string>} seed
  * @param {Set<PickerSource>} detected
  * @param {Set<string>} lockedSet
+ * @param {Set<string>} unavailable
  * @returns {WalkthroughOption}
  */
-function buildPickOption(d, seed, detected, lockedSet) {
+function buildPickOption(d, seed, detected, lockedSet, unavailable) {
   const locked = lockedSet.has(d.id)
   const seeded = seed.has(d.id)
   let label = d.label
   if (locked) {
     label += LOCKED_LABEL_SUFFIX
+  } else if (unavailable.has(d.id)) {
+    label += ' · unavailable on this platform'
   } else if (detected.has(/** @type {PickerSource} */ (d.id))) {
     label += ' · detected'
   }
