@@ -315,6 +315,117 @@ test('a refused detach skips --purge and keeps the local CA', async () => {
   }
 })
 
+/**
+ * Run `hyp client detach <argv> --json` against a fresh stage with
+ * `process.platform` pinned to linux, so the purge never reaches the macOS
+ * keychain or launchd. `seedCa` shapes the local CA before the run.
+ * stdout comes back with the stage's temp root replaced by `<root>`.
+ *
+ * @param {string[]} argv
+ * @param {(caDir: string) => Promise<void>} seedCa
+ */
+async function detachJson(argv, seedCa) {
+  const s = await stage()
+  const platform = /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(process, 'platform'))
+  Object.defineProperty(process, 'platform', { value: 'linux' })
+  try {
+    const caDir = path.join(s.env.HYP_HOME, 'hypaware', 'tls')
+    await fsp.mkdir(caDir, { recursive: true })
+    await seedCa(caDir)
+    const cli = cliCtx(s)
+    const code = await runDetach([...argv, '--json'], cli.ctx)
+    const leftover = (await fsp.readdir(caDir).catch(() => [])).sort()
+    // Each stage has its own temp root, which the records name; strip it so
+    // two runs' stdout compare byte for byte.
+    const out = cli.out().split(s.root).join('<root>')
+    return { code, out, err: cli.err(), leftover }
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    await s.cleanup()
+  }
+}
+
+/** @param {string} caDir */
+async function seedWholeCa(caDir) {
+  await fsp.writeFile(path.join(caDir, 'ca-key.pem'), 'key')
+  await fsp.writeFile(path.join(caDir, 'ca-cert.pem'), 'cert')
+}
+
+/**
+ * The stdout contract a scripted caller parses: one JSON object per line.
+ * The stderr side is the reverse: a consumer that merges the two streams
+ * must not be able to read a diagnostic as one more record.
+ *
+ * @param {string} out
+ * @param {string} err
+ */
+function assertStreamsSplit(out, err) {
+  for (const line of out.split('\n').filter(Boolean)) JSON.parse(line)
+  for (const line of err.split('\n').filter(Boolean)) {
+    assert.throws(() => JSON.parse(line), `stderr line parses as JSON: ${line}`)
+  }
+}
+
+test('detach --purge --json reports the purge on stderr and leaves the NDJSON untouched', async () => {
+  const plain = await detachJson(['codex'], seedWholeCa)
+  const purged = await detachJson(['codex', '--purge'], seedWholeCa)
+  assert.equal(purged.code, 0)
+  assert.equal(purged.out, plain.out, 'the purge adds nothing to stdout')
+  assert.match(purged.err, /removed the local interception CA/)
+  assert.deepEqual(purged.leftover, [])
+  assertStreamsSplit(purged.out, purged.err)
+})
+
+test('detach --purge --json surfaces a cleanup failure on stderr without changing the exit', async () => {
+  // A directory where the key belongs: unlink fails, so the CA stays.
+  /** @param {string} caDir */
+  const stuck = async (caDir) => {
+    await fsp.mkdir(path.join(caDir, 'ca-key.pem'))
+    await fsp.writeFile(path.join(caDir, 'ca-cert.pem'), 'cert')
+  }
+  const plain = await detachJson(['codex'], stuck)
+  const purged = await detachJson(['codex', '--purge'], stuck)
+  assert.equal(purged.code, plain.code)
+  assert.equal(purged.out, plain.out, 'the failure adds nothing to stdout')
+  assert.match(purged.err, /! the local CA could not be removed \(.+\); delete it by hand/)
+  assertStreamsSplit(purged.out, purged.err)
+})
+
+test('detach all --purge --json writes every client record and purges once', async () => {
+  const purged = await detachJson(['all', '--purge'], seedWholeCa)
+  const records = purged.out.split('\n').filter(Boolean)
+  assert.ok(records.length > 1, 'one record per client')
+  assert.equal((purged.err.match(/removed the local interception CA/g) ?? []).length, 1)
+  assert.deepEqual(purged.leftover, [])
+  assertStreamsSplit(purged.out, purged.err)
+})
+
+test('detach --purge --json --dry-run leaves the CA and says nothing about a purge', async () => {
+  const dry = await detachJson(['codex', '--purge', '--dry-run'], seedWholeCa)
+  assert.equal(dry.code, 0)
+  assert.doesNotMatch(dry.err, /local CA|interception CA/)
+  assert.deepEqual(dry.leftover, ['ca-cert.pem', 'ca-key.pem'])
+  assertStreamsSplit(dry.out, dry.err)
+})
+
+test('a refused detach with --json still says on stderr that the purge was skipped', async () => {
+  const s = await stage()
+  const platform = /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(process, 'platform'))
+  Object.defineProperty(process, 'platform', { value: 'linux' })
+  try {
+    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'config-control')
+    await fsp.mkdir(controlDir, { recursive: true })
+    await fsp.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] }))
+    const cli = cliCtx(s)
+    assert.equal(await runDetach(['codex', '--purge', '--json'], cli.ctx), 1)
+    assert.match(cli.err(), /Skipped --purge/)
+    assertStreamsSplit(cli.out(), cli.err())
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    await s.cleanup()
+  }
+})
+
 test('attach all resumes Claude Desktop, which registers no adapter', async () => {
   const s = await stage()
   try {

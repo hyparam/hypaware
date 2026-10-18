@@ -206,12 +206,13 @@ async function runClientLifecycle(action, argv, ctx) {
     // A refused client is still attached and may still route through the
     // proxy, so the CA and its trust stay with it.
     if (parsed.purge && !parsed.dryRun && refused) {
-      if (!parsed.json) ctx.stderr.write('Skipped --purge: a client that could not be detached may still use the local CA.\n')
+      ctx.stderr.write('Skipped --purge: a client that could not be detached may still use the local CA.\n')
     } else if (parsed.purge && !parsed.dryRun) {
       const purged = await purgeProxyTrustResidue({ ctx })
-      if (!parsed.json) {
-        for (const line of purged.lines) ctx.stdout.write(`${line}\n`)
-      }
+      // Under --json, stdout is the per-client NDJSON, so the purge lines
+      // (diagnostics, not data) go to stderr rather than being dropped.
+      const out = parsed.json ? ctx.stderr : ctx.stdout
+      for (const line of purged.lines) out.write(`${line}\n`)
     }
     return exitCode
   }
