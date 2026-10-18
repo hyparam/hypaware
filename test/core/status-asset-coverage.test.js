@@ -116,3 +116,23 @@ test('the notice dedupes, sorts, labels, and bounds the client list', () => {
     /^Managed skills\/agents for B, C, D and 1 more are outside/
   )
 })
+
+test('long picker labels are clipped so the remedy survives the line cap in both views', async () => {
+  /** @param {string} client */
+  const rec = (client) => ({ kind: /** @type {const} */ ('skill'), name: 's', client, dest: `/x/${client}` })
+  const remedy = /are outside automatic update coverage; run hyp skills install after package updates\n/
+  for (const clients of [['a'], ['a', 'b', 'c', 'd']]) {
+    const line = describeAssetCoverage({ records: clients.map(rec), attached: [], labelOf: (name) => name.repeat(400) })
+    assert.ok(line && line.length <= 400, `line is ${line?.length} characters`)
+    const s = await stage()
+    try {
+      const report = await collectHypAwareStatus({ env: s.env })
+      report.assetCoverage = line
+      const out = render(report)
+      assert.match(out.compact, remedy)
+      assert.match(out.verbose, remedy)
+    } finally {
+      await s.cleanup()
+    }
+  }
+})

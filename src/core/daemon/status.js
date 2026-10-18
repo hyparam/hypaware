@@ -3063,6 +3063,12 @@ export async function collectHypAwareStatus(opts = {}) {
 const ASSET_COVERAGE_MAX_NAMED = 3
 
 /**
+ * Per-name cap, so three names plus the sentence stay inside the renderers'
+ * 400-character line cap and the remedy is never the part that gets cut.
+ */
+const ASSET_COVERAGE_MAX_LABEL_CHARS = 64
+
+/**
  * The informational notice for managed skills and agents that update-time
  * installation will not refresh, or null when there are none.
  *
@@ -3086,7 +3092,8 @@ export function describeAssetCoverage({ records, attached, labelOf }) {
   }
   if (uncovered.size === 0) return null
   const names = [...uncovered].sort(compareStrings)
-  const shown = names.slice(0, ASSET_COVERAGE_MAX_NAMED).map(labelOf)
+  const shown = names.slice(0, ASSET_COVERAGE_MAX_NAMED)
+    .map((name) => sanitizeLabel(labelOf(name), ASSET_COVERAGE_MAX_LABEL_CHARS) ?? name)
   const rest = names.length - shown.length
   const who = rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ')
   return `Managed skills/agents for ${who} are outside automatic update coverage; run hyp skills install after package updates`
