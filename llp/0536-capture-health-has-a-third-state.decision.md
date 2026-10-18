@@ -129,11 +129,15 @@ Some things are passed over without costing certainty:
 first, and at most 128 KiB (`MAX_CONFIRM_TAIL_BYTES`) is read from the end of
 each (plus one boundary byte per tail). The worst case is therefore about
 2 MiB read and parsed once per `hyp status`, and only on the path that would
-otherwise print a gap. Exhausting either limit
-makes the read uncertain, and an uncertain read with no turn past the
-threshold answers `unknown`.** A turn it did find past the threshold still
-answers `gap` ([#positive-evidence](#positive-evidence)): running out of budget
-can cost an answer, but it cannot cancel a finding.
+otherwise print a gap. A read the limits leave unsettled, with no turn found
+past the threshold, answers `unknown`.** Hitting a limit does not by itself
+unsettle the read. Evicting candidates past the file cap always does. A
+truncated tail does only when it found no turn and never reached back to the
+baseline ([#certainty-obligation](#certainty-obligation)): a tail cut at
+128 KiB that ends in a dated turn is settled, and reads `ok` when that turn is
+inside the threshold. A turn found past the threshold still answers `gap`
+([#positive-evidence](#positive-evidence)). Running out of budget can cost an
+answer, but it cannot cancel a finding.
 
 The sizes come from the real transcripts measured for #2295. Sixteen files
 cover a sitting's worth of concurrently written sessions (a main transcript
@@ -145,10 +149,11 @@ both figures by more than 3x.
 The budget bounds the content read and the candidate list, which uses bounded
 insertion rather than collect-then-sort. It does not make status constant-time.
 Directory discovery still walks the probe tree to `MAX_ACTIVITY_PROBE_DEPTH`
-and stats each matching file, and that cost grows with the tree. The budget
-fails toward `unknown` because the read exists only to keep the gap diagnostic
-honest. Guessing on an exhausted budget would bring back the false accusation
-or the false all-clear that the read was added to prevent.
+and stats each matching file, and that cost grows with the tree. A read the
+limits leave unsettled fails toward `unknown` because the read exists only to
+keep the gap diagnostic honest. Guessing on an unsettled read would bring back
+the false accusation or the false all-clear that the read was added to
+prevent.
 
 ### Format ownership {#format-ownership}
 
@@ -165,8 +170,8 @@ format and a decision that extends this one, not a relaxed check.
 
 - `hyp status` raises `capture_gap` only on transcript content, never on an
   mtime. A user is told sessions went uncaptured only when a dated turn says so.
-- A machine whose transcript tree defeats the budget, with no turn found past
-  the threshold, sees `[capture unconfirmed]` with an `overall` that is not
+- A machine whose transcript tree leaves the bounded read unsettled, with no
+  turn found past the threshold, sees `[capture unconfirmed]` with an `overall` that is not
   degraded. That is the honest result for a question that was not answered. If
   the read did find such a turn, the machine sees `capture_gap` at its S17
   severity, budget or no budget.
