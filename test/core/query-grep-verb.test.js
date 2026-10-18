@@ -516,6 +516,61 @@ test('--remote calls the server grep_search with the wire params and renders its
   assert.match(err.join(''), /more matches exist beyond the limit/)
 })
 
+/**
+ * Run `hyp query grep needle --remote prod` against `stubServer` and keep
+ * what reached each stream.
+ *
+ * @param {string[]} extra
+ */
+async function runRemoteGrep(extra = []) {
+  /** @type {string[]} */ const out = []
+  /** @type {string[]} */ const err = []
+  const ctx = /** @type {any} */ ({
+    env: { HYP_HOME: '/tmp/none', HYP_REMOTE_TOKEN_PROD: 'tok' },
+    config: { version: 2, query: { remotes: { prod: { url: 'https://hyp.internal/mcp' } } } },
+    query: {}, storage: {},
+    stdout: { write: (/** @type {string} */ s) => out.push(s) },
+    stderr: { write: (/** @type {string} */ s) => err.push(s) },
+  })
+  const code = await cmd.run(['needle', '--remote', 'prod', ...extra], ctx)
+  return { code, out: out.join(''), err: err.join('') }
+}
+
+test('a malformed --remote answer fails in every format instead of rendering as an empty success', async (t) => {
+  // `--remote` adopts the server's answer without running `operation`, so
+  // the floor the local and injected paths enforce has to hold on render.
+  const malformed = [
+    { truncated: false, exhausted: true },
+    { hits: {}, truncated: false, exhausted: true },
+    { hits: [], exhausted: true },
+    { hits: [], truncated: false },
+    { hits: [], truncated: 'no', exhausted: true },
+  ]
+  for (const answer of malformed) {
+    for (const format of [[], ['--format', 'json'], ['--format', 'jsonl']]) {
+      stubServer(t, answer)
+      const { code, out, err } = await runRemoteGrep(format)
+      const label = `${JSON.stringify(answer)} ${format.join(' ')}`
+      assert.equal(code, 1, label)
+      assert.equal(out, '', label)
+      assert.match(err, /the grep_search backend returned no (hits array|truncated\/exhausted booleans)/, label)
+    }
+  }
+})
+
+test('a valid empty --remote answer still succeeds and keeps both completeness notices', async (t) => {
+  stubServer(t, { hits: [], truncated: false, exhausted: true })
+  const empty = await runRemoteGrep()
+  assert.equal(empty.code, 0)
+  assert.doesNotMatch(empty.err, /backend returned|more matches exist|stopped before/)
+
+  stubServer(t, { hits: [], truncated: true, exhausted: false })
+  const both = await runRemoteGrep(['--format', 'json'])
+  assert.equal(both.code, 0)
+  assert.match(both.err, /more matches exist beyond the limit/)
+  assert.match(both.err, /stopped before covering every file/)
+})
+
 // The injected-backend seam (LLP 0314 / LLP 0353). These drive
 // `operation` directly with a stubbed context, because the harness above
 // goes through the projected command, whose `buildOperationContext` never

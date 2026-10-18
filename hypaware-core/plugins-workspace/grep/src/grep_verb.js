@@ -171,29 +171,7 @@ export const queryGrepVerb = {
       if (err instanceof GrepQueryError) throw new VerbUsageError(err.message)
       throw err
     }
-    // A backend that answered with the wrong shape must not read as an
-    // empty archive. The render falls back field by field, so a missing or
-    // misnamed `hits` renders as a clean zero-row table with neither
-    // completeness notice and exit 0, and the one guard that would have
-    // caught it (the zero-files line below) cannot fire for a
-    // server-shaped result: its counters are the local service's own and
-    // are undefined, not 0. That is the forged "nothing is stored" the
-    // summary's coverage clause exists to prevent, so a malformed answer
-    // is a failed search rather than an honest zero.
-    if (!Array.isArray(result?.hits)) {
-      throw new Error('the grep_search backend returned no hits array')
-    }
-    // The same argument reaches the two completeness facts, which are
-    // required booleans on `GrepSearchResult`, not local extras a
-    // server-shaped result is entitled to omit. The render reads each with
-    // a strict comparison, so a backend that stopped at its own deadline
-    // and left `exhausted` off prints no "stopped before covering every
-    // file" line and its partial answer reads as a complete one; an
-    // omitted `truncated` hides the beyond-the-limit notice the same way.
-    // @ref LLP 0303#completeness-signals [constrained-by]: a consumer told only one of the two facts is told the wrong half, so a backend reporting neither is the same forgery as one reporting no hits
-    if (typeof result.truncated !== 'boolean' || typeof result.exhausted !== 'boolean') {
-      throw new Error('the grep_search backend returned no truncated/exhausted booleans')
-    }
+    assertGrepResultShape(result)
     // The ceiling's own promise, carried through to the render: at the
     // ceiling there is no larger `--limit` left to ask for, so the
     // truncation notice must not send the caller back to a flag that
@@ -205,6 +183,10 @@ export const queryGrepVerb = {
     return { ...result, limitCeilingReached: limit >= MAX_LIMIT }
   },
   render(result, controls, params) {
+    // `--remote` adopts the server's answer without running `operation`, so
+    // the shape floor is enforced here too: a malformed remote answer is a
+    // failed render (exit 1) rather than an empty or complete success.
+    assertGrepResultShape(result)
     const r = /** @type {Partial<GrepSearchResult> & { localOnly?: LocalOnlyVisibilityReport, freshnessMessages?: string[], limitCeilingReached?: boolean, indexedFiles?: number, scannedFiles?: number }} */ (result)
     const hits = Array.isArray(r.hits) ? r.hits : []
     // One row per matched column, rg-style: the locator columns lead, the
@@ -270,6 +252,38 @@ export const queryGrepVerb = {
       ...(out.file ? { file: out.file } : {}),
     }
   },
+}
+
+/**
+ * The minimum answer shape both routes require before anything renders.
+ *
+ * @param {unknown} value
+ */
+function assertGrepResultShape(value) {
+  const result = /** @type {Partial<GrepSearchResult> | null | undefined} */ (value)
+  // A backend that answered with the wrong shape must not read as an
+  // empty archive. The render falls back field by field, so a missing or
+  // misnamed `hits` renders as a clean zero-row table with neither
+  // completeness notice and exit 0, and the one guard that would have
+  // caught it (the zero-files line in `render`) cannot fire for a
+  // server-shaped result: its counters are the local service's own and
+  // are undefined, not 0. That is the forged "nothing is stored" the
+  // summary's coverage clause exists to prevent, so a malformed answer
+  // is a failed search rather than an honest zero.
+  if (!Array.isArray(result?.hits)) {
+    throw new Error('the grep_search backend returned no hits array')
+  }
+  // The same argument reaches the two completeness facts, which are
+  // required booleans on `GrepSearchResult`, not local extras a
+  // server-shaped result is entitled to omit. The render reads each with
+  // a strict comparison, so a backend that stopped at its own deadline
+  // and left `exhausted` off prints no "stopped before covering every
+  // file" line and its partial answer reads as a complete one; an
+  // omitted `truncated` hides the beyond-the-limit notice the same way.
+  // @ref LLP 0303#completeness-signals [constrained-by]: a consumer told only one of the two facts is told the wrong half, so a backend reporting neither is the same forgery as one reporting no hits
+  if (typeof result.truncated !== 'boolean' || typeof result.exhausted !== 'boolean') {
+    throw new Error('the grep_search backend returned no truncated/exhausted booleans')
+  }
 }
 
 /**
