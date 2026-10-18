@@ -298,7 +298,10 @@ the process doing the work, in MB:
 
 Narrow the work first: add a `WHERE` or date filter, a `LIMIT`, or aggregate
 instead of selecting raw rows. Raise a budget only when the work genuinely
-needs the memory. A value that is blank or not a number is ignored and the
+needs the memory, and give it a positive value. A value that is blank or not a
+number is ignored and the default applies. At zero or below the two differ:
+`HYP_QUERY_MAX_HEAP_MB` turns the query heap guard off rather than tightening
+it, while `HYP_GRAPH_PROJECTION_MAX_HEAP_MB` is ignored and the projection
 default applies.
 
 For a command you run yourself, set it in the same shell:
