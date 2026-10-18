@@ -2637,6 +2637,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // that would otherwise print "not being captured" and send the user off
       // to restart their daemon.
       // @ref LLP 0257#status-and-health [implements]: S17 compares the last event against last *transcript activity*; mtime only nominates a candidate, transcript content confirms it
+      // @ref LLP 0536#positive-evidence [implements]: a confirmed turn reads gap despite a partial read; an unsettled one reads unknown, never ok
       if (verdict.state === 'gap') {
         const baselineMs = captureBaselineMs(lastEventAt, attachedAt, listenerStartedAt)
         const confirmed = await confirmClientActivityFromDescriptor({
@@ -4031,6 +4032,7 @@ const MAX_CONFIRM_TAIL_BYTES = 128 * 1024
  * as a clean bill of health and hide a real gap.
  *
  * @ref LLP 0257#status-and-health [implements]: "last transcript activity" is a conversation record, not a filesystem timestamp
+ * @ref LLP 0536#certainty-obligation [implements]: certain only when every post-baseline byte that could hold a turn was read in the claude format
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv, sinceMs: number }} args
  * @returns {Promise<{ activityAt?: string, certain: boolean }>}
  */

@@ -254,7 +254,7 @@ export function renderClientStatusText(rows, stdout) {
       const events = row.capture_health.last_event_at ?? 'none'
       const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
       // `unknown` is the bounded confirmation read declining to answer, and
-      // the line says so rather than picking a side (LLP 0257 #status-and-health).
+      // the line says so rather than picking a side (LLP 0536 #rendering).
       const gap = row.capture_health.state === 'gap'
         ? ' [capture gap]'
         : row.capture_health.state === 'unknown' ? ' [capture unconfirmed]' : ''
