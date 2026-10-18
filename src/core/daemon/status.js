@@ -3093,7 +3093,9 @@ export function describeAssetCoverage({ records, attached, labelOf }) {
   if (uncovered.size === 0) return null
   const names = [...uncovered].sort(compareStrings)
   const shown = names.slice(0, ASSET_COVERAGE_MAX_NAMED)
-    .map((name) => sanitizeLabel(labelOf(name), ASSET_COVERAGE_MAX_LABEL_CHARS) ?? name)
+    .map((name) => sanitizeLabel(labelOf(name), ASSET_COVERAGE_MAX_LABEL_CHARS)
+      ?? sanitizeLabel(name, ASSET_COVERAGE_MAX_LABEL_CHARS)
+      ?? 'an unnamed client')
   const rest = names.length - shown.length
   const who = rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ')
   return `Managed skills/agents for ${who} are outside automatic update coverage; run hyp skills install after package updates`

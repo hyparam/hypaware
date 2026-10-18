@@ -121,8 +121,16 @@ test('long picker labels are clipped so the remedy survives the line cap in both
   /** @param {string} client */
   const rec = (client) => ({ kind: /** @type {const} */ ('skill'), name: 's', client, dest: `/x/${client}` })
   const remedy = /are outside automatic update coverage; run hyp skills install after package updates\n/
-  for (const clients of [['a'], ['a', 'b', 'c', 'd']]) {
-    const line = describeAssetCoverage({ records: clients.map(rec), attached: [], labelOf: (name) => name.repeat(400) })
+  /** @type {Array<[string[], (name: string) => string]>} */
+  const cases = [
+    [['a'], (name) => name.repeat(400)],
+    [['a', 'b', 'c', 'd'], (name) => name.repeat(400)],
+    // A label that sanitizes to nothing falls back to the client name, clipped too.
+    [['a'.repeat(400), 'b'.repeat(400), 'c'.repeat(400)], () => '\n'],
+    [['\n'], () => '\n'],
+  ]
+  for (const [clients, labelOf] of cases) {
+    const line = describeAssetCoverage({ records: clients.map(rec), attached: [], labelOf })
     assert.ok(line && line.length <= 400, `line is ${line?.length} characters`)
     const s = await stage()
     try {
