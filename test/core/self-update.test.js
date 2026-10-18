@@ -804,16 +804,45 @@ test('npm runs with the node bin directory on PATH, not the service manager defa
   }
 })
 
+test('the apply lock stays stale-proof for twice the longest bounded apply path', async () => {
+  // Each command `runCommand` starts is bounded by its timeout (npm's when
+  // none is given) plus the SIGKILL grace. Pricing the commands
+  // `applySelfUpdate` actually issues, on both of its longest paths, keeps
+  // a command added later from silently eating the margin: the sequence
+  // pin fails first, and the price check fails if the window is not grown.
+  /** @param {{ timeoutMs?: number } | undefined} options */
+  const budget = (options) =>
+    (typeof options?.timeoutMs === 'number' ? options.timeoutMs : NPM_TIMEOUT_MS) + NPM_KILL_GRACE_MS
+  for (const preflightFails of [undefined, '1.1.0']) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-budget-'))
+    try {
+      const { packageRoot, runner } = await fakeGlobalInstall(dir, { preflightFails })
+      /** @type {string[]} */
+      const steps = []
+      let held = 0
+      const result = await applySelfUpdate({
+        name: 'hypaware', version: '1.1.0', previousVersion: '1.0.0', packageRoot, env: {},
+        runner: async (cmd, args, options) => {
+          steps.push(cmd === 'npm' ? `npm ${args.join(' ')}` : args.slice(1).join(' '))
+          held += budget(options)
+          return runner(cmd, args, options)
+        },
+      })
+      assert.deepEqual(steps, preflightFails
+        ? ['npm config get prefix', 'npm install -g hypaware@1.1.0', '--version', 'npm install -g hypaware@1.0.0']
+        : ['npm config get prefix', 'npm install -g hypaware@1.1.0', '--version', 'skills install --attached'])
+      assert.equal(result.applied, !preflightFails)
+      assert.equal(2 * held, APPLY_LOCK_STALE_MS)
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('the apply lock outlives the longest legitimate hold and releases only its own', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-life-'))
   try {
     const lockPath = path.join(dir, 'run', 'self-update.lock')
-    // `applySelfUpdate` runs two npm commands, each capped at the npm
-    // timeout plus the SIGKILL grace. A stale window below that sum lets a
-    // second process steal a live holder's lock and start the concurrent
-    // `npm install -g` the lock exists to prevent.
-    assert.ok(APPLY_LOCK_STALE_MS > 2 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS))
-
     const release = acquireApplyLock(dir)
     assert.ok(release)
     assert.equal(acquireApplyLock(dir), null)

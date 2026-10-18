@@ -38,15 +38,23 @@ const PROBE_TIMEOUT_MS = 5000
 export const NPM_TIMEOUT_MS = 120_000
 // How long a timed-out npm gets to honor SIGTERM before SIGKILL.
 export const NPM_KILL_GRACE_MS = 5000
+// How long the new install's entrypoint gets to print its version before
+// the apply is judged broken and rolled back.
+export const PREFLIGHT_TIMEOUT_MS = 30_000
+// The longest a live holder can legitimately hold the apply lock.
+// `applySelfUpdate` runs the prefix query, the install and the preflight,
+// then either the skills install or the rollback, never both. Every
+// command is bounded by its timeout plus the SIGKILL grace `runCommand`
+// gives it, so the worst path is three npm-length commands and one
+// preflight: 410s.
+const APPLY_LONGEST_HOLD_MS =
+  3 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS) + (PREFLIGHT_TIMEOUT_MS + NPM_KILL_GRACE_MS)
 // An apply lock this old belonged to a process that died mid-install;
-// honoring it forever would wedge updates permanently. The floor is the
-// longest a live holder can legitimately hold it: `applySelfUpdate` runs
-// up to three install commands (prefix, install, and either rollback or
-// skills install) plus the preflight, each bounded by its timeout, about
-// 390s of the 500s here. Reclaiming a lock its owner still holds starts
-// the second concurrent `npm install -g` this lock exists to prevent, so
-// erring long costs a slower recovery and erring short costs the machine.
-export const APPLY_LOCK_STALE_MS = 4 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS)
+// honoring it forever would wedge updates permanently. Reclaiming a lock
+// its owner still holds starts the second concurrent `npm install -g` this
+// lock exists to prevent, so erring long costs a slower recovery and
+// erring short costs the machine: twice the longest legitimate hold.
+export const APPLY_LOCK_STALE_MS = 2 * APPLY_LONGEST_HOLD_MS
 const DAILY_CHECK_MS = 24 * 60 * 60 * 1000
 // One hour when the previous boot never reached healthy: a machine
 // stuck on a broken release re-probes eagerly so it jumps to the fix
@@ -67,9 +75,6 @@ export const SELF_UPDATE_RESTART_EXIT_CODE = 75
  */
 const CONFIG_BASENAME = 'hypaware-config.json'
 
-// How long the new install's entrypoint gets to print its version before
-// the apply is judged broken and rolled back.
-export const PREFLIGHT_TIMEOUT_MS = 30_000
 // How many consecutive boots on a freshly installed version may fail to
 // reach the kernel before the pre-boot lane reinstalls the version it
 // replaced. One is not enough: the first relaunch after a power loss
