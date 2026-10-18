@@ -24,7 +24,7 @@ import { groupThousands } from '../util/format_number.js'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
- * @import { PendingVolume, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
+ * @import { PendingVolume, SinkDatasetDiscovery, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
@@ -394,13 +394,23 @@ export async function runSync(argv, ctx) {
   }
 
   const described = new Map(destinations.map((d) => [d.instance, d]))
+  let incomplete = false
   for (const r of report.sinks) {
-    // Successful file copies are incidental to sharing. Failures still need
-    // their diagnostic and continue to determine the command's exit code.
-    if (!displayedInstances.has(r.instance) && r.status === 'exported') continue
-    ctx.stdout.write(renderResult(r, described.get(r.instance)))
+    const unread = (r.datasets ?? []).filter((d) => d.discovery !== 'complete')
+    if (unread.length > 0) incomplete = true
+    const dest = described.get(r.instance)
+    // Successful file copies are incidental to sharing. Failures, including a
+    // dataset the copy could not read, still need their diagnostic and
+    // continue to determine the command's exit code.
+    if (displayedInstances.has(r.instance) || r.status !== 'exported') {
+      ctx.stdout.write(renderResult(r, dest) + renderPrepared(r))
+    }
+    for (const d of unread) ctx.stderr.write(renderUnread(d, dest?.text ?? r.instance))
   }
-  return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+  if (incomplete) {
+    ctx.stderr.write('  Data that could not be read stays in the local cache; run `hyp sync` again to retry.\n')
+  }
+  return incomplete || report.sinks.some((r) => r.status === 'failed') ? 1 : 0
 }
 
 /**
@@ -932,11 +942,44 @@ function renderResult(r, dest) {
   if (r.status === 'failed') {
     return `Could not send to ${where}: ${r.error ?? 'no reason given; see `hyp status`'}\n`
   }
+  // A destination that read no dataset at all sent nothing, and saying so
+  // with a check mark would be a confident zero-work success.
+  if (r.datasets?.length && r.datasets.every((d) => d.discovery === 'failed')) {
+    return `Nothing sent to ${where}: no dataset could be read\n`
+  }
   const verb = dest?.offMachine === true ? 'uploaded' : 'exported'
   if (r.status === 'partial') {
     return `Partly ${verb} to ${where}${r.error ? ` (${r.error})` : ''}; the rest goes on the next sync\n`
   }
   return `✓ ${verb.charAt(0).toUpperCase()}${verb.slice(1)} to ${where}\n`
+}
+
+/**
+ * The partitions discovery handed this destination, per dataset, under its
+ * result line. Empty datasets are left out; a partly read one says so.
+ *
+ * @param {TickReport['sinks'][number]} r
+ * @returns {string}
+ */
+function renderPrepared(r) {
+  return (r.datasets ?? [])
+    .filter((d) => d.partitions > 0)
+    .map((d) => `  ${d.dataset}: ${plural(d.partitions, 'partition')}${d.discovery === 'partial' ? ' (incomplete)' : ''}\n`)
+    .join('')
+}
+
+/**
+ * One dataset this destination's discovery could not fully read. The cause
+ * is plugin-owned and stays in the `sink.discover_partitions_failed` log.
+ *
+ * @param {SinkDatasetDiscovery} d
+ * @param {string} where
+ * @returns {string}
+ */
+function renderUnread(d, where) {
+  return d.discovery === 'failed'
+    ? `warning: could not read ${d.dataset} for ${where}; this sync left it out\n`
+    : `warning: read only part of ${d.dataset} for ${where}; this sync did not cover all of it\n`
 }
 
 /**

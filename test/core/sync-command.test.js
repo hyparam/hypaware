@@ -761,6 +761,102 @@ test('a failed accompanying copy remains visible and fails the command', async (
   await fs.rm(hypHome, { recursive: true, force: true })
 })
 
+/**
+ * Give `ctx` two cached datasets whose discovery the test controls (#976).
+ * `failed` throws on every discovery. `partial` reads once, has rows waiting
+ * in the spool, and throws when the driver re-discovers after the flush; the
+ * pending preview never flushes, so only the export pass sees that failure.
+ *
+ * @param {any} ctx
+ * @param {{ logs?: 'complete' | 'failed' | 'partial', metrics?: 'complete' | 'failed' | 'partial' }} modes
+ */
+function withDatasets(ctx, modes) {
+  const flushed = new Set()
+  /** @param {string} name @param {'complete' | 'failed' | 'partial'} mode */
+  const dataset = (name, mode) => ({
+    name,
+    async discoverPartitions() {
+      if (mode === 'failed' || (mode === 'partial' && flushed.has(name))) throw new Error(`secret-path ${name}`)
+      return [
+        { dataset: name, partition: { p: 'a' }, tablePath: `/cache/${name}/a` },
+        { dataset: name, partition: { p: 'b' }, tablePath: `/cache/${name}/b` },
+      ]
+    },
+  })
+  ctx.query = {
+    listDatasets: () => [dataset('logs', modes.logs ?? 'complete'), dataset('metrics', modes.metrics ?? 'complete')],
+  }
+  ctx.storage = {
+    ...ctx.storage,
+    tableExists: () => true,
+    hasPendingSync: (/** @type {string} */ tablePath) => modes[tablePath.split('/')[2]] === 'partial',
+    async flushTable(/** @type {string} */ tablePath) { flushed.add(tablePath.split('/')[2]) },
+  }
+}
+
+test('a complete sync reports what it prepared per dataset and warns about nothing', async () => {
+  const hypHome = await makeHome('discovery-complete')
+  const { ctx, stdout, stderr } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeSink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('archive-copy', { dir: '/home/u/exports' }),
+    ],
+  })
+  withDatasets(ctx, {})
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n {2}logs: 2 partitions\n {2}metrics: 2 partitions\n/)
+  assert.doesNotMatch(stdout.text, /\/home\/u\/exports\n {2}logs/, 'a successful hidden copy stays silent')
+  assert.doesNotMatch(stderr.text, /warning:/)
+  assert.doesNotMatch(stdout.text, /\x1b/, 'plain output carries no escape codes')
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('a dataset that could not be read is named on stderr and fails the command', async () => {
+  const hypHome = await makeHome('discovery-failed')
+  const central = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const copy = fakeSink('archive-copy', { dir: '/home/u/exports' })
+  const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [central, copy] })
+  withDatasets(ctx, { logs: 'failed' })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  // What did go out is still reported as sent; the summary line is unchanged.
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n {2}metrics: 2 partitions\n/)
+  assert.doesNotMatch(stdout.text, / {2}logs:/)
+  assert.match(stderr.text, /^warning: could not read logs for hypaware\.example\.com; this sync left it out$/m)
+  // The hidden copy's failure to read is shown even though its success is not.
+  assert.match(stderr.text, /^warning: could not read logs for \/home\/u\/exports; this sync left it out$/m)
+  assert.doesNotMatch(stdout.text, /Exported to \/home\/u\/exports/)
+  assert.match(stderr.text, /run `hyp sync` again to retry/)
+  assert.doesNotMatch(stderr.text + stdout.text, /secret-path/, 'the plugin error is not echoed')
+  assert.equal(central.exported.length, 1, 'the readable dataset still shipped')
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('a dataset read only in part is marked incomplete and fails the command', async () => {
+  const hypHome = await makeHome('discovery-partial')
+  const { ctx, stdout, stderr } = makeCtx({
+    hypHome, sinks: [fakeSink('central', { url: 'https://hypaware.example.com' })],
+  })
+  withDatasets(ctx, { metrics: 'partial' })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n {2}logs: 2 partitions\n {2}metrics: 2 partitions \(incomplete\)\n/)
+  assert.match(stderr.text, /^warning: read only part of metrics for hypaware\.example\.com; this sync did not cover all of it$/m)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('when no dataset can be read the sync does not claim success', async () => {
+  const hypHome = await makeHome('discovery-all-failed')
+  const central = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [central] })
+  withDatasets(ctx, { logs: 'failed', metrics: 'failed' })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  assert.doesNotMatch(stdout.text, /✓/)
+  assert.match(stdout.text, /^Nothing sent to hypaware\.example\.com: no dataset could be read$/m)
+  assert.match(stderr.text, /could not read logs for hypaware\.example\.com/)
+  assert.match(stderr.text, /could not read metrics for hypaware\.example\.com/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
 test('a file-only sync still names its target and reports its result', async () => {
   const hypHome = await makeHome('file-only-plan')
   const { ctx, stdout } = makeCtx({

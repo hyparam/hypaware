@@ -14,7 +14,7 @@ import { createDiagnosticHistory } from './diagnostic_history.js'
  * @import { DatasetRegistration, ExportProgress, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
  * @import { Span } from '../observability/runtime.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
- * @import { DriverOptions, TickOptions, TickReport, SinkRunOutcome, SinkExecutionState } from '../../../src/core/sinks/types.js'
+ * @import { DriverOptions, TickOptions, TickReport, SinkDatasetDiscovery, SinkRunOutcome, SinkExecutionState } from '../../../src/core/sinks/types.js'
  */
 
 // @ref LLP 0471#instance-ownership [implements]: all drivers share one active run and one pending opportunity per handle
@@ -152,7 +152,11 @@ export function createSinkDriver(opts) {
     const report = await runSink(handle, instance, schedule, now, tickOpts.onProgress, state)
     // Closed lifetimes cannot update a replacement's host snapshot.
     if (!state.stopped && !stopped) {
-      try { opts.onComplete?.({ instance, startedAt, completedAt: new Date().toISOString(), report }) }
+      // The per-dataset discovery list is for the caller awaiting this run; the
+      // host snapshot keeps only the scalar fields.
+      // @ref LLP 0471#daemon-work [constrained-by]: completion reaches the host as bounded scalar data, no inventories
+      const { datasets: _datasets, ...scalars } = report
+      try { opts.onComplete?.({ instance, startedAt, completedAt: new Date().toISOString(), report: scalars }) }
       catch (error) { logDispatchError(error) }
     }
     return { report }
@@ -252,7 +256,8 @@ export function createSinkDriver(opts) {
    */
   async function runSink(handle, instance, schedule, now, onProgress, state) {
     const batchId = nextBatchId(now, instance)
-    const partitions = await discoverReadyPartitions(handle, instance)
+    const { partitions, datasets } = await discoverReadyPartitions(handle, instance)
+    const incomplete = datasets.filter((d) => d.discovery !== 'complete').length
     if (state.stopped || stopped) return refused(handle, 'Sync stopped before export; retry after restart.')
     return withSpan(
       'sink.export_batch',
@@ -265,6 +270,7 @@ export function createSinkDriver(opts) {
         hyp_batch_id: batchId,
         hyp_sink_schedule: schedule,
         partitions_count: partitions.length,
+        hyp_datasets_incomplete: incomplete,
         status: 'ok',
       },
       async (span) => {
@@ -290,7 +296,7 @@ export function createSinkDriver(opts) {
           const failed = { status: 'failed', partitionsExported: 0, retryPartitions: partitions, error: message }
           await persistOutbox(handle, instance, batchId, partitions, message)
           recordFailure(handle, instance, batchId, partitions.length, message, span)
-          return summarize(instance, failed)
+          return summarize(instance, failed, datasets)
         }
         const status = result.status
         const exported = result.partitionsExported
@@ -321,21 +327,30 @@ export function createSinkDriver(opts) {
           recordFailure(handle, instance, batchId, retryParts.length, message, span)
           span.setAttribute('status', status === 'partial' ? 'degraded' : 'failed')
         }
-        return summarize(instance, result)
+        return summarize(instance, result, datasets)
       },
       { component: 'sinks' }
     )
   }
 
   /**
+   * The partitions to hand the sink, and what discovery found per dataset.
+   * A dataset whose discovery throws is still isolated so the others ship,
+   * but it is reported rather than dropped: `failed` when nothing of it was
+   * kept, `partial` when the throw came after some of it was (the post-flush
+   * re-discovery). The caller reports that coverage gap apart from the
+   * export result, which stays what the sink acknowledged.
+   *
    * @param {ExtendedSinkHandle} handle
    * @param {string} instance
-   * @returns {Promise<QueryPartition[]>}
+   * @returns {Promise<{ partitions: QueryPartition[], datasets: SinkDatasetDiscovery[] }>}
    */
   async function discoverReadyPartitions(handle, instance) {
     const datasets = queryRegistry.listDatasets()
     /** @type {QueryPartition[]} */
     const all = []
+    /** @type {SinkDatasetDiscovery[]} */
+    const found = []
     /** @type {Set<string>} */
     const seen = new Set()
     // Keep a partition if it is exportable now: either it has no backing
@@ -357,6 +372,9 @@ export function createSinkDriver(opts) {
     }
     for (const dataset of datasets) {
       const datasetName = readDatasetName(dataset)
+      const before = all.length
+      /** @type {SinkDatasetDiscovery['discovery']} */
+      let discovery = 'complete'
       try {
         const discover = () => dataset.discoverPartitions({
           config: config ?? { version: 2 },
@@ -413,14 +431,16 @@ export function createSinkDriver(opts) {
           for (const part of (await discover()) ?? []) keep(part)
         }
       } catch (err) {
+        discovery = all.length > before ? 'partial' : 'failed'
         log.warn('sink.discover_partitions_failed', {
           [Attr.SINK_INSTANCE]: instance,
           [Attr.DATASET]: datasetName,
           message: describeThrown(err),
         })
       }
+      found.push({ dataset: datasetName, partitions: all.length - before, discovery })
     }
-    return all
+    return { partitions: all, datasets: found }
   }
 
   /**
@@ -645,15 +665,17 @@ function describeThrown(err) {
 /**
  * @param {string} instance
  * @param {ExportResult} result
- * @returns {{ instance: string, status: ExportResult['status'], partitionsExported: number, bytesWritten: number, error?: string }}
+ * @param {SinkDatasetDiscovery[]} datasets
+ * @returns {TickReport['sinks'][number]}
  */
-function summarize(instance, result) {
+function summarize(instance, result, datasets) {
   return {
     instance,
     status: result.status,
     partitionsExported: result.partitionsExported,
     bytesWritten: result.bytesWritten ?? 0,
     error: result.error,
+    datasets,
   }
 }
 

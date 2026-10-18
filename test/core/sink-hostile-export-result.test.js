@@ -146,7 +146,7 @@ test('an own enumerable accessor beside the named fields does not reach the summ
     assert.equal(report.sinks[0].bytesWritten, 17)
     assert.deepEqual(
       Object.keys(report.sinks[0]).sort(),
-      ['bytesWritten', 'error', 'instance', 'partitionsExported', 'status'],
+      ['bytesWritten', 'datasets', 'error', 'instance', 'partitionsExported', 'status'],
       'the summary carries only the fields the kernel builds',
     )
   } finally {

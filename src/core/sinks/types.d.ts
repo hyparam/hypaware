@@ -189,6 +189,18 @@ export interface TickOptions {
   source?: 'daemon' | 'manual'
 }
 
+/**
+ * What one sink run's partition discovery found for one dataset. `failed`:
+ * discovery threw before any of it was kept. `partial`: it threw after some
+ * was (the post-flush re-discovery). An empty dataset is `complete` with 0.
+ */
+export interface SinkDatasetDiscovery {
+  dataset: string
+  /** Partitions kept from this dataset and handed to the sink. */
+  partitions: number
+  discovery: 'complete' | 'partial' | 'failed'
+}
+
 export interface TickReport {
   sinks: Array<{
     instance: string
@@ -196,6 +208,8 @@ export interface TickReport {
     partitionsExported: number
     bytesWritten: number
     error?: string
+    /** Per-dataset discovery for this run; absent when the run never discovered. */
+    datasets?: SinkDatasetDiscovery[]
   }>
   /**
    * Present when the whole tick was skipped: an enrolling login's first-sync
