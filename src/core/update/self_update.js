@@ -675,6 +675,7 @@ export async function applySelfUpdate(opts) {
     // the assets on disk for `hyp skills install` or the next upgrade.
     // @ref LLP 0457#update-installs [constrained-by]: this lane declines 0457's post-preflight installer, leaving the rolled-back-from version's assets over older code, and 0457's own recovery paths (attach, hyp skills install, the next upgrade) are what close that mismatch
     // @ref LLP 0458#attached-only [constrained-by]: the flag is the new package's, so a rollback onto an older one does not use it
+    // @ref LLP 0535#rollback-skip [implements]: the permanent, decided exception; the skipped event is the whole explanation, with no version gate
     if (opts.skipSkillsInstall) {
       log('self_update.skills_install_skipped', { reason: 'rollback', version: opts.version })
       return { applied: true }
