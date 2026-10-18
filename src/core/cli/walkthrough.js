@@ -12,7 +12,7 @@ import { isEntryRecording } from '../config/client_recording.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { DurableBinRequiredError, GlobalInstallError } from './global_install.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
-import { daemonIncompleteNote } from '../daemon/platform.js'
+import { daemonIncompleteNote, platformIsSupported } from '../daemon/platform.js'
 import { ServiceOpError } from '../daemon/service_ops.js'
 import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -1803,6 +1803,12 @@ export async function runPickerFinale(args) {
   // claim it would. A withheld restart keeps the summary's initial
   // `skipped: true` record, and `daemonInstall.failed` is where the run says
   // why.
+  //
+  // A platform with no service manager has nothing to restart either. A join
+  // that ended `daemon_incomplete` skips the install rather than failing it,
+  // so `installFailed` is false and the restart used to run straight into
+  // `unsupported platform`, printing `daemon restart failed:` under the note
+  // that had just said there is no background service to install (#1382).
   // @ref LLP 0317#install-means-running [constrained-by]: a pid, not "loaded", is what says a daemon is running
   if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
     const serviceOptions = { ...(homeDir ? { homeDir } : {}) }
@@ -1814,8 +1820,8 @@ export async function runPickerFinale(args) {
     // first `daemon/install.js`.
     try {
       const service = args.daemonService ?? await import('../daemon/install.js')
-      const restartable = !installFailed
-        || (await service.serviceDaemonStatus(serviceOptions)).pid !== undefined
+      const restartable = platformIsSupported(process.platform) && (!installFailed
+        || (await service.serviceDaemonStatus(serviceOptions)).pid !== undefined)
       if (restartable) {
         await service.restartServiceDaemon(serviceOptions)
         summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
