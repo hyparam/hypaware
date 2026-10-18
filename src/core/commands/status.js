@@ -269,6 +269,25 @@ export function renderClientStatusText(rows, stdout) {
 }
 
 /**
+ * The automatic Codex migrations (the scheduled sweep and the reconciler's
+ * attach) record their restart requirement only in the daemon log, and no
+ * persisted field says whether one ran or whether Codex was running at the
+ * time. So the note is conditional and shows for every recording
+ * transcript-mode Codex, which is the one row that is attach n/a with a
+ * probe declared.
+ * @ref LLP 0429#migration: running Codex clients must restart to reload their provider configuration
+ */
+const CODEX_RESTART_NOTE = 'If Codex was running when capture mode changed, restart it to use the new mode.'
+
+/**
+ * @param {HypAwareStatusReport['clients'][number] | undefined} client
+ * @returns {boolean}
+ */
+function needsCodexRestartNote(client) {
+  return client?.name === 'codex' && client.configured && client.recording !== false && client.attachable === false
+}
+
+/**
  * Where the recorder's listener is bound, read from the report's source
  * snapshot.
  *
@@ -370,6 +389,7 @@ export function renderStatusSummary({ report, stdout }) {
   for (const name of notRecording) {
     stdout.write(`\n  To record ${printable(name)} again: hyp client attach ${printable(name)}\n`)
   }
+  if (needsCodexRestartNote(clients.get('codex'))) stdout.write(`\n  ${CODEX_RESTART_NOTE}\n`)
 
   const ollama = report.clients.find(c => c.name === 'ollama')
   if (ollama?.capture) renderOllamaCapture(ollama.capture, stdout, '  ')
@@ -1028,6 +1048,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
       if (c.configured && c.recording === false) stdout.write(`        to record it again: hyp client attach ${c.name}\n`)
+      if (needsCodexRestartNote(c)) stdout.write(`        ${CODEX_RESTART_NOTE}\n`)
       // The probe's error is not this build's prose: a settings file that is
       // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
       // an excerpt of the file back. The client wrote that file, so it is
