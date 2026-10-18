@@ -281,6 +281,7 @@ export type StatusDiagnosticKind =
   | 'gateway_upstreams_dropped'
   | 'recent_errors'
   | 'sink_export_failing'
+  | 'sink_dataset_unsupported'
   | 'sink_materialize_failed'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'

@@ -2,13 +2,14 @@
 
 import path from 'node:path'
 
+import { createHeldDatasetStore } from '../../../src/core/sinks/held_datasets.js'
 import { createInstanceWatermarkStore, instanceWatermarkStateDir } from '../../../src/core/sinks/incremental.js'
 
 import { validateCentralConfig } from './src/config.js'
 import { createConfigPullLoop } from './src/config_client.js'
 import { IdentityClient } from './src/identity_client.js'
 import { createDatasetRolloutStore } from './src/rollout.js'
-import { createForwardSink, initializeOpenDatasetRollouts } from './src/sink.js'
+import { createForwardSink, eligibleOpenDatasetNames, initializeOpenDatasetRollouts } from './src/sink.js'
 
 /**
  * @import { PluginActivationContext, SinkCreateContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -80,6 +81,20 @@ export async function activate(ctx) {
       // @ref LLP 0307#rollout-instant [implements]: initialize dataset rollout state before scheduled exports can observe a first partition
       await initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log: sinkCtx.log })
 
+      // Datasets this destination refused to register, kept on disk so
+      // `hyp status` can say their rows stay local. A failed read is not fatal:
+      // the next hold rewrites the record, and status reports an unreadable one.
+      const instanceStateDir = instanceWatermarkStateDir(sinkCtx.paths.stateDir, sinkCtx.name)
+      const held = createHeldDatasetStore({ stateDir: instanceStateDir, destination: config.url })
+      try {
+        await held.load(eligibleOpenDatasetNames(query))
+      } catch (err) {
+        sinkCtx.log.warn('central.forward.held_state_unavailable', {
+          hyp_sink_instance: sinkCtx.name,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+
       const sink = createForwardSink({
         config,
         identityClient,
@@ -87,7 +102,8 @@ export async function activate(ctx) {
         storage,
         watermarks,
         rollouts,
-        receiptsDir: path.join(instanceWatermarkStateDir(sinkCtx.paths.stateDir, sinkCtx.name), 'receipts'),
+        receiptsDir: path.join(instanceStateDir, 'receipts'),
+        held,
         log: sinkCtx.log,
       })
 

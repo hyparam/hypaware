@@ -32,6 +32,9 @@ import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { sinkInstanceName } from '../registry/sinks.js'
 import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_history.js'
+import { readHeldDatasets } from '../sinks/held_datasets.js'
+import { instanceWatermarkStateDir } from '../sinks/incremental.js'
+import { pluginStateDir } from '../runtime/paths.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { isEphemeralRecordedBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
@@ -2981,6 +2984,9 @@ export async function collectHypAwareStatus(opts = {}) {
   )
   const recentErrorCount = recentErrors.total
   diagnostics.push(...recentErrors.sinkDiagnostics)
+  if (sinksAreConfigured && config?.sinks) {
+    diagnostics.push(...await heldDatasetDiagnostics(stateRoot, config))
+  }
   // A probation that expired while a sink could not materialize says this
   // host could not confirm the revision, not that the revision is bad, so the
   // hint names the sink instead of blaming the config (issue #2547).
@@ -3024,7 +3030,8 @@ export async function collectHypAwareStatus(opts = {}) {
   // `error` severity degrades through the severity rule below by design
   // (LLP 0262 open question 1): silent session loss is an outage, not an
   // unfinished setup.
-  const degradingKinds = new Set(['config_missing', 'config_unreadable'])
+  // @ref LLP 0537#status-warning [implements]: rows a configured destination cannot accept stay local, which is not healthy forwarding
+  const degradingKinds = new Set(['config_missing', 'config_unreadable', 'sink_dataset_unsupported'])
   const overall =
     diagnostics.some((d) => d.severity === 'error') ? 'degraded'
     : v1Diagnostics.length > 0 ? 'degraded'
@@ -4685,6 +4692,53 @@ async function countDaemonLogErrors(logPath, sinceMs, rollbackAtMs) {
     if (isSinkFailure) sinkMaterialize += 1
   }
   return { count, sinkMaterialize, probationSinkFailures: currentBootMaterialized ? currentBoot : previousBoot }
+}
+
+const HELD_DATASET_NAMES_SHOWN = 5
+
+/**
+ * One warning per configured request sink whose destination refused to
+ * register a dataset it would otherwise forward (LLP 0537). Read from the
+ * snapshot the sink keeps on disk, so a fresh `hyp status` sees it with no
+ * daemon to ask. A snapshot that cannot be read warns too: answering nothing
+ * would certify forwarding nobody checked.
+ *
+ * @param {string} stateRoot
+ * @param {HypAwareV2Config} config
+ * @returns {Promise<StatusDiagnostic[]>}
+ */
+async function heldDatasetDiagnostics(stateRoot, config) {
+  const disabled = new Set((config.plugins ?? []).filter((p) => p.enabled === false).map((p) => p.name))
+  /** @type {StatusDiagnostic[]} */
+  const out = []
+  for (const [instance, raw] of Object.entries(config.sinks ?? {})) {
+    const plugin = 'plugin' in raw && typeof raw.plugin === 'string' ? raw.plugin : undefined
+    const url = raw.config?.url
+    if (!plugin || disabled.has(plugin) || typeof url !== 'string' || url.length === 0) continue
+    const read = await readHeldDatasets(instanceWatermarkStateDir(pluginStateDir(stateRoot, plugin), instance), url)
+    const label = sanitizeLabel(instance) ?? 'unknown'
+    if ('unreadable' in read) {
+      out.push({
+        severity: 'warning',
+        kind: 'sink_dataset_unsupported',
+        message: `${label}: held-dataset state is unreadable (${sanitizeLabel(read.unreadable) ?? 'unknown'}), so it is unknown whether every dataset forwards`,
+        repair: ['let the next export rewrite it, or restart the daemon'],
+      })
+      continue
+    }
+    if (read.datasets.length === 0) continue
+    const shown = read.datasets.slice(0, HELD_DATASET_NAMES_SHOWN).map((name) => sanitizeLabel(name) ?? 'unknown')
+    const more = read.datasets.length - shown.length
+    const names = more > 0 ? `${shown.join(', ')} and ${more} more` : shown.join(', ')
+    const count = read.datasets.length
+    out.push({
+      severity: 'warning',
+      kind: 'sink_dataset_unsupported',
+      message: `${label}: the server cannot accept ${count} dataset${count === 1 ? '' : 's'} (${names}); their rows stay local`,
+      repair: ['upgrade the server; held rows forward once it accepts the dataset'],
+    })
+  }
+  return out
 }
 
 /**
