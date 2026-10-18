@@ -56,3 +56,6 @@ default): per-plugin state dirs, the plugin install root and lock file
 ([LLP 0013](./0013-local-query-cache.decision.md)), and collection entries
 ([LLP 0015](./0015-query-and-datasets.spec.md)). Plugins receive scoped paths
 and must not reach into each other's directories.
+
+> **Extended by [LLP 0533](./0533-collect-is-deferred-not-shipped.decision.md#deferred).**
+> Collection entries are deferred with `collect`; the kernel creates none today.

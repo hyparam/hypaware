@@ -337,6 +337,22 @@ test('future setup lifecycle commands remain documentation-only', () => {
   }
 })
 
+// @ref LLP 0533#deferred [tests]: collect is deferred, not shipped, so neither it nor an inspect verb the config group once implied is registered or advertised
+test('deferred collect stays unregistered and the config group claims only validate', async () => {
+  const registry = coreRegistry()
+  for (const name of ['collect', 'collect list', 'collect remove', 'config show']) {
+    assert.equal(registry.get(name), undefined, `${name} must not register while it is deferred`)
+  }
+  assert.deepEqual(listGroupChildren(registry, 'config').map((c) => c.name), ['validate'])
+  const { run } = await harness(registry)
+  const config = await run(['config', '--help'])
+  assert.equal(config.code, 0)
+  assert.match(config.out, /^hyp config - Validate the HypAware config$/m)
+  assert.doesNotMatch(config.out, /inspect/i)
+  const top = await run(['--help'])
+  assert.doesNotMatch(top.out, /collect/)
+})
+
 // A verb declares one `inputSchema` from which the kernel projects both the
 // CLI usage and the MCP tool. A hand-written usage on the projection is the
 // drift that contract exists to prevent.

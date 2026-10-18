@@ -27,6 +27,10 @@
 > per-table field ids, and keep LIMIT/OFFSET on the merged stream. Drifted
 > schemas retain the row-padding behavior specified below.
 
+> **Extended by [LLP 0533](./0533-collect-is-deferred-not-shipped.decision.md).**
+> The `collect` on-ramp below is deferred, not shipped: no command, no
+> collection state. Its text stays as design intent for a future request.
+
 ## Query is intrinsic
 
 Query and Iceberg storage are intrinsic services. Plugins register datasets;
@@ -127,6 +131,10 @@ depends on the read path and is not settled here. Pinned by
 > advertised.
 
 ## Collect: the ad-hoc on-ramp
+
+> **Extended by [LLP 0533](./0533-collect-is-deferred-not-shipped.decision.md#deferred).**
+> This command is deferred and unimplemented; nothing below is registered or
+> created today.
 
 `hypaware collect` registers an external JSONL file (or glob) the user already
 has on disk as a queryable table **without writing a plugin**. It is a **core
