@@ -135,7 +135,9 @@ export type RemoteCredentialRecord = RemoteStaticRecord | RemoteOidcRecord
  *
  * `no_membership` / `org_not_permitted` / `org_selection_required` are the
  * server-surfaced LLP 0058 D7 refusals, definitive in the sense that the same
- * bare login cannot fix them. `denied` is a provider denial and `login_failed`
+ * bare login cannot fix them. `no_poll_endpoint` is a server too old for the
+ * poll login lane, definitive in the same sense until the server is upgraded
+ * (LLP 0543#typed). `denied` is a provider denial and `login_failed`
  * a transient or local failure (timeout, network, an abandoned browser flow);
  * both are worth retrying. `help` is the one non-failure that is also not a
  * sign-in: argv asked for the usage line and got it. The rest name a step that
@@ -150,6 +152,7 @@ export type LoginOutcomeReason =
   | 'no_membership'
   | 'org_not_permitted'
   | 'org_selection_required'
+  | 'no_poll_endpoint'
   | 'denied'
   | 'login_failed'
   | 'store_failed'

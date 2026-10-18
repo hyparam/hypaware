@@ -1096,6 +1096,30 @@ test('runInitWizard: a multi-org join failure points at hyp remote login --org',
   assert.doesNotMatch(stderr.text(), /admin needs to grant/)
 })
 
+// A server too old for the poll lane is no access problem, so the fork
+// names the upgrade, not an admin grant, and still offers both rows again:
+// a retry after the upgrade, and local setup now.
+// @ref LLP 0543#sentence [tests]:
+test('runInitWizard: a stale-server join names the upgrade and returns to the fork', async () => {
+  const forkChoices = ['team', 'team', 'local']
+  let joins = 0
+  const { opts, stderr, calls } = wizardOpts(await tmpHome(), {
+    fork: async () => forkChoices.shift(),
+    join: async () => {
+      joins += 1
+      return { status: 'failed', reason: 'no_poll_endpoint', detail: 'hyp remote login: this server does not support poll login yet\n' }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.pathway, 'local')
+  assert.equal(joins, 2, 'the team row is still offered after the failure')
+  assert.deepEqual(calls.slice(0, 6), ['gate', 'fork', 'join', 'fork', 'join', 'fork'])
+  assert.match(stderr.text(), /this server needs an upgrade before it supports browser sign-in/)
+  assert.doesNotMatch(stderr.text(), /admin needs to grant/)
+  assert.doesNotMatch(stderr.text(), /Sign-in did not complete/)
+})
+
 // A successful enrollment whose daemon install failed is not a failed
 // sign-in: the machine is enrolled, so re-presenting the fork would offer
 // enrollment to a machine that already has it, and "Sign-in did not complete"

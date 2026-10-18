@@ -89,7 +89,12 @@ async function runJoinFlow(opts, span) {
   if (login.exitCode !== 0 && login.reason !== 'daemon_incomplete') {
     const failure = classifyLoginFailure(login)
     setSpanAttr(span, 'status', 'error')
-    setSpanAttr(span, Attr.ERROR_KIND, failure === 'failed' ? 'login_rejected' : 'login_abandoned')
+    // A stale server rejected nothing and nobody abandoned anything, so it
+    // names its own fault rather than borrowing either kind.
+    // @ref LLP 0543#telemetry [implements]: the stale-server join reports its actual fault
+    setSpanAttr(span, Attr.ERROR_KIND, login.reason === 'no_poll_endpoint'
+      ? 'no_poll_endpoint'
+      : failure === 'failed' ? 'login_rejected' : 'login_abandoned')
     return { status: failure, detail: login.stderr, ...(login.reason ? { reason: login.reason } : {}) }
   }
   /** @type {'ok' | 'daemon_incomplete'} */
@@ -150,18 +155,23 @@ export async function computeCentralLockedSources(opts) {
  * `org_not_permitted` (an admin has to act) and `org_selection_required`
  * (a multi-org account needs an explicit `hyp remote login --org <name>`
  * the wizard's bare login cannot supply). Retrying the same login is
- * futile for all three -> `'failed'`. Anything else - a provider denial,
- * a transient network error, a login timeout, an abandoned browser flow,
- * a store/seed failure - is retriable, so -> `'abandoned'`.
+ * futile for all three -> `'failed'`. So is `no_poll_endpoint`, a server
+ * too old for the poll login lane: every retry polls the same server and
+ * meets the same 404 until it is upgraded. Anything else - a provider
+ * denial, a transient network error (a proxy's own 404 included), a login
+ * timeout, an abandoned browser flow, a store/seed failure, a code this
+ * does not model - is retriable, so -> `'abandoned'`.
  *
  * A lane result with no reason (an old-shaped test double) classifies as
  * retriable, which is the same answer the stderr matcher gave when it
  * recognized nothing.
  *
- * The closed set is unchanged. `daemon_incomplete` never reaches here:
- * its sign-in completed, so `runJoinFlow` never calls this for it (#978).
+ * The set stays closed: it gains that one member and nothing else.
+ * `daemon_incomplete` never reaches here: its sign-in completed, so
+ * `runJoinFlow` never calls this for it (#978).
  *
- * @ref LLP 0058#d7 [constrained-by]: the three definitive reasons are the D7 refusal codes verbatim, so the split is the server's taxonomy and not a wizard-local one
+ * @ref LLP 0058#d7 [constrained-by]: the three refusal reasons are the D7 codes verbatim, so their split is the server's taxonomy and not a wizard-local one
+ * @ref LLP 0543#failed [implements]: `no_poll_endpoint` is the one definitive member that is not a D7 refusal
  * @ref LLP 0179#no-prose-control-flow [implements]: classify on the reason code, never on the lane's English
  * @param {Pick<LoginLaneResult, 'reason'>} login
  * @returns {'failed' | 'abandoned'}
@@ -171,6 +181,7 @@ export function classifyLoginFailure(login) {
     case 'no_membership':
     case 'org_not_permitted':
     case 'org_selection_required':
+    case 'no_poll_endpoint':
       return 'failed'
     default:
       return 'abandoned'

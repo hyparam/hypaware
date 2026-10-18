@@ -1199,14 +1199,22 @@ export function firstLookHadRows(result) {
  * (`org_selection_required`) is definitive for the wizard - the bare
  * login it wraps cannot pass `--org` - so the fix is the manual login,
  * after which re-running `hyp init` re-enters as an enrolled machine.
+ * A server too old for the poll login lane (`no_poll_endpoint`) is
+ * definitive too, but no admin grant cures it, so it gets its own sentence
+ * rather than the access one.
  *
  * @ref LLP 0179#no-prose-control-flow [implements]: the multi-org branch reads the lane's reason code, not its sentence
+ * @ref LLP 0543#sentence [implements]: the stale server names the upgrade, never membership or access
  * @param {RunInitWizardOptions} opts
  * @param {WizardJoinResult} join
  */
 function printJoinFailure(opts, join) {
   if (join.status !== 'failed') {
     opts.stderr.write('Sign-in did not complete. You can try again, or set up locally for now.\n')
+    return
+  }
+  if (join.reason === 'no_poll_endpoint') {
+    opts.stderr.write('Joining failed: this server needs an upgrade before it supports browser sign-in. Set up locally for now, or try again once the server is upgraded.\n')
     return
   }
   if (join.reason === 'org_selection_required') {
