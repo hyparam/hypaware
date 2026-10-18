@@ -50,3 +50,14 @@ An MCP client must handle both failure forms: a tool result with
 `isError: true`, and a result with `isError: false` whose `structuredContent`
 has `ok: false`. Don't treat `isError: false` alone as a successful set of
 graph results.
+
+## v1.38.0
+
+### Codex capture left the gateway route: restart Codex
+
+Codex is now captured from its local rollout files by default, and inference
+connects directly to your provider. After the upgrade the daemon removes the
+managed gateway route from Codex's `config.toml` on its own. A Codex CLI or
+Desktop that was already running keeps using the old route until it restarts,
+so restart it. `hyp status` repeats this reminder for a Codex in this capture
+mode.
