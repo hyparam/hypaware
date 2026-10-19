@@ -32,17 +32,22 @@ exports and history replay share this claim, independent of receipt replay
 mode. Different destinations and partitions remain independent. No new config,
 schema or runtime dependency is introduced.
 
-Reuse the non-expiring PID/nonce directory guard from LLP 0417. Hold it before
-flushing or reading the partition, loading the watermark or opening receipts,
-through all chunk acknowledgements, the final watermark commit and receipt
-cleanup. A waiting exporter reads progress only after acquiring the claim, so
-it observes the completed upload instead of replaying a stale cursor. The
+Reuse the non-expiring PID/nonce directory guard from LLP 0417. Hold it from
+before the forward pass flushes or reads the partition, loads the watermark or
+opens receipts, through all chunk acknowledgements, the final watermark commit
+and receipt cleanup. A waiting exporter's forward pass reads progress only
+after acquiring the claim, so it observes the completed upload instead of
+replaying a stale cursor. Open-dataset rollout preparation runs before the
+claim, as it did before this change: it may flush the partition, check that
+known progress exists and seed zero progress for a new partition, but the
+cursor an upload sends from is always the one the claimed pass reloads. The
 existing per-runtime scheduling and partition guards remain in place.
 
 A live owner is never displaced by elapsed time. A dead PID can be reclaimed
 by the existing guard protocol. Empty, malformed or unverifiable claims fail
-closed. Missing or unwritable claim storage also fails the upload closed;
-receipt caching's best-effort fallback must not bypass ownership. In-memory
+closed. A missing receipts directory is created for the claim; an unwritable
+one fails the upload closed before any request, so receipt caching's
+best-effort fallback cannot bypass ownership. In-memory
 embedders that supply no receipts directory retain their existing lifecycle;
 production sink creation always supplies the durable instance directory.
 
