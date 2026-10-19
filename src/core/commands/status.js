@@ -1127,15 +1127,26 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
     section('capture health')
     for (const c of report.captureHealth) {
+      const tag = c.state === 'gap'
+        ? '  [telemetry may be interrupted]'
+        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
+      // A marker-less client captures by transcript sweep, not telemetry: its
+      // entry's one timestamp is the newest cached row, and it has no
+      // transcript-activity comparison to show.
+      // @ref LLP 0546#newest-partition: the transcript lane's entry carries the newest cached row
+      if (report.clients.some((r) => r.name === c.client && !r.attachable)) {
+        const rows = c.lastEventAt !== null
+          ? `last captured row ${formatEntrypointAge(c.lastEventAt)}`
+          : 'no captured rows yet'
+        stdout.write(`    - ${c.client}  ${rows}${tag}\n`)
+        continue
+      }
       const events = c.lastEventAt !== null
         ? `last event ${formatEntrypointAge(c.lastEventAt)}`
         : 'no events yet'
       const transcripts = c.lastTranscriptActivityAt !== null
         ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
         : 'no transcript activity'
-      const tag = c.state === 'gap'
-        ? '  [telemetry may be interrupted]'
-        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
     const namedFailures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)

@@ -19,6 +19,12 @@ import {
   perSignalOtlpOverrides,
 } from '../config/otlp_precedence.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
+import { cacheTablePath } from '../cache/paths.js'
+import { resolveIcebergDir } from '../cache/storage.js'
+import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet'
+import { urlToPath } from '../cache/iceberg/resolver.js'
+import { listLiveDataFiles, physicalProjection } from '../cache/iceberg/store.js'
+import { AI_GATEWAY_MESSAGES_DATASET } from '../backfill/scan_util.js'
 import { discoverSpoolTables, QUERY_FLUSH_FAILURE_COOLDOWN_MS, readFlushFailure } from '../cache/spool.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
@@ -2359,6 +2365,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const clients = []
   /** @type {CaptureHealthReport[]} */
   const captureHealth = []
+  const cacheRoot = opts.runtime?.storage?.cacheRoot ?? path.join(stateRoot, 'cache')
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
   let capturePid
   try { capturePid = readPidFile(stateRoot) } catch { /* Unreadable identity stays unconfirmed. */ }
@@ -2743,6 +2750,33 @@ export async function collectHypAwareStatus(opts = {}) {
         })
       }
     }
+
+    // ----- capture health, transcript lane -----
+    // Transcript-mode Codex writes no marker and sends no telemetry, so the
+    // otel line above can never fire for it and a working install had nothing
+    // but "configured" to show (issue #2069). The capture this lane makes is
+    // the row the sweep lands in the cache, so the line reads the newest one.
+    // No row, or a table that cannot be read, is "unconfirmed": configured is
+    // not captured.
+    // @ref LLP 0546#newest-partition [implements]: one read of the newest date partition's timestamps, the narrow exception to LLP 0257 S17 and LLP 0164
+    if (configured && attachWritesNoMarker(clientName, config)) {
+      /** @type {string | null} */
+      let newestRowAt = null
+      try {
+        newestRowAt = await newestCachedClientRowAt(cacheRoot, clientName)
+      } catch { /* best-effort: an unreadable table confirms nothing */ }
+      captureHealth.push({
+        client: clientName,
+        plugin: descriptor.plugin,
+        source: null,
+        lastEventAt: newestRowAt,
+        lastTranscriptActivityAt: null,
+        attachedAt: null,
+        listenerStartedAt: null,
+        gapMs: 0,
+        state: newestRowAt === null ? 'unknown' : 'ok',
+      })
+    }
   }
 
   // ----- client sync split (LLP 0188 #never-silent) -----
@@ -2795,7 +2829,6 @@ export async function collectHypAwareStatus(opts = {}) {
 
   // ----- retention + cache stats -----
   const retention = readRetention(config)
-  const cacheRoot = opts.runtime?.storage?.cacheRoot ?? path.join(stateRoot, 'cache')
   // Best-effort like every other probe here (see this function's docstring): a
   // transient fs error mid-walk (EACCES/EMFILE/EIO, walkForStats re-throws
   // anything but ENOENT) must degrade to zeroed cache stats, never throw out of
@@ -3549,6 +3582,44 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
   }
   failures.sort((a, b) => compareStrings(b.failedAt, a.failedAt) || compareStrings(a.table, b.table))
   return { total: failures.length, failures }
+}
+
+/**
+ * The newest `message_created_at` among a client's cached
+ * `ai_gateway_messages` rows, or null when it has none.
+ *
+ * Bounded by the newest date partition: one metadata load and the manifests
+ * name the files, only that partition's delete data is read, and only its
+ * timestamp column is decoded, one row group at a time. `date` is the UTC day
+ * of `message_created_at`, so no older partition can hold a newer row. A raw
+ * parquet read applies no deletes, so committed delete positions are skipped
+ * here.
+ *
+ * @param {string} cacheRoot
+ * @param {string} clientName
+ * @returns {Promise<string | null>}
+ */
+async function newestCachedClientRowAt(cacheRoot, clientName) {
+  const tableDir = resolveIcebergDir(cacheTablePath(cacheRoot, AI_GATEWAY_MESSAGES_DATASET, [`source=${clientName}`]))
+  let newestMs = -Infinity
+  for (const file of await listLiveDataFiles(tableDir, { newestBy: 'date' })) {
+    const source = await asyncBufferFromFile(urlToPath(file.filePath))
+    const { metadata, columns } = await physicalProjection(source, ['message_created_at'])
+    if (columns.length === 0) continue
+    let start = 0
+    for (const group of metadata.row_groups) {
+      const end = start + Number(group.num_rows)
+      const rows = await parquetReadObjects({ file: source, metadata, columns, rowStart: start, rowEnd: end })
+      for (let i = 0; i < rows.length; i++) {
+        if (file.deletedPositions?.has(BigInt(start + i))) continue
+        const value = rows[i].message_created_at
+        const ms = value instanceof Date ? value.getTime() : typeof value === 'string' ? Date.parse(value) : NaN
+        if (ms > newestMs) newestMs = ms
+      }
+      start = end
+    }
+  }
+  return Number.isFinite(newestMs) ? new Date(newestMs).toISOString() : null
 }
 
 /**
