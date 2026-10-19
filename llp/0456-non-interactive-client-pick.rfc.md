@@ -1,7 +1,7 @@
 # LLP 0456: The non-interactive client pick needs a stated rule
 
 **Type:** RFC
-**Status:** Draft
+**Status:** Accepted
 **Systems:** CLI, Reports
 **Author:** Neutral / Claude
 **Date:** 2026-09-30
@@ -13,7 +13,9 @@
 > that cannot prompt (piped stdin, `HYP_NO_TUI=1`) takes `launchers[0]`,
 > and no document says what earns a client index zero. This RFC records
 > the evidence, lays out the candidate selection rules with their costs,
-> and asks for a decision. It changes no behavior by itself.
+> and asks for a decision. The decision, taken on issue #671, is
+> recorded under #decision: ascending client id, one order for the
+> default and the picker.
 
 ## Context {#context}
 
@@ -23,7 +25,7 @@ Three non-interactive paths take the first entry of the same list:
 again (`report fix`, which hands the launched agent a repository edit).
 The list is built by `askableClients` from the status report's client
 order, filtered by `resolveLaunchers` (LLP 0198 #path-probe), which
-preserves input order. The status order flows from plugin discovery:
+preserved input order until #decision gave it one of its own. The status order flows from plugin discovery:
 `discoverBundledPlugins` in `src/core/runtime/bundled.js` maps
 `fsp.readdir` over the bundled workspace with no explicit sort anywhere
 downstream.
@@ -66,8 +68,9 @@ when discovery order is shuffled adversarially.
 
 ## Candidate rules {#candidates}
 
-None of these is decided here. Each changes something PR #2339 did not
-otherwise touch, which is what makes this a decision and not a patch.
+Each changes something PR #2339 did not otherwise touch, which is what
+makes this a decision and not a patch. #decision takes candidate 1 and
+declines the rest.
 
 <a id="document-current"></a>**1. Adopt the current order as the rule.**
 Declare the pick alphabetical by client name, add the explicit sort at
@@ -117,6 +120,33 @@ Which rule, or which combination (2 plus a default from 1 or 4 is the
 common pairing), governs the non-interactive pick. Whatever is chosen,
 the landing change should carry the test #2368's acceptance condition
 names: pin the picked client and fail when discovery order is shuffled.
+
+## Decision {#decision}
+
+Decided on issue #671 (2026-10-06): **candidate 1, ascending client id**
+(#document-current), with no flag, config key, usage ranking, or refusal.
+
+- `resolveLaunchers` (`src/core/cli/wizard/first_ask.js`) returns the
+  recorded-and-resolvable launchers sorted by client id, ascending, with
+  the shared locale-independent `compareStrings` (code-unit order). It is
+  the one list every caller reads, so the sort sits there and not at each
+  pick site. Workspace directory names and plugin discovery order no
+  longer decide it.
+- For a command that needs one launcher (`hyp ask "<question>"`,
+  `hyp report generate`, `hyp report fix`), the first is the default a run
+  that cannot prompt takes. The interactive picker offers the same order,
+  so its existing deadline fallback starts the same client.
+- The selected client is announced as before, and the recording and
+  launchability filters, permissions, and child exit handling are
+  unchanged. A named `hyp ask` stays launchable without a tty.
+- A newly recorded client whose id sorts earlier becomes the default.
+  That is stated in the CLI reference rather than softened by a saved
+  per-user preference.
+
+This answers the first two open questions below: the same rule governs
+`report fix` and `hyp ask`, and the picker and the default share one
+order. The third does not apply, since the rule needs no change to the
+tty gate.
 
 ## Open questions {#open-questions}
 

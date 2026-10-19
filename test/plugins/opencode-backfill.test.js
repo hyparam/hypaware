@@ -268,7 +268,13 @@ test('OpenCode backfill reports no history rather than a failure when the CLI is
 
   const { items, events } = await collect(provider.run(ctx))
   assert.deepEqual(items, [])
-  assert.deepEqual(events, [])
+  // Ok is not "empty": the note tells setup and `hyp backfill` the import
+  // could not run, and how to retry once PATH is fixed.
+  assert.deepEqual(events.map((e) => e.event), ['import_unavailable'])
+  assert.equal(events[0].attributes?.reason, 'opencode_cli_absent')
+  assert.match(String(events[0].attributes?.note), /opencode was not found on PATH/)
+  assert.match(String(events[0].attributes?.note), /live capture is unaffected/)
+  assert.match(String(events[0].attributes?.note), /hyp backfill opencode/)
   assert.deepEqual(logged.map((l) => l.event), ['opencode.backfill.cli_absent'])
   assert.equal(logged[0].attrs.status, 'ok')
   assert.equal(logged[0].attrs.reason, 'opencode_cli_absent')

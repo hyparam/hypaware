@@ -46,25 +46,25 @@ hyp cache status
 2. Check that the client is attached. Preview and apply its attach using
    `hyp attach CLIENT --dry-run` and `hyp attach CLIENT`.
 3. Check the daemon is running. Use `hyp daemon start` for an installed service,
-   or follow [headless setup](TEAM_SETUP.md#ci-and-headless-deployment) when there is no service manager.
+   or follow [headless setup](integrations/ci-and-headless.md) when there is no service manager.
 4. Start a new client process and complete a turn so it uses the managed settings.
    Ollama attach enables recording and prints recipes without editing client files
    or shell/service `OLLAMA_HOST`; use its
-   [explicit CLI host or SDK constructor](CLIENTS.md#route-a-cli-or-sdk-client).
+   [explicit CLI host or SDK constructor](integrations/ollama.md#route-a-cli-or-sdk-client).
 5. Check `hyp privacy show /absolute/path/to/project` for an ignore marking.
 
 For Claude Code, `hyp client status claude` reports the configured and live
 listener endpoints, recent telemetry, and transcript activity. If the endpoints
 differ, run `hyp attach claude`, restart the daemon, and start a new Claude Code
-process. Check the [client table](CLIENTS.md#choose-and-check-a-client) for minimum
-version requirements.
+process. Check the [Claude Code requirements](integrations/claude-code.md#requirements)
+for minimum versions.
 For transcript-only clients, allow time for the scheduled recovery sweep.
 
 Detaching a gateway-routed client restores its own connection settings if a
 stopped gateway is preventing normal use where that integration manages them.
 Ollama detach leaves the capture host unchanged. With its collector stopped,
 launch the CLI at the preserved direct root or construct a new SDK object with
-that root using [direct recovery](CLIENTS.md#stop-and-resume-ollama-recording).
+that root using [direct recovery](integrations/ollama.md#stop-and-resume-ollama-recording).
 
 ## Ollama capture is unconfirmed
 
@@ -80,7 +80,7 @@ hyp status --verbose
 Check the **Direct upstream**, service/model inventory and **Capture root (live)**
 separately. An executable on PATH does not prove a service or model is ready.
 Use a model already listed and the supported CLI/SDK recipes in
-[clients](CLIENTS.md#route-a-cli-or-sdk-client). A configured or stale capture root
+[clients](integrations/ollama.md#route-a-cli-or-sdk-client). A configured or stale capture root
 is not a live route. After saved endpoint changes with an unconfirmed restart,
 run `hyp daemon restart` and check setup again.
 
@@ -122,7 +122,7 @@ telemetry can supply structured run/exchange correlation, but is not required fo
 the ordinary status/log path. See [diagnostic logs](#find-diagnostic-logs).
 
 When the collector has stopped, use the preserved direct-host CLI command or a
-new `Client(host=...)` from [direct recovery](CLIENTS.md#stop-and-resume-ollama-recording).
+new `Client(host=...)` from [direct recovery](integrations/ollama.md#stop-and-resume-ollama-recording).
 This restores inference without recording. Off/stopped historical timestamps do
 not claim current health. Ollama has no history import or outage replay, and its
 unknown directory means directory exclusions cannot protect these API requests.
@@ -188,9 +188,62 @@ Remote sign-in with `--no-forward` grants query access without setting up
 sync. `hyp leave` stops sync but keeps local recordings.
 See [team setup](TEAM_SETUP.md) and [privacy controls](PRIVACY.md).
 
+### Rows skipped by exports before v1.42.0
+
+<!-- @ref LLP 0492#mixed-versions: an old writer that is still running can still commit below a sink's watermark -->
+Before v1.42.0, a `hyp` command that refreshed the cache while the daemon was
+also writing could commit rows below the point a destination had already
+exported to. Those rows stay in the local cache but no scheduled export sends
+them ([issue 2225](https://github.com/hyparam/hypaware/issues/2225)). v1.42.0
+stops new skips once the daemon restarts on it; `hyp daemon restart` makes
+sure. Nothing finds the rows already skipped, so recovery is a manual step for
+each destination. It reaches only rows the local cache still holds: rows that
+retention has removed are gone from this host.
+
+<!-- @ref LLP 0345#central: central drops a replayed row it already has, by part id -->
+For HypAware Cloud, `hyp sync --history <client>` resends one client's
+retained `ai_gateway_messages` and leaves normal export progress alone. The
+server drops rows it already has, so a rerun is safe. Run it for each client
+that records on this host, and read the preview first: the client must be
+syncing, and the replay also sends rows it held back while it was local-only.
+Folders marked local-only stay withheld. Other datasets, such as traces and
+logs, have no Cloud replay.
+
+<!-- @ref LLP 0040#watermark-contract: one saved position per sink instance and partition; removing it re-reads the partition from the start -->
+<!-- @ref LLP 0040#applying-it-to-both-sinks: a file name carries only its seq range, so a re-export can reuse an earlier name -->
+A local folder or S3 destination has no replay, and it does not drop rows it
+already has. To export one dataset again in full, stop the daemon, move that
+dataset's earlier export files out of the destination, remove the
+destination's saved position for the dataset, then start the daemon and sync:
+
+```sh
+hyp daemon stop
+mv <dir>/<dataset> <kept>/<dataset>
+rm -r ~/.hyp/hypaware/plugins/@hypaware/local-fs/sink-instances/<instance>/watermarks/<dataset>
+hyp daemon start
+hyp sync <instance>
+```
+
+`<instance>` is the destination's name in `hyp sync --dry-run`, `<dir>` is its
+`dir` setting, and `<kept>` is any folder outside `<dir>`. The `~/.hyp` path
+is the default `HYP_HOME`; use yours if you set another. For S3, move the
+objects under `<prefix>/<dataset>/` in the destination's bucket to a prefix
+outside the destination instead, and the saved position is under
+`@hypaware/s3` instead of `@hypaware/local-fs`.
+
+Move the earlier files before the export, don't skip it. A file is named only
+by the range of rows it holds, so the re-export can reuse an earlier file's
+name and replace it, and if retention has since removed some of that file's
+rows from the local cache, they are lost. After the export, the destination
+holds every row the local cache still retains, once. The moved files are the
+only copy of rows that retention has removed, so keep them; a row in both
+places is the same row, and can be dropped where the data is read, for example
+by `part_id` for `ai_gateway_messages`. Rows held back as local-only stay held
+back.
+
 ## A command is missing or rejects an option
 
-<!-- agent: A hyp command or flag from the docs is missing on this machine. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. -->
+<!-- agent: A hyp command or flag from the docs is missing on this host. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. -->
 ```sh
 hyp version
 hyp --help
@@ -245,7 +298,10 @@ the process doing the work, in MB:
 
 Narrow the work first: add a `WHERE` or date filter, a `LIMIT`, or aggregate
 instead of selecting raw rows. Raise a budget only when the work genuinely
-needs the memory. A value that is blank or not a number is ignored and the
+needs the memory, and give it a positive value. A value that is blank or not a
+number is ignored and the default applies. At zero or below the two differ:
+`HYP_QUERY_MAX_HEAP_MB` turns the query heap guard off rather than tightening
+it, while `HYP_GRAPH_PROJECTION_MAX_HEAP_MB` is ignored and the projection
 default applies.
 
 For a command you run yourself, set it in the same shell:

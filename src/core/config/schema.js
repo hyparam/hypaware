@@ -749,8 +749,13 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       // threshold set above that bound. A partition would converge and still
       // read as due on every growth tick, forever, with no error anywhere.
       // Compared on EFFECTIVE values: a config that raises only the average
-      // is paired with the default batch bound, which is the likelier way to
-      // write this mistake.
+      // is paired with the default batch bound, and one that lowers only the
+      // batch bound is paired with the default average and is rejected too.
+      //
+      // @ref LLP 0540#avg-below-batch-scope: the rule guards routine
+      // source-table compaction (the growing layout). The generation-swap
+      // writer rolls files at `target_file_bytes`, and that higher ceiling is
+      // deliberately not a reason to compare against it.
       //
       // Silent when either key already failed its own check: the written
       // value is gone, so the pairing this rule would report is with a

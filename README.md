@@ -90,7 +90,7 @@ See [reports](./docs/REPORTS.md) for generation and publishing.
 
 Choose Ollama in `hyp setup`, then run `hyp ollama setup` for the live CLI/SDK
 capture host. Run `hyp ollama verify --model <installed-model>` to confirm a fresh
-saved request and response. See [Ollama setup, recording and direct recovery](./docs/CLIENTS.md#record-ollama)
+saved request and response. See [Ollama setup, recording and direct recovery](./docs/integrations/ollama.md)
 for supported versions and privacy limits.
 
 Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,

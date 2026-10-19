@@ -7,6 +7,7 @@
 **Date:** 2026-10-13
 **Source:** [HYP-128 "HypAware MCP: close the agent access gap"](https://linear.app/hyperparam/issue/HYP-128/hypaware-mcp-close-the-agent-access-gap), Phase 1, at the Linear revisions LLP 0493 cites; Hernan's direction change of 2026-10-13T20:21:14Z and his scope answer of 2026-10-13T20:50Z
 **Extends:** [LLP 0034#tool-auth-class](./0034-mcp-host-intrinsic.decision.md#tool-auth-class) (Phil), [LLP 0298#mint](./0298-ci-tokens-share-one-gateway.decision.md#mint) (Kenny), [LLP 0118#requirements](./0118-hermes-log-forwarding.spec.md#requirements) (Phil)
+**Extended-by:** [LLP 0499](./0499-hypaware-mcp-phase-2.design.md) (#seams, Phase 2: the plugin repo, the registry entry and the DNS proof)
 **Related:** LLP 0493 (request), LLP 0034#proxy-fallback, #scoped-credential,
 #stdio-stdout-discipline, LLP 0107#every-attach, LLP 0197, LLP 0491#guidance;
 hypaware-server LLP 0602 (request), LLP 0596 (server design), LLP 0597 (the
@@ -41,7 +42,7 @@ same tools, prompts and instructions.
 | HYP-133 | `prompts/list` and `prompts/get` serve three prompts; the fix prompt ends with the mark and has no approval step | `server.js`, `prompts.js` (new) |
 | HYP-134 | the four skills gain `pi`, `opencode`, `cursor`, `openclaw` in their client lists, from a neutral content tree | client plugin manifests, skills |
 | HYP-135 | a Devin knowledge entry and a Droid skill, written as text; their place in HYP-75's recipes is deferred | `docs/agents/` (new) |
-| HYP-136, HYP-137 | every agent prompt and every read or act instruction gains its MCP path | `docs/*.md` |
+| HYP-136, HYP-137 | every agent prompt and every read or act instruction that has an MCP path names it | `docs/*.md` |
 | HYP-138, HYP-139 | `docs/MCP.md` written by hand, `docs/MCP_REFERENCE.md` generated with a drift test; both merged without a README row | `docs/`, `scripts/` |
 | HYP-141 (client share) | every `tools/list` entry carries a `title` and the hints its auth class implies | `registry/verbs.js`, `server.js`, the three client verbs |
 
@@ -112,6 +113,12 @@ person pasting it into a secret store knows.
   `minimum`. An agent token reads the org's whole history and can publish
   and delete reports; an enrollment token can only append capture. That is
   why the two defaults differ (hypaware-server LLP 0596#token-ttl).
+- The enrollment branch also refuses above 3650 days, its server's
+  ceiling, before any request, so a value such as `1e30` (which passes
+  `Number.isInteger`) never reaches the wire (issue #972). The check lives
+  in the branch, not the shared schema, because the agent ceiling is a
+  deployment setting with no upper bound: the agent mint still sends what
+  it is given and prints the server's `invalid_ttl`.
 
 ### Output
 
@@ -596,18 +603,26 @@ evidence detach removes on. Other clients keep replace-on-install.
 
 ### Agent prompts and the MCP path (HYP-136, HYP-137) {#docs-paths}
 
-- **Agent prompts.** Each `<!-- agent: ... -->` marker in `docs/` (23 today:
-  CLI 1, Querying 9, Reports 4, Privacy 2, Troubleshooting 5, Team setup 2)
-  is extended so that it works when the agent has no `hyp`. The prompt says
-  "Use HypAware" (as most already do), and the sentence after it names the
-  MCP tool for the same read or act. One new marker gives `hyp report list`
-  a prompt in Reports.
-- **Every read or act instruction.** In Querying, Reports, Team setup,
-  Clients and Troubleshooting, each CLI instruction gains one line naming
-  its MCP path. `hyp report mark` gains `set_recommendation_status`. Where
-  none exists (most setup and daemon commands), the line says that this is
-  a local operation with no MCP path, so a reader is not left guessing. "No
-  read or act instruction is CLI-only" is then checkable by reading.
+- **The rule (Hernan's copy review on #2624, 2026-10-16).** Name the MCP
+  path only where one exists. Never say that a path does not exist: a
+  prompt that runs `hyp` is already local, and a section with no MCP
+  equivalent (setup, daemon, troubleshooting) says nothing about MCP.
+  Where several blocks in a section share one MCP path, say it once for
+  the section. Where a section mixes local and MCP operations and the
+  difference matters to the reader, say it once at the top of the section.
+  The server-only note for the `/v1/mcp` recommendation tools is likewise
+  stated once per section.
+- **Agent prompts.** Of the `<!-- agent: ... -->` markers in `docs/` (22
+  before T9: CLI 1, Querying 9, Reports 4, Privacy 2, Troubleshooting 5,
+  Team setup 1), each one whose read or act has an MCP tool gains a
+  sentence naming that tool; the rest stay as they are on master. One new
+  marker gives `hyp report list` a prompt in Reports, naming
+  `list_recommendations`.
+- **Every read or act instruction.** In Querying, Reports and Clients, a
+  CLI instruction that has an MCP path gains a line naming it, once per
+  section where blocks share it. `hyp report mark` gains
+  `set_recommendation_status`. "No read or act instruction that has an
+  MCP path is CLI-only" is then checkable by reading.
 - **No link to the new pages** from any published page (gate step 1 in
   #docs-order). The MCP lines name the tools and `hyp mcp serve`. They do
   not link `MCP.md`.
@@ -707,7 +722,8 @@ first, and merge after the server landing.
 ## Verification map
 
 Each Done-when is quoted verbatim from Linear at the revisions LLP 0493
-cites.
+cites, except HYP-136 and HYP-137, quoted at their revisions of
+2026-10-16T16:12Z (after the copy review on #2624).
 
 | Done-when | Hermetic proof (this repo) | Human or production proof |
 | --- | --- | --- |
@@ -719,8 +735,8 @@ cites.
 | HYP-134 (use half) | none | one task per client (Pi, OpenCode, Cursor, OpenClaw), human |
 | HYP-128 follow-on: Hermes skills (install half) | attach writes only the four `hypaware-*` directories under `~/.hermes/skills`; detach removes only those; a foreign skill, `.usage.json`, `.archive/`, `config.yaml` and `state.db` come through both byte-identical; another plugin's skill (`all`, or a `hypaware-*` name) never lands; an unrecorded or edited `hypaware-*` directory survives attach | Hermes uses a skill on a question (human) |
 | HYP-135: "the HYP-75 pilot recipes include the instructions and the agent token." | the two text files exist | deferred with HYP-75 |
-| HYP-136: "every agent prompt names the MCP path, and `hyp report list` has a prompt." | a docs test: every `agent:` marker names a tool or says no MCP path exists; Reports has a `report list` marker | Hernan's copy OK |
-| HYP-137: "no read or act instruction in the docs is CLI-only." | reviewed by reading against the list in #docs-paths | Hernan's copy OK |
+| HYP-136 (revised 2026-10-16): "every agent prompt that has an MCP equivalent names it, and `hyp report list` has a prompt." | a docs test: every tool an `agent:` marker names is in `MCP_REFERENCE.md`; no docs page says "no MCP path"; Reports has a `report list` marker naming `list_recommendations` | Hernan's copy OK |
+| HYP-137 (revised 2026-10-16): "no read or act instruction that has an MCP path is CLI-only." | reviewed by reading against the list in #docs-paths | Hernan's copy OK |
 | HYP-138: "/docs/mcp is live and each client config is tested." | the config test in #docs-mcp | "live" is HYP-140's; each client connection is human |
 | HYP-139: "/docs/mcp-reference is live and regenerates on each docs build." | the drift test | "live" and the site build hook are HYP-140's |
 | HYP-141: "every tool on /v1/mcp and stdio carries a title and the right hint." (client share) | the annotations test in #annotations, over stdio and both HTTP principals | the server's three tools are hypaware-server LLP 0596#verification |
@@ -818,7 +834,7 @@ No hot path changes.
 ## Consequences
 
 This branch adds Draft forward-refs. The LLP 0034 and LLP 0118 lines record
-Phil's yes; the LLP 0298 line is removed if Kenny declines:
+Phil's yes and the LLP 0298 line Kenny's:
 
 - LLP 0034#tool-auth-class: a third class, `write`, admitted by a named
   credential scope, plus annotations derived from the class (Phil, yes,
@@ -827,7 +843,7 @@ Phil's yes; the LLP 0298 line is removed if Kenny declines:
   credential with a different default lifetime, which can read the org's
   history and mark recommendations, publish reports and delete reports as
   the person who minted it; `--label` names the integration that holds it
-  (Kenny).
+  (Kenny, yes, 2026-10-15T18:00:18Z, Slack 1792087218.778909).
 - LLP 0118#requirements: HypAware may create and remove only its own
   marker-owned skill directories under `~/.hermes/skills/`, nothing else
   under `~/.hermes/`, removed on detach (Phil, yes, 2026-10-14T18:34:17Z,

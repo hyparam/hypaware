@@ -408,6 +408,51 @@ test('runBackfillProvider dry-run scans without appending or flushing', async ()
   assert.equal(flushed.length, 0, 'dry-run must not flush')
 })
 
+/**
+ * Register a provider that cannot run its importer: it yields two
+ * `import_unavailable` notes, the first overlong, and no items.
+ *
+ * @param {CommandRunContext} ctx
+ */
+function registerUnavailable(ctx) {
+  ctx.backfills.register({
+    name: 'absent',
+    plugin: '@test/plugin',
+    datasets: ['ds'],
+    async *run() {
+      yield { type: 'event', event: 'import_unavailable', attributes: { note: 'n'.repeat(1000) } }
+      yield { type: 'event', event: 'import_unavailable', attributes: { note: 'second' } }
+    },
+  })
+}
+
+// The note is how a missing importer reads as unavailable rather than empty.
+// It is bounded twice: only the first is kept, and it is capped in length.
+test('an import_unavailable note reaches the result, capped and first only', async () => {
+  for (const dryRun of [false, true]) {
+    const { ctx } = makeCtx()
+    registerUnavailable(ctx)
+    const result = await runBackfillProvider({ ctx, provider: 'absent', dryRun })
+    assert.deepEqual(result, { ok: true, scanned: 0, rowsWritten: 0, skipped: 0, note: 'n'.repeat(240) })
+  }
+})
+
+test('runBackfill prints the note in both its human and JSON output', async () => {
+  const human = makeCtx()
+  registerUnavailable(human.ctx)
+  assert.equal(await runBackfill(['absent'], human.ctx), 0)
+  assert.match(human.out.join(''), new RegExp(`\\n    note: n{240}\\n`))
+
+  const json = makeCtx()
+  registerUnavailable(json.ctx)
+  assert.equal(await runBackfill(['absent', 'tester', '--json'], json.ctx), 0)
+  const payload = JSON.parse(json.out.join(''))
+  const byName = Object.fromEntries(payload.providers.map((/** @type {any} */ p) => [p.provider, p]))
+  assert.equal(byName.absent.note, 'n'.repeat(240))
+  assert.equal(byName.absent.status, 'ok')
+  assert.equal('note' in byName.tester, false, 'a provider that yielded no note gets no key')
+})
+
 test('runBackfillProvider reports a failed result for an unknown provider', async () => {
   const { ctx, appended } = makeCtx()
   const result = await runBackfillProvider({ ctx, provider: 'ghost', dryRun: false })

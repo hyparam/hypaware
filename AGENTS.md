@@ -177,6 +177,13 @@ npm run smoke -- daemon_foreground_start_stop
 
 ## Edit rules
 
+- **Skill descriptions control discovery.** Agents use the `SKILL.md`
+  description to decide whether to load the skill at all. Preserve existing
+  trigger examples and routing requirements when reorganizing or shortening
+  skills; changes to the body cannot compensate for lost discovery. Treat
+  description rewrites as behavior changes, and do not claim routing is
+  preserved from static checks alone: verify it in fresh sessions or explicitly
+  report it as unverified.
 - Read a file (or the region you will change) before your first Edit to it in
   a session, and re-read it before retrying any failed Edit; the failure
   usually means the file changed underneath you (a formatter or another agent).

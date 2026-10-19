@@ -112,14 +112,15 @@ export function armPickDeadline(stdin, controller, deadlineMs) {
  * current directory, which is the shape a user reaches for once they know
  * what they want: `hyp ask "which sessions touched the auth module"`.
  *
- * `deps` are the prompt seams `hyp report fix` already carries, so a test
- * can reach the multi-client branch with no terminal to drive.
+ * `deps` are the prompt and launcher seams `hyp report fix` already
+ * carries, so a test can reach the multi-client branch with no terminal to
+ * drive.
  *
  * @ref LLP 0198#re-runnable [implements]: the question needs a verb, or it is a sentence to retype
  * @ref LLP 0398#run-directory [implements]: the recommendation starts in the evidence folder, a free-form question where it was typed
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ select?: RunWizardFirstAskOptions['select'], pickDeadlineMs?: number }} [deps]
+ * @param {{ select?: RunWizardFirstAskOptions['select'], pickDeadlineMs?: number, resolveLaunchers?: typeof resolveLaunchers }} [deps]
  * @returns {Promise<number>}
  */
 export async function runAsk(argv, ctx, deps = {}) {
@@ -133,7 +134,7 @@ export async function runAsk(argv, ctx, deps = {}) {
     // A named question wants a launch, not the gather: resolve directly
     // and say plainly when nothing can answer it, rather than falling back
     // to the one question the user did not ask.
-    const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
+    const launchers = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
       const canPaste = await recordedClientReadsQuerySkill(ctx, descriptors, clients)
       await writeNoLauncher(ctx, descriptors, clients, canPaste ? framedQuestion(question) : undefined)
@@ -308,7 +309,7 @@ async function writeNoLauncher(ctx, descriptors, clients, paste) {
  * @param {string} client
  * @returns {string}
  */
-function friendlyClientLabel(client) {
+export function friendlyClientLabel(client) {
   return FRIENDLY_LAUNCHLESS_LABELS[client] ?? (client.length > 0 ? client.charAt(0).toUpperCase() + client.slice(1) : client)
 }
 

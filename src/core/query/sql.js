@@ -146,6 +146,22 @@ export function resolveHeapBudgetBytes(optionBytes) {
 /** Rows between inline heap checks on a row scan. */
 const BUDGET_CHECK_ROW_STRIDE = 4096
 
+/**
+ * How long a shared confirmation GC may stand in for a passing mid-run check,
+ * process-wide. A retaining query that crosses inside it is confirmed at the
+ * next check after it lapses, or sooner once the heap has grown a budget.
+ */
+const CONFIRM_GC_STAND_IN_MS = 1000
+
+/**
+ * The most recent forced confirmation GC, shared by every query guard in the
+ * process. Three scalars, overwritten in place: no query registers here, so a
+ * finished or aborted query leaves nothing behind.
+ *
+ * @ref LLP 0526#shared-confirmation [implements]: one recent forced GC stands in for every guard's passing confirmation
+ */
+const lastConfirmation = { epoch: 0, atMs: 0, settledHeap: 0 }
+
 /** @type {(() => void) | null | undefined} */
 let cachedForcedGc
 
@@ -502,6 +518,7 @@ export async function executeQuerySql(args) {
 
           if (refresh === 'always' && typeof dataset.refreshPartition === 'function') {
             for (const partition of partitions) {
+              args.signal?.throwIfAborted()
               await dataset.refreshPartition(partition, {
                 cacheDir: storage.cacheRoot,
                 force: true,
@@ -516,6 +533,7 @@ export async function executeQuerySql(args) {
             storage,
             refresh,
             messages: freshnessMessages,
+            signal: args.signal,
           })
           if (settled.degraded) refreshDegraded = true
 
@@ -594,6 +612,8 @@ export async function executeQuerySql(args) {
           }
         }
         const baselineHeap = process.memoryUsage().heapUsed
+        // Only a collection after this baseline measures this query's growth.
+        const baselineEpoch = lastConfirmation.epoch
         /** @type {QueryExecutionBudgetError | undefined} */
         let budgetError
         /** @type {NodeJS.Timeout | undefined} */
@@ -627,13 +647,29 @@ export async function executeQuerySql(args) {
         // query pays one forced GC per budget-width of garbage; a genuinely
         // retaining query pays one GC and then refuses.
         // @ref LLP 0097#confirm-with-gc [implements]: only growth that survives a full GC refuses; raw deltas count garbage
-        const confirmGrowth = () => {
-          const raw = process.memoryUsage().heapUsed - baselineHeap
+        // @ref LLP 0526#shared-confirmation [implements]: a recent shared collection can pass a check but never refuse one; terminal always forces
+        const confirmGrowth = (/** @type {boolean} */ terminal) => {
+          const heap = process.memoryUsage().heapUsed
+          const raw = heap - baselineHeap
           if (raw <= budgetBytes) return undefined
           const forcedGc = resolveForcedGc()
           if (!forcedGc) return { settled: raw, raw, gcMode: /** @type {const} */ ('unavailable') }
+          // A shared collection stands in for this one only to pass, and only
+          // while it still describes this query: taken after this baseline,
+          // under the interval old, with less than one budget of heap growth
+          // since, and showing this query under budget. Anything else forces,
+          // so every refusal rests on a collection this check made.
+          const last = lastConfirmation
+          if (!terminal && last.epoch !== baselineEpoch &&
+            performance.now() - last.atMs < CONFIRM_GC_STAND_IN_MS &&
+            heap - last.settledHeap < budgetBytes &&
+            last.settledHeap - baselineHeap <= budgetBytes) return undefined
           forcedGc()
-          const settled = process.memoryUsage().heapUsed - baselineHeap
+          const settledHeap = process.memoryUsage().heapUsed
+          last.epoch++
+          last.atMs = performance.now()
+          last.settledHeap = settledHeap
+          const settled = settledHeap - baselineHeap
           if (settled <= budgetBytes) return undefined
           return { settled, raw, gcMode: /** @type {const} */ ('confirmed') }
         }
@@ -642,7 +678,7 @@ export async function executeQuerySql(args) {
           check(site) {
             if (budgetBytes <= 0) return
             if (budgetError) throw budgetError
-            const crossing = confirmGrowth()
+            const crossing = confirmGrowth(site === 'terminal')
             if (crossing !== undefined) throw trip(crossing, site)
           },
         }
@@ -651,7 +687,7 @@ export async function executeQuerySql(args) {
           // further source rows (join amplification, output finalization)
           // but do yield to the event loop.
           watchdog = setInterval(() => {
-            const crossing = confirmGrowth()
+            const crossing = confirmGrowth(false)
             if (crossing !== undefined) trip(crossing, 'watchdog')
           }, HEAP_WATCH_INTERVAL_MS)
           watchdog.unref()
@@ -728,7 +764,9 @@ export async function executeQuerySql(args) {
  *   storage: ExtendedQueryStorageService,
  *   refresh: RefreshMode,
  *   messages: string[],
- * }} args
+ *   signal?: AbortSignal,
+ * }} args once `signal` is aborted no further flush starts; one already
+ *   under way settles
  * @returns {Promise<{ degraded: boolean }>} whether any stream served
  *   unrefreshed data because its flush failed or is cooling down
  */
@@ -740,6 +778,8 @@ export async function settlePendingCacheForQuery(args) {
     try {
       const info = await args.storage.pendingInfo(partition.tablePath)
       if (!info.pending) continue
+      // Checked after the awaited read, so a caller aborted meanwhile starts no flush
+      args.signal?.throwIfAborted()
       if (args.refresh === 'always') {
         // This gate never consults the stamp under `always`: freshness is the
         // caller's stated requirement, so it gets the attempt and the original
@@ -771,6 +811,8 @@ export async function settlePendingCacheForQuery(args) {
         `cache: last write to query cache was ${formatAgeMinutes(now - info.lastFlushAtMs)} ago`
       )
     } catch (err) {
+      // An abort is the caller's, never an automatic refresh failure to degrade past
+      args.signal?.throwIfAborted()
       if (args.refresh !== 'auto') throw err
       // A storage service that never had the spool methods is a wiring bug,
       // not the blocked spool-to-cache write the auto degrade is for. Told

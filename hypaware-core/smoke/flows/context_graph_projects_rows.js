@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import { Attr, installObservability, runRoot } from '../../../src/core/observability/index.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
@@ -22,7 +23,7 @@ import {
  * (the projection engine) and `@hypaware/ai-gateway-graph` (the connector
  * carrying the `ai_gateway_messages` contract; with no contract registered
  * `graph project` is a no-op), seeds a small `ai_gateway_messages` fixture
- * with two file-touching tool calls, runs `hyp graph project`, and asserts:
+ * with two file-touching tool calls, starts automatic projection, and asserts:
  *
  * - `select count(*) from node` = 7 (Session, App, Model, 2× Tool, 2× File)
  * - `select count(*) from edge` = 6 (via, used_model, 2× used, 2× touched)
@@ -80,14 +81,38 @@ export async function run({ harness, expect }) {
     fixtureRow({ message_id: 'm3', message_index: 2, role: 'user', part_type: 'text', content_text: 'hello' }),
   ])
 
-  // Run the projection.
-  const project1 = await dispatchOk(['graph', 'project'], { kernel, registry, harness, expect, label: 'first' })
-  expect.that('graph project: first run printed a summary', project1, (v) => typeof v === 'string' && v.includes('node(s)'))
+  const sourceCtx = kernel.activationContexts.get('@hypaware/ai-gateway-graph')
+  if (!sourceCtx) throw new Error('missing graph connector activation')
+  await runRoot('smoke.graph_auto_projection', {
+    [Attr.COMPONENT]: 'plugin',
+    [Attr.OPERATION]: 'graph.auto_projection',
+    [Attr.SMOKE_NAME]: harness.smokeName,
+    [Attr.SMOKE_STEP]: 'automatic_projection',
+    [Attr.DEV_RUN_ID]: harness.devRunId,
+  }, async () => {
+    await kernel.sources.start('ai-gateway-graph', sourceCtx)
+    try {
+      const source = kernel.sources.started('ai-gateway-graph')
+      const deadline = Date.now() + 15_000
+      while (Date.now() < deadline) {
+        const status = await source?.status?.()
+        if (status?.lastError) throw new Error(status.lastError)
+        if (status?.details?.last_success_at) break
+        await sleep(25)
+      }
+      expect.that('automatic projection completed before manual graph command',
+        (await source?.status?.())?.rowsWritten, v => v === 13)
+    } finally {
+      await kernel.sources.stop('ai-gateway-graph')
+    }
+  })
 
   const nodeCount1 = await sqlCount('node')
   const edgeCount1 = await sqlCount('edge')
   expect.that('node count after first projection is 7', nodeCount1, (v) => v === 7)
   expect.that('edge count after first projection is 6', edgeCount1, (v) => v === 6)
+  const project1 = await dispatchOk(['graph', 'project'], { kernel, registry, harness, expect, label: 'manual_after_automatic' })
+  expect.that('manual graph project still printed a summary', project1, v => v.includes('node(s)'))
 
   const byType = await runSql("select node_type, count(*) as n from node group by node_type")
   /** @type {Record<string, number>} */
@@ -156,6 +181,11 @@ export async function run({ harness, expect }) {
   // the same counts the SQL assertions saw, per the log-driven-development
   // policy (a silent span break should fail this smoke, not pass it).
   await obs.shutdown()
+  const logs = await expect.logs()
+  expect.that('logs: automatic session projection completed', logs, rows => rows.some(row =>
+    row.body === 'graph.projection_completed' && row.attributes?.source_dataset === 'ai_gateway_messages' &&
+    row.attributes?.nodes_written === 7 && row.attributes?.edges_written === 6
+  ))
   const traces = await expect.traces()
   const projectSpans = traces.filter((/** @type {any} */ t) => t.name === 'graph.project')
   expect.that('traces: scoped traversal records its query and materialization counts', traces, rows => rows.some(t =>

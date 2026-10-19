@@ -576,6 +576,14 @@ export type ExtendedQueryStorageService = QueryStorageService & {
   pendingInfo(tablePath: string): Promise<PendingInfo>
   /** Whether `tablePath` has rows spooled but not yet flushed to Iceberg. */
   hasPendingSync(tablePath: string): boolean
+  /**
+   * How many of `rows`, already read from `tablePath` through `readRowsSince`
+   * with every column, the export seam would withhold now: a purged session,
+   * an opted-out source, or a `cwd` whose current usage class (`.hypignore`
+   * included, within the resolver's TTL) is not `full`. Bounded to the rows
+   * given; no table scan.
+   */
+  exportWithheld(tablePath: string, rows: readonly Record<string, unknown>[]): number
   appendRowsToPartition(
     dataset: string,
     partitionSegments: string[],

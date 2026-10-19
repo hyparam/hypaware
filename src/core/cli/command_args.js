@@ -188,19 +188,45 @@ export const CORE_COMMAND_ARGS = {
   'remote mint': {
     // Bare `hyp remote mint` mints against the default target, the same
     // resolution as bare `remote login` (LLP 0062 #bare-remote).
-    usage: 'hyp remote mint [name] [--label <label>] [--expires-days <n>]',
+    usage: 'hyp remote mint [name] [--scope query] [--label <label>] [--expires-days <n>]',
     schema: {
       type: 'object',
       properties: {
         name: { type: 'string' },
+        // `query` is a CLI word, not a server scope: it selects the agent
+        // token mint, whose scope is the session's own.
+        scope: { type: 'string', enum: ['query'] },
         label: { type: 'string' },
-        // The expiry bound and its 365-day default are declared here, not
-        // re-checked in the runner: the schema is the whole surface of the
-        // command, so a bad value fails at the gate with the usage line like
-        // every other argument error.
-        'expires-days': { type: 'integer', minimum: 1, default: 365 },
+        // The expiry bound is declared here, not re-checked in the runner: the
+        // schema is the whole surface of the command, so a bad value fails at
+        // the gate with the usage line like every other argument error.
+        // @ref LLP 0494#cli-mint [implements]: no schema default, so the runner can tell a given --expires-days from none; the enrollment branch applies its own 365 days and the agent mint sends nothing
+        'expires-days': { type: 'integer', minimum: 1 },
       },
       positional: ['name'],
+    },
+  },
+  'remote tokens': {
+    usage: 'hyp remote tokens [name] [--json]',
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        json: { type: 'boolean', default: false },
+      },
+      positional: ['name'],
+    },
+  },
+  'remote tokens revoke': {
+    usage: 'hyp remote tokens revoke <jti> [--remote <name>]',
+    schema: {
+      type: 'object',
+      properties: {
+        jti: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['jti'],
+      required: ['jti'],
     },
   },
   'report generate': {
@@ -391,4 +417,30 @@ export function parseCoreCommandArgv(name, argv, ctx) {
     return { ok: false, code: 2 }
   }
   return { ok: true, params: parsed.params }
+}
+
+/**
+ * The refusal a bundled `hyp setup <preset>` owes for argv it cannot honor:
+ * a setup choice its fixed plugin list never reads (`--client`, `--source`,
+ * `--export`, `--retention-days`, `--bin`), `--from-file`, or a positional.
+ * Each would otherwise be dropped while the preset reports a successful
+ * write (#2468). The preset calls this before any write or backup. It is not
+ * applied in `runInit`, because a third-party preset may honor these and
+ * reads its own argv.
+ *
+ * @param {string[]} argv the argv after the preset name
+ * @param {string} preset
+ * @returns {string | null} the stderr line, or null when nothing is refused
+ */
+export function presetUnhonoredArgError(argv, preset) {
+  for (const token of argv) {
+    if (/^--from-file(=|$)/.test(token)) {
+      return `hyp setup: --from-file is not supported with preset '${preset}'; run hyp setup --from-file <path> without a preset name`
+    }
+    if (/^--(client|source|export|retention-days|bin)(=|$)/.test(token)) {
+      return `hyp setup: ${token.split('=')[0]} is not supported with preset '${preset}'; run hyp setup --yes without a preset name to set it`
+    }
+    if (!token.startsWith('-')) return `hyp setup: unexpected argument '${token}' after preset '${preset}'`
+  }
+  return null
 }

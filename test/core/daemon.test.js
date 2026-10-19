@@ -450,6 +450,54 @@ test('serviceDaemonStatus degrades to "not loaded" when the service manager cann
   assert.equal(status.installed, true)
   assert.equal(status.loaded, false)
   assert.equal(status.pid, undefined)
+  assert.equal(status.unreachable, true, 'the degraded answer says the probe never ran (#1406)')
+})
+
+test('serviceDaemonStatus marks a service manager that answered with a failure as unreachable', async () => {
+  // The dead-user-bus shape (#1406): systemctl spawns and exits 1 with "Failed
+  // to connect to bus" rather than throwing, and launchctl answers with an exit
+  // other than 113. Neither is "not loaded" as observed, so both say so; a
+  // unit systemd does not know, and launchd's 113, stay plain not loaded.
+  const unitDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-svc-status-bus-'))
+  await fs.writeFile(path.join(unitDir, 'hypaware.service'), '[Unit]\n')
+  /** @param {{ exitCode: number, stdout: string, stderr: string }} result */
+  const systemctlAnswering = (result) => /** @type {SystemctlAdapter} */ (new Proxy(/** @type {any} */ ({}), {
+    get() {
+      return async () => result
+    },
+  }))
+  const noBus = await serviceDaemonStatus({
+    platform: 'linux',
+    unitDir,
+    systemctl: systemctlAnswering({ exitCode: 1, stdout: '', stderr: 'Failed to connect to bus: No medium found' }),
+  })
+  assert.equal(noBus.loaded, false)
+  assert.equal(noBus.unreachable, true, 'a systemctl that could not reach the bus is not a unit that is not loaded')
+  const unknown = await serviceDaemonStatus({
+    platform: 'linux',
+    unitDir,
+    systemctl: systemctlAnswering({ exitCode: 0, stdout: 'LoadState=not-found\nActiveState=inactive\nMainPID=0\n', stderr: '' }),
+  })
+  assert.equal(unknown.loaded, false)
+  assert.equal('unreachable' in unknown, false, 'systemd answering "not-found" is an observation, not a failed probe')
+
+  const plistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-svc-status-launchd-'))
+  await fs.writeFile(path.join(plistDir, 'com.hyperparam.hypaware.plist'), '<plist/>')
+  /** @param {number} exitCode */
+  const launchctlPrinting = (exitCode) => ({
+    print: async () => ({ exitCode, stdout: '', stderr: '' }),
+    bootstrap: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    bootout: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    kickstart: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+  })
+  const notInDomain = await serviceDaemonStatus({ platform: 'darwin', plistDir, userDomain: 'gui/501', launchctl: launchctlPrinting(113) })
+  assert.equal(notInDomain.loaded, false)
+  assert.equal('unreachable' in notInDomain, false, '113 is launchd saying the service is not in its domain')
+  const failed = await serviceDaemonStatus({ platform: 'darwin', plistDir, userDomain: 'gui/501', launchctl: launchctlPrinting(5) })
+  assert.equal(failed.loaded, false)
+  assert.equal(failed.unreachable, true, 'any other nonzero print is launchctl failing to answer')
+  await fs.rm(unitDir, { recursive: true, force: true })
+  await fs.rm(plistDir, { recursive: true, force: true })
 })
 
 // `ensureFsOp` exists so an EACCES on the plist/unit directory reaches the
@@ -612,6 +660,78 @@ test('runDaemon reload re-merges the central layer (does not re-read local alone
       started: 'central',
       reloaded: 'central',
     })
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a configured sink that fails to materialize degrades the boot, and a reload keeps it degraded (#2547)', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-sink-degraded-'))
+  let handle
+  try {
+    const installDir = await stageReloadPlugin(hypHome)
+    await writeLock(path.join(hypHome, 'hypaware'), {
+      schema_version: 1,
+      plugins: {
+        '@third-party/reload-fixture': {
+          name: '@third-party/reload-fixture',
+          version: '0.1.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-05-22T00:00:00.000Z',
+        },
+      },
+    })
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    // The fixture registers a source and no sink, so this instance cannot materialize.
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@third-party/reload-fixture', config: { value: 'before' } }],
+      sinks: { broken: { plugin: '@third-party/reload-fixture' } },
+    }))
+
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'sink-degraded-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+    })
+
+    const snap = handle.snapshot()
+    assert.equal(snap.state, 'degraded')
+    assert.deepEqual(snap.sources.map((s) => s.state), ['started'])
+    assert.equal(snap.warnings?.length, 1)
+    assert.match(snap.warnings[0], /^sink_materialize_failed: sink 'broken' \(sink_contribution_missing\): /)
+
+    // Reload does not materialize sinks, so it is no evidence the sink came up.
+    await handle.reload()
+    assert.equal(handle.snapshot().state, 'degraded')
+    const onDisk = readStatusFile(path.join(hypHome, 'hypaware'))
+    assert.equal(onDisk?.state, 'degraded')
+
+    await handle.stop()
+    await handle.done
+    handle = undefined
+
+    const raw = await fs.readFile(path.join(hypHome, 'hypaware', 'logs', 'daemon.log'), 'utf8')
+    const events = raw.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(events.some((e) => e.event === 'daemon.healthy'), false)
+    const failed = events.find((e) => e.event === 'daemon.sink_materialize_failed')
+    assert.equal(failed?.hyp_component, 'daemon')
+    assert.equal(failed?.instance, 'broken')
+    assert.equal(failed?.error_kind, 'sink_contribution_missing')
+    const degraded = events.find((e) => e.event === 'daemon.degraded')
+    assert.deepEqual(degraded?.failed_sinks, [{ instance: 'broken', error_kind: 'sink_contribution_missing' }])
+    assert.deepEqual(degraded?.failed_sources, [])
   } finally {
     if (handle) {
       await handle.stop()

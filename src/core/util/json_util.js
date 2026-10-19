@@ -175,6 +175,19 @@ export function escapeForDisplay(value) {
 }
 
 /**
+ * Whether `value` holds a character `escapeForDisplay` would escape: one that
+ * drives or reorders a terminal. For a caller that must refuse such a value
+ * rather than show it, over the same vocabulary so the two cannot disagree.
+ *
+ * @param {string} value
+ * @returns {boolean}
+ */
+export function hasDisplayUnsafeChars(value) {
+  // `search` ignores the global flag's lastIndex, so the shared regex is safe.
+  return value.search(DISPLAY_UNSAFE_CHARS) !== -1
+}
+
+/**
  * Parse `value` as JSON when it is a string, falling back to the
  * original value when it is not a string or does not parse. Projectors
  * use this for fields that may arrive either encoded or already

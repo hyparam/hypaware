@@ -7,9 +7,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 
-import { createForwardSink, initializeOpenDatasetRollouts } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { createForwardSink, initializeOpenDatasetRollouts, openDatasetsWithoutPartitions } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { createHeldDatasetStore, readHeldDatasets } from '../../src/core/sinks/held_datasets.js'
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 import { readRequestBody } from '../helpers/request_body.js'
+import { temporaryDirectory } from '../helpers/temp_dir.js'
+
+/** @import { HeldDatasetStore } from '../../src/core/sinks/types.js' */
 
 function makeLog() {
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
@@ -222,6 +226,53 @@ function makeFetch(responder) {
 
 const TABLE = '/cache/ai_gateway_messages/source=claude'
 
+test('missing-row repair binds the org, preserves its retry batch and never advances watermarks', async () => {
+  const watermarks = makeWatermarks()
+  const calls = []
+  let org = 'test-org'
+  let valid = true
+  let validations = 0
+  let reply = { syncRestore: 1, status: 'accepted', restored: 1, present: 0, purged: 0 }
+  const sink = createForwardSink({ config: /** @type {any} */ ({ url: 'http://server:8740' }),
+    query: /** @type {any} */ (makeQuery('proxy')), storage: /** @type {any} */ (makeStorage(TABLE, 0)),
+    watermarks, rollouts: makeRollouts(), log: makeLog(), sleepFn: async () => {},
+    identityClient: /** @type {any} */ ({ async getCurrentJwt() { return `header.${Buffer.from(JSON.stringify({ org })).toString('base64url')}.signature` } }),
+    fetchFn: /** @type {typeof fetch} */ (async (url, init) => {
+      calls.push({ url: String(url), headers: init?.headers, body: await readRequestBody(init?.body) })
+      if (calls.length === 1) return new Response('', { status: 503, headers: { 'retry-after': '0' } })
+      return Response.json(reply, { status: 202 })
+    }),
+  })
+  const request = { org: 'test-org', revision: 'a'.repeat(64), rows: [{ part_id: 'missing', session_id: 's' }],
+    async validate() {
+      validations++
+      if (!valid) throw new Error('policy changed')
+    } }
+  try {
+    assert.ok(sink.restoreMissingRows)
+    assert.equal((await sink.restoreMissingRows(request)).restored, 1)
+    assert.equal(calls.length, 2)
+    assert.equal(validations, 2, 'policy and local revision revalidated before every attempt')
+    assert.equal(calls[0].url, 'http://server:8740/v1/ingest-missing/ai_gateway_messages')
+    assert.equal(calls[0].headers['x-hyp-batch-id'], calls[1].headers['x-hyp-batch-id'])
+    assert.equal(calls[1].headers['x-hyp-sync-org'], 'test-org')
+    assert.equal(calls[0].body, calls[1].body)
+    assert.equal(watermarks.writes.length, 0)
+    org = 'different-org'
+    await assert.rejects(sink.restoreMissingRows(request), /different organizations/)
+    assert.equal(calls.length, 2, 'wrong-org identity never sends the payload')
+    org = 'test-org'
+    valid = false
+    await assert.rejects(sink.restoreMissingRows(request), /policy changed/)
+    assert.equal(calls.length, 2)
+    valid = true
+    reply = /** @type {any} */ ({})
+    await assert.rejects(sink.restoreMissingRows(request), /unsupported repair acknowledgement/)
+    await assert.rejects(sink.restoreMissingRows({ ...request, rows: Array(1001).fill(request.rows[0]) }), /invalid missing-row/)
+    await assert.rejects(sink.restoreMissingRows({ ...request, rows: [{ content_text: 'x'.repeat(4 * 1024 * 1024) }] }), /4 MiB/)
+  } finally { await sink.close() }
+})
+
 /**
  * @param {{
  *   count: number | (() => number),
@@ -237,9 +288,10 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
  *   watermarkFilePath?: string,
  *   receiptsDir?: string,
  *   fetchFn?: typeof fetch,
+ *   held?: HeldDatasetStore,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath, receiptsDir, fetchFn }) {
+function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath, receiptsDir, fetchFn, held }) {
   const storage = makeStorage(TABLE, count, rowFactory, dropRow)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
@@ -262,6 +314,7 @@ function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', que
     log: /** @type {any} */ (log),
     fetchFn: fetchFn ?? fn,
     receiptsDir,
+    held,
     sleepFn: sleepFn ?? recordingSleep,
     nowFn,
   })
@@ -901,6 +954,174 @@ test('an older server holds an open dataset locally and re-probes slowly', async
   await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
   assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT', 'POST'])
   assert.deepEqual(calls[2].lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
+})
+
+// @ref LLP 0537#held-outcome [tests]: a refused registration is held durably, neither counted nor retried, and only acceptance clears it
+test('a held registration is recorded, not counted or retried, and survives reprobe expiry', async () => {
+  const dir = temporaryDirectory('hyp-central-held-')
+  const url = 'http://server:8740'
+  let count = 10
+  let now = 0
+  let putStatus = 405
+  const held = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await held.load(new Set(['claude_telemetry_events']))
+  const { sink, calls, watermarks } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+    nowFn: () => now,
+    held,
+    responder: (c) => c.method === 'PUT' ? putStatus : 202,
+  })
+
+  const first = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(first.status, 'exported')
+  assert.equal(first.partitionsExported, 0, 'held work is not an exported partition')
+  assert.equal(first.retryPartitions, undefined, 'no outbox entry for a capability hold')
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+  const baseline = watermarks.record?.continuation.seq
+
+  // The reprobe window expires and the server still refuses: the hold stays
+  // and the watermark does not move past rows that never left.
+  count = 12
+  now = 5 * 60_000 + 1
+  const second = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(second.partitionsExported, 0)
+  assert.equal(watermarks.record?.continuation.seq, baseline)
+  assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT'])
+
+  // Expiry alone is not recovery: a tick inside the next window still holds.
+  now = 6 * 60_000
+  await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+
+  // A fresh process reads the same hold.
+  const restarted = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await restarted.load(new Set(['claude_telemetry_events']))
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+
+  putStatus = 202
+  now = 11 * 60_000
+  const upgraded = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(upgraded.partitionsExported, 1)
+  assert.deepEqual(calls.at(-1)?.lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: [] })
+})
+
+test('an accepted registration clears the hold even when the ingest after it fails', async () => {
+  const dir = temporaryDirectory('hyp-central-held-')
+  const url = 'http://server:8740'
+  let count = 10
+  let now = 0
+  let putStatus = 404
+  const held = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await held.load(new Set(['claude_telemetry_events']))
+  const { sink, calls } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+    nowFn: () => now,
+    held,
+    responder: (c) => c.method === 'PUT' ? putStatus : 500,
+  })
+
+  await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+
+  putStatus = 202
+  count = 12
+  now = 5 * 60_000 + 1
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed', 'the ingest failure still retries')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT', 'POST'])
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: [] }, 'not reported as a server that cannot take it')
+})
+
+test('only open datasets with no local partition count as holding nothing', async () => {
+  /**
+   * @param {string} name
+   * @param {() => Promise<unknown[]>} discoverPartitions
+   */
+  const dataset = (name, discoverPartitions) => ({ name, discoverPartitions })
+  const query = {
+    listDatasets: () => [
+      dataset('stored', async () => [{ tablePath: '/t/stored' }]),
+      dataset('spooled', async () => [{ tablePath: '/t/spooled' }]),
+      dataset('empty', async () => []),
+      dataset('unmaterialized', async () => [{ tablePath: '/t/none' }]),
+      dataset('unknown', async () => { throw new Error('discovery failed') }),
+      dataset('logs', async () => []),
+    ],
+  }
+  const storage = {
+    cacheRoot: '/t',
+    tableExists: (/** @type {string} */ p) => p === '/t/stored',
+    hasPendingSync: (/** @type {string} */ p) => p === '/t/spooled',
+  }
+  assert.deepEqual(
+    await openDatasetsWithoutPartitions(/** @type {any} */ (query), /** @type {any} */ (storage)),
+    ['empty', 'unmaterialized'],
+  )
+})
+
+test('a hold that cannot be recorded fails the partition rather than reading as settled', async () => {
+  const { sink } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+    nowFn: () => 0,
+    held: {
+      async load() { return undefined },
+      async resolve() {},
+      async hold() { throw new Error('EACCES: held-datasets.json') },
+      async clear() {},
+    },
+    responder: (c) => c.method === 'PUT' ? 404 : 202,
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.match(String(result.error), /held-dataset state/)
+})
+
+test('one batch keeps healthy, held and privacy-withheld datasets apart', async () => {
+  const dir = temporaryDirectory('hyp-central-held-')
+  const url = 'http://server:8740'
+  const base = makeQuery(null)
+  const held = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await held.load(new Set(['claude_telemetry_events', 'private_graph']))
+  // A dataset that is withheld now holds nothing, even if it once did.
+  await held.hold('private_graph')
+  const { sink, calls } = buildSink({
+    count: 10,
+    nowFn: () => 0,
+    held,
+    query: {
+      getDataset(name) {
+        const dataset = base.getDataset(name)
+        if (name === 'ai_gateway_messages') return { ...dataset, sourceSignal: 'logs' }
+        if (name === 'private_graph') return { ...dataset, localOnlyContentColumns: ['content_text'] }
+        return dataset
+      },
+    },
+    responder: (c) => c.method === 'PUT' ? 404 : 202,
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ ({
+    partitions: [
+      { dataset: 'ai_gateway_messages', tablePath: TABLE },
+      { dataset: 'claude_telemetry_events', tablePath: TABLE },
+      { dataset: 'private_graph', tablePath: TABLE },
+    ],
+  }), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 1, 'only the healthy partition counts')
+  assert.equal(result.retryPartitions, undefined)
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.url}`), [
+    'POST http://server:8740/v1/ingest/logs',
+    'PUT http://server:8740/v1/datasets/claude_telemetry_events',
+  ])
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
 })
 
 test('an unresolvable dataset fails only its own partition', async () => {

@@ -5,8 +5,8 @@ start a question with `hyp ask` or ask the client you already have open to use
 HypAware. Search and SQL commands are also available below. To generate or share
 a report, see [reports](REPORTS.md).
 
-Queries use this machine's recordings by default. To search recordings in
-HypAware Cloud, including other machines and your team, tell your agent to use
+Queries use this host's recordings by default. To search recordings in
+HypAware Cloud, including other hosts and your team, tell your agent to use
 `--remote` on its query commands. This uses your default remote target;
 `--remote <target>` selects another. See [remote access](TEAM_SETUP.md#manage-remote-access)
 to configure a target and sign in.
@@ -43,7 +43,7 @@ which one to use.
 
 ## See what is available
 
-<!-- agent: Use HypAware to tell me what is recorded on this machine: which datasets, how fresh, and a summary of models, tokens, and tools. -->
+<!-- agent: Use HypAware to tell me what is recorded on this host: which datasets, how fresh, and a summary of models, tokens, and tools. Over MCP, read the datasets with query_sql. -->
 ```sh
 hyp cache status
 hyp query overview
@@ -55,15 +55,17 @@ What HypAware has recorded
 ────────────────────────────────────────
 Input is prompt sent fresh; cached is prompt served from (or written to) the cache.
 Output is what the model generated. Input + cached is the whole prompt.
-Token bars split ▒ input from █ output; cache is excluded.
+Share bars split ▒ input from █ output; cache is excluded.
 
 Which providers and models you use, by volume
 
-  provider   model                       input      cached   output  by input+output
-  anthropic  claude-opus-5-5            25,252  64,078,478  263,270  ▒▒████████████████
-  openai     gpt-6.1-sol                61,926     612,992    1,284  ▒▒▒█
-  anthropic  claude-haiku-5-5           20,423           0    1,273  █
+  provider   model              input      cached   output  share
+  anthropic  claude-opus-5-5   25,252  64,078,478  263,270  ▒▒████████████████
+  openai     gpt-6.1-sol       61,926     612,992    1,284  ▒▒▒█
+  anthropic  claude-haiku-5-5  20,423           0    1,273  █
 ```
+
+Over MCP, read the same datasets with `query_sql`.
 
 Cache status lists local datasets and freshness. The overview summarizes models,
 tokens, repositories, and tools over the period printed in its heading. Its
@@ -85,7 +87,7 @@ can save the change it backs the config up first, leaving a timestamped
 that process, and a read-only config logs a warning that the change could not
 be saved.
 
-<!-- agent: Use HypAware to find sessions mentioning connection refused, newest first, and show me the daemon-related sessions from the first week of September 2026. -->
+<!-- agent: Use HypAware to find sessions mentioning connection refused, newest first, and show me the daemon-related sessions from the first week of September 2026. Over MCP, use grep_search. -->
 ```sh
 hyp query grep "connection refused" --limit 20
 hyp query grep "daemon" --from 2026-09-01 --to 2026-09-07 --format json
@@ -98,6 +100,8 @@ date        session_id                            column        message_id      
 2026-09-05  1e56b730-1ce4-46f8-b7fc-7961a4087ada  content_text  559ea13b-be2e-464c-ae03-aabcd78838ae  559ea13b-be2e-464c-ae03-aabcd78838ae#0  ...curl: (7) Failed to connect to localhost port 4318: Connection refused\n
 ```
 
+Over MCP, use `grep_search`.
+
 Replace the dates with the period you need. Search is a case-insensitive
 substring match unless you pass `--regex`. Each hit identifies a session,
 message, and part, with newest hits first. One part can match several columns.
@@ -108,7 +112,7 @@ system prompts or tool arguments. Inspect those with SQL when needed.
 
 Take a `session_id` from a hit and read its conversation:
 
-<!-- agent: Use HypAware to read the full conversation for session SESSION_ID in order. -->
+<!-- agent: Use HypAware to read the full conversation for session SESSION_ID in order. Over MCP, run the same SQL with query_sql. -->
 ```sh
 hyp query sql "select message_index, part_index, role, part_type, content_text, tool_name
   from ai_gateway_messages
@@ -117,9 +121,15 @@ hyp query sql "select message_index, part_index, role, part_type, content_text, 
   limit 100" --format json
 ```
 
+A `session_id` filter alone can read every day of the cache, because the cache
+is partitioned by `date`. If you know the days the session ran, add
+`and date >= 'FIRST_DAY' and date <= 'LAST_DAY'` so only those days are read.
+Cover every day: a session can cross midnight, and rows outside the range are
+silently left out.
+
 To inspect that session's tool calls:
 
-<!-- agent: Use HypAware to list every tool call in session SESSION_ID with its arguments. -->
+<!-- agent: Use HypAware to list every tool call in session SESSION_ID with its arguments. Over MCP, run the same SQL with query_sql. -->
 ```sh
 hyp query sql "select message_index, tool_name, tool_args
   from ai_gateway_messages
@@ -128,12 +138,14 @@ hyp query sql "select message_index, tool_name, tool_args
   limit 50" --format json
 ```
 
+Over MCP, every SQL query in this section runs with `query_sql`.
+
 ## Summarize a known period
 
 Use explicit date bounds so the result has a clear scope. This counts sessions
 and parts per client per day; a session spanning days can count on each day.
 
-<!-- agent: Use HypAware to count sessions per client per day for the first week of September 2026. -->
+<!-- agent: Use HypAware to count sessions per client per day for the first week of September 2026. Over MCP, run the same SQL with query_sql. -->
 ```sh
 hyp query sql "select date, client_name,
     count(distinct session_id) as sessions, count(*) as parts
@@ -142,6 +154,8 @@ hyp query sql "select date, client_name,
   group by date, client_name
   order by date desc, client_name" --format markdown
 ```
+
+Over MCP, every SQL query in this section runs with `query_sql`.
 
 For token summaries, start with `hyp query overview --days 7 --sql` and its
 existing usage extraction. Token usage is stored in structured attributes;
@@ -156,12 +170,15 @@ Terminal output truncates long cells and limits the displayed byte count.
 Notices on standard error explain omitted data. Write to a file when you need
 complete results from your query:
 
-<!-- agent: Use HypAware to export the full conversation for session SESSION_ID to session.jsonl, without truncation. -->
+<!-- agent: Use HypAware to export the full conversation for session SESSION_ID to session.jsonl, without truncation. Over MCP, run the same SQL with query_sql and save the rows it returns to session.jsonl. -->
 ```sh
 hyp query sql "select message_index, part_index, role, content_text
   from ai_gateway_messages where session_id = 'SESSION_ID'
   order by message_index, part_index" --format jsonl --output ./session.jsonl
 ```
+
+Over MCP, run the same SQL with `query_sql`; the agent saves the rows itself,
+since `--output` is a local option.
 
 `--output` avoids terminal display truncation; it does not remove a SQL `LIMIT`.
 Available formats include `table`, `json`, `jsonl`, and `markdown`. Keep stderr
@@ -173,7 +190,7 @@ separate from JSON output so freshness and privacy notices remain visible.
 
 ## Query a remote target
 
-<!-- agent: Use HypAware to search our team's remote recordings for connection refused this week and count sessions per day. -->
+<!-- agent: Use HypAware to search our team's remote recordings for connection refused this week and count sessions per day. Over MCP, use grep_search and query_sql on our team's server. -->
 ```sh
 hyp remote list
 hyp query grep "connection refused" --remote team --limit 20
@@ -182,6 +199,9 @@ hyp query sql "select date, count(distinct session_id) as sessions
   where date >= '2026-09-01' and date < '2026-09-08'
   group by date order by date" --remote team --format json
 ```
+
+Over MCP, use `grep_search` and `query_sql` on your team's server, either on
+`/v1/mcp` or through `hyp mcp serve --remote`.
 
 Replace `team` with a configured target. A bare `--remote` uses the default.
 For target configuration and query-only sign-in, see
@@ -198,11 +218,13 @@ is available. The remote enforces visibility and rejects
 When `@hypaware/context-graph` is active, project local recordings before
 walking relationships:
 
-<!-- agent: Use HypAware's activity graph to show which sessions touched src/app.js, two hops in. -->
+<!-- agent: Use HypAware's activity graph to show which sessions touched src/app.js, two hops in. Over MCP, use graph_neighbors. -->
 ```sh
 hyp graph project
 hyp query graph neighbors src/app.js --type File --direction in --depth 2 --limit 25
 ```
+
+Over MCP, use `graph_neighbors`.
 
 Replace the example file with one from your recorded work. A seed can be a node
 ID, natural key, or label. An ambiguous seed needs a type or exact ID. A file can
@@ -225,12 +247,15 @@ The server's session index accelerates eligible session-scoped reads.
 
 This uses existing remote tools:
 
-<!-- agent: Use HypAware's team graph to find the file nodes for FEATURE, the sessions that touched them, and what those sessions said about TERM. -->
+<!-- agent: Use HypAware's team graph to find the file nodes for FEATURE, the sessions that touched them, and what those sessions said about TERM. Over MCP, use query_sql, graph_neighbors and grep_search on our team's server. -->
 ```sh
 hyp query sql "SELECT node_id, natural_key, label FROM node WHERE node_type = 'File' AND LOWER(natural_key) LIKE '%<feature>%' ORDER BY natural_key LIMIT 40" --remote team --format json
 hyp query graph neighbors <file-node-id> --type File --direction in --edge-type touched --depth 1 --limit 50 --remote team --json
 hyp query grep "<term>" --session-id <session-id> --remote team --format json
 ```
+
+Over MCP, the three steps are `query_sql`, `graph_neighbors` and `grep_search`
+on your team's server.
 
 Replace placeholders with terms and IDs from the question and results. A
 Session node's `natural_key` is the message dataset's `session_id`. Read the
@@ -240,7 +265,7 @@ leads, not proof of what was decided. Check incomplete results and later
 relevant sessions before concluding whether a decision still stands.
 
 Team retrieval needs no replicated graph or additional client plugin. The
-server maintains the graph. This machine's own capture graph remains available
+server maintains the graph. This host's own capture graph remains available
 for local activity questions. If remote graph data is unavailable, use remote
 message searches and disclose that coverage limit.
 

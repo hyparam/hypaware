@@ -587,7 +587,7 @@ async function launchListener(ctx, state, liveState) {
     return [{ name: u.name, canonical: /** @type {string} */ (u.aliasOf), path_prefix: u.path_prefix ?? '/', base_url: url.href }]
   })
 
-  // Hook stop so in-flight exchanges drain before the listener fully closes.
+  // Hook stop so in-flight exchanges are recorded before the listener is gone.
   proxy.recordingDetails = () => ({ capture_ready: transport?.role !== 'gateway', ...gate.snapshot(), capture_outcomes: outcomes.snapshot() })
   const originalStop = proxy.stop
   proxy.stop = async () => {
@@ -595,8 +595,13 @@ async function launchListener(ctx, state, liveState) {
     recordingControl.close()
     verificationControl.close()
     for (const exchange of captures) if (!exchange.finished) exchange.cancelCapture()
-    await recorder.drain(5000)
+    // The listener first: its stop gives a streaming response a bounded grace,
+    // cuts what is left, and waits for every cut exchange to finalize. The
+    // drain after it is the backstop for an exchange still unsettled, and in
+    // the gateway role it abandons whatever it finds, so running it first
+    // would drop every in-flight turn (#610).
     await originalStop.call(proxy)
+    await recorder.drain(5000)
     // Close the chained agent's keep-alive sockets; a config reload builds a
     // fresh listener and a fresh agent, so the old one must not keep its pool.
     chainedAgent?.destroy()

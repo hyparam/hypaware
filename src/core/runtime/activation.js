@@ -125,10 +125,17 @@ function defaultCacheRoot() {
  * @param {PluginPaths}      args.paths
  * @param {JsonObject}       [args.config]
  * @param {NodeJS.ProcessEnv} [args.env]
+ * @param {boolean}          [args.preview]
  * @returns {PluginActivationContext}
  * @ref LLP 0004#the-activation-context [implements]: per-plugin ctx: config slice, registry facades, scoped logger, requireCapability
  */
-export function createActivationContext({ runtime, plugin, paths, config, env }) {
+export function createActivationContext({ runtime, plugin, paths, config, env, preview }) {
+  // `ctx.plugin` is the kernel's own record of who this plugin is, and the
+  // sink materializer reads it again after `activate()` has run, so a plugin
+  // that could rename it would move its sinks' owner record, labels and
+  // `supports` onto a neighbour (issue #2130). Frozen here, once per
+  // activation and shallowly: the manifest it points at stays as it was.
+  Object.freeze(plugin)
   const pluginName = plugin.name
   const log = createPluginLogger(pluginName)
   const permissions = createPermissionContext(pluginName, plugin.manifest.permissions ?? [])
@@ -158,6 +165,8 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     clients: runtime.clients,
     // @ref LLP 0025#apply-engine-is-kernel-surface [implements]: plugins reach the apply engine only through this narrow facade; absent outside the daemon
     ...(runtime.configControl ? { configControl: runtime.configControl } : {}),
+    // @ref LLP 0525#preview-boot [implements]: present only on a preview boot, so a real activation's ctx is unchanged
+    ...(preview ? { preview: true } : {}),
     /**
      * @template T
      * @param {CapabilityName} name
@@ -177,6 +186,9 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
       runtime.capabilities.provide(pluginName, name, version, value)
     },
   }
+  // Freezing the record alone leaves the member: a plugin that replaced
+  // `ctx.plugin` would hand the materializer a record of its own choosing.
+  Object.defineProperty(ctx, 'plugin', { writable: false, configurable: false })
   runtime.activationContexts.set(pluginName, ctx)
   return ctx
 }
@@ -543,7 +555,7 @@ function createVerbsFacade(pluginName, registry) {
  */
 const VERB_FIELDS = [
   'name', 'tool', 'title', 'summary', 'plugin', 'category', 'audience', 'aliases', 'help',
-  'inputSchema', 'exposure', 'authClass',
+  'inputSchema', 'exposure', 'authClass', 'scope',
 ]
 
 /**

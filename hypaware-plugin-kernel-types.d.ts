@@ -218,10 +218,12 @@ export interface PluginClientManifest {
    *
    * An mtime alone only nominates: when it would report a gap, core reads
    * the tail of the newest files to confirm a real turn is behind the
-   * write, and that read understands Claude Code's JSONL records
-   * (`type`, `isMeta`). A client whose trail is shaped differently gets
-   * the mtime pass and a confirmation read that will not recognise its
-   * turns, so declare one here only alongside that record shape.
+   * write. That read understands Claude Code's JSONL records (`type`,
+   * `isMeta`) and runs only for the built-in claude client (plugin
+   * `@hypaware/claude`, client name `claude`). Any other client that
+   * declares this probe gets the mtime pass and no confirmation read: a
+   * suspected gap is reported as unconfirmed (`unknown`), never as a
+   * confirmed gap and never as healthy, whatever its files contain.
    */
   activity_probe?: PluginActivityProbeManifest
   /**
@@ -262,8 +264,9 @@ export interface PluginActivityProbeManifest {
 
 /**
  * A client's launch spec: the binary to look for on `$PATH` and the
- * argv to start it with. Exactly one `args` element must contain the
- * `{prompt}` placeholder, which is replaced with the user's question;
+ * argv to start it with. At least one `args` element must contain the
+ * `{prompt}` placeholder, and every occurrence is replaced literally with
+ * the user's question;
  * a spec without it would start the client mute, which looks like the
  * feature working (LLP 0198#split).
  */
@@ -694,6 +697,14 @@ export interface PluginActivationContext {
    * and rollback.
    */
   configControl?: ConfigControlFacade
+  /**
+   * Present, and `true`, only when the boot serves a preview
+   * (`hyp setup --dry-run`). The kernel has resolved `paths.stateDir` and
+   * `paths.cacheDir` without creating them, and `activate` must not create
+   * or change persistent state either: register and provide as usual, but
+   * leave directories and files on disk for a real boot to make (LLP 0525).
+   */
+  preview?: true
   requireCapability<T = unknown>(name: CapabilityName, range?: SemverRange): T
   provideCapability<T = unknown>(name: CapabilityName, version: SemverVersion, value: T): void
 }
@@ -1072,6 +1083,17 @@ export interface CommandRegistration {
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }
 
+/**
+ * One plugin's activation outcome as a command body sees it: the loader's
+ * `ActivationResult` without the raw thrown message.
+ */
+export interface CommandActivationOutcome {
+  ok: boolean
+  plugin: ActivePlugin
+  /** Present only when `ok` is false: the loader's safe error-kind label. */
+  errorKind?: string
+}
+
 export interface CommandRunContext {
   stdout: WriteStream
   stderr: WriteStream
@@ -1102,6 +1124,20 @@ export interface CommandRunContext {
    * (LLP 0219 #incomplete-activation-prunes-nothing).
    */
   failedPlugins?: string[]
+  /**
+   * How each plugin that reached `activate()` on this boot came out
+   * (kernel-owned, populated by the dispatcher from `bootKernel`'s
+   * `activations`). Only the first of the four `failedPlugins` routes lands
+   * here, but it is the one that names its owner and its error kind, and the
+   * one whose partial registrations stay behind: a plugin that registered a
+   * client adapter and then threw still shows that adapter in `clients`. The
+   * loader's raw thrown message is withheld; `errorKind` is the safe label.
+   * Absent on a caller that pre-built the kernel, which a reader treats as
+   * "unknown", never as "every plugin activated". Read by the setup finale's
+   * attach lane so a picked client whose owner failed is reported as not
+   * attached rather than skipped as adapterless (issue #596).
+   */
+  activations?: CommandActivationOutcome[]
   /**
    * Capability registry. Per-plugin for a plugin-contributed command, raw
    * for a core one: see `sinks` below for the rule and why it exists.
@@ -1316,6 +1352,12 @@ export interface SinkEncoder {
 
 export interface SinkEncodeContext {
   log: PluginLogger
+  /**
+   * Kernel-owned scratch for staging. It may be reclaimed once the
+   * `Sink.exportBatch` call that encoded the blob settles (a CLI-owned
+   * kernel deletes it at teardown), so nothing staged here may be read
+   * after that. See `Sink.exportBatch`.
+   */
   tempDir: string
   /**
    * Column schema for the partition's dataset. Provided by the blob
@@ -1344,6 +1386,10 @@ export interface SinkEncodeContext {
 export interface SinkEncodedBlob {
   /** Filename (without directory) the destination should write under. */
   filename: string
+  /**
+   * An `AsyncIterable` may be consumed lazily, but only within the
+   * `Sink.exportBatch` call that encoded it. See `Sink.exportBatch`.
+   */
   bytes: Uint8Array | AsyncIterable<Uint8Array>
   bytesWritten?: number
   rowCount?: number
@@ -1403,7 +1449,12 @@ export interface PutObjectResult {
 
 export interface GetObjectInput {
   key: string
-  /** Single HTTP byte range, e.g. bytes=0-7 or bytes=-8. Ends are inclusive. */
+  /**
+   * Single HTTP byte range, e.g. bytes=0-7 or bytes=-8. Ends are inclusive.
+   * A range the object cannot satisfy, an empty object included, MUST throw
+   * with `error_kind=blob_range_unsatisfiable`, so a reader can tell it from
+   * any other storage failure and refetch the whole object.
+   */
   range?: string
 }
 
@@ -1533,11 +1584,33 @@ export interface SourceHistoryReplayResult {
   error?: string
 }
 
+/** A bounded explicit repair selected from a verified server inventory. */
+export interface MissingSyncRequest {
+  org: string
+  revision: string
+  rows: Record<string, unknown>[]
+  validate(): Promise<void>
+}
+
+export interface MissingSyncResult {
+  syncRestore: 1
+  status: 'accepted' | 'already_accepted'
+  restored?: number
+  present?: number
+  purged?: number
+}
+
 export interface Sink {
   /**
    * Called by the sink driver on the configured schedule. The driver
    * passes a batch of ready partitions from the cache; the sink writes
    * them to its destination in the configured format and acks.
+   *
+   * Before the returned promise settles, resolved or rejected, the sink
+   * has finished consuming every `SinkEncodedBlob` it encoded for the
+   * batch, or cancelled the work that depends on one, so nothing still
+   * reads `SinkEncodeContext.tempDir`. Streaming inside the call is
+   * fine; draining after it is not.
    */
   exportBatch(batch: ExportBatch, opts: ExportOptions): Promise<ExportResult>
   flush?(): Promise<void>
@@ -1572,6 +1645,7 @@ export interface Sink {
    */
   previewSourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayPreview>
   replaySourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayResult>
+  restoreMissingRows?(request: MissingSyncRequest): Promise<MissingSyncResult>
 }
 
 export interface ExportBatch {
@@ -1789,6 +1863,22 @@ export interface ReadRowsOptions {
 export interface QueryStorageService {
   /** Reconcile a complete scoped snapshot, including removals, in the local cache. */
   reconcileRows?(dataset: string, columns: ColumnSpec[], rows: Record<string, unknown>[], scope: { where: Record<string, string>; key: string }): Promise<number>
+  /**
+   * Reconcile a batch of complete scoped snapshots of one dataset in one pass:
+   * partitions are discovered, guarded and committed once for the batch, and
+   * each scope settles exactly as a lone `reconcileRows` would. Every scope
+   * names the same `where` columns and key; no two are equal. Returns the rows
+   * written across the batch.
+   */
+  reconcileRowsBatch?(dataset: string, columns: ColumnSpec[], snapshots: { rows: Record<string, unknown>[]; scope: { where: Record<string, string>; key: string } }[]): Promise<number>
+  /**
+   * Claim the cross-process guard for one reconcile scope (`client_name` and
+   * `session_id` required). Hold it from the authoritative source read
+   * through `reconcileRows`, then call the returned release. Throws an error
+   * with `error_kind: 'cache_partition_mutation_busy'` when another writer
+   * holds the scope; it never waits.
+   */
+  claimReconcileScope?(dataset: string, where: Record<string, string>): () => void
 
   cacheRoot: string
   cacheTablePath(dataset: string, partitionSegments?: string[]): string
@@ -1886,8 +1976,13 @@ export type VerbExposure = 'cli+mcp' | 'cli-only' | 'local-only'
  * Gating only applies on an authed (remote/HTTP) transport: the local
  * stdio host is local-user trust and exposes both. See LLP 0034
  * §tool-auth-class.
+ *
+ * `write` is one bounded mutation admitted by a named credential scope: the
+ * verb must name `scope`, and is listed and dispatched only where the host
+ * admits that scope (`allowScopes`), on every transport. See LLP 0494
+ * #write-class.
  */
-export type VerbAuthClass = 'read' | 'operator'
+export type VerbAuthClass = 'read' | 'write' | 'operator'
 
 /**
  * A single typed input property. A deliberately small JSON-Schema subset:
@@ -2047,6 +2142,11 @@ export interface VerbRegistration {
   exposure?: VerbExposure
   /** Default `'read'`. */
   authClass?: VerbAuthClass
+  /**
+   * The credential scope that admits a `write` verb, e.g. `'report-publish'`.
+   * Required, non-empty, on a `write` verb; not read on any other class.
+   */
+  scope?: string
   /** The shared core. Identical for the CLI and the MCP tool. */
   operation(params: Record<string, unknown>, ctx: VerbOperationContext): Promise<unknown> | unknown
   /** CLI-only: turn a structured result into stdout text + exit code. */
@@ -2295,6 +2395,20 @@ export interface ClientRegistration {
   requiresEndpoint?: boolean
   attach(ctx: ClientAttachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
+  /**
+   * Read-only check setup runs once the client is picked, before any write
+   * (LLP 0532). Never throws; an adapter that cannot tell returns `{}`. The
+   * attach-time checks stay in `attach`, which still enforces them.
+   */
+  preflight?(): Promise<ClientPreflight>
+}
+
+/** A client's setup preflight verdict: at most one of the two is set. */
+export interface ClientPreflight {
+  /** Attach is known to refuse: the reason and the action that clears it. Setup skips this client's attach. */
+  refuse?: string
+  /** Attach will work with reduced capture: said once, and setup proceeds. */
+  warn?: string
 }
 
 export interface ClientRegistry {
@@ -3086,7 +3200,13 @@ export interface BackfillProvenance {
 
 export interface BackfillEvent {
   type: 'event'
-  /** Free-form event name (e.g. `scan_started`, `unsupported_location`). */
+  /**
+   * Free-form event name (e.g. `scan_started`, `unsupported_location`).
+   * `import_unavailable` with a string `attributes.note` tells the person
+   * the import could not run (a missing CLI, say) rather than found nothing:
+   * the runner keeps the first such note, capped, for the setup and
+   * `hyp backfill` output.
+   */
   event: string
   /** Optional structured attributes. */
   attributes?: Record<string, unknown>

@@ -11,6 +11,7 @@ import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-
 import { createOpenclawBackfillProvider } from '../../hypaware-core/plugins-workspace/openclaw/src/backfill.js'
 import { sessionMatchKey, wireMatchKey } from '../../hypaware-core/plugins-workspace/openclaw/src/match_key.js'
 import { createOpenclawExchangeProjector } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
+import { createOpenclawSettlementEnricher } from '../../hypaware-core/plugins-workspace/openclaw/src/settle.js'
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
 
 /**
@@ -471,6 +472,257 @@ test('a backfilled row and a settled live row for the same turn carry identical 
       settledRows.map((r) => r.part_id)
     )
     assert.deepEqual(backfilledRows.map((r) => r.part_id), ['msg-user-1#0', 'msg-asst-1#0'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Tool traffic off a real transcript (#2001)
+// ---------------------------------------------------------------------------
+
+/**
+ * OpenClaw 2026.9.6 CLI's own session file for one tool-calling turn against
+ * an OpenAI-compatible, non-OpenAI provider (`api: "openai-completions"`, the
+ * path an Ollama backend takes), only the temp path sanitized. Written line for
+ * line as OpenClaw wrote it, not through `messageLine`, so the toolCall block
+ * and the toolResult record keep every field OpenClaw put on them. `mutate`
+ * edits the parsed records first, for the boundary cases one field away from
+ * the captured shape.
+ *
+ * @param {{ homeDir: string }} env
+ * @param {(records: any[]) => void} [mutate]
+ */
+async function writeRealToolTranscript(env, mutate) {
+  const records = JSON.parse(await fs.readFile(new URL('../fixtures/openclaw/2026.9.6-transcript.json', import.meta.url), 'utf8'))
+  mutate?.(records)
+  const dir = path.join(env.homeDir, '.openclaw', 'agents', 'main', 'sessions')
+  await fs.mkdir(dir, { recursive: true })
+  const filePath = path.join(dir, `${records[0].id}.jsonl`)
+  await fs.writeFile(filePath, records.map((/** @type {unknown} */ r) => JSON.stringify(r)).join('\n') + '\n', 'utf8')
+  // Settlement windows candidate files by mtime against the rows' own
+  // timestamps, so the file is dated to the turn it records.
+  const turnEnd = new Date(Date.parse(records[records.length - 1].timestamp) + 1_000)
+  await fs.utimes(filePath, turnEnd, turnEnd)
+  return records
+}
+
+/**
+ * The final exchange of the real tool turn on the Anthropic Messages wire,
+ * where the result rides a `user` turn the way OpenClaw sends it upstream, run
+ * through the real live projector and the real settlement enricher. The ids
+ * are the session file's own; settlement matches on content, so they would not
+ * need to be.
+ *
+ * @param {{ homeDir: string }} env
+ * @param {any[]} records
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function settledLiveToolTurn(env, records) {
+  const [, user, assistantCall, toolResult, assistantReply] = records
+  const requestBody = {
+    model: 'probe',
+    system: 'You are OpenClaw.',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: user.message.content }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'call_probe', name: 'read', input: assistantCall.message.content[0].arguments }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'call_probe', content: toolResult.message.content }],
+      },
+    ],
+  }
+  const responseBody = {
+    id: 'msg_wire_reply',
+    role: 'assistant',
+    model: 'probe',
+    content: [{ type: 'text', text: assistantReply.message.content[0].text }],
+    stop_reason: 'end_turn',
+    usage: { input_tokens: 80, output_tokens: 20 },
+  }
+  const projection = createOpenclawExchangeProjector().project(
+    /** @type {any} */ ({
+      exchange_id: 'ex-tool-1',
+      ts_start: assistantReply.timestamp,
+      duration_ms: 50,
+      request_headers: JSON.stringify({ 'x-hypaware-client': 'openclaw' }),
+      request_body: JSON.stringify(requestBody),
+      response_body: JSON.stringify(responseBody),
+      stream_events: [],
+    }),
+    /** @type {any} */ ({ log: { debug() {}, info() {}, warn() {}, error() {} } })
+  )
+  assert.ok(projection, 'the live projector must claim this exchange')
+  const liveRows = aiGatewayRowsFromProjectedExchange(/** @type {any} */ (projection))
+  return /** @type {Record<string, unknown>[]} */ (await createOpenclawSettlementEnricher({
+    homeDir: env.homeDir,
+    resolver: { resolve: () => ({ class: 'full', governedBy: null, declared: null }), isIgnored: () => false },
+    logger: { info() {}, warn() {} },
+  }).settle(/** @type {any} */ (liveRows), /** @type {any} */ ({})))
+}
+
+test('a real toolCall and toolResult land with tool columns populated and paired by id', async () => {
+  const env = await stageEnv()
+  try {
+    await writeRealToolTranscript(env)
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    assert.equal(items.length, 1)
+    const rows = await materialize(items[0])
+    const call = rows.find((r) => r.part_type === 'tool_call')
+    const result = rows.find((r) => r.part_type === 'tool_result')
+    assert.ok(call, 'the toolCall block lands as a tool_call part')
+    assert.ok(result, 'the toolResult record lands as a tool_result part')
+    assert.equal(rows.some((r) => r.part_type === 'toolCall'), false)
+
+    assert.equal(call.tool_name, 'read')
+    assert.equal(call.tool_call_id, 'call_probe')
+    assert.deepEqual(call.tool_args, { path: '/openclaw-test/workspace/probe.txt' })
+
+    assert.equal(result.role, 'tool')
+    assert.equal(result.tool_name, 'read')
+    assert.equal(result.tool_call_id, 'call_probe')
+    assert.equal(result.tool_result_for, call.tool_call_id)
+    assert.deepEqual(result.tool_args, call.tool_args)
+    assert.equal(result.content_text, 'OpenClaw SQLite acceptance probe\n')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0157#requirements [tests]: R11 for tool traffic. The live half runs
+// the real projector and the real settlement enricher over the same turn the
+// session file records, so the union by `part_id` is what the cache keeps.
+test('a real tool turn the live lane also observed settles to one row per part', async () => {
+  const env = await stageEnv()
+  try {
+    const records = await writeRealToolTranscript(env)
+
+    // --- Route 1: backfill.
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const backfilledRows = await materialize(items[0])
+
+    // --- Route 2: the final exchange of the same turn on the live lane.
+    const settledRows = await settledLiveToolTurn(env, records)
+
+    // Every live row settles onto a part the backfill also wrote, so the
+    // union keeps one row per part rather than landing the turn twice.
+    const backfilledIds = backfilledRows.map((r) => r.part_id)
+    assert.deepEqual(settledRows.map((r) => r.part_id), backfilledIds)
+    assert.equal(new Set([...backfilledIds, ...settledRows.map((r) => r.part_id)]).size, backfilledIds.length)
+    // The call and its result carry the same part_type on both routes.
+    assert.deepEqual(settledRows.map((r) => r.part_type), backfilledRows.map((r) => r.part_type))
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a window that cuts between a call and its result keeps the result paired with its arguments', async () => {
+  const env = await stageEnv()
+  try {
+    await writeRealToolTranscript(env)
+    // After the 18:12:34.549Z call, before the 18:12:34.560Z result.
+    const { items } = await collect(provider(env).run(runContext({ since: '2026-09-28T18:12:34.555Z' }).ctx))
+    const rows = await materialize(items[0])
+    assert.equal(rows.some((r) => r.part_type === 'tool_call'), false, 'the out-of-window call is not imported')
+    const result = rows.find((r) => r.part_type === 'tool_result')
+    assert.ok(result)
+    assert.equal(result.tool_call_id, 'call_probe')
+    assert.deepEqual(result.tool_args, { path: '/openclaw-test/workspace/probe.txt' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a call in canonical tool_use spelling pairs its arguments onto the result', async () => {
+  const env = await stageEnv()
+  try {
+    await writeRealToolTranscript(env, (records) => {
+      const block = records[2].message.content[0]
+      block.type = 'tool_use'
+      block.input = block.arguments
+      delete block.arguments
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    const result = rows.find((r) => r.part_type === 'tool_result')
+    assert.ok(result)
+    assert.deepEqual(result.tool_args, { path: '/openclaw-test/workspace/probe.txt' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an identified tool result with empty output still lands, on the part the live lane settles to', async () => {
+  const env = await stageEnv()
+  try {
+    const records = await writeRealToolTranscript(env, (records) => {
+      records[3].message.content = []
+    })
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const backfilledRows = await materialize(items[0])
+    const result = backfilledRows.find((r) => r.part_type === 'tool_result')
+    assert.ok(result, 'an empty result is still a tool outcome')
+    assert.equal(result.tool_name, 'read')
+    assert.equal(result.tool_call_id, 'call_probe')
+    assert.deepEqual(result.tool_args, { path: '/openclaw-test/workspace/probe.txt' })
+
+    const settledRows = await settledLiveToolTurn(env, records)
+    assert.deepEqual(settledRows.map((r) => r.part_id), backfilledRows.map((r) => r.part_id))
+    assert.deepEqual(settledRows.map((r) => r.part_type), backfilledRows.map((r) => r.part_type))
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/**
+ * Append a second call and result that reuse the captured turn's call id
+ * `call_probe` with a different path, the way a session that repeats a call id
+ * across turns writes them.
+ *
+ * @param {any[]} records
+ */
+function appendReusedCallId(records) {
+  const call = structuredClone(records[2])
+  call.id = 'second-call'
+  call.parentId = records[4].id
+  call.timestamp = '2026-09-28T18:12:34.580Z'
+  call.message.timestamp = Date.parse(call.timestamp)
+  call.message.content[0].arguments = { path: '/openclaw-test/workspace/second.txt' }
+  const result = structuredClone(records[3])
+  result.id = 'second-result'
+  result.parentId = call.id
+  result.timestamp = '2026-09-28T18:12:34.590Z'
+  result.message.timestamp = Date.parse(result.timestamp)
+  records.push(call, result)
+}
+
+test('a call id reused later in the session pairs each result with the call before it', async () => {
+  const env = await stageEnv()
+  try {
+    await writeRealToolTranscript(env, appendReusedCallId)
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    const results = rows.filter((r) => r.part_type === 'tool_result')
+    assert.deepEqual(results.map((r) => r.tool_args), [
+      { path: '/openclaw-test/workspace/probe.txt' },
+      { path: '/openclaw-test/workspace/second.txt' },
+    ])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a reused call id past the window end does not rebind an in-window result', async () => {
+  const env = await stageEnv()
+  try {
+    await writeRealToolTranscript(env, appendReusedCallId)
+    const { items } = await collect(provider(env).run(runContext({ until: '2026-09-28T18:12:34.575Z' }).ctx))
+    const rows = await materialize(items[0])
+    const results = rows.filter((r) => r.part_type === 'tool_result')
+    assert.deepEqual(results.map((r) => r.tool_args), [{ path: '/openclaw-test/workspace/probe.txt' }])
   } finally {
     await env.cleanup()
   }
@@ -1289,6 +1541,33 @@ test('sweep.cron falls back to the every-5-minutes default when config is absent
     })
     assert.deepEqual(
       createOpenclawBackfillProvider({ homeDir: env.homeDir, config: { backfill: {} } }).sweep,
+      { cron: '*/5 * * * *' }
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0041#consent-gating [tests]: `backfill.on_join: false` withholds the
+// scheduled sweep, which is automatic history import (issue #1339)
+test('backfill.on_join false contributes no sweep, so the daemon never ticks Lane B', async () => {
+  const env = await stageEnv()
+  try {
+    assert.equal(
+      createOpenclawBackfillProvider({ homeDir: env.homeDir, config: { backfill: { on_join: false } } }).sweep,
+      undefined
+    )
+    // A configured cadence does not override the opt-out.
+    assert.equal(
+      createOpenclawBackfillProvider({
+        homeDir: env.homeDir,
+        config: { backfill: { on_join: false, sweep_cron: '*/10 * * * *' } },
+      }).sweep,
+      undefined
+    )
+    // An explicit on_join true keeps the schedule.
+    assert.deepEqual(
+      createOpenclawBackfillProvider({ homeDir: env.homeDir, config: { backfill: { on_join: true } } }).sweep,
       { cron: '*/5 * * * *' }
     )
   } finally {

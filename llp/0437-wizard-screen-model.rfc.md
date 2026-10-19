@@ -7,6 +7,7 @@
 **Date:** 2026-09-24
 **Supersedes:** LLP 0387, LLP 0412
 **Extends:** LLP 0100 (#requirements R1a: the recap and `hyp sync` name the server as "HypAware Cloud" or its host, with no lookup pointer; see #server-name)
+**Extended-by:** LLP 0538 (#note: an import that could not run says so in the finish step)
 **Related:** LLP 0188 (#never-silent: the wizard is a consent surface),
 LLP 0341 (#context: stdout is that surface; the guarded streams),
 LLP 0387 (#adjacency: compact lines that must sit next to each other),

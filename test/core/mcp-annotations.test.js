@@ -9,6 +9,7 @@ import { Readable } from 'node:stream'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
+import { REMOTE_TOOL_CONTRACTS } from '../../src/core/mcp/contracts.js'
 import { createMcpServer } from '../../src/core/mcp/server.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
@@ -106,6 +107,8 @@ function assertAnnotated(tools, lookup) {
     const authClass = verb.authClass ?? 'read'
     if (authClass === 'read') {
       assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: true }, `${entry.name} is a read tool`)
+    } else if (authClass === 'write') {
+      assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: false, destructiveHint: false }, `${entry.name} is a write tool`)
     } else {
       assert.equal(authClass, 'operator')
       assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: false, destructiveHint: true }, `${entry.name} is an operator tool`)
@@ -155,6 +158,47 @@ test('an http read principal sees the same titles and read hints, without operat
   }
 })
 
+test('an http principal with report-publish sees the bound mark titled and hinted as a non-destructive write', async () => {
+  const booted = await bootKernel()
+  try {
+    // The mark as the server binds it: the contract plus an operation.
+    const mark = /** @type {NonNullable<typeof REMOTE_TOOL_CONTRACTS[number]>} */ (REMOTE_TOOL_CONTRACTS.find((c) => c.tool === 'set_recommendation_status'))
+    booted.kernel.verbs.register({
+      name: `contract ${mark.tool}`, tool: mark.tool, title: mark.title, summary: mark.summary, inputSchema: mark.inputSchema,
+      authClass: mark.authClass, scope: mark.scope, operation: async () => ({ ok: true }), render: () => ({ stdout: '' }),
+    })
+    const server = createMcpServer({
+      verbs: booted.kernel.verbs,
+      query: booted.kernel.query,
+      runTool: (verb, params) => Promise.resolve(verb.operation(params, /** @type {any} */ ({}))),
+      transport: 'http',
+      allowOperator: false,
+      allowScopes: ['report-publish'],
+    })
+    const r = /** @type {any} */ (await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+    const tools = r.result.tools
+    assert.deepEqual(tools.map((/** @type {any} */ t) => t.name).sort(),
+      ['annotations_untitled', 'graph_neighbors', 'grep_search', 'query_sql', 'set_recommendation_status'])
+    assertAnnotated(tools, (t) => booted.kernel.verbs.getByTool(t))
+    assert.deepEqual(tools.find((/** @type {any} */ t) => t.name === 'set_recommendation_status').annotations,
+      { title: 'Set recommendation status', readOnlyHint: false, destructiveHint: false })
+  } finally {
+    await fs.rm(booted.tmp, { recursive: true, force: true })
+  }
+})
+
+test('the stdio host registers no write verb', async () => {
+  const booted = await bootKernel()
+  try {
+    assert.deepEqual(booted.kernel.verbs.list().filter((v) => v.authClass === 'write').map((v) => v.name), [])
+    const tools = await stdioTools(booted)
+    assert.ok(!tools.some((t) => t.name === 'set_recommendation_status'))
+    assert.ok(!tools.some((t) => t.annotations.destructiveHint === false))
+  } finally {
+    await fs.rm(booted.tmp, { recursive: true, force: true })
+  }
+})
+
 test('registration refuses a title that is not a non-empty string', async () => {
   const booted = await bootKernel()
   try {
@@ -170,7 +214,8 @@ test('registration refuses a title that is not a non-empty string', async () => 
 })
 
 test('a verb whose auth class has no hints is not listed', async () => {
-  const stray = { ...untitledVerb, authClass: 'write' }
+  // Registration refuses an unknown class, so this stray bypasses the registry.
+  const stray = { ...untitledVerb, authClass: 'admin' }
   const list = [stray]
   const verbs = {
     list: () => list,

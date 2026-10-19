@@ -1,7 +1,7 @@
 // @ts-check
 
 import { runBackfill, runBackfillList } from '../commands/backfill.js'
-import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
+import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove, runRemoteTokens, runRemoteTokensRevoke } from './remote_commands.js'
 import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportMark, runReportPublish, runReportRecommend, runReportSave } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
@@ -320,7 +320,7 @@ function buildCoreCommands(registry) {
       name: 'config',
       category: 'additional',
       audience: 'operator',
-      summary: 'Inspect or validate the HypAware config',
+      summary: 'Validate the HypAware config',
     }),
     {
       name: 'config validate',
@@ -701,6 +701,17 @@ function buildCoreCommands(registry) {
         '`hyp sync --history <client>` previews and replays locally retained',
         'history for a client that is already syncing. Only replay-safe',
         'destinations participate, and ordinary sink watermarks are unchanged.',
+        '',
+        '`hyp sync <instance> --check --dataset ai_gateway_messages` compares',
+        'retained export-eligible row IDs with a prepared server inventory.',
+        'It never uploads. --from/--to narrow event dates; --json emits a report.',
+        'Exit codes: 0 matched, 1 differences, 2 incomplete. Other datasets are',
+        'unsupported in this initial version. Requires a logged-in read remote.',
+        '',
+        '`hyp sync <instance> --missing --dataset ai_gateway_messages` sends',
+        'only candidate missing rows, with server checks across dates and purge',
+        'exclusions. Use --dry-run to preview or --yes to confirm. One run admits',
+        'at most 1,000 candidates and 4 MiB; narrow --from/--to for larger gaps.',
       ].join('\n'),
       run: runSync,
     },
@@ -761,8 +772,26 @@ function buildCoreCommands(registry) {
         'Requires a logged-in session (hyp remote login). The token enrolls CI',
         'runs under one shared gateway via `hyp join`; default expiry 365 days',
         '(--expires-days <n>), --label names the gateway.',
+        '',
+        'With --scope query it mints a personal agent token instead: it reads the',
+        "org's recorded history and can mark, publish and delete reports as you,",
+        "until it expires (the server's default unless --expires-days) or is revoked",
+        "with 'hyp remote tokens revoke <jti>'. For headless agents and CI; at your",
+        "own computer 'hyp mcp serve --remote' already uses your session.",
       ].join('\n'),
       run: runRemoteMint,
+    },
+    {
+      name: 'remote tokens',
+      summary: 'List your agent tokens on a remote target (never a token value)',
+      usage: coreUsage('remote tokens'),
+      run: runRemoteTokens,
+    },
+    {
+      name: 'remote tokens revoke',
+      summary: 'Revoke one of your agent tokens on a remote target',
+      usage: coreUsage('remote tokens revoke'),
+      run: runRemoteTokensRevoke,
     },
     {
       name: 'remote list',
@@ -812,7 +841,8 @@ function buildCoreCommands(registry) {
         'directory\'s own usage class. This is not session isolation: excerpts it',
         'reads out of local-only history are quoted into a transcript that syncs',
         'if this directory does. No remote login is required. The skill drafts',
-        "here and finishes with 'hyp report save', which moves the folder into",
+        './hypaware-report-<from>-to-<to>/ here, appending -2, -3, etc. if it',
+        "exists, and finishes with 'hyp report save', which moves the folder into",
         '$HYP_HOME/reports.',
       ].join('\n'),
       run: runReportGenerate,
@@ -885,8 +915,8 @@ function buildCoreCommands(registry) {
         'selects or filters the remote and it cannot be read, saved reports are',
         'still listed under a warning; --json keeps the failure instead.',
         'Under each report, one line per recommendation: id, [state], page, and',
-        'title. The state is open, in_progress, applied, or dismissed; a',
-        "recommendation nobody has marked is open. --recommendations lists the",
+        'title. The state label appears only when the remote provides a state.',
+        '--recommendations lists the',
         'recommendations themselves, flat across reports (a standalone one says',
         "'standalone' where its report would be); --status <state,...> filters",
         "them and implies --recommendations. --json prints the remote's records whole",

@@ -9,7 +9,7 @@ import { loadManifest } from '../manifest.js'
 import { Attr, withSpan } from '../observability/index.js'
 import { provenanceFromUrl } from './git_source.js'
 import { captureGitOutput, GIT_OUTPUT_LIMIT } from './git_output.js'
-import { installDirIsContained, pluginInstallDir } from './paths.js'
+import { checkInstallDestination, installDirIsContained, pluginInstallDir } from './paths.js'
 import { sha256Hex } from '../util/json_util.js'
 
 /**
@@ -120,8 +120,8 @@ export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) 
         ok: false,
         errorKind: 'manifest_name_unsafe',
         message:
-          `plugin install: refused, manifest name '${manifest.name}' does not resolve to a ` +
-          `directory inside the plugin install root; nothing was installed and nothing was removed`,
+          `plugin install: refused, manifest name '${manifest.name}' is not an install name ` +
+          `(one name or @scope/name, inside the plugin install root); nothing was installed and nothing was removed`,
       }
     }
 
@@ -153,6 +153,16 @@ export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) 
       }
     }
 
+    // After the prompt, which can wait on a person, so the check sits next
+    // to the mkdir and backup rename it guards.
+    const destination = await checkInstallDestination(stateDir, manifest.name)
+    if (!destination.ok) {
+      return {
+        ok: false,
+        errorKind: 'install_dir_unsafe',
+        message: `plugin install: refused, ${destination.reason}; nothing was installed and nothing was removed`,
+      }
+    }
     const installDir = pluginInstallDir(stateDir, manifest.name)
     const copyResult = await runCopyArtifactSpan({
       sourceRoot: tmpRepo,

@@ -8,7 +8,7 @@ import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
 import { isHelpFlag } from '../cli/group_help.js'
 import { runInitWizard } from '../cli/wizard/index.js'
 import { enableGithubCollection } from '../cli/wizard/pick.js'
-import { DEFAULT_RETENTION_DAYS, LOCAL_INSTALL_RETENTION_DAYS, orderPickerDescriptors, visiblePickerDescriptors } from '../cli/walkthrough.js'
+import { DEFAULT_RETENTION_DAYS, LOCAL_INSTALL_RETENTION_DAYS, orderPickerDescriptors, preflightLegacyProxyAttach, visiblePickerDescriptors } from '../cli/walkthrough.js'
 import { detectPickerSources } from '../cli/detect.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
@@ -59,6 +59,7 @@ export function buildPickerBackfillRunner(ctx, skipOptional = false) {
         scanned: result.scanned,
         rowsWritten: result.rowsWritten,
         skipped: result.skipped,
+        ...(result.note ? { note: result.note } : {}),
       }
     },
   }
@@ -76,7 +77,8 @@ export function buildPickerBackfillRunner(ctx, skipOptional = false) {
  * presets land on stderr with the list of available names. What follows
  * the preset name is gated before the preset runs: a help flag renders
  * help, and a flag `hyp setup` does not advertise is a usage error, so
- * neither reaches the preset's config write.
+ * neither reaches the preset's config write. Any other setup option and
+ * any positional is the preset's own to read or refuse.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -105,7 +107,7 @@ export async function runInit(argv, ctx) {
     // through that same interception rather than letting a preset speak for the
     // command with help of its own.
     // @ref LLP 0009#central-help-interception [implements]: the preset form renders core's registry-backed help for `setup`
-    if (presetArgv.some(isHelpFlag)) return ctx.commands.run('setup', ['--help'])
+    if (presetArgv.some(isHelpFlag)) return renderSetupHelp(ctx)
     // A preset reads its own argv for the handful of flags it honors, so
     // anything else here would be ignored on a path that writes user config.
     // Refuse it as the no-preset form below does.
@@ -118,7 +120,7 @@ export async function runInit(argv, ctx) {
     // choices would be dropped while setup reports success.
     const pickerOnly = presetArgv.find((t) => /^--(github|no-backfill)(=|$)/.test(t))
     if (pickerOnly !== undefined) {
-      ctx.stderr.write(`hyp setup: ${pickerOnly.split('=')[0]} is not supported with a preset; name choices with --source instead\n`)
+      ctx.stderr.write(`hyp setup: ${pickerOnly.split('=')[0]} is not supported with a preset; name choices with hyp setup --yes --source instead\n`)
       return 2
     }
     return preset.run(presetArgv, ctx)
@@ -133,7 +135,7 @@ export async function runInit(argv, ctx) {
     // intercepts help only when it leads the command's argv, so a help flag
     // behind an init flag arrives here instead.
     // @ref LLP 0293#one-contract [implements]: a --help further along argv prints the usage line on stdout and exits 0
-    if (parsed.help) return ctx.commands.run('setup', ['--help'])
+    if (parsed.help) return renderSetupHelp(ctx)
     if (parsed.error) {
       ctx.stderr.write(`hyp setup: ${parsed.error}\n`)
       return 2
@@ -174,6 +176,18 @@ export async function runInit(argv, ctx) {
   // interactive path.
   writeUnknownFlag(ctx, argv[0])
   return 2
+}
+
+/**
+ * Render `setup`'s help through the dispatcher's central interception, for a
+ * help flag that does not lead argv. The outer invocation is a help render,
+ * not a setup run, so it is classified as one here, where that is decided: it
+ * records what a leading `hyp setup --help` records (issue #2470).
+ * @param {CommandRunContext} ctx
+ */
+function renderSetupHelp(ctx) {
+  noteInvocation({ kind: 'help' })
+  return ctx.commands.run('setup', ['--help'])
 }
 
 /**
@@ -364,7 +378,7 @@ function hasInitFlags(argv) {
  * @ref LLP 0368#display-only [constrained-by]: a platform-gated row keeps its `--source` identity
  */
 export const INIT_SOURCE_CHOICES = Object.freeze(/** @type {PickerSource[]} */ ([
-  'ollama', 'langgraph',
+  'ollama', 'langgraph', 'codex-cloud', 'chatgpt-work',
   'claude', 'claude-desktop', 'codex', 'opencode', 'cursor', 'pi', 'openclaw', 'hermes', 'raw-anthropic', 'raw-openai', 'otel',
 ]))
 
@@ -625,6 +639,15 @@ async function runInitFromFile(flags, ctx) {
   // up before replacing. `--dry-run` gets the same answer and refusal
   // with no backup and no write.
   const dryRun = flags.dryRun
+  // @ref LLP 0524#refusal [implements]: --force replaces the file, not the transport a still-proxying client depends on
+  if (!(await preflightLegacyProxyAttach({
+    config: /** @type {HypAwareV2Config} */ (parsed),
+    configPath: targetPath,
+    env: ctx.env,
+    stderr: ctx.stderr,
+  }))) {
+    return 1
+  }
   const guard = await prepareLocalConfigWrite({ targetPath, force: flags.force, dryRun })
   if (!guard.proceed) {
     ctx.stderr.write(`hyp setup: ${guard.message}\n`)

@@ -253,23 +253,33 @@ const SPAWN_POLL_ATTEMPTS = 20 // ~2s ceiling at 100ms each
 const SPAWN_POLL_INTERVAL_MS = 100
 
 /**
- * Poll `launchctl print <target>` until the agent is gone (non-zero exit)
- * or the bound elapses. `launchctl bootout` is asynchronous: launchd may
+ * Poll `launchctl print <target>` until launchd answers 113 (service not
+ * found) or the bound elapses. `launchctl bootout` is asynchronous: launchd may
  * still be tearing the service down after the command returns. Waiting for
  * the service to actually disappear closes the bootout→bootstrap race.
+ *
+ * Only 113 confirms the release. Any other non-zero exit is a probe that
+ * failed, which says nothing either way about the job, so it keeps the poll
+ * going on the same bound rather than ending it as an unload (#2338). A probe
+ * that rejects outright still propagates at once: it never confirms anything.
  *
  * @param {LaunchctlAdapter} launchctl
  * @param {string} target
  * @param {(ms: number) => Promise<void>} sleep
  * @param {number} [attempts]
- * @returns {Promise<LaunchctlResult | undefined>}
+ * @returns {Promise<{ released: boolean, last: LaunchctlResult | undefined }>}
+ *   `last` is the final probe only, so a failure can say what it saw without
+ *   carrying the poll's history
  */
 async function waitUntilUnloaded(launchctl, target, sleep, attempts = UNLOAD_POLL_ATTEMPTS) {
+  /** @type {LaunchctlResult | undefined} */
+  let last
   for (let i = 0; i < attempts; i += 1) {
-    const res = await launchctl.print([target])
-    if (res.exitCode !== 0) return res // launchd has released it, or the probe failed
+    last = await launchctl.print([target])
+    if (last.exitCode === 113) return { released: true, last }
     await sleep(UNLOAD_POLL_INTERVAL_MS)
   }
+  return { released: false, last }
 }
 
 /**
@@ -420,29 +430,89 @@ export async function uninstallLaunchAgent(options) {
   const plistPath = plistPathFor(plistDir, label)
 
   if (!fs.existsSync(plistPath)) return
-  const booted = await launchctl.bootout([target]).catch(function() { return undefined })
+  // A bootout the adapter could not run is not a reason to abandon the
+  // removal (launchd answers a teardown it already finished with `3: No such
+  // process`, and the probe below is the verdict either way), but its reason
+  // is kept for the failure rather than discarded (#2340).
+  /** @type {Error | undefined} */
+  let bootoutErr
+  const booted = await launchctl.bootout([target])
+    .catch(function(err) { bootoutErr = asError(err); return undefined })
   // A probe that could not be run at all is no more an unload than a bootout
   // that could not be run, and no more a reason to abandon the removal: a
   // `launchctl` the host cannot spawn rejects here (the #1386 shape), and so
   // does the suite's own refusal to touch a real launchd. Unlink on that path
-  // too, exactly as the bootout's `.catch()` above already does, and let the
-  // failure below carry the reason the unload went unconfirmed.
+  // too, and let the failure below carry the reason the unload went
+  // unconfirmed.
   /** @type {Error | undefined} */
   let probeErr
   const unloaded = await waitUntilUnloaded(launchctl, target, options.sleep ?? defaultSleep, STOP_UNLOAD_POLL_ATTEMPTS)
-    .catch(function(err) { probeErr = err instanceof Error ? err : new Error(String(err)); return undefined })
+    .catch(function(err) { probeErr = asError(err); return undefined })
   unlinkServiceFile(plistPath)
-  if (unloaded !== undefined) return
-  const failed = booted !== undefined && booted.exitCode !== 0
-  const why = probeErr?.message || (booted?.stderr || '').trim() || (failed ? `exit ${booted.exitCode}` : '')
-  throw new LaunchAgentError(
-    `booted out ${label} and removed ${plistPath}, but the service did not unload`
-      + `${why ? `: ${why}` : ''}`
+  if (unloaded?.released) return
+  throw unconfirmedUninstallError({ label, target, plistPath, booted, bootoutErr, last: unloaded?.last, probeErr })
+}
+
+const EVIDENCE_MAX_CHARS = 300
+
+/**
+ * One piece of launchctl output, trimmed to a line an operator can read and
+ * capped so a runaway stderr cannot grow the message without bound.
+ *
+ * @param {string | undefined} text
+ * @returns {string}
+ */
+function evidence(text) {
+  const flat = (text || '').trim().replace(/\s+/g, ' ')
+  return flat.length > EVIDENCE_MAX_CHARS ? `${flat.slice(0, EVIDENCE_MAX_CHARS)}...` : flat
+}
+
+/**
+ * @param {unknown} err
+ * @returns {Error}
+ */
+function asError(err) {
+  return err instanceof Error ? err : new Error(String(err))
+}
+
+/**
+ * The failure an uninstall raises when launchd never confirmed the release.
+ * It says only what was observed: the plist removal is confirmed, the bootout
+ * was attempted (and how it answered), and the job's release is unconfirmed.
+ * A probe that failed is reported as a failed probe, never as proof the job
+ * is still loaded. The bootout's reason leads, because it is the causal one
+ * when both stages failed (#2340), and the original rejection rides along as
+ * `cause`.
+ *
+ * @param {{ label: string, target: string, plistPath: string, booted: LaunchctlResult | undefined, bootoutErr: Error | undefined, last: LaunchctlResult | undefined, probeErr: Error | undefined }} seen
+ * @returns {LaunchAgentError}
+ */
+function unconfirmedUninstallError(seen) {
+  const { label, target, plistPath, booted, bootoutErr, last, probeErr } = seen
+  const bootoutStderr = evidence(booted?.stderr)
+  const bootout = bootoutErr
+    ? `the bootout could not be run (${evidence(bootoutErr.message)})`
+    : booted && booted.exitCode !== 0
+      ? `the bootout exited ${booted.exitCode}${bootoutStderr ? ` (${bootoutStderr})` : ''}`
+      : 'the bootout was accepted'
+  const probeStderr = evidence(last?.stderr)
+  const probe = probeErr
+    ? `launchctl print could not be run (${evidence(probeErr.message)})`
+    : last && last.exitCode !== 0
+      ? `launchctl print kept failing (last exit ${last.exitCode}${probeStderr ? `: ${probeStderr}` : ''}), so whether the job is still loaded is unknown`
+      : 'launchctl print still listed the job when the wait ran out'
+  const failedBootout = booted !== undefined && booted.exitCode !== 0
+  const error = new LaunchAgentError(
+    `tried to boot out ${label} and removed ${plistPath}, but launchd never confirmed the job unloaded:`
+      + ` ${bootout}; ${probe}`
       + `. The daemon may still be running; ask launchd itself: launchctl print ${target}`,
     // `exitCode: 0` on a thrown error reads as success to any caller that
     // forwards the field as a process exit status.
-    { exitCode: failed ? booted.exitCode : undefined, stderr: booted?.stderr },
+    { exitCode: failedBootout ? booted.exitCode : undefined, stderr: booted?.stderr },
   )
+  const cause = bootoutErr ?? probeErr
+  if (cause) error.cause = cause
+  return error
 }
 
 /**
@@ -524,17 +594,18 @@ export async function stopLaunchAgent(options) {
   const booted = await launchctl.bootout([target])
   const sleep = options.sleep ?? defaultSleep
   const unloaded = await waitUntilUnloaded(launchctl, target, sleep, STOP_UNLOAD_POLL_ATTEMPTS)
-  if (unloaded === undefined) {
-    const why = (booted.stderr || '').trim() || (booted.exitCode === 0 ? '' : `exit ${booted.exitCode}`)
-    throw new LaunchAgentError(
-      `failed to bootout ${label}: the service did not unload${why ? `: ${why}` : ''}`,
-      // No exit code when the bootout itself exited 0: a thrown error tagged
-      // `exitCode: 0` reads as success to any caller that forwards the field
-      // as a process exit status.
-      { exitCode: booted.exitCode === 0 ? undefined : booted.exitCode, stderr: booted.stderr },
-    )
-  }
-  if (unloaded.exitCode !== 113) ensure(unloaded, `print ${label}`)
+  if (unloaded.released) return
+  // A probe that kept failing to the end of the window is reported as the
+  // probe failure it is, not as a job launchd is known to still hold.
+  if (unloaded.last && unloaded.last.exitCode !== 0) ensure(unloaded.last, `print ${label}`)
+  const why = (booted.stderr || '').trim() || (booted.exitCode === 0 ? '' : `exit ${booted.exitCode}`)
+  throw new LaunchAgentError(
+    `failed to bootout ${label}: the service did not unload${why ? `: ${why}` : ''}`,
+    // No exit code when the bootout itself exited 0: a thrown error tagged
+    // `exitCode: 0` reads as success to any caller that forwards the field
+    // as a process exit status.
+    { exitCode: booted.exitCode === 0 ? undefined : booted.exitCode, stderr: booted.stderr },
+  )
 }
 
 /**
@@ -575,13 +646,19 @@ export function isLaunchAgentInstalled(options) {
  * not in its domain. When loaded, includes a `pid` only if the agent
  * currently has a running process.
  *
+ * Only 113 says the service is not in the domain. Any other nonzero exit is
+ * launchctl failing to answer, which is still not loaded but is marked
+ * `unreachable` so a caller does not read it as "nothing running" (#1406).
+ * @ref LLP 0545#unreachable [implements]: a print that did not answer is a probe that never ran
+ *
  * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, platform?: NodeJS.Platform }} options
- * @returns {Promise<{ loaded: boolean, pid?: number }>}
+ * @returns {Promise<{ loaded: boolean, pid?: number, unreachable?: boolean }>}
  */
 export async function launchAgentStatus(options) {
   const { launchctl, target } = resolveTarget(options)
   const result = await launchctl.print([target])
-  if (result.exitCode !== 0) return { loaded: false }
+  if (result.exitCode === 113) return { loaded: false }
+  if (result.exitCode !== 0) return { loaded: false, unreachable: true }
   const pid = parsePrintedPid(result.stdout)
   return pid === undefined ? { loaded: true } : { loaded: true, pid }
 }

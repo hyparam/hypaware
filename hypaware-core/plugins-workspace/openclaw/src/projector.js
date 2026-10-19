@@ -444,7 +444,23 @@ function isEmptyCutRow(role, message) {
   if (role !== 'assistant' || !cutStreamMessages.has(message)) return false
   const content = message.content
   if (typeof content === 'string') return content.length === 0
-  if (Array.isArray(content)) return content.length === 0
+  if (Array.isArray(content)) return content.every(isEmptyTextPlaceholder)
+  return true
+}
+
+/**
+ * The block `content_block_start` seeds before its first `text_delta`
+ * (`{type: 'text', text: ''}`), still exactly as seeded. A stream cut in
+ * that gap leaves only placeholders, which carry no more content than an
+ * empty array (issue #595). Anything else is kept: whitespace text, an extra
+ * key, a tool or thinking block.
+ *
+ * @param {unknown} block
+ * @returns {boolean}
+ */
+function isEmptyTextPlaceholder(block) {
+  if (!isPlainObject(block) || block.type !== 'text' || block.text !== '') return false
+  for (const key in block) if (key !== 'type' && key !== 'text') return false
   return true
 }
 

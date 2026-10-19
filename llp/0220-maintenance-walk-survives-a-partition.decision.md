@@ -105,18 +105,22 @@ readings back into the same absence the LLP 0218 report exists to remove.
 - A cache holding one broken partition no longer has its whole walk starved
   by it: the walk moves on to the next partition instead of aborting. The
   per-tick budget guard (LLP 0199#neediest-first) still applies, and is keyed
-  off partitions actually *maintained*, not partitions merely visited - a
-  partition that failed did no work, so it cannot itself satisfy the guard's
-  "always work one partition before the budget can cut the tick short"
+  off partitions the walk got through, not partitions that merely produced a
+  report: a partition that threw did no work, so it cannot itself satisfy the
+  guard's "always work one partition before the budget can cut the tick short"
   guarantee and stall everything behind it (`src/core/cache/maintenance.js`).
   What this buys is "the walk keeps moving past a failure", not "every
   healthy partition is guaranteed maintenance on the tick a partition
   breaks": a tight budget can still cut a tick short once real work has
-  happened, exactly as it could before this document. The one case that
-  guard alone cannot bound - every partition in the cache failing - is capped
-  separately: the walk still breaks once `MAX_FAILURES_BEFORE_BUDGET_BREAK`
-  partitions have failed past the budget, so an all-failing cache cannot walk
-  unbounded either. The guard against unbounded metadata growth (snapshot
+  happened, exactly as it could before this document. The one case the
+  `maintained` gate alone cannot bound, a walk that keeps finding failures and
+  never reaches a partition it can maintain, is capped separately: the walk
+  breaks once `MAX_FAILURES_BEFORE_BUDGET_BREAK` (4) partitions have failed
+  past the budget. That cap is what the guarantee stops at: a cache with four
+  or more partitions failing per tick, on a tick that has already spent
+  `max_tick_ms`, still leaves the partitions behind them unvisited. Bounding
+  the tick and guaranteeing every partition a turn are not simultaneously
+  satisfiable here, and this document chooses the bound. The guard against unbounded metadata growth (snapshot
   expiry, the orphan sweep) stops being hostage to the neediest partition's
   health specifically; it is not a promise that one failure never costs any
   other partition its turn in a budget-constrained tick.

@@ -249,6 +249,19 @@ test('a declaration dedupes when the root pin satisfies it, not when it matches 
     /no root pin/)
 })
 
+// `installedDeclarations` merges peer declarations into what `dedupeOffenders`
+// judges, and npm does not nest a private copy for an unsatisfied peer: it
+// hoists one or refuses the install. The map carries no declaration kind, so the
+// message names what is wrong without promising either consequence.
+test('an out-of-range message does not promise a nested copy to a peer declaration', () => {
+  const peer = { peerDependencies: { hyparquet: '^1.30.0' } }
+  const message = dedupeOffenders('dep', { ...peer.peerDependencies }, undefined, { hyparquet: '1.29.2' }).join('\n')
+  assert.match(message, /does not satisfy, so dependency resolution may conflict or install another copy/)
+  assert.doesNotMatch(message, /nests a second copy/)
+  assert.match(message, /ABOVE the root pin, move the ROOT pin up/)
+  assert.match(message, /BELOW it wants an `overrides` entry naming 1\.29\.2/)
+})
+
 test('no root dependency nests a hyparquet of its own', t => {
   if (!INSTALLED) {
     t.skip('no node_modules, so nothing has been resolved to inspect')
@@ -499,8 +512,9 @@ function dedupeOffenders(name, declared, overridden, pins) {
     }
     if (matchesSemverRange(pin, spec)) continue
     offenders.push(`${name} declares ${dep}@${spec}, which the root pin ${pin} does not ` +
-      'satisfy, so npm nests a second copy: if that declaration is ABOVE the root pin, move the ' +
-      `ROOT pin up; only one BELOW it wants an \`overrides\` entry naming ${pin}`)
+      'satisfy, so dependency resolution may conflict or install another copy: if that ' +
+      'declaration is ABOVE the root pin, move the ROOT pin up; only one BELOW it wants an ' +
+      `\`overrides\` entry naming ${pin}`)
   }
   return offenders
 }

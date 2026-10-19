@@ -932,6 +932,94 @@ test('hyp privacy client says an unreadable central layer cannot be read, not "n
   })
 })
 
+/**
+ * Write the machine's local config layer with a hand-authored central sink per
+ * URL, keyed apart from the enrollment's so the two layers merge rather than
+ * one overriding the other.
+ *
+ * @param {string} hypHome
+ * @param {string[]} urls
+ */
+function writeLocalForwarders(hypHome, urls) {
+  /** @type {Record<string, unknown>} */
+  const sinks = {}
+  for (const [i, url] of urls.entries()) {
+    sinks[`mine${i}`] = { plugin: '@hypaware/central', config: { url, identity: {} } }
+  }
+  writeFileSync(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks,
+  }))
+}
+
+// Issue #2249: the receipt read its destinations from the central layer alone,
+// while rows forward through every `@hypaware/central` sink of the effective
+// config. A local sink is named alongside the enrollment's, and the same server
+// reached from both layers is named once.
+test('hyp privacy client names destinations from both config layers', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hyp.acme.dev'] })
+    writeLocalForwarders(hypHome, ['https://hyp.mine.dev'])
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to hyp\.acme\.dev and hyp\.mine\.dev$/m)
+  })
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hyp.acme.dev'] })
+    writeLocalForwarders(hypHome, ['https://hyp.acme.dev'])
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to hyp\.acme\.dev$/m)
+  })
+})
+
+// A machine with no enrollment that forwards through a local sink is
+// connected: "not connected" there would tell the user the opt-out is moot.
+test('hyp privacy client does not call a machine forwarding through a local sink "not connected"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    writeLocalForwarders(hypHome, ['https://hyp.mine.dev'])
+    const out = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(out.code, 0, out.stderr)
+    assert.doesNotMatch(out.stdout, /not connected/)
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to hyp\.mine\.dev$/m)
+  })
+})
+
+// Issue #2235: with a layer that cannot be read, the sync receipt cannot know
+// every destination. It names the readable ones as known, says the rest cannot
+// be verified, and never echoes the unreadable file.
+test('hyp privacy client qualifies the sync receipt while a config layer cannot be read', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hyp.acme.dev'] })
+    const localPath = path.join(hypHome, 'hypaware-config.json')
+    writeFileSync(localPath, '{ secret-ish not json')
+    const out = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(out.code, 0, out.stderr)
+    assert.match(out.stdout, new RegExp('^ {2}the local config \\(' + escapeRe(localPath) + '\\) cannot be read, so this machine\'s destinations beyond hyp\\.acme\\.dev cannot be verified', 'm'))
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    assert.doesNotMatch(res.stdout, /^ {2}future openclaw rows sync to /m)
+    assert.match(res.stdout, new RegExp('^ {2}future openclaw rows are eligible to sync, including to hyp\\.acme\\.dev; the local config \\(' + escapeRe(localPath) + '\\) cannot be read', 'm'))
+    assert.doesNotMatch(out.stdout + res.stdout, /secret-ish/)
+  })
+  await withSandbox(async ({ root, hypHome }) => {
+    const seedPath = centralSeedPath(stateDirOf(hypHome))
+    mkdirSync(path.dirname(seedPath), { recursive: true })
+    writeFileSync(seedPath, '{ secret-ish not json')
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^openclaw: sync$/m, 'the removal is still recorded')
+    assert.deepEqual(await readClientSyncEntries({ stateDir: stateDirOf(hypHome) }), [])
+    assert.doesNotMatch(res.stdout, /sync to your HypAware server/)
+    assert.match(res.stdout, new RegExp('^ {2}future openclaw rows are eligible to sync, but this machine\'s central config layer \\(' + escapeRe(seedPath) + '\\) cannot be read, so where they go cannot be verified$', 'm'))
+    assert.doesNotMatch(res.stdout, /secret-ish/)
+  })
+})
+
 test('hyp policy client fails loudly on a corrupt store', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir

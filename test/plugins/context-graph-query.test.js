@@ -14,6 +14,7 @@ import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { EDGE_COLUMNS, graphDatasetRegistration, NODE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
 import { queryNeighbors, resolveSeed } from '../../hypaware-core/plugins-workspace/context-graph/src/query.js'
+import { QueryExecutionBudgetError } from '../../src/core/query/sql.js'
 import { graphNeighborsVerb } from '../../hypaware-core/plugins-workspace/context-graph/src/verb.js'
 
 /**
@@ -330,6 +331,23 @@ test('a read failing for its own reason while out of time keeps its own error', 
   const fixture = memoryGraph()
   wrapSources(fixture, t, source => ({ ...source, scan: () => { own.abort(); throw broken } }))
   await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), err => err === broken)
+})
+
+test('a heap-budget trip keeps its identity and names the traversal levers', async t => {
+  // The engine's refusal advises a WHERE filter or a LIMIT, neither of which
+  // this verb takes. It stays the same error, distinguishable from a row or
+  // time refusal, with the levers the verb does have appended.
+  const trip = new QueryExecutionBudgetError(128 * 1024 * 1024, 140 * 1024 * 1024, undefined, true)
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => { throw trip } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), err => {
+    assert.equal(err, trip)
+    assert.equal(trip.name, 'QueryExecutionBudgetError')
+    assert.equal(trip.code, 'query_budget_exceeded')
+    assert.match(trip.message, /execution memory budget \(140MB used of 128MB\)/)
+    assert.match(trip.message, /graph neighbor traversal: reduce depth or narrow --edge-type$/)
+    return true
+  })
 })
 
 test('large labels are subject to the cumulative payload budget', async () => {

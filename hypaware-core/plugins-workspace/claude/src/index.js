@@ -14,9 +14,17 @@ import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
 import { booleanFlagValue } from '../../../../src/core/cli/verb_codec.js'
+import { presetUnhonoredArgError } from '../../../../src/core/cli/command_args.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
-import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
-import { resolveClaudeCodeVersion } from './claude_version.js'
+import {
+  MODE_OTEL,
+  MODE_PROXY,
+  attach,
+  defaultSettingsPath,
+  preflightOtelAttach,
+  previewOverrideWarnings,
+} from './settings.js'
+import { claudeVersionPreflight, resolveClaudeCodeVersion } from './claude_version.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
@@ -173,6 +181,12 @@ export async function activate(ctx) {
   gateway.registerClient({
     name: CLIENT_NAME,
     defaultUpstream: UPSTREAM_NAME,
+    // The same resolver attach uses, so the probe is `claude --version` with
+    // no shell and a 3 s timeout, or the HYP_CLAUDE_CODE_VERSION override.
+    // @ref LLP 0532#boundary [implements]: setup asks once the client is picked; attach keeps its own check
+    async preflight() {
+      return claudeVersionPreflight(await resolveClaudeCodeVersion(ctx.env))
+    },
     /** @param {AiGatewayClientAttachContext} attachCtx */
     async attach(attachCtx) {
       const homeDir = ctx.env.HOME ?? os.homedir()
@@ -209,6 +223,13 @@ export async function activate(ctx) {
             const claudeVersion = await resolveClaudeCodeVersion(ctx.env)
             preflightOtelAttach({ claudeVersion, telemetryPort, spoolDir })
             if (attachCtx.dryRun) {
+              // The override check is a pure read, so the plan can name the
+              // leftover export the real attach would warn about.
+              // @ref LLP 0271#attach-reads-the-process-environment [implements]
+              const overrideWarnings = await previewOverrideWarnings({
+                settingsPath,
+                processEnv: ctx.env,
+              })
               span.setAttribute('status', 'ok')
               span.setAttribute('restored', false)
               writeAttachOutput(attachCtx, {
@@ -222,6 +243,7 @@ export async function activate(ctx) {
                 mode: MODE_OTEL,
                 telemetryPort,
                 spoolDir,
+                warnings: overrideWarnings,
               })
               return
             }
@@ -287,12 +309,15 @@ export async function activate(ctx) {
             const malformedWarnings = result.changed && result.warnings !== undefined
               ? [...result.warnings]
               : []
-            // The spool warning rides the same user-facing list but is counted
-            // apart: `malformed_blocks_repaired` names one specific repair, and
-            // folding an unrelated warning into it would make the count lie.
-            const warnings = spoolWarning === undefined
-              ? [...malformedWarnings]
-              : [...malformedWarnings, spoolWarning]
+            // The per-signal override and spool warnings ride the same
+            // user-facing list but are counted apart: `malformed_blocks_repaired`
+            // names one specific repair, and folding an unrelated warning into
+            // it would make the count lie.
+            const warnings = [
+              ...malformedWarnings,
+              ...(result.changed ? result.overrideWarnings ?? [] : []),
+              ...(spoolWarning === undefined ? [] : [spoolWarning]),
+            ]
             // Nothing else will ever mention an ephemeral hook path: the hook
             // exits 0 and says nothing once its command is gone, so the first
             // symptom is columns that stopped arriving. Pushed onto a copy, so
@@ -511,7 +536,7 @@ export async function activate(ctx) {
   // session-context hook.
   ctx.commands.register({
     name: 'claude-hook classify-cwd',
-    summary: 'Internal Claude Code hook: prompt to classify an unclassified folder on an enrolled machine',
+    summary: 'Internal Claude Code hook: prompt to classify an unclassified folder on a machine that forwards',
     usage: 'hyp claude-hook classify-cwd',
     hidden: true,
     run: runClaudeClassifyHook,
@@ -664,6 +689,12 @@ function booleanFlag(argv, name) {
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
+  // Ahead of the backup below, so a refused run leaves nothing behind.
+  const unhonored = presetUnhonoredArgError(argv, 'claude-and-otel-local')
+  if (unhonored !== null) {
+    ctx.stderr.write(`${unhonored}\n`)
+    return 2
+  }
   const dryRunFlag = booleanFlag(argv, 'dry-run')
   if (!dryRunFlag.ok) {
     ctx.stderr.write(`hyp setup: ${dryRunFlag.error}\n`)
@@ -681,22 +712,6 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
   const configPath = ctx.env.HYP_CONFIG
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(hypHome)
-
-  // A preset is a scripted non-interactive init (LLP 0011
-  // #non-interactive-entry), so it owes the same overwrite contract as every
-  // other local-layer writer: refuse an existing config, and back it up before
-  // replacing it under `--force`.
-  const guard = await prepareLocalConfigWrite({ targetPath: configPath, force, dryRun })
-  if (!guard.proceed) {
-    ctx.stderr.write(`hyp setup: ${guard.message}\n`)
-    return 1
-  }
-  if (guard.backupPath) {
-    // A dry run copied nothing, so it reports the backup it would have made.
-    ctx.stdout.write(dryRun
-      ? `(dry-run) would back up existing config to ${guard.backupPath}\n`
-      : `  backed up existing config to ${guard.backupPath}\n`)
-  }
 
   /** @type {HypAwareV2Config} */
   const config = {
@@ -753,6 +768,28 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
         retention: { default_days: 90 },
       },
     },
+  }
+
+  // Ahead of the overwrite guard and its backup, so a refused run leaves
+  // nothing behind (the preset composes no proxy_mode, like the picker).
+  // @ref LLP 0524#check [implements]: the literal preset owes the same check as the picker fold
+  const { preflightLegacyProxyAttach } = await import('../../../../src/core/cli/walkthrough.js')
+  if (!(await preflightLegacyProxyAttach({ config, configPath, env: ctx.env, stderr: ctx.stderr }))) return 1
+
+  // A preset is a scripted non-interactive init (LLP 0011
+  // #non-interactive-entry), so it owes the same overwrite contract as every
+  // other local-layer writer: refuse an existing config, and back it up before
+  // replacing it under `--force`.
+  const guard = await prepareLocalConfigWrite({ targetPath: configPath, force, dryRun })
+  if (!guard.proceed) {
+    ctx.stderr.write(`hyp setup: ${guard.message}\n`)
+    return 1
+  }
+  if (guard.backupPath) {
+    // A dry run copied nothing, so it reports the backup it would have made.
+    ctx.stdout.write(dryRun
+      ? `(dry-run) would back up existing config to ${guard.backupPath}\n`
+      : `  backed up existing config to ${guard.backupPath}\n`)
   }
 
   if (!dryRun) {
@@ -926,6 +963,9 @@ function writeAttachOutput(attachCtx, fields) {
         ? `  Would set ${managedKey} to the local telemetry listener\n`
         : `  Would set ${managedKey} to the local gateway endpoint\n`
     )
+    for (const warning of fields.warnings ?? []) {
+      attachCtx.stdout.write(`  ! ${warning}\n`)
+    }
     return
   }
   attachCtx.stdout.write(`✓ Claude Code attached (${fields.settingsPath})\n`)

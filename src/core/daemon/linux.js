@@ -395,13 +395,18 @@ export function isSystemdUnitInstalled(options) {
  * Query the runtime status of the systemd user unit via
  * `systemctl --user show <unit>`.
  *
+ * `show` answers an unknown unit with exit 0 and `LoadState=not-found`, so a
+ * nonzero exit is systemctl failing to answer at all ("Failed to connect to
+ * bus" with no user session). That is not loaded and also says so (#1406).
+ * @ref LLP 0545#unreachable [implements]: a nonzero `show` is a probe that never ran
+ *
  * @param {{ label?: string, systemctl?: SystemctlAdapter, homeDir?: string, platform?: NodeJS.Platform }} options
- * @returns {Promise<{ loaded: boolean, active?: boolean, pid?: number }>}
+ * @returns {Promise<{ loaded: boolean, active?: boolean, pid?: number, unreachable?: boolean }>}
  */
 export async function systemdUnitStatus(options) {
   const { systemctl, unitName } = resolveUnit(options)
   const result = await systemctl.show(unitName)
-  if (result.exitCode !== 0) return { loaded: false }
+  if (result.exitCode !== 0) return { loaded: false, unreachable: true }
   const props = parseShowOutput(result.stdout)
   if (props.LoadState !== 'loaded') return { loaded: false }
   const pid = parsePid(props.MainPID)

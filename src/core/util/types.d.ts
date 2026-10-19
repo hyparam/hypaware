@@ -4,7 +4,7 @@ import type * as fsp from 'node:fs/promises'
  * Options for {@link atomicWriteFile} and its JSON variant.
  */
 export interface AtomicWriteOptions {
-  /** file mode for the temp file (carried over by rename) */
+  /** exact file mode, set on the temp file whatever the umask and carried over by rename */
   mode?: number
   /** mode for parent directories created on demand */
   dirMode?: number

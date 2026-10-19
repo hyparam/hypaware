@@ -219,9 +219,10 @@ export async function digestClientAsset(dest) {
  * target is gone or not.
  *
  * @param {string} dest
- * @returns {Promise<{ digest?: string, missing: boolean }>} `missing` is true
- *   only for a path that is not there; a digest is present only when the whole
- *   asset was read
+ * @returns {Promise<{ digest?: string, missing: boolean, errno?: string }>}
+ *   `missing` is true only for a path that is not there; a digest is present
+ *   only when the whole asset was read, and `errno` names why a read below
+ *   `dest` failed
  * @ref LLP 0226#unreadable-is-not-absent [implements]: an unreadable asset is
  *   reported and kept on the books, never read as one that is already gone,
  *   including when the read failure happens below `dest` rather than at it.
@@ -243,8 +244,8 @@ export async function inspectClientAsset(dest) {
       hash.update('file\n')
       hash.update(await fs.readFile(dest))
     }
-  } catch {
-    return { missing: false }
+  } catch (err) {
+    return { missing: false, errno: errCode(err) }
   }
   return { digest: hash.digest('hex'), missing: false }
 }

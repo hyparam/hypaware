@@ -1,7 +1,6 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
-import path from 'node:path'
 
 import {
   Attr,
@@ -10,7 +9,6 @@ import {
   SpanStatusCode,
   withSpan,
 } from '../observability/index.js'
-import { isWithinDir } from '../runtime/contribution_names.js'
 
 import { fetchPlugin } from './fetch.js'
 import { provenanceFromUrl, redactRawSource } from './git_source.js'
@@ -23,7 +21,7 @@ import {
   upsertEntry,
   writeLock,
 } from './lock.js'
-import { pluginInstallDir } from './paths.js'
+import { checkInstallDestination, isRemovableInstallDir, pluginInstallDir } from './paths.js'
 import { resolveSource } from './resolver.js'
 import { checkForPluginUpdate } from './update_check.js'
 
@@ -354,7 +352,7 @@ function refForReinstall(entry) {
  * @param {object} args
  * @param {PluginName} args.name
  * @param {string} args.stateDir
- * @returns {Promise<{ ok: true, lock: PluginLockFile } | { ok: false, errorKind: string, message: string }>}
+ * @returns {Promise<{ ok: true, lock: PluginLockFile, cleanupSkipped?: string } | { ok: false, errorKind: string, message: string }>}
  */
 export async function removePlugin({ name, stateDir }) {
   const instruments = getKernelInstruments()
@@ -395,11 +393,28 @@ export async function removePlugin({ name, stateDir }) {
       // makes the fallback join resolve two levels above it. `hyp status`
       // prints this very command as the repair for such a row, so still clear
       // the row, and delete only a directory strictly beneath the root
-      // (issue #1967).
-      const pluginsRoot = pluginInstallDir(stateDir, '')
-      if (isWithinDir(installDir, pluginsRoot) && path.resolve(installDir) !== path.resolve(pluginsRoot)) {
-        await fs.rm(installDir, { recursive: true, force: true })
+      // (issue #1967) that is this row's own install destination: a key or
+      // recorded directory for a bare `@scope`, a normalizing key, or another
+      // plugin's directory points at plugins this row does not own (issue
+      // #2123).
+      /** @type {string | undefined} */
+      let cleanupSkipped
+      if (isRemovableInstallDir(stateDir, name, installDir)) {
+        // @ref LLP 0508#removal [implements]: a linked or uninspectable parent
+        //   withholds the delete, the row is still cleared, and the result says so
+        const destination = await checkInstallDestination(stateDir, name)
+        if (destination.ok) {
+          // Delete the derived path the check inspected, not the recorded
+          // text: `<root>/jump/../victim` equals it lexically but the OS
+          // walks `jump` first, and a linked `jump` lands outside the root.
+          await fs.rm(pluginInstallDir(stateDir, name), { recursive: true, force: true })
+        } else {
+          cleanupSkipped = destination.reason
+        }
+      } else {
+        cleanupSkipped = 'the row does not name its own install directory'
       }
+      if (cleanupSkipped !== undefined) span.setAttribute('cleanup', 'skipped')
       const nextLock = removeLockEntry(lock, name)
       await writeLock(stateDir, nextLock)
       // Zero the gauge so a downstream consumer doesn't show a
@@ -409,8 +424,9 @@ export async function removePlugin({ name, stateDir }) {
       log.info('plugin.removed', {
         [Attr.COMPONENT]: 'plugin-install',
         [Attr.PLUGIN]: name,
+        ...(cleanupSkipped !== undefined ? { cleanup: 'skipped', reason: cleanupSkipped } : {}),
       })
-      return { ok: true, lock: nextLock }
+      return { ok: true, lock: nextLock, ...(cleanupSkipped !== undefined ? { cleanupSkipped } : {}) }
     },
     { component: 'plugin-install' }
   )

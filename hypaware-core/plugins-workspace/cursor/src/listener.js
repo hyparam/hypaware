@@ -5,6 +5,7 @@ import path from 'node:path'
 import { realpath } from 'node:fs/promises'
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { SESSION_IGNORE_ROUTE, createControlHandler, isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { isMisdirectedHost, listenAndResolve, requestUrlOf } from '../../../../src/core/otlp/server.js'
 import { CLASS_RANK, createUsagePolicyResolver, isEqualOrDescendant } from '../../../../src/core/usage-policy/index.js'
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
@@ -104,7 +105,7 @@ export function createStartCursorSource(deps = {}) {
               activeRecoveries.add(item.id)
               claimed = true
               const admission = cursorAdmission({ localOnlyListPath: deps.localOnlyListPath, ignoredSessions })
-              if (ignoredSessions.has(item.id) || policy.resolve(item.cwd).class === 'ignore') { completedRoots.delete(key); continue }
+              if (sessionIgnoreLoadError(ignoredSessions) || ignoredSessions.has(item.id) || policy.resolve(item.cwd).class === 'ignore') { completedRoots.delete(key); continue }
               const session = await findCursorSession(item.id, item.cwd, readOptions)
               if (!session) throw new CursorReadError('native_session_unavailable')
               const [nativeCwd, hookCwd] = await Promise.all([realpath(session.cwd), realpath(item.cwd)])
@@ -117,7 +118,11 @@ export function createStartCursorSource(deps = {}) {
               let rowsWritten = 0
               for (const exchange of snapshot.exchanges) {
                 if (stopped) { complete = false; break }
-                const permitted = await admission.filter(exchange)
+                // A hook reports the running client's version, not the version
+                // that produced older turns recovered alongside this one.
+                const attributed = item.clientVersion && item.generation && exchange.messages.every((message) => message.request_id === item.generation)
+                  ? { ...exchange, client_version: item.clientVersion } : exchange
+                const permitted = await admission.filter(attributed)
                 if (!permitted || permitted.messages.length !== exchange.messages.length) complete = false
                 if (!permitted?.messages.length) continue
                 const result = await nativeWriter.record(permitted)
@@ -154,11 +159,15 @@ export function createStartCursorSource(deps = {}) {
       }, deps.recoveryDelayMs ?? 1000)
       recoveryTimer.unref()
     }
-    const scheduleRecovery = (id, cwd) => {
+    const scheduleRecovery = (id, cwd, event) => {
       if (stopped) return
       const key = JSON.stringify([id, cwd])
       if (!pending.has(key) && pending.size >= 64) { recoveryCounts.recovery_queue_drops++; return }
-      pending.set(key, { id, cwd, attempt: 0 })
+      const generation = typeof event.generation_id === 'string' && event.generation_id.length <= 256 ? event.generation_id : undefined
+      const previous = pending.get(key)
+      const clientVersion = typeof event.cursor_version === 'string' && /^[\w.+-]{1,128}$/.test(event.cursor_version)
+        ? event.cursor_version : generation && generation === previous?.generation ? previous.clientVersion : undefined
+      pending.set(key, { id, cwd, generation, clientVersion, attempt: 0 })
       armRecovery()
     }
     const control = createControlHandler({ ignoredSessions, log: ctx.log, logEvent: 'cursor.control.ignore_session', logFields: { [Attr.PLUGIN]: '@hypaware/cursor' } })
@@ -234,7 +243,7 @@ export function createStartCursorSource(deps = {}) {
           // Check once before projection, and again inside the serialized
           // write so a session ignored while queued cannot slip through.
           const admission = async () => {
-            if (ignoredSessions.has(session)) {
+            if (sessionIgnoreLoadError(ignoredSessions) || ignoredSessions.has(session)) {
               counts.session_drops++
               return 'session_ignored'
             }
@@ -263,7 +272,7 @@ export function createStartCursorSource(deps = {}) {
                 counts.policy_drops++
                 return 'file_path_unresolved'
               }
-              if (ignoredSessions.has(session)) {
+              if (sessionIgnoreLoadError(ignoredSessions) || ignoredSessions.has(session)) {
                 counts.session_drops++
                 return 'session_ignored'
               }
@@ -276,15 +285,15 @@ export function createStartCursorSource(deps = {}) {
           }
           // @ref LLP 0399#identity: the native store owns conversation rows.
           // Hook-only response/tool IDs cannot safely join native Shell IDs.
-          scheduleRecovery(session, cwd)
-          if (hook !== 'beforeReadFile') {
+          scheduleRecovery(session, cwd, event)
+          const projection = projectCursorHook(raw)
+          if (hook !== 'beforeReadFile' && !projection) {
             counts.lifecycle_events++
             skip('native_recovery_scheduled')
             return
           }
-          // Every lifecycle hook already returned above, so the only way past
-          // the projector here is a beforeReadFile whose own fields are unusable.
-          const projection = projectCursorHook(raw)
+          // Only admitted file observations and complete terminal usage write
+          // hook rows. They retain identities independent of native messages.
           if (!projection) {
             counts.incomplete++
             skip('incomplete_hook')
@@ -333,10 +342,10 @@ export function createStartCursorSource(deps = {}) {
     return {
       async status() {
         return {
-          state: 'ready', rowsWritten: counts.rows_written, lastError,
+          state: 'ready', rowsWritten: counts.rows_written, lastError: sessionIgnoreLoadError(ignoredSessions) ?? lastError,
           details: { ...counts, ...recoveryCounts, pending_recovery: pending.size, listen_host: bound.host, listen_port: bound.port, control_routes: [SESSION_IGNORE_ROUTE],
             active_requests: active, last_event_at: lastEventAt ?? null,
-            coverage: 'native_sessions_and_file_observations', frontend: 'native_store', usage_supported: false,
+            coverage: 'native_sessions_and_file_observations', frontend: 'native_store', usage_supported: true,
             history_recovery: 'native_store', response_identity: 'native_turn_step',
             assistant_segments: 'native_checkpoint',
           },

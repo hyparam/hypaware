@@ -66,9 +66,10 @@ export function aiGatewayTablePath(storage) {
  * a recreated cache can still carry residual v4 spool).
  *
  * @param {DatasetDiscoveryContext} ctx
+ * @param {CachePartitionMeta[]} [cachedParts] Already-discovered committed partitions, when a caller also needs their metadata.
  * @returns {Promise<QueryPartition[]>}
  */
-export async function discoverParts(ctx) {
+export async function discoverParts(ctx, cachedParts) {
   const cacheDir = ctx.cacheDir ?? ''
   if (!cacheDir) return []
 
@@ -87,7 +88,7 @@ export async function discoverParts(ctx) {
     seen.add(spoolPath)
   }
 
-  const discovered = await discoverCachePartitions(cacheDir, buildDiscoveryScope(ctx.scope))
+  const discovered = cachedParts ?? await discoverCachePartitions(cacheDir, buildDiscoveryScope(ctx.scope))
   for (const p of discovered) {
     if (seen.has(p.path)) continue
     seen.add(p.path)

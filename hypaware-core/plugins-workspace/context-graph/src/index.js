@@ -60,13 +60,14 @@ export async function activate(ctx) {
   /** @type {ContextGraphCapability} */
   const capability = {
     registerContract: (contract) => registry.register(contract),
-    async project(sourceDataset) {
+    async project(sourceDataset, options) {
       const contracts = registry.list().filter((c) => c.sourceDataset === sourceDataset)
       if (contracts.length === 0) throw new Error(`graph project: no contract registered for source '${sourceDataset}'`)
       return projectGraph({
         query: ctx.query,
         storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
         contracts,
+        signal: options?.signal,
       })
     },
     kit: { nodeId, edgeId, makeRowBuilders },
@@ -94,8 +95,9 @@ export async function activate(ctx) {
     'connect to the apps, models, tools, files, skills, programs, repos, and',
     'commits they touched.',
     '',
-    'GitHub capture projects its data automatically. Run `hyp graph project`',
-    'to build all sources, including newly recorded sessions, before querying.',
+    'GitHub capture projects its data automatically. While the daemon runs,',
+    'recorded AI sessions are projected locally after startup and checked every',
+    'five minutes. Run `hyp graph project` to build all sources immediately.',
     'Projection is idempotent, so re-running it is safe.',
     '',
     'Two ways to read it, and they answer different questions:',

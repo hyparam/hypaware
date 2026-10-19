@@ -2,6 +2,7 @@
 
 import { Attr, getLogger } from '../observability/index.js'
 import { jsonReplacer } from '../query/format.js'
+import { UNDECLARED_SCHEMA_NOTE } from '../query/schema.js'
 import { toJsonSchema, validateToolArguments } from '../cli/verb_codec.js'
 import { verbAuthClass, verbExposure } from '../registry/verbs.js'
 import { buildInstructions } from './instructions.js'
@@ -39,6 +40,8 @@ const HANDLE_OPERATION = 'mcp.handle_message'
  */
 const HINTS_BY_AUTH_CLASS = Object.freeze({
   read: Object.freeze({ readOnlyHint: true }),
+  // A mark appends to a ledger and removes nothing, so `write` is not destructive.
+  write: Object.freeze({ readOnlyHint: false, destructiveHint: false }),
   operator: Object.freeze({ readOnlyHint: false, destructiveHint: true }),
 })
 
@@ -55,6 +58,9 @@ const HINTS_BY_AUTH_CLASS = Object.freeze({
  *   a remote/HTTP transport.
  * - operator-class verbs require `allowOperator` (true for local-user-trust
  *   stdio; a query-scoped HTTP client gets only read-class tools).
+ * - write-class verbs require their `scope` in `allowScopes` (default empty,
+ *   on every transport): the server passes the principal's scopes, and the
+ *   local host passes none.
  *
  * @param {{
  *   verbs: VerbRegistry,
@@ -62,6 +68,7 @@ const HINTS_BY_AUTH_CLASS = Object.freeze({
  *   runTool: (verb: VerbRegistration, params: Record<string, unknown>, owner: PluginName | undefined) => Promise<unknown>,
  *   transport?: 'stdio' | 'http',
  *   allowOperator?: boolean,
+ *   allowScopes?: readonly string[],
  *   serverVersion?: string,
  * }} opts
  * @ref LLP 0034#tool-auth-class [implements]: read/operator boundary lives on the tool; the credential scope gates it
@@ -70,6 +77,9 @@ export function createMcpServer(opts) {
   const { verbs, query, runTool } = opts
   const transport = opts.transport ?? 'stdio'
   const allowOperator = opts.allowOperator ?? (transport === 'stdio')
+  // Copied once, so a caller that later edits its array cannot widen what this
+  // assembly already listed.
+  const allowScopes = new Set(opts.allowScopes ?? [])
   const serverVersion = opts.serverVersion ?? '0.0.0'
 
   const log = getLogger(SERVER_COMPONENT)
@@ -83,7 +93,10 @@ export function createMcpServer(opts) {
     const exposure = verbExposure(verb)
     if (exposure === 'cli-only') return false
     if (transport !== 'stdio' && exposure === 'local-only') return false
-    if (!allowOperator && (authClass ?? verbAuthClass(verb)) === 'operator') return false
+    const cls = authClass ?? verbAuthClass(verb)
+    if (!allowOperator && cls === 'operator') return false
+    // @ref LLP 0494#write-class [implements]: by class and scope, never by tool name; listing and dispatch share this gate
+    if (cls === 'write' && !allowScopes.has(/** @type {string} */ (verb.scope))) return false
     return true
   }
 
@@ -208,10 +221,15 @@ export function createMcpServer(opts) {
         return undefined
       }
       named = name
+      // The resource body stays `{ dataset, columns }`; an empty declaration
+      // is qualified here, in the slot the entry already has.
+      const declared = dataset.schema.columns.length > 0
       return {
         uri: datasetSchemaUri(name),
         name: `${name} schema`,
-        description: `Column schema for the ${name} dataset`,
+        description: declared
+          ? `Column schema for the ${name} dataset`
+          : `Column schema for the ${name} dataset: ${UNDECLARED_SCHEMA_NOTE}`,
         mimeType: 'application/json',
       }
     } catch (err) {

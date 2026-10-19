@@ -274,6 +274,68 @@ test('reconcile keeps the duplicate that matches when an earlier one has drifted
   assert.deepEqual((await sessionRows(table, 'target')).map((row) => [row.part, row.text, row.seq]), [['target-p0', 'text target-0', 2]])
 })
 
+// The acceptance for #2345: the scan drops each group's scope rows before
+// its value pass, keeping only the candidates `hits` holds. Duplicate and
+// out-of-order scope rows, interleaved with filler and straddling a row-group
+// boundary, must still settle exactly as before: which copy of a key
+// survives, with which sequence, which copies retire, and what is written.
+test('reconcile settles duplicate and out-of-order scope rows across row groups exactly', async (t) => {
+  const { dir, table } = await makeTable('duplicates-out-of-order')
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const seq = { from: 1 }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  for (let i = 0; i < 990; i++) rows.push(storedRow('filler', i))
+  // Row group 0 ends at position 999. Positions 990..999:
+  rows.push(storedRow('target', 3)) //            990, seq 991
+  rows.push(storedRow('filler', 990)) //          991
+  rows.push(storedRow('target', 1, 'drifted')) // 992, seq 993
+  rows.push(storedRow('target', 0)) //            993, seq 994
+  rows.push(storedRow('filler', 991)) //          994
+  rows.push(storedRow('target', 1)) //            995, seq 996
+  rows.push(storedRow('filler', 992)) //          996
+  rows.push(storedRow('target', 2)) //            997, seq 998
+  rows.push(storedRow('filler', 993)) //          998
+  rows.push(storedRow('filler', 994)) //          999
+  // Row group 1 starts at position 1000.
+  rows.push(storedRow('target', 2)) //            1000, seq 1001
+  rows.push(storedRow('filler', 995)) //          1001
+  rows.push(storedRow('target', 4, 'drifted')) // 1002, seq 1003
+  for (let i = 996; i < 1100; i++) rows.push(storedRow('filler', i))
+  rows.push(storedRow('target', 0)) //            1106, seq 1107
+  await writeDataFile(table, rows, seq)
+  const metadata = await parquetMetadataAsync(await asyncBufferFromFile(await soleDataFile(table)))
+  assert.equal(metadata.row_groups.length, 2, 'fixture must straddle a row-group boundary')
+
+  const result = await reconcileRowsInTable(
+    table,
+    COLUMNS,
+    // Out of order against the file, too.
+    [storedRow('target', 4), storedRow('target', 2), storedRow('target', 0), storedRow('target', 5), storedRow('target', 3, 'edited'), storedRow('target', 1)],
+    scopeFor('target'),
+    allocator(5000),
+  )
+  // p0, p1, p2 keep their first matching copy; p0's and p2's later twins and
+  // p1's earlier drifted copy retire. p3 (edited) and p4 (drifted) retire and
+  // are rewritten, and p5 is new. Writes take sequences in snapshot order.
+  assert.deepEqual(result, { rowsWritten: 3, rowsDeleted: 5, rowCount: rows.length - 5 + 3 })
+  assert.deepEqual(await sessionRows(table, 'target'), [
+    { session: 'target', part: 'target-p0', text: 'text target-0', frame: storedRow('target', 0).raw_frame, seq: 994 },
+    { session: 'target', part: 'target-p1', text: 'text target-1', frame: storedRow('target', 1).raw_frame, seq: 996 },
+    { session: 'target', part: 'target-p2', text: 'text target-2', frame: storedRow('target', 2).raw_frame, seq: 998 },
+    { session: 'target', part: 'target-p3', text: 'edited', frame: storedRow('target', 3, 'edited').raw_frame, seq: 5002 },
+    { session: 'target', part: 'target-p4', text: 'text target-4', frame: storedRow('target', 4).raw_frame, seq: 5000 },
+    { session: 'target', part: 'target-p5', text: 'text target-5', frame: storedRow('target', 5).raw_frame, seq: 5001 },
+  ])
+  assert.deepEqual(
+    (await sessionRows(table, 'filler')).map((row) => row.seq),
+    rows.flatMap((row, pos) => (row.session_id === 'filler' ? [pos + 1] : [])).sort((a, b) => {
+      const part = (/** @type {number} */ s) => String(rows[s - 1].part_id)
+      return part(a) < part(b) ? -1 : part(a) > part(b) ? 1 : a - b
+    }),
+  )
+})
+
 // The acceptance for #2346: one key's duplicates in two data files. icebird's
 // `findDataFileEntries` fills its map inside a `Promise.all` over manifests,
 // so which copy the walk meets first is a race. Mirroring two keys forces the

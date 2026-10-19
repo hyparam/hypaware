@@ -90,6 +90,8 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/claude-account',
   '@hypaware/claude-desktop',
   '@hypaware/github',
+  // @ref LLP 0511#onboarding: hosted collection needs a local selection as well as activation.
+  '@hypaware/codex-cloud',
   // @ref LLP 0469#seams [implements]: native Ollama capture requires explicit plugins[] opt-in
   '@hypaware/ollama',
   // @ref LLP 0517#onboarding: explicitly selected in Customize or attached later

@@ -384,8 +384,10 @@ function trimUsageIndex(index) {
  * would have carried it failed, so the exporter's retry re-projects against
  * the same inputs and its rows still get their tokens and cost.
  *
- * `snapshot` is the index as it stood before projection ran. A key missing
- * from `index` now was either claimed by an assistant message (whose row
+ * `consumed` is what the batch's projection took out of the index: the
+ * entries of the pre-projection index missing right after it ran, taken
+ * before any awaited write so a concurrent batch's claims are not among
+ * them. A consumed key was either claimed by an assistant message (whose row
  * never landed, so it has to come back) or evicted by the cap (which does
  * not), and the two are indistinguishable from here. So both come back and
  * the cap is re-applied: during a sustained write outage nothing is ever
@@ -395,10 +397,10 @@ function trimUsageIndex(index) {
  * alone, so an `api_request` whose response has not arrived yet still waits.
  *
  * @param {Map<string, Record<string, unknown>>} index
- * @param {Map<string, Record<string, unknown>>} snapshot
+ * @param {Map<string, Record<string, unknown>>} consumed
  */
-export function restoreUnclaimedUsage(index, snapshot) {
-  for (const [requestId, usage] of snapshot) {
+export function restoreUnclaimedUsage(index, consumed) {
+  for (const [requestId, usage] of consumed) {
     if (!index.has(requestId)) index.set(requestId, usage)
   }
   trimUsageIndex(index)

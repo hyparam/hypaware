@@ -9,6 +9,7 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
+import { renderStatusSummary } from '../../src/core/commands/status.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
 
@@ -770,6 +771,58 @@ test('export warning: an unreadable central layer still warns about a failing si
   assert.equal(warnings.length, 1, 'an unreadable central layer must not suppress a live export failure')
   assert.match(warnings[0].message, /^central: 1 retained failed export record with no later success recorded/)
 })
+
+// A central layer can be unreadable without ever reaching a parse: a pointer
+// naming a gone slot, a pointer that is a regular file, or a control
+// directory this process cannot list. None is the operator removing the
+// destination, so each keeps the warning a parse failure keeps (issue #2432).
+/** @type {Array<[string, (controlDir: string) => Promise<void>]>} */
+const UNREADABLE_CENTRAL_WITHOUT_PARSE = [
+  ['an active pointer naming a gone slot', async (controlDir) => {
+    await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  }],
+  ['an active pointer that is a regular file', async (controlDir) => {
+    await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2, plugins: [] }))
+    await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  }],
+  ['a central config directory that cannot be listed', async (controlDir) => {
+    await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2, plugins: [] }))
+    await fs.chmod(controlDir, 0o000)
+  }],
+]
+
+for (const [label, arrange] of UNREADABLE_CENTRAL_WITHOUT_PARSE) {
+  // @ref LLP 0453#warning-rule [tests]: every unreadable central state is uncertainty, not a configured-set removal, so the destination still warns
+  test(`export warning: ${label} still warns about a failing sink`, async (t) => {
+    const { hypHome, stateRoot } = await makeHome()
+    const controlDir = path.dirname(centralSeedPath(stateRoot))
+    t.after(async () => {
+      await fs.chmod(controlDir, 0o700)
+      await fs.rm(hypHome, { recursive: true, force: true })
+    })
+    await fs.mkdir(controlDir, { recursive: true })
+    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }))
+    await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+    await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+      sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
+    }))
+    await writeOutbox(stateRoot, 'central', [{ agoMs: 60_000, error: 'fetch failed' }])
+    await arrange(controlDir)
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.ok(report.diagnostics.some((d) => d.kind === 'config_central_unreadable'), 'ground truth: the layer is unreadable')
+    const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+    assert.equal(warnings.length, 1, 'an unreadable central layer must not suppress a live export failure')
+    assert.match(warnings[0].message, /^central: 1 retained failed export record with no later success recorded/)
+    // The export warning sits beside the unreadable-layer reason, never in
+    // place of it, and sharing reads off that same signal.
+    let compact = ''
+    renderStatusSummary({ report, stdout: { write(chunk) { compact += chunk } } })
+    assert.match(compact, /Sharing\s+Unknown \(organization config could not be read\)/)
+    assert.match(compact, /central config layer .* is unreadable/)
+    assert.match(compact, /central: 1 retained failed export record/)
+  })
+}
 
 // A merge-dropped entry speaks only for the destination it names. Dropping
 // `brandnew` must not re-arm the warning for `deleted-ghost`, an unrelated

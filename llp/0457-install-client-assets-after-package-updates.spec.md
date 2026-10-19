@@ -6,7 +6,7 @@
 **Author:** Brendan / Codex
 **Date:** 2026-09-30
 **Extends:** LLP 0138, LLP 0309
-**Extended-by:** LLP 0458 (update-time installation is restricted to currently attached clients)
+**Extended-by:** LLP 0458 (update-time installation is restricted to currently attached clients); LLP 0534 (status names clients left outside that coverage); LLP 0535 (the boot-failure rollback permanently skips the post-preflight install)
 **Supersedes:** LLP 0397, LLP 0400; LLP 0402 #migration-is-the-boot-heal only
 
 ## Request {#request}

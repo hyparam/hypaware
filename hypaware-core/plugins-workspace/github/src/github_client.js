@@ -43,9 +43,12 @@ const COMMIT_FILES_CAP = 300
  * @param {string} [opts.baseUrl]
  * @param {() => Promise<string>} [opts.ghToken] test seam for `gh auth token`
  * @param {(file: string, args: string[], options: Record<string, unknown>, callback: (err: NodeJS.ErrnoException | null, stdout: string) => void) => void} [opts.execFileImpl]
+ * @param {AbortSignal} [opts.signal] the one capture invocation this client
+ *   serves. Once it aborts, every request, body read and credential lookup
+ *   ends with `github_capture_cancelled` and no further request is sent.
  * @returns {GithubClient}
  */
-export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, baseUrl = API_BASE, ghToken, execFileImpl }) {
+export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, baseUrl = API_BASE, ghToken, execFileImpl, signal }) {
   const doFetch = fetchImpl ?? fetch
   /** @type {Promise<string> | null} */
   let resolvedToken = null
@@ -61,17 +64,19 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
       const selected = readGithubAuth(stateDir)
       if (oauthFailure && selected?.generation === oauthFailure.generation && selected?.refresh_token === oauthFailure.refreshToken) throw oauthFailure.error
       try {
-        const oauth = await resolveGithubOAuth(stateDir, { fetchImpl })
+        const oauth = await resolveGithubOAuth(stateDir, { fetchImpl, signal })
         if (oauth !== null) return oauth
       } catch (error) {
         // One failed refresh per short-lived capture client, rather than one
         // per repository. A new tick retries; a new login is visible at once.
-        if (selected) oauthFailure = { generation: selected.generation, refreshToken: selected.refresh_token, error }
+        // A refresh this client's own stop cut short is not a credential
+        // verdict, so it is never remembered as one.
+        if (selected && !signal?.aborted) oauthFailure = { generation: selected.generation, refreshToken: selected.refresh_token, error }
         throw error
       }
     }
     if (!resolvedToken) {
-      const resolveGhToken = ghToken ?? (() => tokenFromGh(env, execFileImpl))
+      const resolveGhToken = ghToken ?? (() => tokenFromGh(env, execFileImpl, signal))
       // Cache the resolved token, never the failure. `gh auth token` fails for
       // ordinary transient reasons (gh not yet on PATH under launchd, a
       // credential store still locked after login), and a retained rejected
@@ -107,7 +112,16 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
     // var means not spawning `gh auth token` (a subprocess with a 10s timeout)
     // on behalf of a URL we are about to throw away.
     const url = resolveUrl(baseUrl, pathAndQuery)
-    const authToken = await token()
+    if (signal?.aborted) throw captureCancelled()
+    let authToken
+    try {
+      authToken = await token()
+    } catch (err) {
+      // A stop that interrupts an OAuth refresh or `gh auth token` surfaces
+      // there as an auth failure; report it as the stop it was.
+      if (signal?.aborted) throw captureCancelled()
+      throw err
+    }
     /** @type {Record<string, string>} */
     const headers = {
       Accept: 'application/vnd.github+json',
@@ -127,7 +141,10 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
       // origin pin as a continuation, for a few hops. Anything else keeps the
       // status and reports `GitHub API 301` below.
       for (let hop = 0; ; hop++) {
-        res = await doFetch(target, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+        // The caller's stop rides the same fetch signal as the timeout, so it
+        // ends the response-body read below as well as the request.
+        const timeout = AbortSignal.timeout(30_000)
+        res = await doFetch(target, { headers, redirect: 'manual', signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
         if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECTS) break
         const next = sameOriginLocation(baseUrl, res.headers.get('location'))
         if (next === null) break
@@ -140,6 +157,7 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
       }
     } catch (cause) {
       if (/** @type {HypError} */ (cause)?.hypErrorKind === 'github_budget_exhausted') throw cause
+      if (signal?.aborted) throw captureCancelled()
       // Carry a diagnosis without echoing anything server-controlled: an
       // errno code or error name is a runtime constant, while messages can
       // embed URLs or upstream text.
@@ -177,6 +195,7 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
     try {
       data = await res.json()
     } catch {
+      if (signal?.aborted) throw captureCancelled()
       const err = /** @type {HypError} */ (new Error('GitHub API response was unreadable or timed out'))
       err.hypErrorKind = 'github_response_error'
       throw err
@@ -291,16 +310,18 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {(file: string, args: string[], options: Record<string, unknown>, callback: (err: NodeJS.ErrnoException | null, stdout: string) => void) => void} [execFileImpl]
+ * @param {AbortSignal} [signal] kills the subprocess when the caller stops
  * @returns {Promise<string>}
  */
 // @ref LLP 0360#authentication [implements]: reuse local gh credentials without persisting or logging them
-export function tokenFromGh(env, execFileImpl = /** @type {any} */ (execFile)) {
+export function tokenFromGh(env, execFileImpl = /** @type {any} */ (execFile), signal) {
   return new Promise((resolve, reject) => {
     execFileImpl('gh', ['auth', 'token'], {
       encoding: 'utf8',
       timeout: 10_000,
       maxBuffer: 64 * 1024,
       windowsHide: true,
+      ...(signal ? { signal } : {}),
       env: {
         ...env,
         PATH: githubCliPath(env),
@@ -406,6 +427,19 @@ function foreignOrigin(url) {
 function budgetExhausted() {
   const err = /** @type {HypError} */ (new Error('GitHub request budget exhausted before a redirect was followed'))
   err.hypErrorKind = 'github_budget_exhausted'
+  return err
+}
+
+/**
+ * The capture invocation this client serves was stopped. Not a network,
+ * response or credential failure: capture ends the tick on it instead of
+ * recording it against a repository and moving on to the next.
+ *
+ * @returns {HypError}
+ */
+export function captureCancelled() {
+  const err = /** @type {HypError} */ (new Error('GitHub capture cancelled'))
+  err.hypErrorKind = 'github_capture_cancelled'
   return err
 }
 

@@ -224,7 +224,7 @@ test('runWizardPick: the defaults omit a detected needs_setup row, and autoAccep
     platform: 'darwin',
   }))
   assert.doesNotMatch(stdout.text(), /Claude Desktop/, 'the narration must not promise a row the user never ticked')
-  assert.deepEqual(result.sourcesPicked, ['codex'])
+  assert.deepEqual(result.sourcesPicked, ['codex', 'codex-cloud'])
 })
 
 // A reconfigure reports which picks it carried from the config on disk, so
@@ -311,8 +311,8 @@ test('runWizardPick: autoAccept takes the default rows and prints what it accept
   // One line, plain names: the locked row is named on the fast path too,
   // and whether it is the team's is said on the sync line, not here. The
   // save confirmation follows it.
-  assert.equal(stdout.text(), '✓ Recording Claude Code and Codex\n✓ Saved settings\n')
-  assert.deepEqual(result.sourcesPicked, ['codex'])
+  assert.equal(stdout.text(), '✓ Recording Claude Code, Codex, and Codex Cloud (beta)\n✓ Saved settings\n')
+  assert.deepEqual(result.sourcesPicked, ['codex', 'codex-cloud'])
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
 
@@ -1349,18 +1349,135 @@ test('runWizardPick: claude-desktop is withheld from the Linux menu', async () =
   }))
   const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
   assert.ok(!rendered.includes('claude-desktop'), 'absent from the menu')
+  assert.ok(!state.question.options.some((/** @type {any} */ o) => /unavailable/.test(o.label)), 'a fresh config records nothing to keep')
   assert.ok(rendered.includes('claude'), 'the ungated rows still render')
   assert.deepEqual(result.sourcesPicked, ['claude'])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   assert.equal(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude-desktop'), undefined)
 })
 
-// A gated row the config already collects is unpickable on the gating
-// platform, so a reconfigure that re-derived the config from the menu alone
-// would delete it. The carry is keyed on what the display filter withheld,
-// not on `hidden`, so the `--source claude-desktop` install survives.
-// @ref LLP 0368#display-only [tests]: the gate withholds the offer, so the choice already recorded must outlive a menu walk on Linux
-test('runWizardPick: a Linux reconfigure carries the configured claude-desktop it cannot offer', async () => {
+/**
+ * Run a Linux reconfigure over a config that collects claude-desktop (and
+ * so, by read-back, Claude Code), answering the menu with `answer`.
+ *
+ * @param {string[]} answer
+ * @param {Record<string, unknown>[]} [extraPlugins]
+ */
+async function linuxDesktopReconfigure(answer, extraPlugins = []) {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: [...DESKTOP_PLUGINS, ...extraPlugins],
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt, state } = capturingPrompt(answer)
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    platform: 'linux',
+  }))
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  /** @type {string[]} */
+  const names = written.plugins.map((/** @type {any} */ p) => p.name)
+  return { state, result, written, names }
+}
+
+// The gate withholds the offer on a fresh config, but a config that already
+// records the gated row gets it back as a choice: checked, marked
+// unavailable, and kept when the selection comes back unchanged.
+// @ref LLP 0370#decision [tests]: on the gating platform a configured gated row is an explicit keep-or-remove choice whose default is keep
+test('runWizardPick: a Linux reconfigure offers the configured claude-desktop as a checked, unavailable row', async () => {
+  const { state, result, names } = await linuxDesktopReconfigure(['claude', 'claude-desktop'])
+  const desktop = state.question.options.find((/** @type {any} */ o) => o.value === 'claude-desktop')
+  assert.ok(desktop, 'the recorded row renders on the platform that would otherwise withhold it')
+  assert.equal(desktop.checked, true, 'keeping it is the default')
+  assert.equal(desktop.label, 'Claude Desktop · unavailable on this platform')
+  assert.equal(state.question.enterKeepsChecked, true)
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'claude-desktop'])
+  assert.ok(names.includes('@hypaware/claude-desktop'), 'an unchanged selection keeps the recorded choice')
+  assert.ok(names.includes('@hypaware/claude'))
+})
+
+// @ref LLP 0370#decision [tests]: a menu walk alone keeps the row
+test('runWizardPick: a bare enter on the Linux numbered menu keeps the configured claude-desktop', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: DESKTOP_PLUGINS,
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const input = new PassThrough()
+  const stdout = scriptedStdout(input, ['\n'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), stdin: input, env: hermeticEnv(tmp), catalog,
+    detect: async () => new Set(),
+    platform: 'linux',
+  }))
+  assert.match(stdout.text(), /\[x\] Claude Desktop · unavailable on this platform/)
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'claude-desktop'])
+})
+
+// @ref LLP 0370#decision [tests]: the express accept keeps the row and names it, as the menu would
+test('runWizardPick: the express accept on Linux keeps and states the configured claude-desktop', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: DESKTOP_PLUGINS,
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const stdout = makeBuf()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
+    detect: async () => new Set(),
+    platform: 'linux',
+  }))
+  assert.match(stdout.text(), /^✓ Recording Claude Code and Claude Desktop$/m)
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'claude-desktop'])
+})
+
+// @ref LLP 0370#decision [tests]: unchecking the row removes it
+test('runWizardPick: unchecking the configured claude-desktop on Linux removes it', async () => {
+  const { result, names } = await linuxDesktopReconfigure(['claude'])
+  assert.deepEqual(result.sourcesPicked, ['claude'])
+  assert.ok(!names.includes('@hypaware/claude-desktop'))
+})
+
+// The Desktop row composes `@hypaware/claude` beside its own adapter, so the
+// old invisible carry put Claude Code capture back after the user cleared
+// both rows. With nothing carried, the empty answer composes nothing.
+// @ref LLP 0370#decision [tests]: no hidden re-composition survives an empty answer
+test('runWizardPick: unchecking every row on Linux removes claude-desktop and the Claude plugin it brought', async () => {
+  const { result, names } = await linuxDesktopReconfigure([])
+  assert.deepEqual(result.sourcesPicked, [])
+  assert.ok(!names.includes('@hypaware/claude-desktop'))
+  assert.ok(!names.includes('@hypaware/claude'), 'the compose rider is not re-composed from a carried id')
+  assert.ok(!names.includes('@hypaware/ai-gateway'))
+})
+
+// @ref LLP 0370#decision [tests]: removing Desktop leaves an independently kept Claude Code and unrelated config alone
+test('runWizardPick: removing claude-desktop on Linux keeps the Claude Code row the user kept', async () => {
+  const { result, written, names } = await linuxDesktopReconfigure(
+    ['claude', 'otel'],
+    [{ name: '@hypaware/otel' }, { name: '@hypaware/gascity', config: { room: 'wallaby' } }]
+  )
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'otel'])
+  assert.ok(!names.includes('@hypaware/claude-desktop'))
+  assert.ok(names.includes('@hypaware/claude'), 'Claude Code was kept in its own right')
+  assert.ok(names.includes('@hypaware/ai-gateway'))
+  assert.ok(names.includes('@hypaware/otel'))
+  assert.deepEqual(
+    written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/gascity'),
+    { name: '@hypaware/gascity', config: { room: 'wallaby' } }
+  )
+})
+
+// @ref LLP 0370#decision [tests]: on a platform the row names, nothing changes
+test('runWizardPick: a macOS reconfigure renders the configured claude-desktop as an ordinary row', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   await seedLocalConfig(tmp, {
@@ -1372,14 +1489,15 @@ test('runWizardPick: a Linux reconfigure carries the configured claude-desktop i
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    platform: 'linux',
+    platform: 'darwin',
   }))
-  const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
-  assert.ok(!rendered.includes('claude-desktop'), 'the menu still cannot offer it')
-  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'claude-desktop'])
+  const desktop = state.question.options.find((/** @type {any} */ o) => o.value === 'claude-desktop')
+  assert.equal(desktop.label, 'Claude Desktop')
+  assert.equal(desktop.checked, true)
+  assert.ok(!state.question.options.some((/** @type {any} */ o) => /unavailable/.test(o.label)))
+  assert.deepEqual(result.sourcesPicked, ['claude'])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
-  const names = written.plugins.map((/** @type {any} */ p) => p.name)
-  assert.ok(names.includes('@hypaware/claude-desktop'), 'the recorded choice is not un-composed')
+  assert.ok(!written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/claude-desktop'))
 })
 
 test('runWizardPick: a configured claude-desktop stays selected when the user keeps it', async () => {
@@ -1651,7 +1769,7 @@ test('runWizardPick: the forged document and its parser-dropped-key near-twin se
       .filter((/** @type {any} */ o) => o.checked)
       .map((/** @type {any} */ o) => o.value)
       .sort()
-    assert.deepEqual(checked, ['claude', 'codex'], JSON.stringify(doc))
+    assert.deepEqual(checked, ['claude', 'codex', 'codex-cloud'], JSON.stringify(doc))
   }
 })
 

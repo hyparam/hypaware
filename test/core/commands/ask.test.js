@@ -9,7 +9,7 @@ import test from 'node:test'
 
 import { askableClients, framedQuestion, runAsk } from '../../../src/core/commands/ask.js'
 import { RECOMMEND_COLD_PROMPT } from '../../../src/core/query/first_ask_evidence.js'
-import { chooseLauncher } from '../../../src/core/cli/wizard/first_ask.js'
+import { chooseLauncher, resolveLaunchers } from '../../../src/core/cli/wizard/first_ask.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -612,4 +612,74 @@ test('runAsk "<question>": a real keypress still lifts the deadline, stray byte 
   assert.equal(code, 0)
   assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
   assert.equal(await fixture.started(), 'codex')
+})
+
+/* ------------------- one launcher order for every command (#671) ------------------ */
+
+// The default is the first client in ascending id order, compared by code
+// unit, and the picker offers that same order so its deadline fallback is
+// the same default. Mixed case and non-ASCII ids, scrambled, so neither the
+// input order nor a locale compare can pass for it.
+const MIXED_IDS = ['émile', 'zeta', 'Zulu', 'beta', 'Émile', 'alpha']
+const MIXED_ORDER = ['Zulu', 'alpha', 'beta', 'zeta', 'Émile', 'émile']
+
+/**
+ * The real `resolveLaunchers` over fixture clients, each a stub on disk
+ * that records its own id, so which one started is a file check.
+ */
+async function mixedFixture() {
+  const hypHome = await freshHome()
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  const bin = path.join(home, 'bin')
+  await fs.mkdir(bin, { recursive: true })
+  const ran = path.join(home, 'ran.txt')
+  const descriptors = new Map()
+  for (const [i, id] of MIXED_IDS.entries()) {
+    await fs.writeFile(path.join(bin, `stub${i}`), `#!/bin/sh\nprintf '%s' '${id}' > '${ran}'\n`, { mode: 0o755 })
+    descriptors.set(id, { plugin: `@test/${id}`, name: id, skillDir: `.${id}`, launch: { bin: `stub${i}`, args: ['{prompt}'], label: `Label ${id}` } })
+  }
+  return {
+    env: { HOME: home, HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' },
+    /** @type {typeof resolveLaunchers} */
+    resolveLaunchers: (args) => resolveLaunchers({ ...args, clients: MIXED_IDS, descriptors, resolve: async (b) => path.join(bin, b) }),
+    async started() { return fs.readFile(ran, 'utf8').catch(() => '') },
+  }
+}
+
+test('runAsk "<question>": the default and the picker share ascending client-id order', { timeout: 5000 }, async () => {
+  const question = 'which sessions touched the auth module'
+  // A run that cannot prompt takes the first.
+  const piped = await mixedFixture()
+  const { ctx, stdout } = makeCtx({ env: piped.env })
+  assert.equal(await runAsk([question], ctx, { resolveLaunchers: piped.resolveLaunchers }), 0)
+  assert.equal(await piped.started(), MIXED_ORDER[0])
+  assert.match(stdout.text(), /Starting Label Zulu\.\.\./)
+
+  // A terminal is offered the same order.
+  const picked = await mixedFixture()
+  /** @type {Array<string | number>} */
+  let offered = []
+  const tty = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: picked.env, stdout: makeTtyOut(), stderr: makeBuf(), stdin: makeSilentTtyIn(),
+  }))
+  assert.equal(await runAsk([question], tty, {
+    resolveLaunchers: picked.resolveLaunchers,
+    /** @param {any} spec */
+    select: async (spec) => {
+      offered = spec.options.map((/** @type {any} */ o) => o.value)
+      return 'émile'
+    },
+  }), 0)
+  assert.deepEqual(offered, MIXED_ORDER)
+  assert.equal(await picked.started(), 'émile')
+
+  // An unanswered picker falls back to that same first.
+  const idle = await mixedFixture()
+  const idleOut = makeTtyOut()
+  const idleCtx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: idle.env, stdout: idleOut, stderr: makeBuf(), stdin: makeSilentTtyIn(),
+  }))
+  assert.equal(await runAsk([question], idleCtx, { resolveLaunchers: idle.resolveLaunchers, pickDeadlineMs: 50 }), 0)
+  assert.match(idleOut.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(await idle.started(), MIXED_ORDER[0])
 })

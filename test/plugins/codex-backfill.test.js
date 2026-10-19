@@ -366,6 +366,75 @@ test('scheduled capture migrates the route, skips unchanged files, and retries f
   }
 })
 
+test('an unreadable rollout warns once across an hour of sweeps, then imports when it recovers (#2070)', async () => {
+  const env = await stageEnv()
+  const file = await writeModernRollout(env, 'rollout-locked.jsonl', modernConversation('locked'))
+  try {
+    await fs.chmod(file, 0o000)
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const failed = () => entries.filter((e) => e.message === 'codex.backfill.rollout_read_failed')
+    const scans = () => entries.filter((e) => e.message === 'codex.backfill.scan_complete')
+    for (let minute = 0; minute < 60; minute++) {
+      assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    }
+    assert.equal(failed().length, 1, 'one warn for an hour of the same failure')
+    assert.equal(failed()[0].level, 'warn')
+    assert.equal(scans().length, 60)
+    assert.ok(scans().every((e) => e.fields?.files_read_failing === 1), 'every sweep still counts the failing file')
+
+    await fs.chmod(file, 0o644)
+    const recovered = await collect(provider.run(ctx))
+    assert.deepEqual(recovered.items.map((item) => value(item).session_id), ['locked'], 'recovery imports with no restart')
+    assert.equal(entries.filter((e) => e.message === 'codex.backfill.rollout_read_recovered').length, 1)
+    assert.equal(scans().at(-1)?.fields?.files_read_failing, 0)
+
+    // An imported, unchanged file is skipped by its fingerprint before any
+    // read, so it has to grow before it can fail again.
+    await fs.appendFile(file, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'new turn' }] } }) + '\n')
+    await fs.chmod(file, 0o000)
+    await collect(provider.run(ctx))
+    assert.equal(failed().length, 2, 'a file that fails again after recovering warns again')
+    await fs.rm(file)
+    await collect(provider.run(ctx))
+    await writeModernRollout(env, 'rollout-locked.jsonl', modernConversation('locked'))
+    await fs.chmod(file, 0o000)
+    await collect(provider.run(ctx))
+    assert.equal(failed().length, 3, 'a departed file drops from the remembered failures')
+
+    ctx.sweep = false
+    await collect(provider.run(ctx))
+    assert.equal(failed().length, 4, 'a manual import still warns on every run')
+  } finally {
+    await fs.chmod(file, 0o644).catch(() => {})
+    await env.cleanup()
+  }
+})
+
+test('the remembered read failures are capped, so many unreadable rollouts still warn a bounded number of times (#2070)', async () => {
+  const env = await stageEnv()
+  /** @type {string[]} */
+  const files = []
+  try {
+    for (let i = 0; i < 300; i++) {
+      const file = await writeModernRollout(env, `rollout-locked-${i}.jsonl`, modernConversation(`locked-${i}`))
+      await fs.chmod(file, 0o000)
+      files.push(file)
+    }
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    for (let minute = 0; minute < 3; minute++) await collect(provider.run(ctx))
+    assert.equal(entries.filter((e) => e.message === 'codex.backfill.rollout_read_failed').length, 256)
+    const scans = entries.filter((e) => e.message === 'codex.backfill.scan_complete')
+    assert.ok(scans.every((e) => e.fields?.files_read_failing === 300), 'files past the cap are still counted')
+  } finally {
+    await Promise.all(files.map((file) => fs.chmod(file, 0o644).catch(() => {})))
+    await env.cleanup()
+  }
+})
+
 test('with on_join false the sweep records new sessions but not prior history', async () => {
   const env = await stageEnv()
   try {

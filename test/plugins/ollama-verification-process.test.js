@@ -234,6 +234,21 @@ for (const lostSupervisor of [false, true]) test('split daemon interrupts reques
   assert.equal(state.committedAfterRecovery, 4)
 })
 
+/**
+ * Wait until the status file `ollama verify` reads carries the live
+ * post-attach recording generation. `client attach` returns once the
+ * processor confirms over the control route, but the aggregate status file is
+ * rewritten later, so a verify straight after attach can read the
+ * detach-era `recording_enabled: false` and report `processor_unavailable`.
+ */
+async function reattached(f) {
+  const live = await requestOllamaVerification({ endpoint: f.root, runId: f.status.runId, deadline: Date.now() + 3000 })
+  assert.equal(live.reason, 'ready')
+  await waitFor(() => {
+    const details = /** @type {any} */ (readStatusFile(f.state)?.sources.find(s => s.name === 'ai-gateway')?.details)
+    return details?.recording_enabled === true && details.recording_generation === live.generation
+  })
+}
 async function command(f, argv) {
   let output = ''
   let error = ''
@@ -249,7 +264,9 @@ test('actual split processing SIGHUP keeps resumed fresh capture and recording g
   assert.equal((await command(f, ['client', 'detach', 'ollama'])).code, 0)
   const attached = await command(f, ['client', 'attach', 'ollama'])
   assert.equal(attached.code, 0, attached.error + attached.output)
-  assert.equal((await verify()).code, 0)
+  await reattached(f)
+  const resumed = await verify()
+  assert.equal(resumed.code, 0, resumed.error + resumed.output)
   const live = await requestOllamaVerification({ endpoint: f.root, runId: f.status.runId, deadline: Date.now() + 1000 })
   const processor = f.status.processes.processing.pid
   const processorRoot = processingStateRoot(f.state)
@@ -296,7 +313,9 @@ test('actual split recording control refuses browser Origin without mutating cap
   assert.equal((await command(f, ['client', 'detach', 'ollama'])).code, 0)
   assert.equal((await verify()).code, 1)
   assert.equal((await command(f, ['client', 'attach', 'ollama'])).code, 0)
-  assert.equal((await verify()).code, 0)
+  await reattached(f)
+  const last = await verify()
+  assert.equal(last.code, 0, last.error + last.output)
 })
 
 // @ref LLP 0474#diagnostics [tests]: actual split status retains actionable failure while off, recovers only on new persistence and resets current evidence on service restart
@@ -323,6 +342,7 @@ test('actual split failure survives benign control and off, with persistence rec
   assert.equal(off.historical, true)
   assert.equal(off.reason, 'unsupported_shape')
   assert.equal((await command(f, ['client', 'attach', 'ollama'])).code, 0)
+  await reattached(f)
   const verified = await command(f, ['ollama', 'verify', '--model', 'tiny:local', '--json'])
   assert.equal(verified.code, 0, verified.error + verified.output)
   await waitFor(async () => (await capture(f)).state === 'persisted')

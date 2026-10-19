@@ -254,7 +254,7 @@ export function renderClientStatusText(rows, stdout) {
       const events = row.capture_health.last_event_at ?? 'none'
       const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
       // `unknown` is the bounded confirmation read declining to answer, and
-      // the line says so rather than picking a side (LLP 0257 #status-and-health).
+      // the line says so rather than picking a side (LLP 0536 #rendering).
       const gap = row.capture_health.state === 'gap'
         ? ' [capture gap]'
         : row.capture_health.state === 'unknown' ? ' [capture unconfirmed]' : ''
@@ -266,6 +266,25 @@ export function renderClientStatusText(rows, stdout) {
       stdout.write(`    recent: ${entry.entrypoint}, ${entry.rows} row${entry.rows === 1 ? '' : 's'}, ${entry.last_seen}\n`)
     }
   }
+}
+
+/**
+ * The automatic Codex migrations (the scheduled sweep and the reconciler's
+ * attach) record their restart requirement only in the daemon log, and no
+ * persisted field says whether one ran or whether Codex was running at the
+ * time. So the note is conditional and shows for every recording
+ * transcript-mode Codex, which is the one row that is attach n/a with a
+ * probe declared.
+ * @ref LLP 0429#migration: running Codex clients must restart to reload their provider configuration
+ */
+const CODEX_RESTART_NOTE = 'If Codex was running when capture mode changed, restart it to use the new mode.'
+
+/**
+ * @param {HypAwareStatusReport['clients'][number] | undefined} client
+ * @returns {boolean}
+ */
+function needsCodexRestartNote(client) {
+  return client?.name === 'codex' && client.configured && client.recording !== false && client.attachable === false
 }
 
 /**
@@ -327,9 +346,12 @@ export function renderStatusSummary({ report, stdout }) {
   const unit = bytes >= 1e9 ? 'GB' : bytes >= 1e6 ? 'MB' : bytes >= 1e3 ? 'KB' : 'B'
   const divisor = unit === 'GB' ? 1e9 : unit === 'MB' ? 1e6 : unit === 'KB' ? 1e3 : 1
   stdout.write(`  Storage    ${unit === 'GB' ? (bytes / divisor).toFixed(1) : Math.round(bytes / divisor)} ${unit} · ${report.retention.days}-day retention\n`)
-  stdout.write(`  Sharing    ${report.layered?.hasCentral ? 'Organization sync configured' : 'No organization sync'}\n`)
+  const sharingUnknown = centralSharingUnknown(report)
+  stdout.write(`  Sharing    ${report.layered?.hasCentral ? 'Organization sync configured'
+    : sharingUnknown ? 'Unknown (organization config could not be read)' : 'No organization sync'}\n`)
   renderSharingNotices(report, stdout)
   if (report.selfUpdate?.line) stdout.write(`  ${printable(report.selfUpdate.line, MAX_ERROR_CHARS)}\n`)
+  if (report.assetCoverage) stdout.write(`  ${printable(report.assetCoverage, MAX_ERROR_CHARS)}\n`)
   for (const s of report.sources) {
     const line = sourceSummaryLine(s)
     if (line) stdout.write(`  ${line}\n`)
@@ -357,15 +379,17 @@ export function renderStatusSummary({ report, stdout }) {
       // row, and it records whenever it is listed.
       : !client || client.configured ? 'Recording'
       : 'Not recording'
-    // A missing policy on an enrolled host is unknown, never permission to sync.
+    // A missing policy on an enrolled host is unknown, never permission to sync,
+    // and so is any policy on a host whose central layer cannot be read.
     const sharing = localOnly.has(name) ? 'Local only' : syncing.has(name) ? 'Sync'
-      : report.layered?.hasCentral ? 'Unknown' : 'Local only'
+      : report.layered?.hasCentral || sharingUnknown ? 'Unknown' : 'Local only'
     stdout.write(`  ${printable(name, 22).padEnd(22)}  ${state.padEnd(31)}  ${sharing}\n`)
   }
   if (syncing.size > 0) stdout.write('\n  Sync = organization sharing policy, not delivery confirmation.\n')
   for (const name of notRecording) {
     stdout.write(`\n  To record ${printable(name)} again: hyp client attach ${printable(name)}\n`)
   }
+  if (needsCodexRestartNote(clients.get('codex'))) stdout.write(`\n  ${CODEX_RESTART_NOTE}\n`)
 
   const ollama = report.clients.find(c => c.name === 'ollama')
   if (ollama?.capture) renderOllamaCapture(ollama.capture, stdout, '  ')
@@ -924,6 +948,9 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.selfUpdate?.line) {
     stdout.write(`  ${report.selfUpdate.line}\n`)
   }
+  if (report.assetCoverage) {
+    stdout.write(`  ${printable(report.assetCoverage, MAX_ERROR_CHARS)}\n`)
+  }
 
   renderStatusAttention(report, stdout)
 
@@ -962,7 +989,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 
   section('sinks')
   if (report.sinks.length === 0) {
-    stdout.write('    (none - keeping captured data local only)\n')
+    // No sink rows on a host whose central layer cannot be read is not a
+    // known absence: that layer may name destinations this report cannot see.
+    stdout.write(centralSharingUnknown(report)
+      ? '    (none visible - organization config could not be read)\n'
+      : '    (none - keeping captured data local only)\n')
   } else {
     for (const s of report.sinks) {
       // A row recovered from the status file and backed by no live handle
@@ -1017,6 +1048,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
       if (c.configured && c.recording === false) stdout.write(`        to record it again: hyp client attach ${c.name}\n`)
+      if (needsCodexRestartNote(c)) stdout.write(`        ${CODEX_RESTART_NOTE}\n`)
       // The probe's error is not this build's prose: a settings file that is
       // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
       // an excerpt of the file back. The client wrote that file, so it is
@@ -1039,6 +1071,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(
       `    syncing: ${list(report.clientSync.syncing)} - local-only: ${list(report.clientSync.localOnly)}\n`
     )
+  } else if (centralSharingUnknown(report)) {
+    stdout.write('    syncing: unknown - local-only: unknown (organization config could not be read)\n')
   }
 
   // Which client surfaces have actually produced rows, and when (LLP 0164).
@@ -1093,15 +1127,26 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
     section('capture health')
     for (const c of report.captureHealth) {
+      const tag = c.state === 'gap'
+        ? '  [telemetry may be interrupted]'
+        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
+      // A marker-less client captures by transcript sweep, not telemetry: its
+      // entry's one timestamp is the newest cached row, and it has no
+      // transcript-activity comparison to show.
+      // @ref LLP 0546#newest-partition: the transcript lane's entry carries the newest cached row
+      if (report.clients.some((r) => r.name === c.client && !r.attachable)) {
+        const rows = c.lastEventAt !== null
+          ? `last captured row ${formatEntrypointAge(c.lastEventAt)}`
+          : 'no captured rows yet'
+        stdout.write(`    - ${c.client}  ${rows}${tag}\n`)
+        continue
+      }
       const events = c.lastEventAt !== null
         ? `last event ${formatEntrypointAge(c.lastEventAt)}`
         : 'no events yet'
       const transcripts = c.lastTranscriptActivityAt !== null
         ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
         : 'no transcript activity'
-      const tag = c.state === 'gap'
-        ? '  [telemetry may be interrupted]'
-        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
     const namedFailures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)
@@ -1431,6 +1476,22 @@ export function formatEntrypointAge(lastSeen, nowMs = Date.now()) {
   if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
   return `${days}d ago`
+}
+
+/**
+ * Whether the report cannot establish this host's sharing at all: the
+ * collector found a central layer it could not read, which leaves
+ * `layered` and `clientSync` null exactly as on a host that never joined.
+ * Read off the collector's own `config_central_unreadable` diagnostic, so
+ * the text views and `--json` rest on the same evidence and nothing here
+ * probes the disk again.
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {boolean}
+ */
+// @ref LLP 0455#compact-view [implements]: an unreadable central layer is Unknown sharing, never No organization sync or Local only
+function centralSharingUnknown(report) {
+  return report.diagnostics.some((d) => d.kind === 'config_central_unreadable')
 }
 
 /**

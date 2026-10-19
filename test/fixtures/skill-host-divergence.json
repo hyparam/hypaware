@@ -2,8 +2,8 @@
   "claude-codex": {
     "hypaware-privacy": {
       "claudeOnly": 26,
-      "codexOnly": 95,
-      "hash": "89a57ccf7e0aca45"
+      "codexOnly": 104,
+      "hash": "fc991eae39a4d3b5"
     },
     "hypaware-query": {
       "claudeOnly": 0,
@@ -23,9 +23,9 @@
   },
   "neutral-claude": {
     "hypaware-privacy": {
-      "neutralOnly": 20,
-      "claudeOnly": 69,
-      "hash": "6cb380a65080d2ea"
+      "neutralOnly": 18,
+      "claudeOnly": 72,
+      "hash": "6577f0b50915c4f1"
     },
     "hypaware-query": {
       "neutralOnly": 13,
@@ -45,9 +45,9 @@
   },
   "neutral-codex": {
     "hypaware-privacy": {
-      "neutralOnly": 20,
-      "codexOnly": 138,
-      "hash": "97a2220350ed74b5"
+      "neutralOnly": 18,
+      "codexOnly": 150,
+      "hash": "62476c134ec5aec9"
     },
     "hypaware-query": {
       "neutralOnly": 13,

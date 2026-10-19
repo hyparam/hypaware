@@ -7,6 +7,7 @@
 **Date:** 2026-07-22
 **Related:** LLP 0005, LLP 0011, LLP 0128, LLP 0131
 **Extended-by:** LLP 0202 (a picker row may set `hidden` to stay out of the menu while remaining a source)
+**Extended-by:** LLP 0511 (hosted Codex choices use a bounded local account grant for seeding and confirmation)
 **Extended-by:** LLP 0368 (a picker row may set `platforms` to be offered only where its integration exists)
 
 > Spawned by [LLP 0128](./0128-install-experience-overhaul.rfc.md) on

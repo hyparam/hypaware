@@ -97,7 +97,10 @@ test('local-fs BlobStore serves byte ranges from the opened file', async () => {
     }
     assert.equal(await store.getObject({ key: 'missing', range: 'bytes=-8' }), null)
     await store.putObject({ key: 'empty', body: new Uint8Array() })
-    await assert.rejects(store.getObject({ key: 'empty', range: 'bytes=-8' }), { code: 'InvalidRange' })
+    for (const [key, range] of [['empty', 'bytes=-8'], ['data', 'bytes=10-'], ['data', 'bytes=-0']]) {
+      await assert.rejects(store.getObject({ key, range }),
+        { code: 'InvalidRange', errorKind: 'blob_range_unsatisfiable' })
+    }
     const held = await store.getObject({ key: 'data', range: 'bytes=2-4' })
     assert.ok(held)
     await fs.unlink(path.join(base, 'data'))

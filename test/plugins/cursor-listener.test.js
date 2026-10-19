@@ -134,7 +134,7 @@ test('policy/session ignore precede persistence; missing fields and disabled rec
     assert.equal(f.rows.length, 0)
     const status = await f.source.status?.()
     assert.equal(status?.details?.history_recovery, 'native_store')
-    assert.equal(status?.details?.usage_supported, false)
+    assert.equal(status?.details?.usage_supported, true)
     assert.equal(status?.details?.policy_drops, 1)
     assert.equal(status?.details?.session_drops, 1)
     assert.equal(status?.details?.missing_cwd, 1)
@@ -289,13 +289,13 @@ test('native recovery retries failed writes, survives restart, and serializes wi
       await append(...args)
     }
     await f.post(body)
-    await waitFor(() => f.rows.length === 8)
+    await waitFor(() => f.rows.length === 13)
     assert.equal((await f.source.status?.())?.details?.native_failures, 1)
     assert.equal((await f.source.status?.())?.lastError, undefined)
     await f.restart()
     await f.post(body)
     await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
-    assert.equal(f.rows.length, 8)
+    assert.equal(f.rows.length, 13)
     const provider = createCursorBackfillProvider({ ...f.readOptions, activeRecoveries })
     const ctx = /** @type {any} */ ({ dryRun: false, env: {}, log: { info() {}, warn() {} } })
     const iterator = provider.run(ctx)[Symbol.asyncIterator]()
@@ -306,10 +306,29 @@ test('native recovery retries failed writes, survives restart, and serializes wi
     await waitFor(async () => Number((await f.source.status?.())?.details?.native_failures) >= 1)
     assert.equal((await f.source.status?.())?.details?.native_reads, 0)
     await iterator.return?.()
-    assert.equal(activeRecoveries.size, 0)
+    // The backfill releases its claim before closing its decoder, so the live
+    // retry can already hold it here. Check for a leaked claim once it is done.
     await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
-    assert.equal(f.rows.length, 8)
+    assert.equal(activeRecoveries.size, 0)
+    assert.equal(f.rows.length, 13)
   } finally { native.close(); await f.cleanup() }
+})
+
+test('live native recovery attributes the hook version only to its matching generation', async () => {
+  for (const generation of ['native-generation', 'different-generation', undefined]) {
+    const f = await fixture({ recoveryDelayMs: 30 })
+    const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
+    try {
+      await f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'postToolUse',
+        generation_id: generation, cursor_version: '2026.09.08-6caf4ff' }))
+      // Coalescing a callback without the version must retain the first one's
+      // metadata for the same generation, without retaining the raw payload.
+      await f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'stop', generation_id: generation }))
+      await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
+      assert.equal(f.rows.length, 13)
+      for (const row of f.rows) assert.equal(row.client_version, generation === 'native-generation' ? '2026.09.08-6caf4ff' : undefined)
+    } finally { native.close(); await f.cleanup() }
+  }
 })
 
 test('pending recovery is bounded, cancelled on stop, and rechecks session ignore', async () => {
@@ -375,7 +394,7 @@ test('a hook callback is answered within its timeout while a maximal-size graph 
     // slower machine moves both numbers together.
     assert.ok(gap < window / 3, `recovery blocked the event loop for ${gap.toFixed(0)}ms of a ${window.toFixed(0)}ms pass`)
     await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
-    assert.equal(f.rows.filter((row) => row.role !== 'system').length, 8)
+    assert.equal(f.rows.filter((row) => row.role !== 'system').length, 13)
   } finally { open(); native.close(); await f.cleanup() }
 })
 
@@ -448,4 +467,36 @@ test('back-to-back recovery passes share one decode thread, released once the so
     await hook()
     await waitFor(() => spawns() === 2)
   } finally { clearInterval(keepAlive); native.close(); await f.cleanup() }
+})
+
+test('live usage survives native-first capture, callback duplicates, restart and failed storage', async () => {
+  const f = await fixture({ recoveryDelayMs: 60000 })
+  try {
+    const body = envelope(f.root, { hook_event_name: 'stop', input_tokens: 100, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 10 })
+    const append = f.storage.appendRows
+    f.storage.appendRows = async () => { throw new Error('PRIVATE') }
+    assert.equal((await f.post(body)).status, 500)
+    f.storage.appendRows = append
+    // A native row already exists. Usage has its own identity and no text.
+    f.rows.push({ message_id: 'native-assistant', part_id: 'native-assistant#0', client_name: 'cursor' })
+    for (const hook_event_name of ['afterAgentResponse', 'stop', 'stop']) {
+      await f.post({ ...body, delivery_id: randomUUID(), event: { ...body.event, hook_event_name } })
+    }
+    assert.equal(f.rows.length, 2)
+    assert.deepEqual(f.rows[1].attributes.usage, { input_tokens: 100, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 10, total_tokens: 160 })
+    assert.equal(f.rows[1].content_text ?? '', '')
+    assert.equal(f.rows[1].hook_event, 'stop')
+    await f.restart()
+    assert.equal((await f.post({ ...body, delivery_id: randomUUID() })).status, 200)
+    assert.equal(f.rows.length, 2)
+    assert.ok(f.events.includes('cursor.hook.recorded'))
+    f.ignoredSessions.add('conversation')
+    assert.equal((await f.post({ ...body, event: { ...body.event, generation_id: 'ignored' } })).status, 202)
+    assert.equal(f.rows.length, 2)
+    f.ignoredSessions.clear()
+    await fs.writeFile(path.join(f.root, '.hypignore'), 'ignore\n')
+    await f.restart()
+    assert.equal((await f.post({ ...body, event: { ...body.event, generation_id: 'private' } })).status, 202)
+    assert.equal(f.rows.length, 2)
+  } finally { await f.cleanup() }
 })

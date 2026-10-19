@@ -24,6 +24,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { PromptCancelledError, select } from '../tui/index.js'
 import { isPromptBackError } from '../tui/runtime.js'
 import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_ask_evidence.js'
+import { compareStrings } from '../../util/compare_strings.js'
 
 /**
  * The question setup offers, and `hyp ask` starts.
@@ -127,6 +128,14 @@ export async function resolveOnPath(bin, env, platform = process.platform) {
  * capture-enabled but carries no `launch` block because it has no prompt
  * argument to carry one for.
  *
+ * The result is in ascending client-id order, compared by code unit rather
+ * than by locale, whatever order `clients` arrived in. Every command that
+ * needs one launcher takes the first as its default and offers its picker
+ * in this order, so the picker's deadline fallback starts the same client
+ * a run that cannot prompt does. Workspace folder names and plugin
+ * discovery order never decide it. A newly recorded client whose id sorts
+ * earlier becomes the default.
+ *
  * @ref LLP 0198#path-probe [implements]: offer only what is recorded and resolves
  * @param {{
  *   clients: string[],
@@ -158,6 +167,37 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
       binPath,
       args: launch.args,
     })
+  }
+  // @ref LLP 0456#decision [implements]: one order for every default and picker, ascending client id
+  return out.sort((a, b) => compareStrings(a.client, b.client))
+}
+
+/**
+ * The launchers `hyp report generate` may start: a resolved launcher whose
+ * client has the `hypaware-report` skill on disk, paired with that skill's
+ * path. Setup asks the same question before it names the command, so the
+ * pointer and the command can never disagree about who qualifies.
+ *
+ * @ref LLP 0450#launch [implements]: only a recorded, launchable client with its installed report skill
+ * @param {{
+ *   launchers: FirstAskLauncher[],
+ *   descriptors: Map<string, ClientDescriptor>,
+ *   homeDir: string,
+ * }} args
+ * @returns {Promise<{ launcher: FirstAskLauncher, skill: string }[]>}
+ */
+export async function reportSkillLaunchers({ launchers, descriptors, homeDir }) {
+  const out = []
+  for (const launcher of launchers) {
+    const descriptor = descriptors.get(launcher.client)
+    if (!descriptor) continue
+    const skill = path.join(homeDir, descriptor.skillDir, 'hypaware-report', 'SKILL.md')
+    try {
+      await fsp.access(skill)
+      out.push({ launcher, skill })
+    } catch {
+      // Only offer clients that can read the report workflow.
+    }
   }
   return out
 }

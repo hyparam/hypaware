@@ -3,11 +3,10 @@
 // The one capped body drain, shared by the servers that discard a request
 // body they are not going to read: the control handler
 // (`src/core/control/session_ignore.js`), the OpenCode listener's reject
-// branches (`hypaware-core/plugins-workspace/opencode/src/listener.js`), the
+// branches and readiness route (`hypaware-core/plugins-workspace/opencode/src/listener.js`), the
 // AI gateway's refusals
 // (`hypaware-core/plugins-workspace/ai-gateway/src/proxy.js`), and the OTLP
-// listener's misdirected-Host and invalid-target refusals
-// (`src/core/otlp/server.js`).
+// listener's banner and refusals (`src/core/otlp/server.js`).
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
@@ -98,6 +97,22 @@ export function drainRequestBody(req, res) {
   req.resume()
   res.on('finish', closeIfAnswered)
   if (!fitsUnderCap(req)) res.setHeader('connection', 'close')
+}
+
+/**
+ * Does this request declare, up front, a body the drain cap would cut?
+ *
+ * A route that reads no body can refuse such a request with a 413 instead of
+ * answering it and then resetting the connection behind the answer, so the
+ * caller learns why from the status rather than from a reset. A chunked body
+ * declares no length and cannot be refused this way: its answer has to be
+ * written before its length is known, and `drainRequestBody` bounds it.
+ *
+ * @param {IncomingMessage} req
+ */
+export function declaresBodyOverDrainCap(req) {
+  const length = req.headers['content-length']
+  return length !== undefined && Number(length) > MAX_REJECTED_DRAIN_BYTES
 }
 
 /**

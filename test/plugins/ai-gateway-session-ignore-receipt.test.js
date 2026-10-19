@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -273,6 +274,84 @@ for (const rel of SKILLS) {
 
     // And the reply is described as the membership receipt it is.
     assert.match(text, /drop set, and nothing more/, 'state the narrow contract plainly')
+  })
+}
+
+/**
+ * The verifier each fallback pipes the reply through, run rather than read
+ * (issue #533). It prints `opt-out confirmed` for a reply that passes, and
+ * nothing it checks authenticates whoever answered on that port, so the copies
+ * print a caveat line under it saying so. The caveat has to ride the success
+ * line and only that line: printed on a refusal, it would sit beside an error
+ * as though something had been confirmed. Each case below is a synthetic reply
+ * on stdin, so no control endpoint is reached.
+ *
+ * @ref LLP 0066#receipt-is-membership [tests]: the success output states the
+ * membership bound itself, rather than leaving it to the prose around it.
+ */
+const hasPython = spawnSync('python3', ['--version']).status === 0
+
+/** @param {string} rel */
+function receiptVerifier(rel) {
+  const m = skillText(rel).match(/printf '%s' "\$response" \| python3 -c '\n([\s\S]*?)\n' "\$/)
+  assert.ok(m, `${rel} must still pipe the reply through its embedded verifier`)
+  return m[1]
+}
+
+const CAVEAT = /^caveat: the responder on that port is not authenticated, and this is a membership receipt, not proof that recording stopped$/m
+
+for (const rel of SKILLS) {
+  test(`${rel} verifier confirms a valid reply with the responder caveat, and refuses the rest without it`, { skip: !hasPython && 'python3 is not on PATH' }, () => {
+    const code = receiptVerifier(rel)
+    const sent = 'sess-A'
+    /** @param {string} reply */
+    const verify = (reply) => spawnSync('python3', ['-c', code, sent], { input: reply, encoding: 'utf8' })
+
+    const valid = verify(JSON.stringify({ session_id: sent, ignored: true, total: 3 }))
+    assert.equal(valid.status, 0, valid.stderr)
+    assert.match(valid.stdout, /^opt-out confirmed for session sess-A \(total ignored: 3\)\n/, 'the success phrase leads, unchanged')
+    assert.match(valid.stdout, CAVEAT, 'and the caveat travels with it in the same output')
+
+    const refusals = {
+      'wrong id': [JSON.stringify({ session_id: 'sess-B', ignored: true, total: 3 }), /about session "sess-B", not "sess-A"/],
+      'string ignored': [JSON.stringify({ session_id: sent, ignored: 'true', total: 3 }), /NOT confirmed/],
+      'boolean total': [JSON.stringify({ session_id: sent, ignored: true, total: true }), /NOT confirmed/],
+      'invalid JSON': ['<html>not the gateway</html>', /was not JSON/],
+    }
+    for (const [name, [reply, why]] of Object.entries(refusals)) {
+      const result = verify(/** @type {string} */ (reply))
+      assert.notEqual(result.status, 0, `${name}: a reply that fails a check must exit nonzero`)
+      assert.match(result.stderr, /** @type {RegExp} */ (why), `${name}: and say why`)
+      assert.equal(result.stdout, '', `${name}: and print neither the success line nor the caveat`)
+    }
+  })
+}
+
+// Issue #1688: a bystander opt-out undo that runs unconditionally revokes a
+// deliberate one. A repeat add answers `ignored: true` the same as a first one
+// (the control route is a Set add), so the receipt cannot say whether this
+// call made the membership, and the opt-out is durable, so a wrong undo
+// resumes recording until the user notices. Every copy, the host-neutral tree
+// included, must gate the undo on the user and must not order it outright.
+const BYSTANDER_UNDO_COPIES = [
+  'hypaware-core/plugins-workspace/claude/skills/hypaware-privacy/SKILL.md',
+  'hypaware-core/plugins-workspace/codex/skills/hypaware-privacy/SKILL.md',
+  'hypaware-core/skills/hypaware-privacy/SKILL.md',
+]
+
+for (const rel of BYSTANDER_UNDO_COPIES) {
+  test(`${rel} undoes a bystander opt-out only once the user rules out their own`, () => {
+    const text = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', rel), 'utf8')
+    const start = text.indexOf('## Step 1')
+    const step1 = text.slice(start, text.indexOf('## Step 2', start))
+    assert.doesNotMatch(step1, /undo it before you stop/, 'the undo must not be an unconditional order')
+    assert.match(
+      step1,
+      /`hyp session unignore "<the session_id it reported>"` only if the user confirms they did not opt that session out themselves/,
+      'the undo must wait for the user to rule out a deliberate opt-out'
+    )
+    assert.match(step1, /cannot say whether the write added that session or found it already opted out/,
+      'and say why the receipt alone cannot decide it')
   })
 }
 

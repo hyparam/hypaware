@@ -69,6 +69,17 @@ export function hermesScopeId(id) {
 }
 
 /**
+ * The reconcile scope one hermes session's snapshot replaces. The projected
+ * item and the read-commit guard both name it, so they cannot drift apart.
+ * @param {string} clientName
+ * @param {string | number} sessionId  `HermesSessionRow.id`
+ * @returns {{ client_name: string, session_id: string }}
+ */
+export function hermesReconcileScope(clientName, sessionId) {
+  return { client_name: clientName, session_id: hermesScopeId(sessionId) }
+}
+
+/**
  * Convert a hermes stored timestamp to ISO-8601. Hermes records
  * `messages.timestamp` and `sessions.started_at`/`ended_at` as epoch-seconds
  * REAL (a float carrying fractional milliseconds), which `node:sqlite`
@@ -430,6 +441,6 @@ export async function projectHermesSession(args) {
 
   const item = projectedExchangeItem(exchange, provenance)
   // @ref LLP 0449#reconciliation [implements]: only this client's session is replaced.
-  item.reconcile = { where: { client_name: clientName, session_id: exchange.session_id }, key: 'part_id' }
+  item.reconcile = { where: hermesReconcileScope(clientName, session.id), key: 'part_id' }
   return item
 }

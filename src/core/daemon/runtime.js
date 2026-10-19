@@ -27,8 +27,9 @@ import { createSinkDriver } from '../sinks/driver.js'
 import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_history.js'
 import { sinkInstanceName } from '../registry/sinks.js'
 import { materializeSinks } from '../sinks/materialize.js'
+import { sanitizeLabel } from '../util/json_util.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
-import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, MAX_ACTIVATION_MESSAGE_CHARS, SINK_MATERIALIZE_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
 import {
   clearControlRequests,
   watchControlRequests,
@@ -342,6 +343,19 @@ export async function runDaemon(opts = {}) {
   writeStatusFile(runtimeStateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
+  // What this process loaded. Read once, at boot: the global root can be
+  // replaced underneath a running daemon, and the updater has to compare
+  // the registry against the code that is actually running, not the code
+  // on disk, or a replaced root reads as "up to date" while the daemon
+  // stays on the old version. Read before the config apply engine is
+  // created, which stamps it on a probation this host could not confirm.
+  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
+  /** @type {string | undefined} */
+  let runningVersion
+  try {
+    runningVersion = readSelfPackageIdentity().version
+  } catch { /* an install mid-replacement; the disk version stands in */ }
+
   // ----- Config apply engine (LLP 0025 / LLP 0031) -----
   // Created before bootKernel so probation expiry is evaluated before
   // any plugin activates: a kernel-killing-but-valid config that
@@ -375,6 +389,7 @@ export async function runDaemon(opts = {}) {
     onConfirmed: () => {
       if (scheduleReconcile) scheduleReconcile('confirm-edge')
     },
+    clientVersion: runningVersion,
   })
   const bootEval = await configControl.evaluateAtBoot()
   if (bootEval.action !== 'none') {
@@ -493,17 +508,6 @@ export async function runDaemon(opts = {}) {
   // config layers.
   // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
   let autoUpdateEnabled = true
-  // What this process loaded. Read once, at boot: the global root can be
-  // replaced underneath a running daemon, and the updater has to compare
-  // the registry against the code that is actually running, not the code
-  // on disk, or a replaced root reads as "up to date" while the daemon
-  // stays on the old version.
-  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
-  /** @type {string | undefined} */
-  let runningVersion
-  try {
-    runningVersion = readSelfPackageIdentity().version
-  } catch { /* an install mid-replacement; the disk version stands in */ }
   const supervised = detectSupervisor(env)
   /**
    * Re-derive the effective flag and re-cache it. Called at boot and
@@ -673,11 +677,26 @@ export async function runDaemon(opts = {}) {
   if (sinkResult.errors.length > 0) {
     for (const e of sinkResult.errors) {
       fileLog.error('daemon.sink_materialize_failed', {
+        [Attr.COMPONENT]: 'daemon',
         instance: e.instance,
         error_kind: e.errorKind,
         message: e.message,
       })
     }
+    // A configured sink that never materialized exports nothing, so the boot
+    // is degraded exactly as it is for a source that failed to start (issue
+    // #2547). Reload does not re-materialize sinks, so this holds until a boot
+    // whose materialize succeeds.
+    status.state = 'degraded'
+    status.warnings = sinkResult.errors.map((e) =>
+      `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: sink '${sanitizeLabel(e.instance) ?? 'unknown'}' (${sanitizeLabel(e.errorKind) ?? 'materialize_failed'}): ${sanitizeLabel(e.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`)
+    // The same signal tells the apply engine this host may be unable to run
+    // the poll that confirms a probation, so its expiry is not a verdict on
+    // the revision.
+    // @ref LLP 0517#unconfirmed [implements]: a sink materialize failure during probation marks it unconfirmable
+    try {
+      configControl.noteSinkMaterializeFailed()
+    } catch { /* best-effort: an unwritable state file leaves the plain expiry */ }
   }
 
   // ----- Sink driver -----
@@ -760,7 +779,8 @@ export async function runDaemon(opts = {}) {
   // status.json: a degraded boot (any source failed to start) must not log
   // `daemon.healthy`. Monitoring keyed off that event would read a false
   // positive, and a health event never lists a source that failed to
-  // start; it reports only the sources that actually came up.
+  // start; it reports only the sources that actually came up. A sink that
+  // failed to materialize degrades the boot the same way.
   // @ref LLP 0017#the-primary-daemon [implements]: the boot health event reports the same state as `hyp daemon status`
   const startedSourceNames = sourceSnapshots
     .filter((s) => s.state !== 'failed')
@@ -778,6 +798,7 @@ export async function runDaemon(opts = {}) {
       failed_sources: sourceSnapshots
         .filter((s) => s.state === 'failed')
         .map((s) => s.name),
+      failed_sinks: sinkResult.errors.map((e) => ({ instance: e.instance, error_kind: e.errorKind })),
       sinks: status.sinks.map((s) => s.instance),
     })
   }
@@ -1021,7 +1042,7 @@ export async function runDaemon(opts = {}) {
     // with the tracer directly instead, so only this one call site's status
     // handling changes and `withSpan` (and everything else that calls it)
     // is untouched.
-    async function runMaintenance() {
+    async function maintenanceTick() {
       const tracer = getTracer('daemon')
       const attrs = buildAttrs({
         [Attr.COMPONENT]: 'daemon',
@@ -1138,16 +1159,24 @@ export async function runDaemon(opts = {}) {
           // (hyparam/hypaware#2363). `withSpan` writes this line for the
           // spans it owns; this tick owns its own, so it writes it here.
           span.setAttribute('status', 'failed')
-          span.setAttribute('error_kind', attrs.error_kind ?? 'unhandled_exception')
+          span.setAttribute('error_kind', 'unhandled_exception')
           throw err
         } finally {
           span.end()
         }
-      }).catch((err) => {
+      })
+    }
+
+    async function runMaintenance() {
+      // `maintenanceTick` is async so a throw in its span prologue arrives
+      // here as a rejection too: `maintenanceInFlight` has no catch of its
+      // own, and an unhandled rejection would end the daemon.
+      await maintenanceTick().catch((err) => {
         // Still reachable: partition discovery, the retired-generation
-        // sweep, and anything else outside the per-partition catch.
+        // sweep, and anything else outside the per-partition catch. Logged
+        // with the kind the span carries, so the line and the span agree.
         const message = err instanceof Error ? err.message : String(err)
-        fileLog.error('daemon.maintenance_failed', { message })
+        fileLog.error('daemon.maintenance_failed', { [Attr.ERROR_KIND]: 'unhandled_exception', message })
       })
       // Retention rides the tail of the same tick, so `maintenanceInFlight`
       // (and with it shutdown, which awaits it) covers a delete in progress.
@@ -1998,7 +2027,7 @@ export async function requestDaemonStop({
 }) {
   const entry = readPidFile(stateRoot)
   if (!entry || !processIsAlive(entry.pid)) {
-    if (entry) clearPidFile(stateRoot)
+    if (entry) clearStalePidFile(stateRoot)
     // A gateway that is already gone is what a hard kill leaves behind, so
     // this is the arm of #2288 that actually accumulates: the child it
     // supervised went with it and its pid file below `processing/` is
@@ -2014,7 +2043,7 @@ export async function requestDaemonStop({
     } catch (err) {
       const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
       if (code === 'ESRCH') {
-        clearPidFile(stateRoot)
+        clearStalePidFile(stateRoot)
         clearStalePidFile(processingStateRoot(stateRoot))
         return 'not_running'
       }
@@ -2024,7 +2053,7 @@ export async function requestDaemonStop({
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (!processIsAlive(entry.pid)) {
-      clearPidFile(stateRoot)
+      clearStalePidFile(stateRoot)
       // The supervised processing child dies with the gateway that spawned it
       // and leaves its own pid file below `processing/` behind whenever it got
       // no shutdown to run (#2288). Reconciled rather than deleted: that pid

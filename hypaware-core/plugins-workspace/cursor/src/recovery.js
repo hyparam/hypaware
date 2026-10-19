@@ -3,6 +3,7 @@ import path from 'node:path'
 import { realpath } from 'node:fs/promises'
 import { createUsagePolicyResolver, CLASS_RANK, isEqualOrDescendant } from '../../../../src/core/usage-policy/index.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
+import { refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { AI_GATEWAY_MESSAGES_DATASET, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
 import { listCursorSessions, safeError } from './native.js'
 import { createCursorDecoder } from './native_decoder.js'
@@ -13,15 +14,20 @@ import { createCursorDecoder } from './native_decoder.js'
 /** @param {{ localOnlyListPath?: string, ignoredSessions?: Set<string> }} opts */
 export function cursorAdmission(opts) {
   const resolver = createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
+  // @ref LLP 0403#storage [implements]: an unreadable exclusion store refuses
+  //   every session rather than reading as an empty list.
+  /** @param {string} id */
+  const ignored = (id) => sessionIgnoreLoadError(opts.ignoredSessions) !== undefined || opts.ignoredSessions?.has(id) === true
   return {
     /** @param {CursorSession} session */
-    session(session) { return !opts.ignoredSessions?.has(session.id) && resolver.resolve(session.cwd).class !== 'ignore' },
+    session(session) { return !ignored(session.id) && resolver.resolve(session.cwd).class !== 'ignore' },
     /** @param {AiGatewayProjectedExchange} exchange */
     async filter(exchange) {
-      if (opts.ignoredSessions?.has(exchange.session_id ?? '') || !exchange.cwd || resolver.resolve(exchange.cwd).class === 'ignore') return undefined
+      if (ignored(exchange.session_id ?? '') || !exchange.cwd || resolver.resolve(exchange.cwd).class === 'ignore') return undefined
       const cwd = exchange.cwd
       const rank = CLASS_RANK[resolver.resolve(cwd).class]
       const messages = []
+      const refusedCalls = new Set()
       for (const message of exchange.messages) {
         let allowed = true
         if (message.role === 'tool' && Array.isArray(message.content)) {
@@ -45,9 +51,17 @@ export function cursorAdmission(opts) {
           }
         }
         if (allowed) messages.push(message)
+        else if (Array.isArray(message.content)) {
+          for (const block of message.content) {
+            if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') refusedCalls.add(block.tool_use_id)
+          }
+        }
       }
-      if (opts.ignoredSessions?.has(exchange.session_id ?? '') || resolver.resolve(cwd).class === 'ignore') return undefined
-      return { ...exchange, messages }
+      if (ignored(exchange.session_id ?? '') || resolver.resolve(cwd).class === 'ignore') return undefined
+      // A newly emitted call must not reintroduce arguments from a Read whose
+      // result failed the existing file policy. Do not resolve the paths twice.
+      return { ...exchange, messages: refusedCalls.size ? messages.filter((message) =>
+        !Array.isArray(message.content) || !message.content.some((block) => block.type === 'tool_use' && refusedCalls.has(block.id))) : messages }
     },
   }
 }
@@ -67,6 +81,9 @@ export function createCursorBackfillProvider(opts = {}) {
     summary: 'Recover Cursor editor and CLI native sessions',
     ...(policy.onJoin !== false ? { sweep: { cron } } : {}),
     async *run(ctx) {
+      // @ref LLP 0403#backfill [implements]: reload saved exclusions before
+      //   import; an unreadable store throws here rather than importing.
+      refreshSessionIgnores(opts.ignoredSessions)
       // One decoder serves the whole run and is closed with it, so a sweep
       // over a thousand stores neither blocks the daemon loop nor leaves a
       // decode thread alive between sweeps.

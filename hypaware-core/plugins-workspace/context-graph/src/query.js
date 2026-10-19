@@ -247,6 +247,12 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       const abortShaped = err instanceof Error
         && (err.name === 'AbortError' || err.name === 'TimeoutError')
       if (visibility.signal.aborted && abortShaped) return refused(outOfTime)
+      // The engine's advice (a WHERE filter, a LIMIT) names levers this verb
+      // does not offer. Append the ones it does, keeping the error's identity,
+      // as the graph projection does for its own budget.
+      if (err instanceof Error && err.name === 'QueryExecutionBudgetError') {
+        err.message += ' - that caller is a graph neighbor traversal: reduce depth or narrow --edge-type'
+      }
       throw err
     } finally {
       span.setAttribute('query_count', queries)

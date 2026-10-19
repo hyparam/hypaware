@@ -174,3 +174,6 @@ export type S3ErrorKind =
   | 's3_put_failed'
   | 's3_throttled'
   | 'encoder_failed'
+  /** A ranged GetObject the object cannot satisfy (InvalidRange / HTTP 416).
+   * Shared with local-fs so a ranged reader can branch on one token. */
+  | 'blob_range_unsatisfiable'

@@ -1,6 +1,6 @@
 // @ts-check
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { gzip } from 'node:zlib'
 import { promisify } from 'node:util'
 import { openReceipts } from './receipts.js'
@@ -9,9 +9,10 @@ import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime
 
 /**
  * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation, SourceHistoryReplayRequest, SourceHistoryReplayPreview, SourceHistoryReplayResult } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
+ * @import { HeldDatasetStore, SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from '../../../../hypaware-core/plugins-workspace/central/src/identity_client.js'
  * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from '../../../../hypaware-core/plugins-workspace/central/src/types.js'
+ * @import { MissingSyncRequest, MissingSyncResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const compress = promisify(gzip)
@@ -53,6 +54,11 @@ const BODY_STREAM_SLICE_BYTES = 64 * 1024
 // version skew does not create an outbox and warning every sink tick.
 const DATASET_REGISTRATION_REPROBE_MS = 5 * 60_000
 
+// What `forwardPartition` returns when the destination refused the dataset's
+// registration. Zero bytes is a legitimate empty export, so it cannot also
+// mean "held".
+const DATASET_HELD = Symbol('central.forward.dataset_held')
+
 /**
  * Build the `forward` Sink. The sink's `exportBatch` forwards each
  * driver partition independently. Legacy datasets resolve their fixed ingest
@@ -77,6 +83,7 @@ const DATASET_REGISTRATION_REPROBE_MS = 5 * 60_000
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   nowFn?: () => number,
  *   receiptsDir?: string,
+ *   held?: HeldDatasetStore,
  * }} args
  * @returns {Sink}
  */
@@ -88,6 +95,7 @@ export function createForwardSink(args) {
   const nowFn = args.nowFn ?? Date.now
   const transport = { gzip: false }
   const receiptRoot = args.receiptsDir
+  const held = args.held
   const registeredDatasets = new Set()
   // Datasets this sink instance has already reported as ineligible, so a
   // permanent verdict is stated once rather than once per tick forever.
@@ -98,13 +106,31 @@ export function createForwardSink(args) {
   const unsupportedDatasetsUntil = new Map()
   /** @type {Map<string, Promise<void>>} */
   const datasetRolloutLocks = new Map()
-  /** @type {Map<string, Promise<number>>} */
+  /** @type {Map<string, Promise<number | typeof DATASET_HELD>>} */
   const partitionExports = new Map()
+
+  /**
+   * Drop a dataset's hold once nothing is holding it. Best effort: the rows
+   * already moved, and a hold left on disk keeps status warning, which errs
+   * loud. The store retries the write on its next call.
+   *
+   * @param {string} dataset
+   */
+  async function settleHold(dataset) {
+    try {
+      await held?.clear(dataset)
+    } catch (err) {
+      log.warn('central.forward.held_state_write_failed', {
+        hyp_dataset: dataset,
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   // Signal every owned central request/body/wait on close. Actual operation
   // settlement, including history replay, is awaited before releasing the sink.
   const abortController = new AbortController()
-  /** @type {Set<Promise<number>>} */
+  /** @type {Set<Promise<unknown>>} */
   const activeForwards = new Set()
   /** @param {Parameters<typeof forwardPartition>[0]} args */
   function forwardOwned(args) {
@@ -116,6 +142,32 @@ export function createForwardSink(args) {
   }
 
   return {
+    /**
+     * @ref LLP 0501#missing [implements]: one bounded explicit repair leaves normal watermarks untouched
+     * @param {MissingSyncRequest} request
+     */
+    async restoreMissingRows(request) {
+      if (!request.rows.length || request.rows.length > 1000 || !/^[a-f0-9]{64}$/.test(request.revision)) throw new Error('invalid missing-row selection')
+      const target = forwardingTarget(query, { dataset: 'ai_gateway_messages', partition: {} })
+      if ('withheld' in target) throw new Error(`missing-row repair withheld: ${target.withheld}`)
+      const lines = []
+      let bytes = 0
+      for (const row of request.rows) {
+        const line = JSON.stringify(serializeRow(row)) + '\n'
+        bytes += Buffer.byteLength(line)
+        if (bytes > MAX_CHUNK_BYTES) throw new Error('missing-row selection exceeds 4 MiB; narrow --from/--to')
+        lines.push(line)
+      }
+      const pending = postNdjson({ centralUrl: config.url, signal: 'ai_gateway_messages', body: lines.join(''),
+        batchId: randomUUID(), identityClient, fetchFn, log, abortSignal: abortController.signal, sleepFn,
+        hyp_dataset: 'ai_gateway_messages', chunkIndex: 0, transport: { gzip: false }, missing: request })
+      activeForwards.add(pending)
+      try {
+        const result = await pending
+        if (typeof result !== 'object') throw new Error('server did not acknowledge missing-row repair')
+        return result
+      } finally { activeForwards.delete(pending) }
+    },
     /**
      * @param {ExportBatch} batch
      * @param {ExportOptions} [opts]
@@ -167,6 +219,7 @@ export function createForwardSink(args) {
               if (resolved.level === 'warn') log.warn('central.forward.dataset_withheld', fields)
               else log.info('central.forward.dataset_withheld', fields)
             }
+            await settleHold(partition.dataset)
             return { success: true, bytesWritten: 0, withheld: true }
           }
           target = resolved
@@ -175,6 +228,7 @@ export function createForwardSink(args) {
           // watermark backward over an earlier write.
           // @ref LLP 0040#watermark-contract [constrained-by]: a partition has one ordered ship-then-advance sequence even when daemon ticks overlap.
           const exportKey = partition.tablePath ?? `${partition.dataset}:${JSON.stringify(partition.partition ?? {})}`
+          /** @type {Promise<number | typeof DATASET_HELD>} */
           const previous = partitionExports.get(exportKey) ?? Promise.resolve(0)
           const pending = previous.catch(() => 0).then(async () => {
             if (resolved.registration) {
@@ -206,6 +260,20 @@ export function createForwardSink(args) {
           partitionExports.set(exportKey, pending)
           try {
             const bytes = await pending
+            // A refused registration keeps the rows local without retrying
+            // through the outbox. The hold must be durable before the
+            // partition can count as settled: if the write fails the
+            // partition fails, so status never reads "healthy" for rows that
+            // went nowhere.
+            // @ref LLP 0537#held-outcome [implements]: held work is neither exported nor retried, and is recorded before it settles
+            if (bytes === DATASET_HELD) {
+              phase = 'held-dataset state'
+              await held?.hold(partition.dataset)
+              return { success: true, bytesWritten: 0, held: true }
+            }
+            // Only a registration the destination accepted ends a hold; the
+            // reprobe timer expiring is not evidence of recovery.
+            if (registeredDatasets.has(partition.dataset)) await settleHold(partition.dataset)
             return { success: true, bytesWritten: bytes }
           } finally {
             if (partitionExports.get(exportKey) === pending) partitionExports.delete(exportKey)
@@ -224,6 +292,10 @@ export function createForwardSink(args) {
             batch_id: e.hyp_batch_id,
             chunks_sent: e.hyp_chunks_sent,
           })
+          // An accepted registration ends the capability hold even when the
+          // ingest after it fails: that is a transport failure, retried and
+          // reported as one, not a server that cannot take the dataset.
+          if (registeredDatasets.has(partition.dataset)) await settleHold(partition.dataset)
           return { success: false, bytesWritten: e.hyp_bytes_written ?? 0, message }
         }
       }
@@ -231,7 +303,7 @@ export function createForwardSink(args) {
         const outcome = await exportPartition(partition)
         bytesWritten += outcome.bytesWritten
         if (outcome.success) {
-          if (!outcome.withheld) partitionsExported += 1
+          if (!outcome.withheld && !outcome.held) partitionsExported += 1
         } else {
           retry.push(partition)
           firstError ??= outcome.message
@@ -318,7 +390,7 @@ export function createForwardSink(args) {
             })
             continue
           }
-          bytesWritten += await forwardOwned({
+          const sent = await forwardOwned({
             partition,
             signal: target.ingestName,
             config,
@@ -343,6 +415,14 @@ export function createForwardSink(args) {
             replaySource: request.source,
             onProgress: request.onProgress,
           })
+          if (sent === DATASET_HELD) {
+            log.info('central.forward.history_replay_held', {
+              hyp_sink_source: request.source,
+              hyp_dataset: partition.dataset,
+            })
+            continue
+          }
+          bytesWritten += sent
           rowsReplayed += stats.rows
         } catch (err) {
           // Both counts come from `stats`, which `flushChunk` updates as each
@@ -512,6 +592,50 @@ export async function initializeOpenDatasetRollouts({ query, storage, watermarks
     const partitions = await discoverRolloutPartitions(dataset, storage)
     await initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log })
   }
+}
+
+/**
+ * Names of the open datasets this sink would register with its destination:
+ * the only datasets a capability hold can name.
+ *
+ * @param {QueryRegistry} query
+ * @returns {Set<string>}
+ */
+export function eligibleOpenDatasetNames(query) {
+  return new Set(query.listDatasets().filter(isEligibleOpenDataset).map((dataset) => dataset.name))
+}
+
+/**
+ * Eligible open datasets with no materialized or spool-pending partition:
+ * nothing of theirs is held locally, so an unreadable held-dataset record need
+ * not wait for a registration that has no partition to trigger it. A dataset
+ * whose discovery fails is left out, so it stays unknown.
+ *
+ * @param {QueryRegistry} query
+ * @param {QueryStorageService} storage
+ * @returns {Promise<string[]>}
+ */
+export async function openDatasetsWithoutPartitions(query, storage) {
+  const extended = /** @type {QueryStorageService & { hasPendingSync?: (tablePath: string) => boolean }} */ (storage)
+  /** @param {string} tablePath */
+  const holdsRows = (tablePath) => storage.tableExists(tablePath) || extended.hasPendingSync?.(tablePath) === true
+  /** @type {string[]} */
+  const names = []
+  for (const dataset of query.listDatasets()) {
+    if (!isEligibleOpenDataset(dataset)) continue
+    try {
+      const partitions = await dataset.discoverPartitions({
+        config: /** @type {HypAwareV2Config} */ ({ version: 2 }),
+        scope: { limit: 1_000_000 },
+        cacheDir: storage.cacheRoot,
+      })
+      const present = (partitions ?? []).some((partition) => partition.tablePath && holdsRows(partition.tablePath))
+      if (!present) names.push(dataset.name)
+    } catch {
+      // Unknown stays unknown.
+    }
+  }
+  return names
 }
 
 /** @param {DatasetRegistration} dataset */
@@ -766,7 +890,7 @@ function withDatasetRolloutLock(dataset, locks, fn) {
  *   replaySource?: string,
  *   transport?: { gzip: boolean },
  * }} args
- * @returns {Promise<number>} bytes successfully POSTed for this partition
+ * @returns {Promise<number | typeof DATASET_HELD>} bytes successfully POSTed for this partition, or {@link DATASET_HELD} when the destination refused the dataset's registration
  */
 async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark, sinceOverride, includeLegacyOverride, persistWatermark = true, rowFilter, replayStats, onProgress, receiptsDir, replaySource, transport = { gzip: false } }) {
   abortSignal.throwIfAborted()
@@ -838,7 +962,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       nowFn,
       abortSignal,
     })
-    if (!supported) return 0
+    if (!supported) return DATASET_HELD
   }
 
   // @ref LLP 0497#receipts [implements]: exact chunk acknowledgements survive interruption; the partition cursor still moves only after the complete scan
@@ -891,10 +1015,10 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     try {
       // @ref LLP 0471#chunk-lifetime [constrained-by]: a saved receipt skips the POST, not the per-chunk cancellation boundary the POST carried
       if (resumed) abortSignal.throwIfAborted()
-      if (!resumed) wireBytes = await postNdjson({
+      if (!resumed) wireBytes = /** @type {number} */ (await postNdjson({
         centralUrl: config.url, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn,
         hyp_dataset: partition.dataset, chunkIndex, transport, onProgress,
-      })
+      }))
       if (!resumed) {
         try { await receipts.record(receipt) } catch {
           log.warn('central.forward.receipts_unavailable', { hyp_dataset: partition.dataset })
@@ -1125,6 +1249,7 @@ function serializeValue(value) {
  *   chunkIndex: number,
  *   transport: { gzip: boolean },
  *   onProgress?: ExportOptions['onProgress'],
+ *   missing?: MissingSyncRequest,
  * }} args
  */
 async function postNdjson(args) {
@@ -1135,7 +1260,7 @@ async function postNdjson(args) {
   // to name different resources, and `joinUrl`'s `new URL()` would normalize a
   // `..` segment out of the ingest path. The four legacy signals are
   // encode-invariant, so their URLs are byte-identical to before.
-  const url = joinUrl(centralUrl, `/v1/ingest/${encodeURIComponent(signal)}`)
+  const url = joinUrl(centralUrl, `/v1/${args.missing ? 'ingest-missing' : 'ingest'}/${encodeURIComponent(signal)}`)
 
   // The chunk goes out as a stream, not one string. Node 26's fetch speaks
   // HTTP/2, and its HTTP/2 client keeps a request body's unsent remainder
@@ -1179,12 +1304,14 @@ async function postNdjson(args) {
     const send = (jwt) => fetchFn(url, {
       method: 'POST',
       signal: abortSignal,
+      ...(args.missing ? { redirect: /** @type {const} */ ('error') } : {}),
       headers: {
         authorization: `Bearer ${jwt}`,
         'content-type': 'application/x-ndjson',
         'content-length': String(bytes.byteLength),
         'x-hyp-batch-id': batchId,
         ...(compressed ? { 'content-encoding': 'gzip', 'x-hyp-uncompressed-length': String(decodedLength) } : {}),
+        ...(args.missing ? { 'x-hyp-sync-revision': args.missing.revision, 'x-hyp-sync-org': args.missing.org } : {}),
       },
       body: streamBody(),
       duplex: 'half',
@@ -1196,6 +1323,14 @@ async function postNdjson(args) {
     let transportRetries = 0
     for (;;) {
       const jwt = await identityClient.getCurrentJwt(abortSignal)
+      if (args.missing) {
+        // This decode can only refuse. The server verifies the signature and
+        // independently binds the repair to the gateway's authenticated org.
+        const claims = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString('utf8'))
+        if ((claims.org ?? '') !== args.missing.org) throw new Error('read remote and sink belong to different organizations')
+        await args.missing.validate()
+        abortSignal.throwIfAborted()
+      }
       /** @type {Response} */
       let response
       try {
@@ -1224,6 +1359,27 @@ async function postNdjson(args) {
 
       abortSignal.throwIfAborted()
       if (response.status === 202 || response.ok) {
+        if (args.missing) {
+          const reader = response.body?.getReader()
+          if (!reader) throw new Error('empty repair acknowledgement')
+          const chunks = []
+          let size = 0
+          try {
+            for (;;) {
+              const { value, done } = await reader.read()
+              if (done) break
+              size += value.byteLength
+              if (size > 4096) throw new Error('repair acknowledgement exceeds byte budget')
+              chunks.push(value)
+            }
+          } finally { await reader.cancel() }
+          const result = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          if (response.status !== 202 || result.syncRestore !== 1 || !['accepted', 'already_accepted'].includes(result.status)) throw new Error('unsupported repair acknowledgement')
+          if (result.status === 'accepted' && (![result.restored, result.present, result.purged].every(n => Number.isSafeInteger(n) && n >= 0) ||
+            result.restored + result.present + result.purged !== args.missing.rows.length)) throw new Error('incomplete repair acknowledgement')
+          abortSignal.throwIfAborted()
+          return /** @type {MissingSyncResult} */ (result)
+        }
         await discardBody(response)
         abortSignal.throwIfAborted()
         if (response.headers.get('accept-encoding')?.split(',').some((value) => value.trim() === 'gzip')) transport.gzip = true

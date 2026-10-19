@@ -24,7 +24,7 @@ provisional number); all out of tree, on their own
 
 @ref LLP 0494 [implements]: the client design this plan builds
 @ref LLP 0034#tool-auth-class [constrained-by]: the `write` class (T6), on Phil's recorded yes (A1)
-@ref LLP 0298#mint [constrained-by]: `--scope query` (T7) waits on Kenny's answer
+@ref LLP 0298#mint [constrained-by]: `--scope query` (T7), on Kenny's recorded yes (A2)
 
 ## How to read the tasks
 
@@ -279,6 +279,11 @@ Records Kenny's answer on LLP 0298#mint and confirms or removes its Draft
 forward-ref. It arrives with his answer on hypaware-server LLP 0597
 (server A1); one does not stand without the other.
 
+- **Recorded:** Kenny yes, 2026-10-15T18:00:18Z ("I approve", Slack
+  1792087218.778909, relayed by the mayor), with server A1 (LLP 0597
+  Accepted). The LLP 0298 forward-ref records it. His question on members
+  deleting only their own reports is a follow-up, not a condition.
+
 - **Fallback on no:** T7 drops. If server A1's fallback is the dedicated
   scope, T7 is rewritten to it (the stderr reminder says "read and mark"
   only) and the plain-words text goes back to Hernan. If the mint goes
@@ -383,6 +388,10 @@ call, recorded in PROGRESS.md.
 - **CPU and memory:** none.
 
 ### T9: the MCP path in the published docs {#t9}
+
+> **Extended-by: [LLP 0494#docs-paths](./0494-hypaware-mcp-phase-1.design.md#docs-paths)
+> (2026-10-16 revision, #2624).** The Done-when and Hermetic proof below
+> are superseded by that section and LLP 0494's verification map.
 
 - **Files:** `docs/CLI.md`, `QUERYING.md`, `REPORTS.md`, `PRIVACY.md`,
   `TROUBLESHOOTING.md`, `TEAM_SETUP.md`, `CLIENTS.md`; a docs test over the

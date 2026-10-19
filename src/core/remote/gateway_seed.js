@@ -168,16 +168,13 @@ export function centralLayerUnreadable({ stateDir, centralLoaded }) {
  * and in configuration order. A caller that has already resolved the layered
  * config and only needs to *name* where rows go takes this directly, so naming
  * a destination costs no second read of the layer and cannot disagree with the
- * enrollment answer the same command computed. {@link readForwardSinkOrigins}
- * forgoes both of those on purpose: it wants a wider layer than the caller
- * already resolved, so it pays a read of its own, and an enrollment change
- * landing between the two reads can leave one command's copy naming a set
- * that existed at no single instant.
+ * enrollment answer the same command computed. {@link readSinkOrigins} runs
+ * it twice over one resolution for the same reason.
  *
  * Which config to hand it is the caller's decision, and the two answers differ:
  * {@link readCentralEnrollment} passes the **central** layer alone, because a
  * hand-authored central sink in the user's own local layer is not an
- * enrollment, while {@link readForwardSinkOrigins} passes the **effective**
+ * enrollment, while {@link readSinkOrigins} also passes the **effective**
  * config, because that sink still forwards.
  *
  * @param {HypAwareV2Config | null | undefined} config
@@ -211,25 +208,37 @@ export async function readCentralSinkOrigins({ stateDir, configPath }) {
 }
 
 /**
- * Every origin an `@hypaware/central` sink targets in the **effective**
- * (central + local) config the daemon boots: where this machine actually
- * forwards. `mergeConfigLayers` unions a hand-authored local sink in under
- * its own instance name and the plugin honors that block's own
- * `identity.persisted_path`, so it ships to its own server.
+ * Both origin answers for one moment, from one resolution of the layered
+ * config: `central` is the enrollment ({@link readCentralEnrollment}'s gate,
+ * LLP 0063 D4) and `effective` is every origin an `@hypaware/central` sink
+ * targets in the **effective** (central + local) config the daemon boots,
+ * i.e. where this machine actually forwards. `mergeConfigLayers` unions a
+ * hand-authored local sink in under its own instance name and the plugin
+ * honors that block's own `identity.persisted_path`, so it ships to its own
+ * server.
  *
- * For *naming* destinations only. Enrollment stays the central layer alone
- * ({@link readCentralEnrollment}, LLP 0063 D4), because counting a local sink
- * as connected would reject a login with `hyp leave` advice that cannot clear
- * it. Disclosure carries no such duty, and a surface that named the enrolling
- * layer alone would offer "never send them to A" on a folder B keeps
- * receiving (#2208).
+ * One read rather than two on purpose: a caller that asks "is this machine
+ * forwarding" and "is it enrolled" from separate reads can get answers that
+ * describe different moments. The effective config is resolved by the same
+ * {@link resolveLayeredConfigFromDisk} the daemon's boot and SIGHUP reload
+ * call, so both answers describe the config on disk at this read. A running
+ * daemon forwards from whatever it last loaded; an edit it has not reloaded
+ * yet is named here before the sink ships to it.
+ *
+ * Not a permission gate: counting a local sink as connected would reject a
+ * login with `hyp leave` advice that cannot clear it, so enrollment decisions
+ * still go through {@link readCentralEnrollment} and its `unreadable` answer.
+ * A surface that named the enrolling layer alone would offer "never send them
+ * to A" on a folder B keeps receiving (#2208), and one that asked only on
+ * enrollment would never ask a machine whose only forwarding sink is its own
+ * (#2248).
  *
  * @param {{ stateDir: string, configPath: string | null }} args
- * @returns {Promise<string[]>}
+ * @returns {Promise<{ central: string[], effective: string[] }>}
  */
-export async function readForwardSinkOrigins({ stateDir, configPath }) {
-  const { effective } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
-  return centralSinkOrigins(effective)
+export async function readSinkOrigins({ stateDir, configPath }) {
+  const { centralConfig, effective } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
+  return { central: centralSinkOrigins(centralConfig), effective: centralSinkOrigins(effective) }
 }
 
 /**

@@ -3,7 +3,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+import { REMOTE_TOOL_CONTRACTS } from '../../src/core/mcp/contracts.js'
 import { buildInstructions } from '../../src/core/mcp/instructions.js'
+import { createMcpServer } from '../../src/core/mcp/server.js'
+import { createVerbRegistry } from '../../src/core/registry/verbs.js'
 
 // Every Phase 1 tool (LLP 0494#tools): the local reads, the two read
 // contracts, the mark (T6) and the server-only evidence tool.
@@ -28,6 +31,46 @@ test('rule 5: with set_recommendation_status visible, marking applied is expecte
     assert.ok(!text.includes('You cannot mark'))
     assert.match(text, /mark both/)
   }
+})
+
+/**
+ * `initialize` over an http assembly with every remote contract bound, for a
+ * principal holding `allowScopes`.
+ *
+ * @param {string[]} allowScopes
+ * @returns {Promise<string>}
+ */
+async function initializeOverHttp(allowScopes) {
+  const verbs = createVerbRegistry()
+  for (const c of REMOTE_TOOL_CONTRACTS) {
+    verbs.register({
+      name: `contract ${c.tool}`, tool: c.tool, title: c.title, summary: c.summary, inputSchema: c.inputSchema,
+      authClass: c.authClass, scope: c.scope, operation: async () => ({}), render: () => ({ stdout: '' }),
+    })
+  }
+  const s = createMcpServer({
+    verbs,
+    query: /** @type {any} */ ({ listDatasets: () => [], getDataset: () => undefined, registerDataset() {} }),
+    runTool: async () => ({}),
+    transport: 'http',
+    allowOperator: false,
+    allowScopes,
+  })
+  const r = /** @type {any} */ (await s.handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }))
+  return r.result.instructions
+}
+
+test('initialize over createMcpServer with report-publish renders rule 5; without it, the hand-off', async () => {
+  const marking = await initializeOverHttp(['report-publish'])
+  assert.match(marking, /marking it applied with set_recommendation_status is the expected last step/)
+  assert.ok(marking.includes('No approval is needed.'))
+  assert.ok(!marking.includes('You cannot mark'))
+  assert.ok(!marking.includes('hyp report'))
+
+  const reading = await initializeOverHttp([])
+  assert.ok(reading.includes(HAND_OFF))
+  assert.ok(!reading.includes('set_recommendation_status'))
+  assert.doesNotMatch(reading, /expected last step/)
 })
 
 test('rule 6 over stdio: the CLI line names hyp report get and hyp report mark', () => {

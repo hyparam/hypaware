@@ -11,7 +11,7 @@ import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
-import { cursorNativeFixture } from '../lib/cursor_native_fixture.js'
+import { cursorNativeFixture, wire } from '../lib/cursor_native_fixture.js'
 import { cursorStorePaths } from '../../plugins-workspace/cursor/src/native.js'
 import { cursorHooksPath } from '../../plugins-workspace/cursor/src/attach.js'
 
@@ -48,6 +48,8 @@ export async function run({ harness, expect }) {
     const paths = cursorStorePaths()
     stores.push(await cursorNativeFixture(path.dirname(paths.editorDb), cwd, 'editor'))
     stores.push(await cursorNativeFixture(paths.cliRoot, cwd, 'cli'))
+    const editor = stores[0]
+    editor.writeRoot(Buffer.concat([editor.state, wire([31, wire([1, 'local-child'], [2, editor.put(wire([1, editor.state], [6, 1]))])])]))
     const loaded = await step('activate', async () => {
       const manifests = await loadManifests([path.resolve(import.meta.dirname, '../../plugins-workspace/cursor')])
       const activated = await activatePlugins({
@@ -83,20 +85,21 @@ export async function run({ harness, expect }) {
     let callbacks = 0
     for (const [mode, version] of [['editor', '3.19.19'], ['cli', '2026.09.08-6caf4ff']]) {
       await step(`${mode}_fixture`, async () => {
-        const base = { conversation_id: stores.find((s) => s.session.frontend === mode).session.id, generation_id: 'turn', cursor_version: version, workspace_roots: [cwd], transcript_path: null }
+        const base = { conversation_id: stores.find((s) => s.session.frontend === mode).session.id, generation_id: 'native-generation', cursor_version: version, workspace_roots: [cwd], transcript_path: null }
         const events = [
           { hook_event_name: 'beforeSubmitPrompt', prompt: 'Read notes' },
           { hook_event_name: 'beforeReadFile', file_path: path.join(cwd, 'notes.txt'), content: 'Observed file contents' },
           { hook_event_name: 'afterAgentResponse', text: 'Same text' },
+          { hook_event_name: 'stop', input_tokens: 100, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 10 },
           { hook_event_name: 'postToolUse', tool_use_id: 'call', tool_name: 'Read', tool_input: { path: 'notes' }, tool_output: 'fixture contents' },
           { hook_event_name: 'afterAgentResponse', text: 'Same text' },
         ]
         for (const event of events) {
           const body = { delivery_id: randomUUID(), observed_at: new Date().toISOString(), event: { ...base, ...event } }
           const result = await post(body)
-          expect.that(`${mode} callback is observed or schedules recovery`, result, (v) => event.hook_event_name === 'beforeReadFile' ? v.status === 200 && v.body.rowsWritten === 1 : v.status === 202)
+          expect.that(`${mode} callback is observed or schedules recovery`, result, (v) => ['beforeReadFile', 'stop'].includes(event.hook_event_name) ? v.status === 200 && v.body.rowsWritten === 1 : v.status === 202)
           const retry = await post(body)
-          expect.that(`${mode} retry writes no duplicate`, retry, (v) => event.hook_event_name === 'beforeReadFile' ? v.status === 200 && v.body.rowsWritten === 0 : v.status === 202)
+          expect.that(`${mode} retry writes no duplicate`, retry, (v) => ['beforeReadFile', 'stop'].includes(event.hook_event_name) ? v.status === 200 && v.body.rowsWritten === 0 : v.status === 202)
           callbacks += 2
         }
       })
@@ -112,7 +115,7 @@ export async function run({ harness, expect }) {
       const code = await dispatch(['backfill', 'cursor', '--since', '2000-01-01T00:00:00.000Z', '--json'], { kernel, registry, env: process.env, stdout: out, stderr: err })
       expect.that('Manual recovery runs through registered materializer', { code, error: err.text() }, (v) => v.code === 0)
       const report = JSON.parse(out.text()).providers.find((provider) => provider.provider === 'cursor')
-      expect.that('Both native sessions replay with zero duplicate writes', report, (v) => v?.status === 'ok' && v.items_seen === 2 && v.rows_written === 0)
+      expect.that('Both native sessions replay with zero duplicate writes', report, (v) => v?.status === 'ok' && v.items_seen === 3 && v.rows_written === 0)
     })
     await step('privacy_and_query', async () => {
       const ignored = path.join(cwd, 'ignored')
@@ -125,15 +128,22 @@ export async function run({ harness, expect }) {
       expect.that('Ignored directory dropped', result, (v) => v.status === 202 && v.body.reason === 'usage_policy')
       const out = buffer()
       const err = buffer()
-      const code = await dispatch(['query', 'sql', 'select client_name, entrypoint, content_text, tool_name from ai_gateway_messages', '--refresh', 'always', '--format', 'json'], { kernel, registry, env: process.env, stdout: out, stderr: err })
+      const code = await dispatch(['query', 'sql', 'select client_name, client_version, session_id, conversation_id, agent_id, parent_thread_id, is_sidechain, part_id, entrypoint, part_type, content_text, tool_name, tool_call_id, tool_result_for, tool_args, is_error, JSON_EXTRACT(attributes, \'$.usage.total_tokens\') AS total_tokens from ai_gateway_messages', '--refresh', 'always', '--format', 'json'], { kernel, registry, env: process.env, stdout: out, stderr: err })
       expect.that('Query succeeds', code, (v) => v === 0)
       const rows = JSON.parse(out.text())
-      expect.that('Both modes retain repeated text, tools and file observations', rows, (v) => v.length === 18 && v.filter((r) => r.content_text === 'Same text').length === 4 && v.filter((r) => r.tool_name === 'Read').length === 2 && v.filter((r) => r.content_text === 'Observed file contents').length === 2)
-      expect.that('Native store identifies editor and CLI', rows, (v) => v.every((r) => r.client_name === 'cursor') && v.filter((r) => r.entrypoint === 'editor').length === 8 && v.filter((r) => r.entrypoint === 'cli').length === 8)
+      expect.that('Both modes retain repeated text, tools and file observations', rows, (v) => v.length === 43 && v.filter((r) => r.content_text === 'Same text').length === 6 && v.filter((r) => r.tool_name === 'Read').length === 6 && v.filter((r) => r.content_text === 'Observed file contents').length === 2)
+      expect.that('Native store identifies editor and CLI', rows, (v) => v.every((r) => r.client_name === 'cursor') && v.filter((r) => r.entrypoint === 'editor').length === 26 && v.filter((r) => r.entrypoint === 'cli').length === 13)
+      expect.that('Usage is counted once per generation despite duplicate hooks and native replay', rows.filter((row) => row.total_tokens != null), (v) => v.length === 2 && v.every((row) => Number(row.total_tokens) === 160))
+      expect.that('Subagent rows keep parent ownership and distinct replay identities', rows.filter((row) => row.is_sidechain), (v) => v.length === 13 && v.every((row) => row.agent_id === 'local-child' && row.parent_thread_id === editor.session.id && row.session_id === editor.session.id && row.conversation_id !== row.session_id))
+      expect.that('Native identities do not collide across agents', rows, (v) => new Set(v.map((row) => row.part_id)).size === v.length)
+      const calls = rows.filter((row) => row.part_type === 'tool_call')
+      expect.that('Tool calls retain arguments and join each native result', calls, (v) => v.length === 15 && v.every((call) => call.tool_args && rows.some((row) => row.part_type === 'tool_result' && row.session_id === call.session_id && row.tool_result_for === call.tool_call_id)))
+      expect.that('Shell failures are queryable', rows.filter((row) => row.part_type === 'tool_result' && row.tool_name === 'Shell'), (v) => v.length === 6 && v.every((row) => row.is_error === true))
+      expect.that('Hook version belongs to the recovered generation', rows, (v) => v.filter((row) => row.entrypoint === 'editor').every((row) => row.client_version === '3.19.19') && v.filter((row) => row.entrypoint === 'cli').every((row) => row.client_version === '2026.09.08-6caf4ff'))
     })
     await step('health_and_detach', async () => {
       const status = await kernel.sources.started('cursor')?.status?.()
-      expect.that('Status names measured and unsupported coverage', status?.details, (v) => v.callbacks === callbacks && v.rows_written === 18 && v.policy_drops === 1 && v.history_recovery === 'native_store' && v.usage_supported === false)
+      expect.that('Status names measured and unsupported coverage', status?.details, (v) => v.callbacks === callbacks && v.rows_written === 43 && v.policy_drops === 1 && v.history_recovery === 'native_store' && v.usage_supported === true)
       await kernel.sources.stop('cursor')
       started = false
       const descriptor = buildPluginCatalog(loaded).clientDescriptors.get('cursor')
@@ -147,7 +157,7 @@ export async function run({ harness, expect }) {
     expect.that('Every callback has receive telemetry', traces.filter((t) => t.name === 'cursor.hook.receive'), (v) => v.length === callbacks)
     expect.that('Privacy decision is visible in telemetry', traces, (v) => v.some((t) => t.attributes?.reason === 'usage_policy'))
     const logs = await expect.logs()
-    expect.that('Native recovery emits evidence for both frontends', logs.filter((l) => l.body === 'cursor.recovery.recorded'), (v) => v.length === 2 && v.every((l) => Number(l.attributes?.rows_written) === 8))
+    expect.that('Native recovery emits evidence for both frontends', logs.filter((l) => l.body === 'cursor.recovery.recorded'), (v) => v.length === 2 && v.map((l) => Number(l.attributes?.rows_written)).sort((a, b) => a - b).join() === '13,26')
     expect.that('Storage path emitted row evidence', logs, (v) => v.some((l) => l.body === 'cursor.hook.recorded' && Number(l.attributes?.rows_written) === 1))
   } finally {
     if (started) await kernel.sources.stop('cursor')

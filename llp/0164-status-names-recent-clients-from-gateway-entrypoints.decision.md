@@ -9,6 +9,7 @@
 **Extended-by:** LLP 0394 (the tick refresh records the rest of what `status()`
 returns, not only its `details`; `state` is still left alone)
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
+**Extended-by:** LLP 0546 (one bounded cache read for a marker-less transcript-lane client's capture-health line)
 
 > Closes the one consequence [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)
 > left deliberately open: `hyp status` could not say "Codex Desktop traffic

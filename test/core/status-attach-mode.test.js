@@ -7,8 +7,10 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
-import { renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusSummary, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspace/codex/src/backfill.js'
+import { prepareAttach } from '../../hypaware-core/plugins-workspace/codex/src/toml-config.js'
 
 /**
  * The attach mode on the text surface. `--json` has carried
@@ -185,6 +187,61 @@ test('a transcript-mode codex is attach-n/a, and gateway mode still demands its 
     const gateway = await collect({ capture_mode: 'gateway' })
     assert.equal(gateway.row?.attachable, true, 'gateway mode does write the marker its probe reads')
     assert.equal(gateway.missing.length, 1, 'and an un-run attach is still reported')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The automatic migration off the gateway route (the scheduled sweep here)
+ * says a running Codex must restart only in the daemon log. `hyp status` has
+ * to carry it, on both the summary and the verbose view, and only for a
+ * Codex that is recording in transcript mode.
+ *
+ * @ref LLP 0429#migration [tests]: running Codex clients must restart to reload their provider configuration
+ */
+test('after the sweep releases the Codex gateway route, hyp status tells the user to restart Codex (#2068)', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-codex-restart-'))
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-codex-restart-home-'))
+  const note = 'If Codex was running when capture mode changed, restart it to use the new mode.'
+  try {
+    await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
+    const configPath = path.join(home, '.codex', 'config.toml')
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+
+    /** @type {string[]} */
+    const logged = []
+    const log = { debug() {}, info: (/** @type {string} */ m) => { logged.push(m) }, warn() {}, error() {} }
+    const ctx = /** @type {any} */ ({ env: {}, cacheRoot: path.join(hypHome, 'cache-unused'), dryRun: false, sweep: true, log, storage: {} })
+    for await (const _ of createCodexBackfillProvider({ homeDir: home }).run(ctx)) { /* drain */ }
+    assert.ok(logged.includes('codex.capture.route_released'), 'the sweep migrated the route')
+    assert.match(await fs.readFile(configPath, 'utf8'), /^model_provider = "custom"\n/)
+
+    const baseEnv = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', HOME: home }
+    /** @param {Record<string, unknown>} plugin */
+    const render = async (plugin) => {
+      await fs.writeFile(
+        defaultConfigPath(hypHome),
+        JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex', ...plugin }] }) + '\n'
+      )
+      const report = await collectHypAwareStatus({ env: baseEnv })
+      const summary = makeBuf()
+      renderStatusSummary({ report, stdout: summary })
+      const verbose = makeBuf()
+      renderStatusText({ report, clientNames: ['codex'], datasets: [], cacheRoot: path.join(hypHome, 'cache'), stdout: verbose, env: baseEnv })
+      return { summary: summary.text(), verbose: verbose.text() }
+    }
+
+    const transcript = await render({})
+    assert.ok(transcript.summary.includes(note), 'the summary names the restart')
+    assert.ok(transcript.verbose.includes(note), 'and so does --verbose')
+
+    const gateway = await render({ config: { capture_mode: 'gateway' } })
+    assert.ok(!gateway.summary.includes(note) && !gateway.verbose.includes(note), 'gateway mode needs no note')
+    const detached = await render({ recording: false })
+    assert.ok(!detached.summary.includes(note) && !detached.verbose.includes(note), 'a detached Codex needs no note')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
     await fs.rm(home, { recursive: true, force: true })

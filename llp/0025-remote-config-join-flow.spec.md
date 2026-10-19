@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-12
 **Related:** LLP 0007, LLP 0008, LLP 0010, LLP 0014, LLP 0017; hypaware-server LLP 0009 (out of tree, design authority)
+**Extended-by:** LLP 0517 (a probation that expired while a sink failed to materialize is retried, not backed off until the etag changes)
 
 > Client-side spec for centrally-managed gateway configuration. Derived from
 > the hypaware-server LLP 0009 handoff
