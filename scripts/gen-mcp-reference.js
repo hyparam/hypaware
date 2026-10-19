@@ -282,7 +282,7 @@ export async function renderMcpReference() {
     'HypAware serves MCP in two places:',
     '',
     '- `hyp mcp serve`, over stdio, for an agent on your host. It lists the tools core and your active plugins register.',
-    '- hypaware-server\'s `/v1/mcp`, over HTTP, for an agent with a member session or an agent token. What it lists depends on the credential.',
+    '- HypAware Cloud\'s `/v1/mcp`, over HTTP, for an agent with a member session or an agent token. What it lists depends on the credential.',
     '',
     'Every tool below has a CLI command that does the same thing. Each tool\'s `tools/list` entry carries its title, description, input schema and hints, as shown here.',
     '',
@@ -308,7 +308,7 @@ export async function renderMcpReference() {
   out.push(
     '## Recommendation tools',
     '',
-    'Served by hypaware-server on `/v1/mcp`. Their names, schemas and CLI equivalents are shared with the client (`src/core/mcp/contracts.js`); `hyp mcp serve` does not list them.',
+    'Served by HypAware Cloud on `/v1/mcp`. Their names, schemas and CLI equivalents are shared with the client; `hyp mcp serve` does not list them.',
     '',
   )
   for (const entry of remoteEntries) {
@@ -318,7 +318,7 @@ export async function renderMcpReference() {
       ...(contract.scope === undefined ? {} : { scope: contract.scope }),
       exposure: '`/v1/mcp` only',
       cli: contract.cli,
-      owner: 'hypaware-server, from the shared contract',
+      owner: 'HypAware Cloud, from the shared contract',
       schema: contract.inputSchema,
       cliFlags: false,
     }), '')
@@ -327,7 +327,7 @@ export async function renderMcpReference() {
   out.push(
     '## Server-only tools',
     '',
-    '`session_evidence` and the other tools hypaware-server registers on its own are defined in the server alone, so they have no entry here. '
+    '`session_evidence` and the other tools HypAware Cloud registers on its own are defined in the server alone, so they have no entry here. '
       + 'Call `tools/list` on `/v1/mcp` for the tools your credential sees, with their titles, schemas and hints.',
     '',
     '## Prompts',

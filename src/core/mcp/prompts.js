@@ -34,7 +34,7 @@ const PROMPTS = Object.freeze([
     name: 'fix_recommendation',
     title: 'Fix a recommendation',
     description: 'Check one recommendation against the current code, make the change in this repository, '
-      + 'and record it as applied. Runs with no approval step.',
+      + 'and record it as applied. It makes the change without asking first. Review the diff before you merge it.',
     arguments: Object.freeze([
       Object.freeze({ name: 'id', description: 'The recommendation id (hyprec- and 16 hex characters).', required: true }),
     ]),

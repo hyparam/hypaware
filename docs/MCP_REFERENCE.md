@@ -5,7 +5,7 @@
 HypAware serves MCP in two places:
 
 - `hyp mcp serve`, over stdio, for an agent on your host. It lists the tools core and your active plugins register.
-- hypaware-server's `/v1/mcp`, over HTTP, for an agent with a member session or an agent token. What it lists depends on the credential.
+- HypAware Cloud's `/v1/mcp`, over HTTP, for an agent with a member session or an agent token. What it lists depends on the credential.
 
 Every tool below has a CLI command that does the same thing. Each tool's `tools/list` entry carries its title, description, input schema and hints, as shown here.
 
@@ -42,7 +42,7 @@ Walk the activity graph from a node out to N hops
 
 **Search session text**
 
-Grep stored ai_gateway_messages: case-insensitive substring or regex, served from direct scans of the local cache. Covers only these columns: content_text, tool_name, session_id, conversation_id, agent_id, model, cwd, git_branch, git_remote. Every other column, including system prompts (system_text), tool definitions (tools), attributes, and raw frames, is NOT searched, so zero hits is not evidence the text is absent from those columns - read them with query_sql instead
+Grep stored ai_gateway_messages for a case-insensitive substring or regex, served from direct scans of the local cache. It covers only these columns: content_text, tool_name, session_id, conversation_id, agent_id, model, cwd, git_branch, git_remote. Every other column, including system prompts (system_text), tool definitions (tools), attributes, and raw frames, is NOT searched. Zero hits is not evidence the text is absent from those columns: read them with query_sql instead.
 
 | | |
 | --- | --- |
@@ -56,10 +56,10 @@ Grep stored ai_gateway_messages: case-insensitive substring or regex, served fro
 | Argument | Type | Required | Default | CLI | Description |
 | --- | --- | --- | --- | --- | --- |
 | `query` | string | yes |  | `<query>` | Substring to find (case-insensitive), or a regex pattern with regex: true |
-| `regex` | boolean | no |  | `--regex` | Treat query as a regular expression (compiled case-insensitive). Servers restrict regex mode to the operator; local search does not |
+| `regex` | boolean | no |  | `--regex` | Treat query as a regular expression (compiled case-insensitive). Servers restrict regex mode to the operator; local search does not. |
 | `session_id` | string | no |  | `--session-id` | Only messages of this session |
 | `chain_id` | string | no |  | `--chain-id` | Only this chain (matches agent_id or conversation_id) |
-| `from` | string | no |  | `--from` | Earliest day, YYYY-MM-DD (page older results by narrowing to) |
+| `from` | string | no |  | `--from` | Earliest day, YYYY-MM-DD. Hits come newest first; to page back to older hits, set "to" to an earlier day. |
 | `to` | string | no |  | `--to` | Latest day, YYYY-MM-DD |
 | `limit` | integer, 1 to 1000 | no | `50` | `--limit` | Max hits (default 50, max 1000) |
 | `include-local-only` | boolean | no |  | `--include-local-only` | Include local-only rows even when this context is synced. If this session is itself captured, their content enters the transcript and can be forwarded. Local search only; a server enforces its own visibility |
@@ -86,7 +86,7 @@ Run a SQL query against registered datasets
 
 ## Recommendation tools
 
-Served by hypaware-server on `/v1/mcp`. Their names, schemas and CLI equivalents are shared with the client (`src/core/mcp/contracts.js`); `hyp mcp serve` does not list them.
+Served by HypAware Cloud on `/v1/mcp`. Their names, schemas and CLI equivalents are shared with the client; `hyp mcp serve` does not list them.
 
 ### `get_recommendation`
 
@@ -101,7 +101,7 @@ Read one recommendation: its summary, status, status history and report. Set `in
 | Hints | `readOnlyHint: true` |
 | Exposure | `/v1/mcp` only |
 | CLI equivalent | `hyp report get <rec-id>` |
-| Registered by | hypaware-server, from the shared contract |
+| Registered by | HypAware Cloud, from the shared contract |
 
 | Argument | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
@@ -121,7 +121,7 @@ List the recommendations in your org's published reports, summary fields only (n
 | Hints | `readOnlyHint: true` |
 | Exposure | `/v1/mcp` only |
 | CLI equivalent | `hyp report list --recommendations` |
-| Registered by | hypaware-server, from the shared contract |
+| Registered by | HypAware Cloud, from the shared contract |
 
 | Argument | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
@@ -144,7 +144,7 @@ Set one recommendation's status. After you have fixed it and checked the fix, ma
 | Hints | `readOnlyHint: false`, `destructiveHint: false` |
 | Exposure | `/v1/mcp` only |
 | CLI equivalent | `hyp report mark <id> <state>` |
-| Registered by | hypaware-server, from the shared contract |
+| Registered by | HypAware Cloud, from the shared contract |
 
 | Argument | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
@@ -155,7 +155,7 @@ Set one recommendation's status. After you have fixed it and checked the fix, ma
 
 ## Server-only tools
 
-`session_evidence` and the other tools hypaware-server registers on its own are defined in the server alone, so they have no entry here. Call `tools/list` on `/v1/mcp` for the tools your credential sees, with their titles, schemas and hints.
+`session_evidence` and the other tools HypAware Cloud registers on its own are defined in the server alone, so they have no entry here. Call `tools/list` on `/v1/mcp` for the tools your credential sees, with their titles, schemas and hints.
 
 ## Prompts
 
@@ -165,7 +165,7 @@ Each prompt is an agent command as text an agent can run (`prompts/list`, `promp
 
 **Fix a recommendation**
 
-Check one recommendation against the current code, make the change in this repository, and record it as applied. Runs with no approval step.
+Check one recommendation against the current code, make the change in this repository, and record it as applied. It makes the change without asking first. Review the diff before you merge it.
 
 | | |
 | --- | --- |

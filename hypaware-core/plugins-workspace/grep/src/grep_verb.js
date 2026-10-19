@@ -53,12 +53,12 @@ export const queryGrepVerb = {
   // not stored" - the exact wrong answer an agent would then report.
   // @ref LLP 0264#shared [implements]: the allowlist stated at the one surface a machine caller reads, with the SQL escape hatch named
   summary:
-    'Grep stored ai_gateway_messages: case-insensitive substring or regex, served from ' +
-    'direct scans of the local cache. Covers only these ' +
+    'Grep stored ai_gateway_messages for a case-insensitive substring or regex, served from ' +
+    'direct scans of the local cache. It covers only these ' +
     `columns: ${[...SEARCHABLE_COLUMNS].join(', ')}. Every other column, including system ` +
     'prompts (system_text), tool definitions (tools), attributes, and raw frames, is NOT ' +
-    'searched, so zero hits is not evidence the text is absent from those columns - read ' +
-    'them with query_sql instead',
+    'searched. Zero hits is not evidence the text is absent from those columns: read ' +
+    'them with query_sql instead.',
   authClass: 'read',
   inputSchema: {
     type: 'object',
@@ -73,11 +73,11 @@ export const queryGrepVerb = {
         type: 'boolean',
         description:
           'Treat query as a regular expression (compiled case-insensitive). ' +
-          'Servers restrict regex mode to the operator; local search does not',
+          'Servers restrict regex mode to the operator; local search does not.',
       },
       session_id: { type: 'string', description: 'Only messages of this session' },
       chain_id: { type: 'string', description: 'Only this chain (matches agent_id or conversation_id)' },
-      from: { type: 'string', description: 'Earliest day, YYYY-MM-DD (page older results by narrowing to)' },
+      from: { type: 'string', description: 'Earliest day, YYYY-MM-DD. Hits come newest first; to page back to older hits, set "to" to an earlier day.' },
       to: { type: 'string', description: 'Latest day, YYYY-MM-DD' },
       // `integer` with a `minimum`, not a bare `number`: the codec turns
       // both into a usage refusal naming the offending value, and this is

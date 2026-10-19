@@ -104,8 +104,8 @@ test('the tool schema is wire-compatible with the server grep_search', () => {
   // does not know this name, so a default here breaks every --remote call.
   assert.equal(props['include-local-only'].default, undefined)
   // The coverage clause: zero hits must be explainable from the summary alone.
-  assert.match(queryGrepVerb.summary, /Covers only these columns: content_text/)
-  assert.match(queryGrepVerb.summary, /zero hits is not evidence/)
+  assert.match(queryGrepVerb.summary, /covers only these columns: content_text/i)
+  assert.match(queryGrepVerb.summary, /zero hits is not evidence/i)
 })
 
 test('core leaves grep_search available for the host or an active plugin', () => {
