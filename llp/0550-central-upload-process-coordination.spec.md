@@ -39,8 +39,12 @@ and receipt cleanup. A waiting exporter's forward pass reads progress only
 after acquiring the claim, so it observes the completed upload instead of
 replaying a stale cursor. Open-dataset rollout preparation runs before the
 claim, as it did before this change: it may flush the partition, check that
-known progress exists and seed zero progress for a new partition, but the
-cursor an upload sends from is always the one the claimed pass reloads. The
+known progress exists and seed zero progress for a new partition. The cursor an
+upload sends from is the one the claimed pass reloads, so suffix-only resend
+holds once a partition has progress. It does not yet hold for a new partition:
+the zero seed is a read then a write outside the claim, and a process that read
+absent progress can overwrite another's committed progress with zero. That race
+predates this spec and is tracked separately (hyparam/hypaware#2786). The
 existing per-runtime scheduling and partition guards remain in place.
 
 A live owner is never displaced by elapsed time. A dead PID can be reclaimed
