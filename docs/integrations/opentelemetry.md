@@ -33,6 +33,8 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
 ## Limits
 
 - JSON encoding only. Protobuf and gRPC requests are refused.
-- The receiver listens on loopback only, so exporters must run on the same host.
+- The receiver binds loopback (`127.0.0.1`) by default, so exporters run on the
+  same host. The `@hypaware/otel` plugin's `listen_host` setting can bind another
+  address.
 - Attributes are stored as JSON and not interpreted: there is no session, token,
   or cost view for this data.
