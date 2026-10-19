@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -71,6 +72,39 @@ test('privacy sees detach, session ignores, unreadable state and folder ignores 
   assert.equal(policy.allows('s', home), false)
   await fs.writeFile(env.HYP_CONFIG, '{')
   assert.equal(policy.allows('s', home), false)
+})
+
+test('session ignores are seen even when the exclusion directory signature does not change', async t => {
+  const { env, home, stateDir } = await fixture(t)
+  const ignores = new SessionIgnoreSet(stateDir)
+  ignores.add('other')
+  const policy = createPolicy(env, stateDir)
+  assert.equal(policy.allows('s', home), true)
+  // Rapid atomic marker writes can leave ino, mtime and ctime unchanged.
+  const frozen = fsSync.statSync(ignores.directory)
+  const statSync = fsSync.statSync
+  t.mock.method(fsSync, 'statSync', (file, ...rest) => file === ignores.directory ? frozen : statSync(file, ...rest))
+  ignores.add('s')
+  assert.equal(policy.allows('s', home), false)
+  ignores.delete('s')
+  assert.equal(policy.allows('s', home), true)
+})
+
+test('an unreadable folder fails closed instead of reading as having no .hypignore', async t => {
+  if (process.getuid?.() === 0) return t.skip('root reads through directory permissions')
+  const { env, home, stateDir } = await fixture(t)
+  const locked = path.join(home, 'locked')
+  await fs.mkdir(locked)
+  await fs.writeFile(path.join(locked, '.hypignore'), 'ignore\n')
+  const policy = createPolicy(env, stateDir)
+  await fs.chmod(locked, 0o000)
+  try {
+    assert.equal(policy.allows('s', locked), false)
+  } finally {
+    await fs.chmod(locked, 0o700)
+  }
+  await fs.unlink(path.join(locked, '.hypignore'))
+  assert.equal(policy.allows('s', locked), true)
 })
 
 test('journal bounds bytes and capacity across concurrent producers; published events survive a new reader', async t => {
