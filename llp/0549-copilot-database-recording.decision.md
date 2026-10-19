@@ -111,9 +111,8 @@ When Copilot is the only registered client and no gateway capability is active,
 its session commands require an explicit native ID and use the existing durable
 SessionIgnoreSet directly. The receipt confirms persisted set membership only.
 Other live-recorder installations retain the shared HTTP control flow. Every
-recovery run refreshes exclusions; directory identity/mtime/ctime changes, or a
-change within two seconds of the last load, trigger another refresh at write
-boundaries, avoiding a 10,000-marker reload per span. Because equal signatures can
+recovery run refreshes exclusions; directory identity/mtime/ctime changes trigger
+another refresh at write boundaries, avoiding a 10,000-marker reload per span. Because equal signatures can
 hide rapid marker writes, each admission check also stats the session's own
 marker, which decides membership both ways; a marker that cannot be probed counts
 as present, as does an unreadable `.hypignore` ancestor. In-place corruption of an

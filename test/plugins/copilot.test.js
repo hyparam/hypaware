@@ -340,7 +340,10 @@ test('persistent exclusions fail closed after restart and metadata ambiguity can
     const admission = createAdmission({ ...f.opts, ignoredSessions: restarted })
     assert.equal(await admission.allowed('session-local', f.cwd), false)
     await fs.writeFile(path.join(restarted.directory, 'unexpected.json'), '{}')
-    await assert.rejects(admission.allowed('other', f.cwd))
+    // An equal directory signature can defer an unrelated malformed marker to the
+    // next run's forced refresh, which then refuses every session.
+    assert.throws(() => admission.refresh(true))
+    assert.equal(await admission.allowed('other', f.cwd).catch(() => false), false)
     await fs.rm(path.join(restarted.directory, 'unexpected.json'))
     f.ignoredSessions.delete('session-local')
     const workspace = path.dirname(path.dirname(f.sessionFile))

@@ -19,22 +19,16 @@ export function createAdmission(opts) {
   const policy = () => createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath, ttlMs: 0, existsSync: present })
   const directory = /** @type {{ directory?: string } | undefined} */ (opts.ignoredSessions)?.directory
   let exclusionsSignature
-  let loadedAt = 0
   function refresh(force = false) {
     let signature = 'missing'
-    let changedAt = 0
     if (directory) {
       try {
         const stat = fs.statSync(directory)
         signature = [stat.ino, stat.mtimeMs, stat.ctimeMs].join(':')
-        changedAt = Math.max(stat.mtimeMs, stat.ctimeMs)
       }
       catch (err) { if (err?.code !== 'ENOENT') throw err }
     }
-    // A change landing within timestamp granularity of the last load leaves the
-    // signature equal, so a directory changed that recently is reloaded again.
-    if (force || signature !== exclusionsSignature || changedAt >= loadedAt - RACY_MS) {
-      loadedAt = Date.now()
+    if (force || signature !== exclusionsSignature) {
       refreshSessionIgnores(opts.ignoredSessions)
       exclusionsSignature = signature
     }
@@ -86,9 +80,6 @@ export function createAdmission(opts) {
     },
   }
 }
-
-// Covers coarse filesystem timestamps and kernel clock lag behind Date.now().
-const RACY_MS = 2000
 
 /**
  * A path that cannot be probed counts as present, so an unreadable .hypignore
