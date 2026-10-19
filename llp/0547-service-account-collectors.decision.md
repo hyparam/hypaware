@@ -136,14 +136,25 @@ interface KeptServiceToken {
   untouched) or after it (opening or syncing the directory: the new record
   is already visible, its durability uncertain). The caller cannot tell
   which from the error, so on any rejection it re-reads the target once:
-  - **the new record is visible** (it parses and its `fingerprint`,
-    `central_url` and, for D3's stop rewrite, `stopped_code` equal what
-    was written): treated as written. `hyp join` goes on to the seed and
-    prints that the record's sync failed, with "re-run `hyp join` if this
-    host crashes before the next start"; D3 treats the stop as persisted.
-  - **the old record, or no record, is visible:** a failure before
-    publication. `hyp join` exits 1 before the seed; the previous
-    enrollment and its record are unchanged. D3 keeps the stop in memory.
+  - **the intended record is visible:** it parses and every field equals
+    the record this write meant to publish: `version`, `secret`,
+    `fingerprint`, `central_url`, `written_at`, and the stop state, which
+    is `stopped_code` present with the intended code for D3's stop rewrite
+    and `stopped_code` absent for a join (a join always drops it). Treated
+    as written. `hyp join` goes on to the seed and prints that the
+    record's sync failed, with "re-run `hyp join` if this host crashes
+    before the next start"; D3 treats the stop as persisted. A visible
+    record proves the rename happened, not that the directory sync did;
+    the warning and the implementation's evidence and logs say visible,
+    never durable.
+  - **any other record, or no record, is visible:** a failure before
+    publication. This includes the old record when it shares the new
+    one's secret and URL, as on a same-secret join over a stopped record:
+    its `written_at` differs and it still carries `stopped_code`, so it
+    is not the intended record. `hyp join` exits 1 before the seed and
+    reports the failure; the previous enrollment, its record and any stop
+    on it are unchanged, and the operator re-runs the join. D3 keeps the
+    stop in memory. A mismatch is never treated as written.
   - **the target is unreadable:** `hyp join` exits 1 before the seed, and
     D3's activation refuses with no request (row 0) until a re-join.
   - In none of these does the caller retry the write in a loop, write the
@@ -386,8 +397,17 @@ sending a long-lived secret on every request.
   reaches the old URL. An unreadable target after the failure: exit 1,
   then activation makes zero requests. Each case repeated for D3's stop
   rewrite (visible stop treated as persisted; invisible stop held in
-  memory). Where the seed write fails after the record: the old identity
-  still loads, and neither secret reaches the other URL. A crash model that
+  memory). A same-secret join over a stopped record with a pre-rename
+  `EIO`: the re-read shows the old stopped record (same `fingerprint`
+  and `central_url`), it is classified as not written, `hyp join` exits 1
+  before the seed, the seed and the stopped record are unchanged, and the
+  next activation refuses with zero requests. Its controls: the same join
+  with no failure, and with a directory-sync `EIO` after the rename (the
+  unstopped replacement visible), are each classified as written and
+  clear the stop, so the next activation is not refused and proceeds as
+  in "New join after a stop"; re-running the join after the failed case
+  does the same. Where the seed write fails after the record: the old
+  identity still loads, and neither secret reaches the other URL. A crash model that
   restores the old record after an uncertain rename: no request carries
   the old secret to the new URL.
 - **Permanent refusal (#activation-stop).** `403 service_token_revoked`
