@@ -711,10 +711,8 @@ export function maintenanceSkipsFromStatus(status) {
   const rawReasons = isPlainObject(raw.reasons) ? raw.reasons : {}
   /** @type {Record<MaintenanceSkipReason, number>} */
   const reasons = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
-  let reasonsTotal = 0
   for (const reason of MAINTENANCE_SKIP_REASONS) {
     reasons[reason] = nonNegativeInt(rawReasons[reason]) ?? 0
-    reasonsTotal += reasons[reason]
   }
 
   /** @type {MaintenanceSkippedPartition[]} */
@@ -740,6 +738,21 @@ export function maintenanceSkipsFromStatus(status) {
       ...(dataFiles !== undefined ? { dataFiles } : {}),
       ...(failedAt !== undefined ? { failedAt } : {}),
     })
+  }
+
+  // Each count is floored at the partitions this list names for it: a foreign
+  // file with zeroed `reasons` beside named `compaction_ineffective` entries
+  // would otherwise render "reasons this build does not recognize" directly
+  // above lines this build does recognize (issue #764). A snapshot this build
+  // wrote counts every skip and names at most a capped subset, so the floor
+  // is a no-op there.
+  /** @type {Record<MaintenanceSkipReason, number>} */
+  const named = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
+  for (const p of partitions) named[p.reason]++
+  let reasonsTotal = 0
+  for (const reason of MAINTENANCE_SKIP_REASONS) {
+    reasons[reason] = Math.max(reasons[reason], named[reason])
+    reasonsTotal += reasons[reason]
   }
 
   // Floored at both the capped list and the reasons it reports: a total below

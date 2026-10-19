@@ -312,14 +312,15 @@ test('a foreign status file is capped, cleaned, and stripped of reasons this bui
     ['compaction_ineffective', ...Array.from({ length: 7 }, () => 'compaction_attempt_failed')]
   )
   // Unknown reason keys never reach the counts, and a non-numeric one reads
-  // as zero rather than as text on a terminal.
-  assert.deepEqual(snapshot.reasons, { compaction_ineffective: 900, compaction_attempt_failed: 0 })
-  // A negative count is not a count, and 900 partitions were recorded
-  // skipped, so visited is floored at the skipped total rather than at the
-  // capped list length: "8 of 900" is exactly the impossible-looking
+  // as zero rather than as text on a terminal, then is floored at the seven
+  // `compaction_attempt_failed` partitions the list still names.
+  assert.deepEqual(snapshot.reasons, { compaction_ineffective: 900, compaction_attempt_failed: 7 })
+  // A negative count is not a count, and 907 partitions are accounted for by
+  // the reasons, so visited is floored at the skipped total rather than at
+  // the capped list length: "8 of 907" is exactly the impossible-looking
   // sentence a missing floor would render.
-  assert.equal(snapshot.partitionsVisited, 900, 'partitionsVisited must never read smaller than skippedTotal')
-  assert.equal(snapshot.skippedTotal, 900)
+  assert.equal(snapshot.partitionsVisited, 907, 'partitionsVisited must never read smaller than skippedTotal')
+  assert.equal(snapshot.skippedTotal, 907)
 })
 
 test('a total smaller than the list it labels is corrected upward, never rendered as a lie', () => {
@@ -515,6 +516,47 @@ test('a status.json carrying only reasons this build does not recognize renders 
     const text = stdout.text()
     assert.doesNotMatch(text, /\(\)/, 'no bare parenthetical in the rendered text')
     assert.doesNotMatch(text, /5 of 0 partitions/, 'visited must never render smaller than skipped')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The other side of that fallback: a foreign status.json with zeroed
+// `reasons` but recognized ids in `partitions` must not render "reasons this
+// build does not recognize" above lines naming recognized reasons (issue
+// #764). Each count is floored at the partitions the list names for it.
+test('a status.json naming recognized reasons beside zeroed counts renders those reasons, not the fallback', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    writeStatusFile(stateRoot, /** @type {any} */ ({
+      state: 'healthy',
+      sources: [],
+      sinks: [],
+      maintenance: {
+        tickAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+        partitionsVisited: 4,
+        skippedTotal: 2,
+        reasons: { compaction_ineffective: 0, compaction_attempt_failed: 0 },
+        partitions: [
+          { dataset: 'traces', partition: 'source=claude', reason: 'compaction_ineffective', dataFiles: 40 },
+          { dataset: 'logs', partition: 'source=claude', reason: 'compaction_attempt_failed', failedAt: '2026-08-12T21:55:35.168Z' },
+        ],
+      },
+    }))
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.deepEqual(report.maintenance?.reasons, { compaction_ineffective: 1, compaction_attempt_failed: 1 })
+
+    const diagnostic = report.diagnostics.find((d) => d.kind === 'maintenance_partitions_skipped')
+    assert.ok(diagnostic, 'a positive skippedTotal still raises the diagnostic')
+    assert.match(diagnostic.message, /1 compaction_ineffective, 1 compaction_attempt_failed/)
+    assert.doesNotMatch(diagnostic.message, /reasons this build does not recognize/)
+
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    const text = stdout.text()
+    assert.match(text, /1 compaction_ineffective, 1 compaction_attempt_failed/)
+    assert.doesNotMatch(text, /reasons this build does not recognize/)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
