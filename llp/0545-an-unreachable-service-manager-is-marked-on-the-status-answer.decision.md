@@ -25,9 +25,19 @@ where no daemon was running.
 
 `serviceDaemonStatus` still never raises, and on a probe failure still reports
 `loaded: false`, because that is what the host observably has. The answer now
-also carries `unreachable: true`. The field appears only on that path; a
-probe that ran, and a unit that is not installed, return no `unreachable`
-field at all.
+also carries `unreachable: true`. A probe failure is either shape the dead
+manager takes:
+
+- the manager cannot be spawned at all (the throw LLP 0017 already catches);
+- it spawns and answers with a failure instead of a state. `systemctl --user
+  show` exits 0 for a unit it does not know (`LoadState=not-found`), so any
+  nonzero exit, "Failed to connect to bus" above all, is a failure.
+  `launchctl print` exits 113 for a service not in its domain, so any other
+  nonzero exit is a failure.
+
+The field appears only on those paths. A probe that got an answer, including
+systemd's `not-found` and launchd's 113, and a unit that is not installed,
+return no `unreachable` field at all.
 
 ## The finale records why it withheld the restart {#withheld}
 
@@ -41,7 +51,10 @@ return the doubled output #1393 removed.
 
 ## Checks {#checks}
 
-The degraded-probe test in `test/core/daemon.test.js` asserts `unreachable:
-true` alongside `loaded: false`. A finale test injects a probe that returns
+The degraded-probe tests in `test/core/daemon.test.js` assert `unreachable:
+true` alongside `loaded: false` for a manager that cannot be spawned, a
+systemctl that exits 1 on a missing bus, and a launchctl print that exits with
+something other than 113, and assert no `unreachable` for systemd's
+`not-found` and launchd's 113. A finale test injects a probe that returns
 the degraded state under a durable-bin install failure, and asserts no
 restart, the `withheld` record, and no restart line on stderr.
