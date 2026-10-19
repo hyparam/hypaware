@@ -11,9 +11,25 @@ import { directories, fingerprint } from './paths.js'
 
 /** @import { CopilotStore, CopilotSpan } from '../../../../hypaware-core/plugins-workspace/copilot/src/types.js' */
 
-/** @param {string} file @returns {DatabaseSync} */
-export function openDatabase(file) {
-  const { DatabaseSync } = require('node:sqlite')
+/**
+ * Node 22.12 ships `node:sqlite` only behind --experimental-sqlite, so a missing
+ * builtin reports its own error kind instead of a generic read failure.
+ *
+ * @param {(id: string) => any} [load]
+ * @returns {typeof DatabaseSync}
+ */
+export function loadSqlite(load = require) {
+  try { return load('node:sqlite').DatabaseSync }
+  catch { throw new Error('sqlite_unavailable') }
+}
+
+/**
+ * @param {string} file
+ * @param {(id: string) => any} [load]
+ * @returns {DatabaseSync}
+ */
+export function openDatabase(file, load = require) {
+  const DatabaseSync = loadSqlite(load)
   const db = new DatabaseSync(file, { readOnly: true })
   db.exec('PRAGMA query_only = ON')
   db.exec('PRAGMA busy_timeout = 100')

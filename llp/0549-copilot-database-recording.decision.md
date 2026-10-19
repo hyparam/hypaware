@@ -111,10 +111,13 @@ When Copilot is the only registered client and no gateway capability is active,
 its session commands require an explicit native ID and use the existing durable
 SessionIgnoreSet directly. The receipt confirms persisted set membership only.
 Other live-recorder installations retain the shared HTTP control flow. Every
-recovery run refreshes exclusions; directory identity/mtime/ctime changes trigger
-another refresh at write boundaries, avoiding a 10,000-marker reload per span.
-In-place corruption of an unrelated marker is detected by the next run's full
-refresh. No current-session guess from cwd or recency is introduced.
+recovery run refreshes exclusions; directory identity/mtime/ctime changes, or a
+change within two seconds of the last load, trigger another refresh at write
+boundaries, avoiding a 10,000-marker reload per span. Because equal signatures can
+hide rapid marker writes, each admission check also stats the session's own
+marker, which decides membership both ways; a marker that cannot be probed counts
+as present, as does an unreadable `.hypignore` ancestor. In-place corruption of an
+unrelated marker is detected by the next run's full refresh. No current-session guess from cwd or recency is introduced.
 
 ## Recovery and resources {#recovery}
 
@@ -123,6 +126,9 @@ backfill.sweep_cron and window_days honored. No extra poller or socket is needed
 Declining on_join history floors scheduled capture at adapter activation, as in
 Codex. Manual backfill can widen the window. Source lifecycle status reports
 last scan, stores, selected/read/unchanged/dropped/incomplete counts.
+Reading the stores needs the unflagged `node:sqlite` builtin, so the plugin
+declares Node >= 22.13; on an older runtime each store reports incomplete with
+`sqlite_unavailable` rather than a generic read failure.
 
 Every pass scans currently retained metadata in rowid pages of 128, capped at
 16,384 span candidates/run and 128 sessions/store. There is no start-time cursor, so late old parents remain

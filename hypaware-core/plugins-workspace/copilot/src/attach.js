@@ -5,6 +5,7 @@ import { stat } from 'node:fs/promises'
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 import { readSettings, editSetting } from '../../../../src/core/config/jsonc_settings.js'
 import { dataRoots } from './paths.js'
+import { loadSqlite } from './native.js'
 
 /** @import { JsonObject } from '../../../../hypaware-plugin-kernel-types.js' */
 /** @param {NodeJS.ProcessEnv} env */
@@ -22,8 +23,14 @@ export function checkCompatibility(env, settings) {
   }
 }
 
-/** @param {{ env: NodeJS.ProcessEnv, config?: JsonObject, dryRun?: boolean, version: string }} opts */
-export async function attachCopilot(opts) {
+/**
+ * @param {{ env: NodeJS.ProcessEnv, config?: JsonObject, dryRun?: boolean, version: string }} opts
+ * @param {() => unknown} [sqlite]
+ */
+export async function attachCopilot(opts, sqlite = loadSqlite) {
+  // Recovery cannot read a store without the builtin, so attach refuses first.
+  try { sqlite() }
+  catch { throw new Error('sqlite_unavailable: Copilot recording needs Node 22.13 or newer, where node:sqlite needs no flag') }
   const settingsPath = receiptPath(opts.env)
   const receipt = await readSettings(settingsPath)
   const previous = receipt.value._hypaware

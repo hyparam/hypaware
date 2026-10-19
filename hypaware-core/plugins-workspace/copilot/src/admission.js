@@ -3,7 +3,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { createUsagePolicyResolver, CLASS_RANK, isEqualOrDescendant } from '../../../../src/core/usage-policy/index.js'
-import { refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
+import { markerName, refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { createClientRecordingPolicyReader } from '../../../../src/core/config/client_recording.js'
 import { readSettings } from '../../../../src/core/config/jsonc_settings.js'
 import { receiptPath } from './attach.js'
@@ -16,19 +16,25 @@ export function createAdmission(opts) {
   const env = opts.env ?? process.env
   const recording = createClientRecordingPolicyReader({ env, plugin: '@hypaware/copilot' })
   // Short serial batches permit fresh policy at every asynchronous boundary.
-  const policy = () => createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath, ttlMs: 0 })
+  const policy = () => createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath, ttlMs: 0, existsSync: present })
+  const directory = /** @type {{ directory?: string } | undefined} */ (opts.ignoredSessions)?.directory
   let exclusionsSignature
+  let loadedAt = 0
   function refresh(force = false) {
-    const directory = /** @type {{ directory?: string } | undefined} */ (opts.ignoredSessions)?.directory
     let signature = 'missing'
+    let changedAt = 0
     if (directory) {
       try {
         const stat = fs.statSync(directory)
         signature = [stat.ino, stat.mtimeMs, stat.ctimeMs].join(':')
+        changedAt = Math.max(stat.mtimeMs, stat.ctimeMs)
       }
       catch (err) { if (err?.code !== 'ENOENT') throw err }
     }
-    if (force || signature !== exclusionsSignature) {
+    // A change landing within timestamp granularity of the last load leaves the
+    // signature equal, so a directory changed that recently is reloaded again.
+    if (force || signature !== exclusionsSignature || changedAt >= loadedAt - RACY_MS) {
+      loadedAt = Date.now()
       refreshSessionIgnores(opts.ignoredSessions)
       exclusionsSignature = signature
     }
@@ -39,7 +45,11 @@ export function createAdmission(opts) {
     async allowed(id, cwd) {
       const resolver = policy()
       refresh()
-      if (!recording().recording || sessionIgnoreLoadError(opts.ignoredSessions) || opts.ignoredSessions?.has(id) || resolver.resolve(cwd).class === 'ignore') return false
+      if (!recording().recording || sessionIgnoreLoadError(opts.ignoredSessions)) return false
+      // The directory signature can miss rapid marker writes, so this session's
+      // own marker decides membership in both directions.
+      if (directory ? present(path.join(directory, markerName(id))) : opts.ignoredSessions?.has(id)) return false
+      if (resolver.resolve(cwd).class === 'ignore') return false
       const receipt = await readSettings(receiptPath(env))
       return receipt.value._hypaware?.mode === 'database'
     },
@@ -74,5 +84,24 @@ export function createAdmission(opts) {
       if (!await this.allowed(exchange.session_id, exchange.cwd)) return undefined
       return { ...exchange, messages }
     },
+  }
+}
+
+// Covers coarse filesystem timestamps and kernel clock lag behind Date.now().
+const RACY_MS = 2000
+
+/**
+ * A path that cannot be probed counts as present, so an unreadable .hypignore
+ * or exclusion resolves through the fail-closed read paths instead of as absent.
+ *
+ * @param {string} file
+ */
+function present(file) {
+  try {
+    fs.statSync(file)
+    return true
+  } catch (error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (error).code
+    return code !== 'ENOENT' && code !== 'ENOTDIR'
   }
 }

@@ -5,7 +5,7 @@
   "description": "VS Code Copilot completed-span recording for Local and Agent Host harnesses. Local single-root workspaces only; native seven-day/100-conversation retention applies.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
-  "node_engine": ">=22.12",
+  "node_engine": ">=22.13",
   "entrypoint": "./src/index.js",
   "permissions": [
     "read_home",

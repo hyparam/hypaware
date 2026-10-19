@@ -2,6 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -11,7 +12,7 @@ import { dataRoots, discoverStores } from '../../hypaware-core/plugins-workspace
 import { validateCopilotConfig } from '../../hypaware-core/plugins-workspace/copilot/src/config.js'
 import { createCopilotBackfillProvider, writeGuards } from '../../hypaware-core/plugins-workspace/copilot/src/backfill.js'
 import { createAdmission } from '../../hypaware-core/plugins-workspace/copilot/src/admission.js'
-import { openDatabase, retainedSpans, readAttributes, sessionMetadata } from '../../hypaware-core/plugins-workspace/copilot/src/native.js'
+import { loadSqlite, openDatabase, retainedSpans, readAttributes, sessionMetadata } from '../../hypaware-core/plugins-workspace/copilot/src/native.js'
 import { projectSpan } from '../../hypaware-core/plugins-workspace/copilot/src/projector.js'
 import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
@@ -232,6 +233,65 @@ test('paths and config cover relocated data, portable installs, profiles and rej
     await fs.rename(path.dirname(f.file), relocated)
     assert.equal((await discoverStores(f.env, f.opts.config))[0].profile, path.join(f.root, 'User', 'profiles', 'profile-1'))
     assert.equal((await f.scan()).rows.length, 6)
+  } finally { await f.cleanup() }
+})
+
+test('a runtime without unflagged node:sqlite reports sqlite_unavailable, and the plugin declares Node 22.13', async () => {
+  const unknown = () => { throw Object.assign(new Error('No such built-in module: node:sqlite'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' }) }
+  assert.throws(() => openDatabase('/nonexistent.db', unknown), { message: 'sqlite_unavailable' })
+  const manifest = JSON.parse(await fs.readFile(new URL('../../hypaware-core/plugins-workspace/copilot/hypaware.plugin.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.node_engine, '>=22.13')
+  // Attach refuses before any write, rather than succeeding into failed recovery.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-sqlite-'))
+  try {
+    const env = { HOME: home, COPILOT_HOME: path.join(home, '.copilot') }
+    await assert.rejects(attachCopilot({ env, config: { user_data_dirs: [home] }, version: '1' }, () => loadSqlite(unknown)), /sqlite_unavailable: .*22\.13/)
+    await assert.rejects(fs.stat(receiptPath(env)), { code: 'ENOENT' })
+  } finally { await fs.rm(home, { recursive: true, force: true }) }
+})
+
+test('a session exclusion added or removed under an unchanged directory signature decides admission and the write guard', async t => {
+  const f = await setup()
+  try {
+    f.ignoredSessions.add('other')
+    // Rapid atomic marker writes can leave ino, mtime and ctime unchanged.
+    const directory = f.ignoredSessions.directory
+    const frozen = { ...fsSync.statSync(directory), mtimeMs: 0, ctimeMs: 0 }
+    const statSync = fsSync.statSync
+    t.mock.method(fsSync, 'statSync', (/** @type {any} */ file, /** @type {any[]} */ ...rest) => file === directory ? frozen : statSync(file, ...rest))
+    const admission = createAdmission(f.opts)
+    assert.equal(await admission.allowed('session-local', f.cwd), true)
+    const iterator = f.provider.run({ ...f.ctx, sweep: false })[Symbol.asyncIterator]()
+    const queued = await iterator.next()
+    assert.ok(queued.value && !('type' in queued.value))
+    // Another process persists the exclusion after the provider yields.
+    const writer = new SessionIgnoreSet(path.join(f.home, 'state'), log)
+    writer.add('session-local')
+    assert.equal(await admission.allowed('session-local', f.cwd), false)
+    assert.equal(await writeGuards.get(/** @type {any} */ (queued.value))?.(), false)
+    await iterator.return?.()
+    writer.delete('session-local')
+    assert.equal(await admission.allowed('session-local', f.cwd), true)
+  } finally { await f.cleanup() }
+})
+
+test('an inaccessible folder policy refuses admission and the final write guard', async t => {
+  if (process.getuid?.() === 0) return t.skip('root reads through directory permissions')
+  const f = await setup()
+  try {
+    const admission = createAdmission(f.opts)
+    const iterator = f.provider.run({ ...f.ctx, sweep: false })[Symbol.asyncIterator]()
+    const queued = await iterator.next()
+    assert.ok(queued.value && !('type' in queued.value))
+    await fs.writeFile(path.join(f.cwd, '.hypignore'), 'ignore\n')
+    assert.equal(await admission.allowed('session-local', f.cwd), false)
+    await fs.chmod(f.cwd, 0o000)
+    try {
+      assert.equal(await admission.allowed('session-local', f.cwd), false)
+      assert.equal(await writeGuards.get(/** @type {any} */ (queued.value))?.(), false)
+      await iterator.return?.()
+      assert.equal((await f.scan()).rows.length, 0)
+    } finally { await fs.chmod(f.cwd, 0o755) }
   } finally { await f.cleanup() }
 })
 
