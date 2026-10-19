@@ -646,13 +646,19 @@ export function isLaunchAgentInstalled(options) {
  * not in its domain. When loaded, includes a `pid` only if the agent
  * currently has a running process.
  *
+ * Only 113 says the service is not in the domain. Any other nonzero exit is
+ * launchctl failing to answer, which is still not loaded but is marked
+ * `unreachable` so a caller does not read it as "nothing running" (#1406).
+ * @ref LLP 0545#unreachable [implements]: a print that did not answer is a probe that never ran
+ *
  * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, platform?: NodeJS.Platform }} options
- * @returns {Promise<{ loaded: boolean, pid?: number }>}
+ * @returns {Promise<{ loaded: boolean, pid?: number, unreachable?: boolean }>}
  */
 export async function launchAgentStatus(options) {
   const { launchctl, target } = resolveTarget(options)
   const result = await launchctl.print([target])
-  if (result.exitCode !== 0) return { loaded: false }
+  if (result.exitCode === 113) return { loaded: false }
+  if (result.exitCode !== 0) return { loaded: false, unreachable: true }
   const pid = parsePrintedPid(result.stdout)
   return pid === undefined ? { loaded: true } : { loaded: true, pid }
 }

@@ -306,10 +306,15 @@ export async function restartServiceDaemon(options) {
  * @ref LLP 0017#status-queries-never-raise [implements]: the query degrades to
  *   "not loaded"; only state-changing service ops surface failures
  *
+ * The degraded answer also says it is one (`unreachable: true`): "not loaded"
+ * is what the host observably has, but a caller deciding whether a daemon is
+ * running cannot read "nothing is running" off a probe that never ran.
+ * @ref LLP 0545#unreachable [implements]: the degraded probe is marked, and still reports not loaded
+ *
  * @param {NodeJS.Platform} platform
  * @param {DaemonServiceOptions} options
  * @param {string} label
- * @returns {Promise<{ loaded: boolean, active?: boolean, pid?: number }>}
+ * @returns {Promise<{ loaded: boolean, active?: boolean, pid?: number, unreachable?: boolean }>}
  */
 async function serviceRuntimeStatus(platform, options, label) {
   try {
@@ -327,7 +332,7 @@ async function serviceRuntimeStatus(platform, options, label) {
       error_message: err instanceof Error ? err.message : String(err),
       exit_status: 'degraded',
     })
-    return { loaded: false }
+    return { loaded: false, unreachable: true }
   }
 }
 
@@ -337,7 +342,7 @@ async function serviceRuntimeStatus(platform, options, label) {
  * `daemon.run` span; this one tracks the installer-facing query).
  *
  * @param {DaemonServiceOptions} options
- * @returns {Promise<{ installed: boolean, loaded: boolean, active?: boolean, pid?: number, platform: NodeJS.Platform }>}
+ * @returns {Promise<{ installed: boolean, loaded: boolean, active?: boolean, pid?: number, unreachable?: boolean, platform: NodeJS.Platform }>}
  */
 export async function serviceDaemonStatus(options) {
   const platform = options.platform ?? process.platform
@@ -364,6 +369,7 @@ export async function serviceDaemonStatus(options) {
       // this query *throw* on a host with no service manager at all (a
       // container with no `systemctl`): the spawn rejects `ENOENT`, and the
       // throw escapes callers that only ever branch on `installed`.
+      /** @type {{ loaded: boolean, active?: boolean, pid?: number, unreachable?: boolean }} */
       const runtime = installed
         ? await serviceRuntimeStatus(platform, options, label)
         : { loaded: false, active: undefined, pid: undefined }
@@ -374,7 +380,14 @@ export async function serviceDaemonStatus(options) {
         loaded: runtime.loaded,
         exit_status: 'ok',
       })
-      return { installed, loaded: runtime.loaded, active: runtime.active, pid: runtime.pid, platform }
+      return {
+        installed,
+        loaded: runtime.loaded,
+        active: runtime.active,
+        pid: runtime.pid,
+        ...(runtime.unreachable ? { unreachable: true } : {}),
+        platform,
+      }
     },
     { component: 'daemon' },
   )
