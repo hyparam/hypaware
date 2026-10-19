@@ -251,8 +251,10 @@ test('iceberg query source is NULL-correct through a real BlobStore round trip',
       // rows are identical whether the cast is folded and pushed or declined
       // and answered by the three-valued engine, so this does not pin the
       // fold (verified: with icebird's cast fold removed, this file is still
-      // 7/0). The negated form is the one case in this corpus that actually
-      // fails when the remote tier's hyparquet drops below 1.28.2, so it is
+      // fully green). The negated form is the one case in this corpus that
+      // actually fails when the remote tier's hyparquet drops below 1.28.2: a
+      // null cell coerces to 0 there, so 0 <= 300 wrongly matches while
+      // 0 > 300 misses by luck, which is why both directions are here. It is
       // this file's hyparquet-floor tripwire (LLP 0222#hyparquet-floor)
       ['ts > CAST(300 AS BIGINT)', [5]],
       ['NOT (ts > CAST(300 AS BIGINT))', [1, 3]],
