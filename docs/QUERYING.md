@@ -271,11 +271,8 @@ message searches and disclose that coverage limit.
 
 ## Connect an MCP client
 
-For an MCP client, configure a **stdio** server with executable `hyp` and
-arguments `mcp`, `serve`. For a remote proxy, add `--remote`, `team` to those
-arguments. The host must be able to find the installed binary and use the
-intended `HYP_HOME`. MCP configuration file syntax belongs to your MCP client;
-`hyp mcp serve` itself speaks protocol on stdout, not an interactive shell.
+See [Connect an MCP client](MCP.md) for local and remote setup, with a
+config block for each client.
 
 ## Vector search and graph enrichment
 
