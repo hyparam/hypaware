@@ -1,11 +1,13 @@
 // @ts-check
 
 import { createHash, randomUUID } from 'node:crypto'
+import path from 'node:path'
 import { gzip } from 'node:zlib'
 import { promisify } from 'node:util'
 import { openReceipts } from './receipts.js'
 
-import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail } from './backoff.js'
+import { CENTRAL_OPERATION_TIMEOUT_MS, RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail } from './backoff.js'
+import { claimPartitionMutation, isPartitionMutationBusy } from '../../../../src/core/util/mutation_guard.js'
 
 /**
  * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation, SourceHistoryReplayRequest, SourceHistoryReplayPreview, SourceHistoryReplayResult } from '../../../../hypaware-plugin-kernel-types.js'
@@ -132,9 +134,52 @@ export function createForwardSink(args) {
   const abortController = new AbortController()
   /** @type {Set<Promise<unknown>>} */
   const activeForwards = new Set()
+
+  /** @param {Parameters<typeof forwardPartition>[0]} args */
+  async function forwardCoordinated(args) {
+    const receiptsDir = args.receiptsDir ?? receiptRoot
+    const run = () => forwardPartition({ ...args, transport, receiptsDir })
+    // The production sink always supplies its durable instance directory.
+    // In-memory embedders without persisted progress keep their own lifecycle.
+    if (!receiptsDir || !args.partition.tablePath) return run()
+    const key = createHash('sha256').update(JSON.stringify([
+      config.url, identityClient.identity?.gateway_id ?? '', args.partition.tablePath,
+    ])).digest('hex')
+    const claim = path.join(receiptsDir, `${key}.upload`)
+    const started = performance.now()
+    let waited = false
+    /** @type {() => void} */
+    let release
+    // @ref LLP 0550#ownership [implements]: hold across watermark/receipt reads, upload and final progress commit; never expire a live uploader's ownership
+    for (;;) {
+      abortController.signal.throwIfAborted()
+      try {
+        release = claimPartitionMutation(claim)
+        break
+      } catch (error) {
+        if (!isPartitionMutationBusy(error)) throw error
+        if (!waited) {
+          waited = true
+          log.info('central.forward.partition_wait', { hyp_dataset: args.partition.dataset })
+        }
+        if (performance.now() - started >= CENTRAL_OPERATION_TIMEOUT_MS) {
+          throw new Error('central upload ownership remained busy or unverifiable for 330s; retry later')
+        }
+        await abortableSleep(1000, abortController.signal)
+      }
+    }
+    try {
+      abortController.signal.throwIfAborted()
+      if (waited) log.info('central.forward.partition_acquired', {
+        hyp_dataset: args.partition.dataset, wait_ms: Math.round(performance.now() - started),
+      })
+      return await run()
+    } finally { release() }
+  }
+
   /** @param {Parameters<typeof forwardPartition>[0]} args */
   function forwardOwned(args) {
-    const pending = forwardPartition({ ...args, transport, receiptsDir: args.receiptsDir ?? receiptRoot })
+    const pending = forwardCoordinated(args)
     activeForwards.add(pending)
     const settled = () => { activeForwards.delete(pending) }
     pending.then(settled, settled)
