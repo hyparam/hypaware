@@ -1,9 +1,9 @@
 # HypAware
 
-HypAware records every session from your AI clients (Claude Code,
-Codex, Cursor, OpenCode, and more) into one queryable history on your
-machine. Then it helps you find what went wrong, what keeps repeating, and
-what to fix.
+HypAware is the improvement loop for all your agents. It records every
+session from your AI clients (Claude Code, Codex, Cursor, OpenCode, and
+more) into one queryable history on your machine. Then it helps you find
+what went wrong, what keeps repeating, and what to fix.
 
 - **Collect.** A lightweight background daemon captures sessions from the
   clients you already use. No changes to how you work.
@@ -23,7 +23,13 @@ npm install -g hypaware
 hyp setup
 ```
 
-Setup first asks how to collect. **Sync to the cloud** is the default: press
+You can also ask your AI agent to install HypAware using these same two
+commands. Without a terminal, `hyp setup` prints a guide so the agent can
+walk you through the choices and run unattended setup. You complete any
+browser sign-ins yourself. Agents using a terminal can read the guide with
+`hyp setup --guide`.
+
+On a terminal, setup first asks how to collect. **Sync to the cloud** is the default: press
 Enter and a browser sign-in enrolls this machine, so your history follows you
 across machines. Choose **Local only** to keep recordings on this machine.
 Then it asks which clients to capture, installs the background daemon, and
@@ -80,8 +86,15 @@ See [reports](./docs/REPORTS.md) for generation and publishing.
 
 ## Supported clients
 
+<!-- @ref LLP 0475#t5 [implements]: ordinary installed Ollama setup and explicit client routing have maintained instructions -->
+
+Choose Ollama in `hyp setup`, then run `hyp ollama setup` for the live CLI/SDK
+capture host. Run `hyp ollama verify --model <installed-model>` to confirm a fresh
+saved request and response. See [Ollama setup, recording and direct recovery](./docs/integrations/ollama.md)
+for supported versions and privacy limits.
+
 Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
-OpenClaw, Hermes Agent, Pi, and any tool that exports OpenTelemetry logs,
+OpenClaw, Hermes Agent, Pi, Ollama, and any tool that exports OpenTelemetry logs,
 traces, or metrics.
 
 Claude Code is captured through its built-in telemetry, so it still talks
@@ -113,11 +126,11 @@ immediately, so answer **n** to keep the review period. Check the deadline with
 before sharing recordings.
 
 One person can sign in and sync on their own. To put more than one person in
-an organization, [contact us](https://hypaware.ai/contact/?utm_medium=readme)
+an organization, [contact us](https://hypaware.ai/contact?utm_medium=readme)
 and we'll set it up; there is no self-serve invite yet. See the
 [team setup guide](./docs/TEAM_SETUP.md).
 
-## Privacy
+## Privacy controls
 
 Recordings stay local until you configure Cloud sync or another export
 destination. You control what is recorded, per folder:

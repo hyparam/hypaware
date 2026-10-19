@@ -25,15 +25,18 @@ This is a version-specific integration, not a supported Cursor export API.
 
 ## Identity and finality {#identity}
 
-Native records own conversation rows. Hooks schedule recovery; only the
-additional `beforeReadFile` observation also writes a hook row. No prompt,
+Native records own conversation content. Hooks schedule recovery; additional
+`beforeReadFile` and terminal usage observations write separate hook rows. No prompt,
 response or generic tool hook fallback can race the native lane into duplicate
 rows. This deliberately trades immediate hook text for recoverable native
 identity, including Shell calls whose hook helper IDs differ from native IDs.
 
 A human prompt is identified by `(session, native user-message ID)`. Assistant
 segments use `(session, user-message ID, request ID, typed step ordinal)`;
-tools use `(session, user-message ID, native tool-call ID)`. Encoding is a JSON
+tool calls and results use separate role tags with
+`(session, user-message ID, native tool-call ID)`. The shipped result ID stays
+unchanged; replay can fill missing call rows without duplicating old results.
+Encoding is a JSON
 tuple. Identical text in distinct steps remains distinct; repeated saved
 snapshots converge through stored/waiting-part identity. Native request IDs are
 retained, but do not alone identify assistant messages. No parent chain is
@@ -71,8 +74,8 @@ tool arguments and results are projected from the allowlisted source shapes;
 system context, reasoning blocks and metadata never become raw frames.
 Content-addressed references are hash-checked. Repeated archive references are
 visited once. Missing blobs, oversized data and unknown required shapes are
-observable failures, not empty successful conversations. Subagent graphs,
-standalone shell turns, external user-text blobs and older formats are outside
+observable failures, not empty successful conversations. Local subagent graphs
+are traversed as described below. Standalone shell turns, external user-text blobs and older formats are outside
 this implementation; orphan blobs are never scanned to invent history.
 
 ## Recovery and usage {#recovery}
@@ -81,7 +84,11 @@ The listener coalesces hook triggers by session/workspace, reads the exact
 matching store, verifies workspace ownership and applies admission before
 reading conversation bodies. Three bounded attempts cover checkpoint delay;
 later callbacks and the scheduled provider cover missed attempts and downtime.
-Only session/workspace metadata enters the pending queue, never hook payloads.
+Only session/workspace metadata and bounded generation/version strings enter
+the pending queue, never hook payloads. A live hook's version is attached only
+to the exact matching native generation, never to older turns in the same
+snapshot. Offline recovery leaves version unknown; the currently installed
+client is not evidence of the client that produced history.
 
 `backfill cursor` and scheduled recovery use the same reader and identities.
 The existing `backfill.on_join`, `window_days`, and `sweep_cron` controls apply.
@@ -90,7 +97,13 @@ sweeps. Discovery is metadata-only and isolates malformed stores. Existing
 retention/window semantics filter dated messages, while unknown timestamps
 remain unknown and use the storage owner's normal receipt-time fallback.
 The adapter does not infer billed usage from context occupancy or hook counts.
+The inspected native `ConversationTokenDetails` carries used/max context tokens,
+not response billing. Live usage is captured separately as described below; native recovery never
+fabricates counters when that terminal observation was missed.
 Provider remains unknown; editor/CLI entrypoint comes from the native store.
+A bounded saved routed-model display label is attributed to assistant rows of
+that turn. It is not inferred from the current selected model or encrypted
+model metadata, and absence remains unknown.
 
 Following LLP 0359, a bounded process-local map skips unchanged roots during
 scheduled runs. The reader checks metadata/root only before that shortcut;
@@ -101,11 +114,76 @@ Manual runs bypass them, and restarts begin cold. Live recovery has a separate
 prevents live writes overlapping backfill consumption of that session. A busy
 live trigger retries; a busy backfill session waits until another pass.
 
+## Local subagent graphs {#subagents}
+
+Cursor 3.19.19's ConversationStateStructure contains inline SubagentPersistedState
+map entries in field 16 and content-addressed references to that type in field
+31. Follow only explicitly local states (environment=1) with a conversation
+state; cloud/first-class cloud or machine references and unspecified environments are not
+proof of local workspace ownership. Never follow transcript path strings.
+When both forms name a child, require identical state bytes and project it
+once. Conflicting copies or duplicate keys within either map are refused.
+
+Reuse the same message projection for each child, excluding thinking/system
+context as for the root. Keep session_id and cwd owned by the root so existing
+session opt-outs and file/workspace admission apply to every child. Derive a
+stable conversation_id from the root session and native ancestor IDs, scope
+message identities to it, and set the existing agent_id, is_sidechain and
+parent_thread_id fields. Root identities are unchanged. Where the native run
+map unambiguously connects a child and parent tool call, retain that call as
+cursor.spawned_by_tool_use_id, the same provenance concept used by Claude.
+Multiple parent calls for a resumed child leave that link unknown.
+
+One worker and one shared 4,096-read/32-MiB budget cover the whole tree, with
+at most 64 child states and depth 16. Limits and missing referenced blobs
+refuse the snapshot observably; neither receives a fresh budget per child.
+Pending children retain the existing incomplete-checkpoint refusal behavior.
+Traversal follows saved references only, with no blob scan or persistent map.
+Synthetic SQLite, replay, privacy and nesting fixtures verify this contract;
+real-client nested/background/resume behavior remains a compatibility limit.
+
+## Live token usage {#live-usage}
+
+Cursor 3.19.19 copies agent.v1 TurnEndedUpdate counters into turnTokenUsage,
+clears them at generation start, and emits them on stop and afterAgentResponse.
+The SDK documents additive input, output, cache-read and cache-write counters
+and per-turn usage events (https://cursor.com/docs/sdk/typescript#token-usage).
+Only stop is an accounting source here. Require all four counters to be
+nonnegative safe integers and their sum to be safe; omission means unknown,
+not zero. These are runtime token counts, not a billed-cost claim.
+
+A system hook observation with an empty text block carries attributes.usage,
+keyed by (session, 'usage', generation). It contains no hook response text or
+raw payload. It uses the existing row schema and shared stored/spooled dedupe.
+Duplicate delivery, repeated stop callbacks and daemon restart converge to one
+row. First valid accounting wins; afterAgentResponse remains a recovery trigger.
+This is a Cursor-specific exception to LLP 0035's assistant-last-row carrier:
+late counters cannot enrich an already deduplicated native assistant row.
+Native backfill never emits usage, so the two paths cannot double count it.
+Selected hook model settings are not attributed as the billed model.
+
+The existing hook admission, serialized writes, failure retry and writer
+rotation apply. No pending usage map, transcript dependency or raw spool is
+added. Offline history and clients that omit counters remain unsupported.
+
 ## File contents and tool outcomes {#file-content}
 
 Full Read/Grep/Glob/Shell results come from saved tool messages, joined by
-native tool ID to typed outcomes. Verified union alternatives establish
+native tool ID to typed outcomes. Each typed tool step also emits an assistant
+tool-call row with its native arguments when available; result rows retain the
+arguments for compatibility. Calls precede results and share their native ID.
+Verified union alternatives establish
 success or error; unrecognized alternatives explicitly retain unknown status.
+For Shell, independent sandbox/background/terminal/pid metadata (fields
+101-104) is not part of the outcome union. Failure, timeout, rejection,
+spawn error and permission denial are errors. A success payload's signed
+exit code and signal decide whether a completed process failed; background
+success remains unknown. Text that merely resembles an exit code never
+establishes an outcome. Verified Delete, Edit, Ls, ReadLints, MCP, WebSearch,
+Task and Fetch unions also classify their explicit failures. Read includes
+permission-denied and invalid-file outcomes. MCP success inspects its nested
+is_error flag; approval alone remains unknown. Unknown alternatives never
+inherit the numbering conventions of a different tool.
 The shared projector preserves explicit `is_error: null` without changing its
 existing missing-field convention. A hook's claimed Shell exit code is never
 substituted for the native result.
@@ -123,7 +201,8 @@ workspace. The one-cwd export contract cannot express a local-only file under
 a full workspace. Explicit missing-file errors can pass lexical scope/policy
 checks because they contain no successful file contents. Recheck session ignore
 after asynchronous path resolution and directory policy before writing.
-Other tool results use the existing workspace policy contract, not an invented
+A refused Read also drops its paired call, so adding call rows cannot restore
+arguments excluded by the file policy. Other tool results use the existing workspace policy contract, not an invented
 interpretation of arbitrary command text or result paths.
 
 ## Attachment {#attachment}

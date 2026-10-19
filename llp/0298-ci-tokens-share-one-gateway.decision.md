@@ -62,6 +62,17 @@ wire it is `POST <identity-base>/mint` (the sibling of `/token` and
 `/refresh`), bearer = the session's access JWT, response
 `{ token, gateway_id, expires_at }`.
 
+> Extended-by (Draft, proposed 2026-10-13): [LLP 0494#cli-mint](./0494-hypaware-mcp-phase-1.design.md#cli-mint)
+> proposes `hyp remote mint --scope query`, which mints a personal agent
+> token (a different credential, on a different route, with the server's
+> default lifetime). In plain words, that token can read the org's history,
+> mark recommendations, publish reports and delete reports as the member who
+> minted it. `--label` names the integration that holds it. Bare `hyp remote
+> mint` is unchanged. Kenny consented 2026-10-15T18:00:18Z ("I approve",
+> Slack 1792087218.778909, relayed by the mayor, with hypaware-server LLP
+> 0597); his question on members deleting only their own reports is a
+> follow-up, not a condition.
+
 ### D4: The CI recipe is explicit setup and teardown steps {#recipe}
 
 The documented recipe is three existing commands, run by the user's CI

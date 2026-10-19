@@ -13,6 +13,7 @@ import {
 import { readInstalledAssets } from './action_reconciler.js'
 import { isActionRefused } from './action_refusal.js'
 import { readAttachPolicy, readCodexCaptureMode } from './attach_policy.js'
+import { isEntryRecording, readRecordingStateFromDiskSync } from './client_recording.js'
 import {
   CLAUDE_SETTINGS_MARKER_SCHEMA,
   detachClientFromDisk,
@@ -102,12 +103,18 @@ export function createAttachHandler(opts = {}) {
           .map((p) => [p.name, p])
       )
 
+      // Read fresh: the daemon booted on an older copy of the config, and a
+      // `hyp client detach` since then must not be undone by this pass.
+      // @ref LLP 0466#reattach-paths [implements]: no automatic path re-attaches a detached client
+      const { detached } = readRecordingStateFromDiskSync({ env: ctx.env })
+
       /** @type {DesiredAction[]} */
       const desired = []
       for (const descriptor of descriptors.values()) {
         const entry = byPluginName.get(descriptor.plugin)
         // Plugin absent from config or explicitly disabled → not a target.
         if (!entry || entry.enabled === false) continue
+        if (!isEntryRecording(entry) || detached.has(descriptor.plugin)) continue
         // Default-on: only an explicit `on_join: false` opts out.
         if (readAttachPolicy(entry).onJoin === false) continue
         // Attach-eligibility requires reverse-capability. reverse() undoes the

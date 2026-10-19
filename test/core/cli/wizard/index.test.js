@@ -7,6 +7,7 @@ import path from 'node:path'
 
 import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { DurableBinRequiredError } from '../../../../src/core/cli/global_install.js'
 import { PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
@@ -219,6 +220,10 @@ function wizardOpts(home, over = {}) {
       }
     },
     ...over,
+    // The env above carries no PATH, so the real probe would find nothing to
+    // launch and silence the closing offer. Tests of the offer assume a
+    // client is there; a test of the probe passes `launchable` itself.
+    suggestSkill: { launchable: true, ...over.suggestSkill },
   })
   // Record phase invocations regardless of which stub a test supplied, so
   // ordering assertions hold for overridden phases too.
@@ -911,6 +916,97 @@ test('runInitWizard: a hidden picked row with no opt-out keeps the sentence that
   assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the carried row is still never named')
 })
 
+/**
+ * A catalog whose locked-set resolution throws, the way `computeLockedSafe`
+ * swallows: the resolver is the only wizard reader of `pluginMetadata`, so a
+ * throwing lookup there fails resolution and nothing else (on-disk shapes
+ * all resolve, a corrupt layer reading as absent).
+ *
+ * @param {any} catalog
+ */
+function failingResolution(catalog) {
+  catalog.pluginMetadata = new Proxy(new Map(), {
+    get(target, key) {
+      if (key === 'has' || key === 'get') return () => { throw new Error('resolution failed') }
+      const value = Reflect.get(target, key)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  return catalog
+}
+
+/** The hidden central row plus its stale local-only entry (#970's case). */
+async function staleHiddenCentralRow(/** @type {string} */ home) {
+  await seedCentralLayer(home, ['@hypaware/ai-gateway'])
+  await writeClientSyncEntries({
+    stateDir: path.join(home, '.hyp', 'hypaware'),
+    entries: [{ source: 'raw-anthropic', class: 'local-only' }],
+  })
+  const catalog = emptyCatalog()
+  const rawDescriptor = { plugin: '@hypaware/ai-gateway', id: 'raw-anthropic', label: 'Anthropic API', hidden: true }
+  catalog.pickerDescriptors.set('raw-anthropic', rawDescriptor)
+  return { catalog, rawDescriptor }
+}
+
+const UNCONFIRMED = /Your team's configuration could not be confirmed, so capture your team manages may still sync to the cloud/
+
+// The returning-enrollment path: a managed machine re-entering through the
+// gate resolves its locked set from disk, and here that throws. The central
+// layer owns `raw-anthropic`, so the stale opt-out is inert and the row
+// ships; the store alone would print "Nothing syncs". Then the retry: the
+// same machine, resolution succeeding, gets the ordinary answer.
+// @ref LLP 0509#unknown-is-not-empty [tests]:
+test('runInitWizard: a returning enrollment whose central set fails to resolve never says nothing syncs, and a retry that resolves does', async () => {
+  const home = await tmpHome()
+  const { catalog, rawDescriptor } = await staleHiddenCentralRow(home)
+  const run = async (/** @type {any} */ cat) => {
+    const { opts, stdout } = wizardOpts(home, {
+      gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+      confirm: async () => 'stay',
+      catalog: cat,
+      // The real picker hands back the locked set it was given.
+      pick: async (/** @type {any} */ o) => pickResult({ descriptors: [rawDescriptor], sourcesPicked: ['raw-anthropic'], lockedSources: o.locked ?? [] }),
+      syncScope: runWizardSyncScope,
+    })
+    assert.equal((await runInitWizard(opts)).exitCode, 0)
+    return stdout.text()
+  }
+
+  const failed = await run(failingResolution(catalog))
+  assert.match(failed, UNCONFIRMED)
+  assert.doesNotMatch(failed, /Nothing syncs/)
+  assert.doesNotMatch(failed, /raw-anthropic|Anthropic API/, 'the hidden row is never named')
+
+  catalog.pluginMetadata = new Map()
+  const retried = await run(catalog)
+  assert.match(retried, /Capture your team manages still syncs to the cloud/, 'resolved, the org row is known to ship')
+  assert.doesNotMatch(retried, /could not be confirmed/)
+})
+
+// The new-join path: the sign-in completes but no org config has applied
+// yet, so the join reports the set unresolved rather than empty.
+// @ref LLP 0509#unknown-is-not-empty [tests]:
+test('runInitWizard: a new join whose org config has not applied never says nothing syncs', async () => {
+  const home = await tmpHome()
+  const { catalog, rawDescriptor } = await staleHiddenCentralRow(home)
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog,
+    join: (/** @type {any} */ o) => runWizardJoin({
+      ...o,
+      runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
+      waitForConverge: async () => ({ ok: false }),
+    }),
+    pick: async (/** @type {any} */ o) => pickResult({ descriptors: [rawDescriptor], sourcesPicked: ['raw-anthropic'], lockedSources: o.locked ?? [] }),
+    syncScope: runWizardSyncScope,
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+  const text = stdout.text()
+  assert.match(text, UNCONFIRMED)
+  assert.doesNotMatch(text, /Nothing syncs/)
+  assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the hidden row is never named')
+})
+
 test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), {
     gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
@@ -998,6 +1094,30 @@ test('runInitWizard: a multi-org join failure points at hyp remote login --org',
   assert.equal(result.pathway, 'local')
   assert.match(stderr.text(), /hyp remote login --org <name>/)
   assert.doesNotMatch(stderr.text(), /admin needs to grant/)
+})
+
+// A server too old for the poll lane is no access problem, so the fork
+// names the upgrade, not an admin grant, and still offers both rows again:
+// a retry after the upgrade, and local setup now.
+// @ref LLP 0543#sentence [tests]:
+test('runInitWizard: a stale-server join names the upgrade and returns to the fork', async () => {
+  const forkChoices = ['team', 'team', 'local']
+  let joins = 0
+  const { opts, stderr, calls } = wizardOpts(await tmpHome(), {
+    fork: async () => forkChoices.shift(),
+    join: async () => {
+      joins += 1
+      return { status: 'failed', reason: 'no_poll_endpoint', detail: 'hyp remote login: this server does not support poll login yet\n' }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.pathway, 'local')
+  assert.equal(joins, 2, 'the team row is still offered after the failure')
+  assert.deepEqual(calls.slice(0, 6), ['gate', 'fork', 'join', 'fork', 'join', 'fork'])
+  assert.match(stderr.text(), /this server needs an upgrade before it supports browser sign-in/)
+  assert.doesNotMatch(stderr.text(), /admin needs to grant/)
+  assert.doesNotMatch(stderr.text(), /Sign-in did not complete/)
 })
 
 // A successful enrollment whose daemon install failed is not a failed
@@ -1583,6 +1703,188 @@ test('runInitWizard: the skill offer comes last, after the privacy narration, an
   assert.match(text, /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/)
 })
 
+// The other privacy lines name the review; this one says what it does
+// (issue #417), only on an attended close, and names the skill only where
+// this run installed it.
+
+/** @param {{ name: string, client: string }[]} skills */
+function finaleWithSkills(skills) {
+  return async () => /** @type {any} */ ({
+    daemonInstall: { skipped: true, dryRun: false },
+    globalInstall: { skipped: true, installed: false },
+    attach: [],
+    skillsInstalled: skills.map((skill) => ({ ...skill, dest: `/tmp/${skill.client}/${skill.name}`, dryRun: false })),
+    agentsInstalled: [],
+    daemonRestart: { skipped: true, dryRun: false, ok: false },
+    backfill: [],
+  })
+}
+
+test('runInitWizard: a local close says what the installed privacy review does, with no team claim', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleWithSkills([
+      { name: 'hypaware-query', client: 'claude' },
+      { name: 'hypaware-privacy', client: 'claude' },
+      { name: 'hypaware-privacy', client: 'codex' },
+    ]),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.match(text, /run the hypaware-privacy skill in Claude or Codex\./)
+  assert.match(text, /with your OK on each one, can stop recording a folder\./)
+  assert.match(text, /Deleting what is already recorded on this machine is a separate step it asks about\./)
+  assert.doesNotMatch(text, /team/)
+  assert.ok(text.indexOf('First look') < text.indexOf('hypaware-privacy skill'))
+})
+
+test('runInitWizard: an enrolled close adds the team clause and keeps the hold narration after it', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleWithSkills([{ name: 'hypaware-privacy', client: 'claude' }]),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.match(text, /run the hypaware-privacy skill in Claude\./)
+  assert.match(text, /can stop a folder syncing to your team or stop recording it\./)
+  assert.ok(text.indexOf('hypaware-privacy skill in Claude') < text.indexOf('Nothing has been uploaded yet'))
+})
+
+test('runInitWizard: a close with no privacy skill installed points at `hyp privacy` instead', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleWithSkills([{ name: 'hypaware-query', client: 'claude' }]),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.match(text, /To choose which folders HypAware records, or to delete what it recorded, see `hyp privacy`\./)
+  assert.doesNotMatch(text, /hypaware-privacy skill/)
+})
+
+test('runInitWizard: a non-interactive or dry run prints no privacy review line', async () => {
+  const scripted = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    finaleRunner: finaleWithSkills([{ name: 'hypaware-privacy', client: 'claude' }]),
+  })
+  await runInitWizard(scripted.opts)
+  assert.doesNotMatch(scripted.stdout.text(), /hypaware-privacy skill|see `hyp privacy`/)
+
+  const dry = wizardOpts(await tmpHome(), {
+    finale: { dryRun: true },
+    finaleRunner: finaleWithSkills([{ name: 'hypaware-privacy', client: 'claude' }]),
+  })
+  await runInitWizard(dry.opts)
+  assert.doesNotMatch(dry.stdout.text(), /hypaware-privacy skill|see `hyp privacy`/)
+})
+
+const REPORT_POINTER = 'To draft a report from your recorded sessions, run `hyp report generate`.'
+
+/**
+ * A finale that attached Claude Code, for the report pointer's real probe.
+ * @param {boolean} [dryRun]
+ */
+function finaleAttachedClaude(dryRun = false) {
+  return async () => /** @type {any} */ ({
+    daemonInstall: { skipped: true, dryRun },
+    globalInstall: { skipped: true, installed: false },
+    attach: [{ client: 'claude', dryRun, ok: true }],
+    skillsInstalled: [],
+    agentsInstalled: [],
+    daemonRestart: { skipped: true, dryRun, ok: false },
+    backfill: [],
+  })
+}
+
+/**
+ * A home with the report skill installed for Claude Code (when `skill`),
+ * its `hypaware-analyst` worker (when `agent`, which defaults to `skill`),
+ * and a PATH holding an executable `claude`.
+ * @param {{ skill: boolean, agent?: boolean }} opts
+ */
+async function reportReadyHome({ skill, agent = skill }) {
+  const home = await tmpHome()
+  if (skill) {
+    const file = path.join(home, '.claude', 'skills', 'hypaware-report', 'SKILL.md')
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '# report\n')
+  }
+  if (agent) {
+    const file = path.join(home, '.claude', 'agents', 'hypaware-analyst.md')
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '# analyst\n')
+  }
+  const bin = path.join(home, 'bin')
+  await fs.mkdir(bin, { recursive: true })
+  await fs.writeFile(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  return { home, env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', PATH: bin } }
+}
+
+test('runInitWizard: names `hyp report generate` only when an attached client can start it, ahead of the privacy close', async () => {
+  // Verified: attached, its CLI on PATH, the report skill on disk.
+  const ready = await reportReadyHome({ skill: true })
+  const verified = wizardOpts(ready.home, {
+    env: ready.env,
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleAttachedClaude(),
+    suggestSkill: { confirm: async () => 'no' },
+  })
+  await runInitWizard(verified.opts)
+  const text = verified.stdout.text()
+  assert.equal(text.split(REPORT_POINTER).length - 1, 1)
+  // Before the privacy close and the closing offer, so nothing follows a child.
+  assert.ok(text.indexOf(REPORT_POINTER) < text.indexOf('hyp privacy'), text)
+  assert.ok(text.indexOf(REPORT_POINTER) < text.indexOf('Run `hyp ask` any time'), text)
+
+  // Recorded but unverified: the same attach and CLI, no report skill.
+  const bare = await reportReadyHome({ skill: false })
+  const unverified = wizardOpts(bare.home, {
+    env: bare.env,
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleAttachedClaude(),
+  })
+  await runInitWizard(unverified.opts)
+  assert.ok(!unverified.stdout.text().includes(REPORT_POINTER))
+
+  // Recorded but unverified: the skill is there, its analyst worker is not.
+  const noWorker = await reportReadyHome({ skill: true, agent: false })
+  const workerless = wizardOpts(noWorker.home, {
+    env: noWorker.env,
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleAttachedClaude(),
+  })
+  await runInitWizard(workerless.opts)
+  assert.ok(!workerless.stdout.text().includes(REPORT_POINTER))
+
+  // None recorded: the skill and CLI are there, but this run attached nothing.
+  const none = wizardOpts(ready.home, { env: ready.env, firstLook: firstLookWithRows() })
+  await runInitWizard(none.opts)
+  assert.ok(!none.stdout.text().includes(REPORT_POINTER))
+})
+
+test('runInitWizard: a dry run or a scripted run never names `hyp report generate`', async () => {
+  const ready = await reportReadyHome({ skill: true })
+  const dry = wizardOpts(ready.home, {
+    env: ready.env,
+    finale: { dryRun: true },
+    finaleRunner: finaleAttachedClaude(true),
+    reportGenerateAvailable: true,
+  })
+  await runInitWizard(dry.opts)
+  assert.ok(!dry.stdout.text().includes(REPORT_POINTER))
+
+  const scripted = wizardOpts(ready.home, {
+    env: ready.env,
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    finaleRunner: finaleAttachedClaude(),
+    reportGenerateAvailable: true,
+  })
+  await runInitWizard(scripted.opts)
+  assert.ok(!scripted.stdout.text().includes(REPORT_POINTER))
+})
+
 test('runInitWizard: a yes to the skill offer runs `hyp ask` on this terminal', async () => {
   // @ref LLP 0398#run-directory [tests]: the offer taken is the ask itself, as a child that inherits the terminal
   const { opts, stdout } = wizardOpts(await tmpHome(), {
@@ -1720,6 +2022,28 @@ test('runInitWizard: no detected client or gateway dataset still prints the empt
   assert.doesNotMatch(stdout.text(), /Starting Claude Code|Starting Codex/)
 })
 
+// @ref LLP 0398#setup-offer [tests]: nothing launchable means no offer and no mention of the verb
+test('runInitWizard: with no client CLI on PATH, setup never mentions `hyp ask`', async () => {
+  let asked = 0
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    // `launchable: undefined` hands the question to the real probe, which
+    // finds nothing: the harness env has no PATH.
+    suggestSkill: { launchable: undefined, confirm: async () => { asked += 1; return 'yes' } },
+  })
+  await runInitWizard(opts)
+  assert.equal(asked, 0)
+  assert.ok(!stdout.text().includes('hyp ask'), stdout.text())
+
+  const { opts: emptyOpts, stdout: emptyStdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookStub([], []).runner,
+    suggestSkill: { launchable: false },
+  })
+  await runInitWizard(emptyOpts)
+  assert.match(emptyStdout.text(), /Nothing recorded yet/)
+  assert.ok(!emptyStdout.text().includes('hyp ask'), emptyStdout.text())
+})
+
 // --- firstLookHadRows ---
 
 // The mapping from a first-look outcome to the question list's `hasRows` has
@@ -1855,3 +2179,32 @@ for (const scenario of ['cancel', 'back', 'config-failure', 'policy-failure', 'c
     if (scenario === 'back') assert.equal(passes, 2)
   })
 }
+
+test('hosted onboarding commits only after config save and skips cancelled or dry runs', async () => {
+  for (const mode of ['commit', 'cancel', 'dry-run']) {
+    const home = await tmpHome()
+    const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+    const catalog = emptyCatalog()
+    for (const id of ['codex-cloud', 'chatgpt-work']) {
+      catalog.pickerDescriptors.set(id, { plugin: '@hypaware/codex-cloud', id, label: id })
+    }
+    let calls = 0
+    const { opts } = wizardOpts(home, {
+      catalog,
+      detect: async () => new Set(),
+      finale: mode === 'dry-run' ? { dryRun: true } : {},
+      pick: async () => mode === 'cancel' ? { exitCode: 130, cancelled: true } : pickResult({
+        configPending: true, configPath, sourcesPicked: ['chatgpt-work'], clientsPicked: [],
+        config: { version: 2, plugins: [{ name: '@hypaware/codex-cloud' }] },
+      }),
+      configureCloud: async options => {
+        calls++
+        const saved = JSON.parse(await fs.readFile(configPath, 'utf8'))
+        assert.equal(saved.plugins[0].name, '@hypaware/codex-cloud')
+        assert.deepEqual(options.sources, ['chatgpt-work'])
+      },
+    })
+    await runInitWizard(opts)
+    assert.equal(calls, mode === 'commit' ? 1 : 0)
+  }
+})

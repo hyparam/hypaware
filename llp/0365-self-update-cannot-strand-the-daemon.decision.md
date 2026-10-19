@@ -7,6 +7,7 @@
 **Date:** 2026-09-02
 **Related:** LLP 0309 (the auto-update decision this extends: #mechanism, #cadence, #unstick-from-the-front, #cli-surface), LLP 0017 (#staged-restart-for-config-replacement: the exit-and-relaunch this bounds), LLP 0348 (#stale-heartbeat-is-unresponsive: how a wedged daemon reads from outside), hyparam/hypaware#610, hyparam/hypaware#1206
 **Extends:** LLP 0309
+**Extended-by:** LLP 0539 (#restart-needs-a-supervisor: the unsupervised refusal is recorded for `hyp status`)
 
 > LLP 0309 settled that the daemon updates itself through `npm install -g`
 > and a staged restart, and accepted two residual risks: a release whose

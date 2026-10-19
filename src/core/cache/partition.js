@@ -3,11 +3,11 @@
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { errCode } from '../util/json_util.js'
+import { claimPartitionMutation, isPartitionMutationBusy, PARTITION_MUTATION_BUSY_ERROR_KIND } from '../util/mutation_guard.js'
 import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
 import { cacheTablePath, datasetsRoot, isConfirmedSymlink } from './paths.js'
@@ -30,25 +30,10 @@ const RETIRED_DIR = '.retired'
  */
 const NUL_BYTE = String.fromCharCode(0)
 
+export { claimPartitionMutation, isPartitionMutationBusy, PARTITION_MUTATION_BUSY_ERROR_KIND }
+
 /** @type {Map<string, Promise<unknown>>} */
 const partitionMutationLocks = new Map()
-
-/**
- * `error_kind` of the refusal {@link claimPartitionMutation} raises when the
- * guard is held or unverifiable. Tagged rather than left to message matching
- * because it is the one failure a caller may absorb and retry later: nothing
- * was mutated under a guard it never took.
- */
-export const PARTITION_MUTATION_BUSY_ERROR_KIND = 'cache_partition_mutation_busy'
-
-/**
- * Whether a thrown value is the mutation guard's contention refusal.
- * @param {unknown} error
- * @returns {boolean}
- */
-export function isPartitionMutationBusy(error) {
-  return /** @type {{ error_kind?: unknown } | null | undefined} */ (error)?.error_kind === PARTITION_MUTATION_BUSY_ERROR_KIND
-}
 
 /**
  * Serialize cursor-coupled mutations of one logical cache partition across
@@ -90,55 +75,6 @@ export function withPartitionMutationLocks(partitionDirs, fn) {
   /** @param {number} index @returns {Promise<T>} */
   const run = index => index === dirs.length ? fn() : withPartitionMutationLock(dirs[index], () => run(index + 1))
   return run(0)
-}
-
-/**
- * A directory grants ownership; its single PID/nonce filename publishes the
- * owner. Never steal from a live process, however long its rewrite takes.
- * Recovery unlinks that exact dead owner's entry before rmdir: a competing
- * reclaimer that lost the unlink must not remove a successor's directory.
- * Empty or malformed locks fail closed (including a crash during admission).
- * @ref LLP 0417#cache-mutation-guard [implements]: CLI purge and daemon publication share a non-expiring guard
- * @param {string} partitionDir
- * @returns {() => void}
- */
-function claimPartitionMutation(partitionDir) {
-  // Keep the guard outside a partition that retention may remove.
-  const directory = path.join(path.dirname(partitionDir), `.${path.basename(partitionDir)}.mutation-lock`)
-  const owner = `${process.pid}-${randomUUID()}`
-  const busy = () => Object.assign(
-    new Error('cache partition mutation busy or lock unverifiable; retry after the writer finishes'),
-    { error_kind: PARTITION_MUTATION_BUSY_ERROR_KIND }
-  )
-  fs.mkdirSync(path.dirname(partitionDir), { recursive: true })
-  for (let attempt = 0; ; attempt++) {
-    try {
-      fs.mkdirSync(directory, { mode: 0o700 })
-      break
-    } catch (error) {
-      if (errCode(error) !== 'EEXIST') throw error
-      if (attempt) throw busy()
-      const entries = fs.readdirSync(directory)
-      if (entries.length !== 1 || !/^[1-9]\d*-[a-f0-9-]{36}$/.test(entries[0])) throw busy()
-      const pid = Number(entries[0].split('-')[0])
-      if (!Number.isSafeInteger(pid)) throw busy()
-      try { process.kill(pid, 0) } catch (error) {
-        if (errCode(error) !== 'ESRCH') throw busy()
-        // No force: losing this exact unlink must abort recovery.
-        fs.unlinkSync(path.join(directory, entries[0]))
-        fs.rmdirSync(directory)
-        continue
-      }
-      throw busy()
-    }
-  }
-  const file = path.join(directory, owner)
-  // Failed owner publication leaves the directory closed for inspection.
-  fs.writeFileSync(file, '', { flag: 'wx', mode: 0o600 })
-  return () => {
-    fs.unlinkSync(file)
-    fs.rmdirSync(directory)
-  }
 }
 
 /**
@@ -202,9 +138,18 @@ export function tryReadCursorSync(partitionDir) {
       const kind = parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`
       throw new TypeError(`cursor.json holds ${kind}, not a cursor object`)
     }
+    // The same synthesized zero, one field down: `epoch: "2"` read as epoch
+    // 0, and maintenance reclaimed the live `epoch=2/` as an orphan (issue
+    // #2522). Every writer since the first has written a numeric epoch, so a
+    // missing one is no historical shape either.
+    // @ref LLP 0323#whole-cursor [implements]: a non-numeric epoch refuses the whole cursor instead of defaulting to zero.
+    if (typeof parsed.epoch !== 'number') {
+      const kind = parsed.epoch === undefined ? 'no epoch' : `an epoch of type ${parsed.epoch === null ? 'null' : typeof parsed.epoch}`
+      throw new TypeError(`cursor.json holds ${kind}, not a numeric epoch`)
+    }
     /** @type {PartitionCursor} */
     const cursor = {
-      epoch: typeof parsed.epoch === 'number' ? parsed.epoch : 0,
+      epoch: parsed.epoch,
       rowCount: typeof parsed.rowCount === 'number' ? parsed.rowCount : 0,
       compaction: parsed.compaction ?? null,
     }
@@ -807,7 +752,7 @@ export function appendRefusalReason(partitionDir) {
  * @param {string[]} sourceSegments
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
- * @param {{ declaration?: CachePartitioningDeclaration, filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[], mutationLockHeld?: boolean }} [options]
+ * @param {{ declaration?: CachePartitioningDeclaration, filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[], stampRows?: (rows: Record<string, unknown>[]) => Promise<void>, mutationLockHeld?: boolean }} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
 export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows, options) {
@@ -820,6 +765,15 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     // Buffered rows must be checked again after waiting behind a purge.
     rows = options?.filterRows ? options.filterRows(rows) : rows
     if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
+    // Seqs are stamped here, under the guard and after the purge re-check,
+    // so every row this partition commits carries a seq above every row it
+    // committed before, whichever process did the committing. Stamping any
+    // earlier (the spool reader once did) let two processes commit out of
+    // seq order and left rows under the sink's watermark (issue #2578). A
+    // multi-partition chunk reserves its whole run before this, once every
+    // guard is held, and only hands each partition its slice here.
+    // @ref LLP 0492#reserve-at-commit [implements]: stamp under the partition guard, after the purge re-check
+    if (options?.stampRows) await options.stampRows(rows)
     const fallbackAppended = countGatewayFallbackRows(rows)
     const cursor = readCursorForAppend(partitionDir)
     const tableDir = cursor.tableDir ?? 'table'
@@ -829,13 +783,13 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, icebergDir)
     const declaration = options?.declaration
     const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
+    // Spread first, so every field the reader returned survives the append
+    // (see `appendRowsToPartition` for the loss a field list caused).
     await writeCursor(partitionDir, {
-      epoch: cursor.epoch,
+      ...cursor,
       rowCount: cursor.rowCount + rows.length,
-      compaction: cursor.compaction,
       layout: 'source-table',
       tableDir,
-      retention: cursor.retention,
       ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result
@@ -855,9 +809,25 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
 }
 
 /**
- * Append rows into the current epoch's Iceberg table for the resolved
- * partition.  Creates the partition directory and cursor on first
- * write.
+ * Append rows into the live generation of the resolved partition, whichever
+ * layout the cursor names. Creates the partition directory and an
+ * `epoch=0` cursor on first write.
+ *
+ * The entry point is the legacy epoch layout's, but the generation it
+ * appends to is the cursor's, not the caller's. A purge rewrite
+ * (`maintenance.js`, the `purgeRewrite` branch) converts an epoch partition
+ * to a `table-<ms>-<uuid>` source-table generation, and this function used
+ * to append to `epoch=<n>` regardless and rewrite the cursor from a field
+ * list that had no `layout` or `tableDir`. That one write pointed the
+ * partition back at the epoch directory, which held only the rows appended
+ * since the purge, and left the rewritten generation holding every
+ * pre-purge row unreferenced for the orphan sweep to reclaim. The server
+ * ingest mover appends through here, so one session purge on a partition
+ * still receiving rows cost it its history.
+ *
+ * Hence the two rules below: the live directory is resolved from the
+ * cursor's layout, and the cursor is written by spreading the one read, so
+ * no field the reader returned is dropped.
  *
  * @param {string} cacheRoot
  * @param {string} dataset
@@ -881,14 +851,13 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
     if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
     const fallbackAppended = countGatewayFallbackRows(rows)
     const cursor = readCursorForAppend(partitionDir)
-    const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
-    // As above: asked before the append creates the epoch's table.
-    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, epochDir)
-    const result = await appendRowsToTable(epochDir, columns, rows)
+    const liveDir = path.join(partitionDir, cursor.layout === 'source-table' ? cursor.tableDir ?? 'table' : `epoch=${cursor.epoch}`)
+    // As above: asked before the append creates the generation's table.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, liveDir)
+    const result = await appendRowsToTable(liveDir, columns, rows)
     await writeCursor(partitionDir, {
-      epoch: cursor.epoch,
+      ...cursor,
       rowCount: cursor.rowCount + rows.length,
-      compaction: cursor.compaction,
       ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result

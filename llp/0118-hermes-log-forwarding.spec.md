@@ -97,6 +97,13 @@ materializing into `ai_gateway_messages` through the existing
   machine-local list or a `.hypignore`, with no hermes-specific policy
   config.
 
+> Extended-by (Draft, proposed): [LLP 0494#skills](./0494-hypaware-mcp-phase-1.design.md#skills) (skill install under `~/.hermes/skills`)
+> extends R5: HypAware may create and remove only its own marker-owned skill
+> directories under `~/.hermes/skills/` (`hypaware-query`, `hypaware-report`,
+> `hypaware-reference`, `hypaware-privacy`), nothing else under `~/.hermes/`,
+> removed on detach. Capture stays as R5 states it. Phil consented
+> 2026-10-14T18:34:17Z (Slack 1792002857.742579, relayed by the mayor).
+
 ## Non-goals {#non-goals}
 
 1. **Operational text logs.** `~/.hermes/logs/*.log` (agent.log, gateway.log,

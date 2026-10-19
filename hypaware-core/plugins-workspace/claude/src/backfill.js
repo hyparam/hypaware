@@ -131,6 +131,7 @@ export function createClaudeBackfillProvider(opts) {
         extraProjectsDirs: desktop3pDirs,
         stateFile,
         clientName,
+        pluginName,
         deriveRepo,
         resolver,
         sweepFingerprints,
@@ -183,6 +184,7 @@ function resolveSweepCron(config) {
  *   extraProjectsDirs?: string[],
  *   stateFile: string,
  *   clientName: string,
+ *   pluginName: string,
  *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  *   resolver: UsagePolicyResolver,
  *   sweepFingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
@@ -191,7 +193,7 @@ function resolveSweepCron(config) {
  * @returns {AsyncGenerator<BackfillItem>}
  */
 async function* runClaudeBackfill(args) {
-  const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, deriveRepo, resolver, sweepFingerprints } = args
+  const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, pluginName, deriveRepo, resolver, sweepFingerprints } = args
   const { ignoredSessions } = args
   refreshSessionIgnores(ignoredSessions)
   const log = ctx.log
@@ -381,7 +383,7 @@ async function* runClaudeBackfill(args) {
       const owners = ctx.entrypointOwners ?? new Map()
       const owned = inContainer
         ? classifyContainerSession(DESKTOP_3P_CONTAINER_OWNER, ctx.isPluginConfigured)
-        : classifyTranscriptEntrypoint(entrypoint, owners, clientName)
+        : classifyTranscriptEntrypoint(entrypoint, owners, clientName, ctx.isPluginDetached?.(pluginName) !== true)
       if (!owned.import) {
         sessionsGated += 1
         log.info('claude.backfill.entrypoint_not_configured', {

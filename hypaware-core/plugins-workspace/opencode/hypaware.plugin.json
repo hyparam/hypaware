@@ -16,8 +16,7 @@
         "format": "managed_file",
         "settings_file": ".config/opencode/plugins/hypaware.js",
         "marker_text": "// HYPWARE_OPENCODE_PLUGIN v1"
-      },
-      "launch": { "bin": "opencode", "args": ["run", "{prompt}"], "label": "OpenCode" }
+      }
     },
     "picker": [
       {
@@ -33,6 +32,12 @@
       { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)" },
       { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Resume recording this AI session" },
       { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
+    ],
+    "skills": [
+      { "name": "hypaware-query", "clients": ["opencode"] },
+      { "name": "hypaware-reference", "clients": ["opencode"] },
+      { "name": "hypaware-privacy", "clients": ["opencode"] },
+      { "name": "hypaware-report", "clients": ["opencode"] }
     ],
     "config_sections": [{ "section": "opencode", "summary": "OpenCode listener, attach, and bounded backfill settings." }]
   }

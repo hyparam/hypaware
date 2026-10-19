@@ -149,6 +149,10 @@ The graph plugin still registers no source or timer, but a source may now
 request its own dataset projection through the capability, so GitHub capture
 runs one inside the daemon tick that captured the rows.
 
+**Extended-by:** [LLP 0512](./0512-local-session-graph-projects-automatically.spec.md#lifecycle).
+The AI gateway connector also requests automatic local session projection from
+its daemon source. The graph engine itself still owns no background timer.
+
 ## Merge policy
 
 Duplicate rows for the same id (same entity seen by multiple rules/runs) merge

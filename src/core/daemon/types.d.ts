@@ -111,6 +111,16 @@ export interface UnloadableManifestSnapshot {
   message: string
 }
 
+/**
+ * One `daemon.sink_materialize_failed` record read back from the daemon log
+ * for a repair hint (issue #2547). Either field is null when the record did
+ * not carry it as a string.
+ */
+export interface SinkMaterializeFailure {
+  instance: string | null
+  errorKind: string | null
+}
+
 export interface SinkSnapshot {
   instance: string
   plugin: string
@@ -260,6 +270,7 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'daemon_heartbeat_stale'
   | 'daemon_exited_abnormally'
+  | 'daemon_boot_failed'
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
@@ -270,6 +281,8 @@ export type StatusDiagnosticKind =
   | 'gateway_upstreams_dropped'
   | 'recent_errors'
   | 'sink_export_failing'
+  | 'sink_dataset_unsupported'
+  | 'sink_materialize_failed'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
   | 'client_sync_list_unreadable'
@@ -373,14 +386,35 @@ export interface ClientActionsReport {
   actions: ClientActionReport[]
 }
 
+/** Current-run route and bounded append evidence for Ollama. */
+export interface OllamaCaptureStatus {
+  state: 'ready' | 'observed' | 'persisted' | 'failed' | 'disabled' | 'unconfirmed'
+  configuredRoot: string | null
+  captureRoot: string | null
+  routeConfirmed: boolean
+  processorReady: boolean
+  lastPersisted: string | null
+  lastFailed: string | null
+  historical: boolean
+  reason: string | null
+  next: string
+}
+
 /** Per-client attach state probed off the user's home directory. */
 export interface ClientAttachReport {
+  /** Bounded current-run Ollama route and append evidence, without cache reads. */
+  capture?: OllamaCaptureStatus
   /** `claude` or `codex`. */
   name: string
   /** The plugin that owns this client (for layer provenance, LLP 0031). */
   plugin: string
   /** Plugin enabled in config. */
   configured: boolean
+  /**
+   * HypAware records this client: configured, and not switched off by
+   * `hyp client detach` (`recording: false` on the plugin entry, LLP 0466).
+   */
+  recording: boolean
   /**
    * The client declares an `attach_probe`, so attach is a state that can be
    * observed (and reversed). False for a probe-less client (`claude-desktop`
@@ -457,9 +491,11 @@ export interface CaptureHealthReport {
   /**
    * Milliseconds of activity past the capture baseline (0 when none).
    *
-   * Under `state: 'unknown'` this is still the filesystem's unconfirmed
-   * suspicion, which is all it ever was: it is `state`, not this number,
-   * that says whether anything stands behind it.
+   * Under `state: 'unknown'` this is the filesystem's unconfirmed suspicion
+   * when the confirmation read found no turn, and the gap to the turn it did
+   * find when that turn sat inside the threshold but a later one could not
+   * be ruled out. Either way it is `state`, not this number, that says
+   * whether anything stands behind it.
    */
   gapMs: number
   /**
@@ -726,6 +762,13 @@ export interface HypAwareStatusReport {
    * version, cached auto_update flag, provenance, and the last probe.
    */
   selfUpdate: { line: string | null, json: Record<string, unknown> }
+  /**
+   * Informational notice naming clients whose ledger-recorded managed skills
+   * or agents update-time installation does not cover (LLP 0534). Null when
+   * there are none or the plugin catalog could not be read. Never a
+   * diagnostic, so it moves neither `overall` nor the headline.
+   */
+  assetCoverage?: string | null
 }
 
 export interface CollectStatusOptions {
@@ -745,13 +788,15 @@ export interface CollectStatusOptions {
   /** Absolute path to the daemon binary the installer recorded. */
   binPath?: string
   isLaunchAgentInstalled?: (opts: { label?: string; plistDir?: string; homeDir?: string }) => boolean
-  launchAgentStatus?: (opts: { label?: string; launchctl?: LaunchctlAdapter; userDomain?: string; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
+  launchAgentStatus?: (opts: { label?: string; launchctl?: LaunchctlAdapter; userDomain?: string; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number; unreachable?: boolean }>
   isSystemdUnitInstalled?: (opts: { label?: string; unitDir?: string; homeDir?: string }) => boolean
-  systemdUnitStatus?: (opts: { label?: string; systemctl?: SystemctlAdapter; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
+  systemdUnitStatus?: (opts: { label?: string; systemctl?: SystemctlAdapter; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number; unreachable?: boolean }>
   /** Keychain trust probe (tests, and any caller that must not shell out). */
   isCaTrusted?: (args: { certPath: string }) => Promise<boolean>
   /** Launchd user-environment probe (tests, and any caller that must not shell out). */
   isLaunchdEnvSet?: () => Promise<boolean>
+  /** Boot-time probe as epoch ms, `undefined` when unknown (tests). Defaults to the platform's boot clock. */
+  bootTimeMs?: () => number | undefined
 }
 
 export interface SystemctlResult {
@@ -1001,6 +1046,12 @@ export interface RunDaemonOptions {
    * the run still reports green.
    */
   installSignalHandlers?: boolean
+  /**
+   * The caller relaunches this run when it ends with 75 (LLP 0529), so a stop
+   * past its deadline kills the processing child and lets the stop finish
+   * instead of exiting, exiting only one deadline later if it still has not.
+   */
+  relaunchesOnRestart?: boolean
   /** Whether the runtime reports foreground mode (default true). */
   foreground?: boolean
   /** Temp directory root for sink materialization scratch files. */
@@ -1012,6 +1063,15 @@ export interface RunDaemonOptions {
    * `hyp backfill` subprocess.
    */
   actionReconciler?: ActionReconciler
+}
+
+/**
+ * The process holding a port the daemon could not bind (issue #137): a pid
+ * and an executable name, never a command line.
+ */
+export interface PortOwner {
+  pid: number
+  executable?: string
 }
 
 export interface DaemonLogger {

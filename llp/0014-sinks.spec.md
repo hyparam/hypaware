@@ -7,7 +7,7 @@
 **Date:** 2026-06-01
 **Related:** LLP 0010, LLP 0013, LLP 0025
 
-**Extended-by:** LLP 0305 (eligible open datasets use catalog registration and begin at a fresh local high-water); LLP 0307 (durable dataset rollout distinguishes existing partitions from future ones); LLP 0452 (optional byte ranges for BlobStore reads)
+**Extended-by:** LLP 0305 (eligible open datasets use catalog registration and begin at a fresh local high-water); LLP 0307 (durable dataset rollout distinguishes existing partitions from future ones); LLP 0452 (optional byte ranges for BlobStore reads); LLP 0471 (per-instance scheduling, complete elapsed chunk budgets and cancellation)
 
 > Export targets and the export driver. Decomposed from `hypaware-design.md`
 > (Sinks).

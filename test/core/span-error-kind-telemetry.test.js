@@ -39,7 +39,12 @@ async function captureSpans(fn) {
   const spans = []
   const provider = new TracerProvider({
     resource: { attributes: {} },
-    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { spans.push(...batch) } }],
+    // Copy at export: a retained live Span is not what the exporter saw.
+    exporters: [{
+      exportBatch: (/** @type {any[]} */ batch) => {
+        for (const s of batch) spans.push({ name: s.name, status: { ...s.status }, attributes: { ...s.attributes } })
+      },
+    }],
   })
   provider.register()
   /** @type {unknown} */
@@ -225,4 +230,56 @@ test('an untyped query failure still exports the default kind', async () => {
   }))
 
   assert.equal(spanNamed(spans, 'query.execute_sql').attributes.error_kind, 'unhandled_exception')
+})
+
+/**
+ * A body's own `setAttribute` write takes the same value bound the opening
+ * bag does (issue #2376). Before, an in-body `error_kind` reached the
+ * exporter as written: an object, `NaN` or a 5000-character string where
+ * the bag path would have exported a bounded scalar.
+ */
+test('an oversized or object error_kind written in the body exports as a bounded scalar', async () => {
+  const long = await captureSpans(() => withSpan('probe.long_kind', { status: 'ok' }, async (span) => {
+    span.setAttribute('error_kind', 'x'.repeat(5000))
+    throw new Error('refused')
+  }))
+  assert.equal(spanNamed(long.spans, 'probe.long_kind').attributes.error_kind, 'x'.repeat(512))
+
+  const object = await captureSpans(() => runRoot('command.run', { hyp_command: 'query', status: 'ok' }, async (span) => {
+    span.setAttributes({ error_kind: { kind: 'nested' } })
+    throw new Error('root refused')
+  }))
+  assert.equal(spanNamed(object.spans, 'command.run').attributes.error_kind, '{"kind":"nested"}')
+})
+
+test('an error_kind nothing can describe falls back to the default kind', async () => {
+  const unreadable = {
+    toJSON() { throw new Error('no json') },
+    toString() { throw new Error('no string') },
+  }
+  const { spans } = await captureSpans(() => withSpan('probe.unreadable_kind', { status: 'ok' }, async (span) => {
+    span.setAttribute('error_kind', unreadable)
+    throw new Error('refused')
+  }))
+  assert.equal(spanNamed(spans, 'probe.unreadable_kind').attributes.error_kind, 'unhandled_exception')
+
+  const nulled = await captureSpans(() => withSpan('probe.null_kind', { status: 'ok' }, async (span) => {
+    span.setAttribute('error_kind', null)
+    throw new Error('refused')
+  }))
+  assert.equal(spanNamed(nulled.spans, 'probe.null_kind').attributes.error_kind, 'unhandled_exception')
+})
+
+test('typed scalars written on the success branch export unchanged', async () => {
+  const { spans } = await captureSpans(() => withSpan('probe.scalars', { status: 'ok' }, async (span) => {
+    span.setAttributes({ rows_written: 3, ratio: 0.5, released: false, error_kind: 'soft_miss', note: '' })
+    span.setAttribute('elapsed_ms', Number.NaN)
+  }))
+  const attrs = spanNamed(spans, 'probe.scalars').attributes
+  assert.equal(attrs.rows_written, 3)
+  assert.equal(attrs.ratio, 0.5)
+  assert.equal(attrs.released, false)
+  assert.equal(attrs.error_kind, 'soft_miss')
+  assert.equal(attrs.note, '')
+  assert.equal(attrs.elapsed_ms, 0, 'a non-finite number is bounded as the bag path bounds it')
 })

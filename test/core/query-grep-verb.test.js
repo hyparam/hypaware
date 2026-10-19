@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process'
 import * as nodeModule from 'node:module'
 
 import { verbToCommand } from '../../src/core/cli/verb_command.js'
-import { argvToParams } from '../../src/core/cli/verb_codec.js'
+import { argvToParams, toJsonSchema, validateToolArguments } from '../../src/core/cli/verb_codec.js'
 import { CORE_VERBS } from '../../src/core/cli/core_verbs.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
@@ -172,19 +172,109 @@ test('the limit produces the truncation notice on stderr', async () => {
   assert.match(err.join(''), /more matches exist beyond the limit/)
 })
 
-test('a limit above the ceiling clamps to it instead of dropping below the default', async () => {
-  // 60 rows: more than the default 50, so a fallback-to-default and a clamp
-  // to the ceiling are distinguishable. Falling back would answer a request
-  // for more rows with fewer, then advise raising a limit already at 9999.
+/**
+ * Count every touch of the local cache service, so a test can prove a
+ * refused limit never started a search.
+ *
+ * @param {any} ctx
+ */
+function countStorage(ctx) {
+  const counter = { touches: 0 }
+  const real = ctx.storage
+  ctx.storage = new Proxy(real, {
+    get(target, key, receiver) {
+      counter.touches += 1
+      const v = Reflect.get(target, key, receiver)
+      return typeof v === 'function' ? v.bind(target) : v
+    },
+  })
+  return counter
+}
+
+test('a limit of 1000, the ceiling, is accepted and searches', async () => {
+  // 60 rows: more than the default 50, so a fallback to the default would
+  // show here as a truncated answer.
   const batch = []
   for (let i = 0; i < 60; i += 1) batch.push(mkRow({ content_text: `needle ${i}` }))
   const { ctx, out, err } = await makeCtx([batch])
-  const code = await cmd.run(['needle', '--limit', '9999'], ctx)
+  const counter = countStorage(ctx)
+  const code = await cmd.run(['needle', '--limit', '1000'], ctx)
   assert.equal(code, 0)
   const rendered = out.join('')
   assert.match(rendered, /needle 0\b/)
   assert.equal(rendered.split('\n').filter((line) => /content_text/.test(line)).length, 60)
-  assert.equal(err.join(''), '', 'a clamped limit still covered every match, so nothing is truncated')
+  assert.equal(err.join(''), '', 'a limit of 1000 covered every match, so nothing is truncated')
+  assert.ok(counter.touches > 0, 'the counter sees a real search')
+})
+
+test('a limit above the ceiling is refused before any search runs', async () => {
+  // It used to be clamped to 1000 with exit 0, so `--limit 5000` answered as
+  // if 1000 had been asked for (issue #2520).
+  for (const over of ['1001', '5000', '1e30']) {
+    const batch = []
+    for (let i = 0; i < 60; i += 1) batch.push(mkRow({ content_text: `needle ${i}` }))
+    const { ctx, out, err } = await makeCtx([batch])
+    const counter = countStorage(ctx)
+    const code = await cmd.run(['needle', '--limit', over], ctx)
+    assert.equal(code, 2, `--limit ${over} is a usage error`)
+    assert.match(err.join(''), new RegExp(`--limit expects an integer from 1 to 1000 \\(got ${over.replace('+', '\\+')}\\)`))
+    assert.equal(out.join(''), '')
+    assert.equal(counter.touches, 0, `--limit ${over} never reached the cache service`)
+  }
+})
+
+test('a limit above the ceiling is refused before --remote sends anything', async (t) => {
+  let calls = 0
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  globalThis.fetch = /** @type {any} */ (async () => { calls += 1; throw new Error('no request should be sent') })
+  /** @type {string[]} */ const out = []
+  /** @type {string[]} */ const err = []
+  const ctx = /** @type {any} */ ({
+    env: { HYP_HOME: '/tmp/none', HYP_REMOTE_TOKEN_PROD: 'tok' },
+    config: { version: 2, query: { remotes: { prod: { url: 'https://hyp.internal/mcp' } } } },
+    query: {}, storage: {},
+    stdout: { write: (/** @type {string} */ s) => out.push(s) },
+    stderr: { write: (/** @type {string} */ s) => err.push(s) },
+  })
+  const code = await cmd.run(['needle', '--limit', '1001', '--remote', 'prod'], ctx)
+  assert.equal(code, 2)
+  assert.match(err.join(''), /--limit expects an integer from 1 to 1000 \(got 1001\)/)
+  assert.equal(calls, 0, 'no MCP request for a refused limit')
+})
+
+test('the MCP schema states the ceiling and the MCP validator refuses above it', () => {
+  const projected = /** @type {any} */ (toJsonSchema(queryGrepVerb.inputSchema))
+  assert.equal(projected.properties.limit.minimum, 1)
+  assert.equal(projected.properties.limit.maximum, 1000)
+  assert.equal(projected.properties.limit.default, 50)
+  const atCeiling = validateToolArguments(queryGrepVerb.inputSchema, { query: 'needle', limit: 1000 })
+  assert.ok(atCeiling.ok)
+  assert.equal(atCeiling.params.limit, 1000)
+  const over = validateToolArguments(queryGrepVerb.inputSchema, { query: 'needle', limit: 1001 })
+  assert.equal(over.ok, false)
+  assert.match(over.ok ? '' : over.error, /limit expects an integer from 1 to 1000 \(got 1001\)/)
+  // A numeric property with no maximum is unchanged: only the bound it
+  // declares applies.
+  const unbounded = { type: 'object', properties: { n: { type: 'integer', minimum: 1 } } }
+  const big = validateToolArguments(/** @type {any} */ (unbounded), { n: 5000 })
+  assert.ok(big.ok)
+  assert.equal(big.params.n, 5000)
+  const cli = argvToParams(/** @type {any} */ (unbounded), ['--n', '5000'])
+  assert.ok(cli.ok)
+  assert.equal(cli.params.n, 5000)
+})
+
+test('the bundled query skills describe the ceiling as a refusal', async () => {
+  for (const file of [
+    'hypaware-core/skills/hypaware-query/search.md',
+    'hypaware-core/plugins-workspace/claude/skills/hypaware-query/search.md',
+    'hypaware-core/plugins-workspace/codex/skills/hypaware-query/search.md',
+  ]) {
+    const text = await fs.readFile(path.join(import.meta.dirname, '..', '..', file), 'utf8')
+    assert.match(text, /accepts 1 to 1000; a larger value is refused/, file)
+    assert.doesNotMatch(text, /reduced to 1000/, file)
+  }
 })
 
 test('a limit the flag cannot use is refused, not quietly replaced', async () => {
@@ -196,7 +286,7 @@ test('a limit the flag cannot use is refused, not quietly replaced', async () =>
     const { ctx, out, err } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
     const code = await cmd.run(['needle', '--limit', bad], ctx)
     assert.equal(code, 2, `--limit ${bad} is a usage error`)
-    assert.match(err.join(''), /--limit expects a positive integer/)
+    assert.match(err.join(''), /--limit expects an integer from 1 to 1000/)
     assert.equal(out.join(''), '')
   }
 })
@@ -209,9 +299,8 @@ test('an absent limit still takes the default', async () => {
 })
 
 test('at the ceiling the truncation notice stops advising a flag that cannot move', () => {
-  // The clamp exists so a caller is never told to raise a limit it already
-  // pinned; the notice has to keep that promise or the clamp only moves the
-  // unfollowable advice one flag along.
+  // A caller at the ceiling has no larger limit to ask for, so the notice
+  // must not tell it to raise one.
   const atCeiling = queryGrepVerb.render(
     { hits: [], truncated: true, exhausted: true, limitCeilingReached: true },
     /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 })
@@ -242,6 +331,16 @@ test('an interrupted walk reports the interruption, not an empty machine', async
   )
   assert.match(stopped.stderr ?? '', /stopped before covering every file/)
   assert.doesNotMatch(stopped.stderr ?? '', /nothing is recorded on this machine/)
+})
+
+test('the incomplete-walk notice tells the caller how to retry and keeps JSON stdout clean', () => {
+  const rendered = queryGrepVerb.render(
+    { hits: [], truncated: false, exhausted: false },
+    /** @type {any} */ ({ format: 'json', json: false, maxCell: 200, maxBytes: 32768 })
+  )
+  assert.match(rendered.stderr ?? '', /stopped before covering every file; results may be incomplete/)
+  assert.match(rendered.stderr ?? '', /Narrow with --from\/--to or --session-id and retry/)
+  assert.doesNotThrow(() => JSON.parse(rendered.stdout))
 })
 
 test('a truncated AND interrupted search prints both notices, not the louder one', () => {
@@ -417,6 +516,108 @@ test('--remote calls the server grep_search with the wire params and renders its
   assert.match(err.join(''), /more matches exist beyond the limit/)
 })
 
+/**
+ * Run `hyp query grep needle --remote prod` against `stubServer` and keep
+ * what reached each stream.
+ *
+ * @param {string[]} extra
+ */
+async function runRemoteGrep(extra = []) {
+  /** @type {string[]} */ const out = []
+  /** @type {string[]} */ const err = []
+  const ctx = /** @type {any} */ ({
+    env: { HYP_HOME: '/tmp/none', HYP_REMOTE_TOKEN_PROD: 'tok' },
+    config: { version: 2, query: { remotes: { prod: { url: 'https://hyp.internal/mcp' } } } },
+    query: {}, storage: {},
+    stdout: { write: (/** @type {string} */ s) => out.push(s) },
+    stderr: { write: (/** @type {string} */ s) => err.push(s) },
+  })
+  const code = await cmd.run(['needle', '--remote', 'prod', ...extra], ctx)
+  return { code, out: out.join(''), err: err.join('') }
+}
+
+test('a malformed --remote answer fails in every format instead of rendering as an empty success', async (t) => {
+  // `--remote` adopts the server's answer without running `operation`, so
+  // the floor the local and injected paths enforce has to hold on render.
+  const malformed = [
+    { truncated: false, exhausted: true },
+    { hits: {}, truncated: false, exhausted: true },
+    { hits: [], exhausted: true },
+    { hits: [], truncated: false },
+    { hits: [], truncated: 'no', exhausted: true },
+  ]
+  for (const answer of malformed) {
+    for (const format of [[], ['--format', 'json'], ['--format', 'jsonl']]) {
+      stubServer(t, answer)
+      const { code, out, err } = await runRemoteGrep(format)
+      const label = `${JSON.stringify(answer)} ${format.join(' ')}`
+      assert.equal(code, 1, label)
+      assert.equal(out, '', label)
+      assert.match(err, /the grep_search backend returned no (hits array|truncated\/exhausted booleans)/, label)
+    }
+  }
+})
+
+test('a valid empty --remote answer still succeeds and keeps both completeness notices', async (t) => {
+  stubServer(t, { hits: [], truncated: false, exhausted: true })
+  const empty = await runRemoteGrep()
+  assert.equal(empty.code, 0)
+  assert.doesNotMatch(empty.err, /backend returned|more matches exist|stopped before/)
+
+  stubServer(t, { hits: [], truncated: true, exhausted: false })
+  const both = await runRemoteGrep(['--format', 'json'])
+  assert.equal(both.code, 0)
+  assert.match(both.err, /more matches exist beyond the limit/)
+  assert.match(both.err, /stopped before covering every file/)
+})
+
+/**
+ * A server-shaped grep hit for the remote truncation tests.
+ *
+ * @param {number} i
+ */
+function remoteHit(i) {
+  return {
+    date: '2026-08-12', sessionId: `s${i}`, agentId: null, conversationId: null,
+    partId: `p${i}`, messageId: `m${i}`, messageCreatedAt: '2026-08-12T01:00:00Z',
+    matches: [{ column: 'content_text', snippet: `...needle ${i}...` }],
+  }
+}
+
+test('a capped --remote grep prints grep\'s own limit notice once, not the SQL-shaped server-cap line', async (t) => {
+  stubServer(t, { hits: [remoteHit(1)], truncated: true, exhausted: true })
+  const capped = await runRemoteGrep()
+  assert.equal(capped.code, 0)
+  assert.equal(capped.err.match(/more matches exist beyond the limit/g)?.length, 1)
+  assert.doesNotMatch(capped.err, /remote:|Iceberg archive/)
+
+  // The walk that also stopped early still says so, beside the limit line.
+  stubServer(t, { hits: [remoteHit(1)], truncated: true, exhausted: false })
+  const both = await runRemoteGrep()
+  assert.equal(both.code, 0)
+  assert.equal(both.err.match(/more matches exist beyond the limit/g)?.length, 1)
+  assert.match(both.err, /stopped before covering every file/)
+  assert.doesNotMatch(both.err, /remote:|Iceberg archive/)
+})
+
+test('a capped --remote grep keeps the client display-budget notice', async (t) => {
+  stubServer(t, { hits: [remoteHit(1), remoteHit(2), remoteHit(3)], truncated: true, exhausted: true })
+  const budget = await runRemoteGrep(['--max-bytes', '200'])
+  assert.equal(budget.code, 0)
+  assert.match(budget.err, /notice: showing \d+ of 3 rows \(200B row-data budget/)
+  assert.match(budget.err, /more matches exist beyond the limit/)
+  assert.doesNotMatch(budget.err, /remote:/)
+})
+
+test('a malformed --remote answer marked truncated keeps the generic server-cap line', async (t) => {
+  // Only an answer of grep's shape drops the line; the tool name alone does not.
+  stubServer(t, { hits: {}, truncated: true, exhausted: true })
+  const malformed = await runRemoteGrep()
+  assert.equal(malformed.code, 1)
+  assert.match(malformed.err, /remote: result truncated/)
+  assert.match(malformed.err, /the grep_search backend returned no hits array/)
+})
+
 // The injected-backend seam (LLP 0314 / LLP 0353). These drive
 // `operation` directly with a stubbed context, because the harness above
 // goes through the projected command, whose `buildOperationContext` never
@@ -456,7 +657,7 @@ test('an injected backend receives exactly the seam shape, and never the host wi
     chain_id: 'a2',
     from: '2026-08-01',
     to: '2026-08-31',
-    limit: 9999,
+    limit: 1000,
     'include-local-only': true,
   }, ctx)
   // Exactly these keys: `storage`, `refresh` and `callerCwd` are this
@@ -472,7 +673,7 @@ test('an injected backend receives exactly the seam shape, and never the host wi
     chainId: 'a2',
     from: '2026-08-01',
     to: '2026-08-31',
-    // Clamped by the verb, before the seam: a backend never has to
+    // Validated by the verb, before the seam: a backend never has to
     // re-default or re-cap, and both planes page identically.
     limit: 1000,
     includeLocalOnly: true,
@@ -504,7 +705,13 @@ test('the argument refusals run before the seam, so a typo never reaches the bac
     async () => { await queryGrepVerb.operation({ query: 'needle', from: '2026-08-20', to: '2026-08-01' }, ctx) },
     VerbUsageError,
   )
-  assert.equal(calls, 0, 'a cross-field or shape refusal is true for any data plane')
+  // A host that calls `operation` directly skips the codec; the ceiling is
+  // still a refusal there, never a clamp handed to the backend.
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle', limit: 1001 }, ctx) },
+    (/** @type {any} */ e) => e instanceof VerbUsageError && /from 1 to 1000 \(got 1001\)/.test(e.message),
+  )
+  assert.equal(calls, 0, 'a cross-field, shape or range refusal is true for any data plane')
 })
 
 test('with a backend supplied the local plane is never consulted', async () => {
@@ -527,7 +734,7 @@ test('with a backend supplied the local plane is never consulted', async () => {
   assert.match(rendered.stdout ?? '', /injected needle/)
 })
 
-test('a bare result gets the clamp fact appended and does not forge "nothing is recorded"', async () => {
+test('a bare result gets the ceiling fact appended and does not forge "nothing is recorded"', async () => {
   // The file counters are the local service's own; an injected backend
   // leaves them `undefined`, and the render's guard is a strict `=== 0`,
   // so the "nothing is recorded on this machine yet" line correctly stays
@@ -664,4 +871,52 @@ test('an injecting host never loads the local search stack', (t) => {
   // message and `run.error` - the only value naming the cause - discarded.
   assert.ifError(run.error)
   assert.equal(run.status, 0, run.stderr)
+})
+
+test('a colour terminal gets the snippet matches painted; anything else stays plain', () => {
+  const result = {
+    hits: [{
+      date: '2026-08-12', sessionId: 'needle-s', agentId: null, conversationId: null,
+      partId: 'p1', messageId: 'm1', messageCreatedAt: '2026-08-12T00:00:00Z',
+      matches: [{ column: 'content_text', snippet: 'a Needle and a needle' }],
+    }],
+    truncated: false,
+    exhausted: true,
+  }
+  const base = { format: 'table', json: false, maxCell: 200, maxBytes: 32768 }
+  const painted = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: true }), { query: 'needle' }).stdout
+  assert.equal((painted.match(/\x1b\[1m\x1b\[31m/g) ?? []).length, 2, 'both case variants in the snippet are painted')
+  assert.match(painted, /needle-s/, 'the session id locator is not painted')
+  assert.doesNotMatch(painted, /\x1b\[1m\x1b\[31mneedle\x1b\[0m-s/)
+  const plain = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: false }), { query: 'needle' }).stdout
+  assert.doesNotMatch(plain, /\x1b/)
+  const json = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, format: 'json', color: true }), { query: 'needle' }).stdout
+  assert.doesNotMatch(json, /\x1b/, 'a pipeline format is never painted')
+})
+
+// `renderTable` pads a column to at most 80 characters without truncating
+// a longer cell, so a long session id pushes its row's snippet to the
+// right of the header's offset. The paint must follow each row's own
+// snippet, never landing on a locator that happens to contain the query.
+test('a locator wider than its column leaves the paint on the snippet', () => {
+  /** @param {string} sessionId @param {string} snippet */
+  const hit = (sessionId, snippet) => ({
+    date: '2026-08-12', sessionId, agentId: null, conversationId: null,
+    partId: 'needle-part', messageId: 'needle-message', messageCreatedAt: '2026-08-12T00:00:00Z',
+    matches: [{ column: 'content_text', snippet }],
+  })
+  const result = {
+    hits: [hit(`${'x'.repeat(150)}needle`, 'a needle here'), hit('needle-s', 'one more needle')],
+    truncated: false,
+    exhausted: true,
+  }
+  const base = { format: 'table', json: false, maxCell: 200, maxBytes: 32768 }
+  const painted = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: true }), { query: 'needle' }).stdout
+  const plain = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: false }), { query: 'needle' }).stdout
+  assert.equal(painted.replace(/\x1b\[[0-9;]*m/g, ''), plain, 'stripped of its paint, the table is the plain one')
+  const red = '\x1b[1m\x1b[31mneedle\x1b[0m'
+  const [, , long, short] = plain.split('\n')
+  const [, , paintedLong, paintedShort] = painted.split('\n')
+  assert.equal(paintedLong, `${long.slice(0, -'a needle here'.length)}a ${red} here`, 'only the overflowing row\'s snippet is painted')
+  assert.equal(paintedShort, `${short.slice(0, -'one more needle'.length)}one more ${red}`, 'only the short row\'s snippet is painted')
 })

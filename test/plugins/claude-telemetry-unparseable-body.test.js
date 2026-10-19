@@ -283,7 +283,7 @@ test('overlapping loadSpooledBodies calls for one body_ref issue exactly one rea
 // `bodies`: the second event read the file again after the first event had
 // deleted it, saw ENOENT, and counted `missing`, so one result called one ref
 // both `unparseable` and `missing`. The shared `reading` entry does not
-// cover it: it is dropped when the read settles, before the first `unlink`.
+// cover it: the call leaves it once the first event is classified.
 test('one batch naming an unparseable body_ref twice counts it once, never missing', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-dup-'))
   const realReadFile = fsp.readFile
@@ -313,6 +313,101 @@ test('one batch naming an unparseable body_ref twice counts it once, never missi
     await assert.rejects(fsp.stat(file))
   } finally {
     fsp.readFile = realReadFile
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * @param {string} file
+ */
+function bodyEvents(file) {
+  return /** @type {any} */ ([{
+    name: 'api_request_body',
+    timestamp: '2026-08-17T19:31:00.000Z',
+    attributes: { body_ref: file, request_id: REQUEST_ID },
+  }])
+}
+
+// Issue #2053. The second caller starts while the first is inside its `unlink`,
+// which is after the shared read settled. Ordering is forced with gates rather
+// than ticks: `unlink` holds until the second call has started, and any fresh
+// `readFile` holds until the deletion is done, so a caller that does not share
+// the first read always reaches the disk after the file is gone.
+test('a caller that arrives during the owner\'s unlink shares the read and never counts missing', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-unlink-'))
+  const unlinking = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const unlinked = Promise.withResolvers()
+  try {
+    const content = 'not json at all'
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, content, 'utf8')
+    const readFile = fsp.readFile
+    const unlink = fsp.unlink
+    let reads = 0
+    t.mock.method(fsp, 'readFile', async (/** @type {string} */ target) => {
+      if (target === file && ++reads > 1) await unlinked.promise
+      return readFile(target)
+    })
+    t.mock.method(fsp, 'unlink', async (/** @type {string} */ target) => {
+      if (target !== file) return unlink(target)
+      unlinking.resolve(undefined)
+      await release.promise
+      try {
+        return await unlink(target)
+      } finally {
+        unlinked.resolve(undefined)
+      }
+    })
+    const first = loadSpooledBodies(bodyEvents(file), { spoolDir: dir })
+    await unlinking.promise
+    const second = loadSpooledBodies(bodyEvents(file), { spoolDir: dir })
+    release.resolve(undefined)
+    const both = await Promise.all([first, second])
+    assert.equal(both[0].unparseable + both[1].unparseable, 2, 'both callers classify it unparseable')
+    assert.equal(both[0].missing + both[1].missing, 0, 'neither caller counts it missing')
+    assert.equal(both[0].unparseableBytes + both[1].unparseableBytes, content.length, 'bytes reported once')
+    assert.equal(reads, 1, 'the second caller shares the first read')
+    await assert.rejects(fsp.stat(file), { code: 'ENOENT' })
+
+    // The shared entry is gone once both settled: a valid body written to the
+    // same path afterwards is read fresh and projects, not the stale bytes.
+    await fsp.writeFile(file, JSON.stringify({ messages: [] }), 'utf8')
+    const after = await loadSpooledBodies(bodyEvents(file), { spoolDir: dir })
+    assert.equal(after.bodies.size, 1, 'a fresh read, not a leaked entry')
+    assert.equal(after.unparseable, 0)
+    assert.equal(reads, 2)
+  } finally {
+    release.resolve(undefined)
+    unlinked.resolve(undefined)
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The other exits (a missing file, a body that projects) leave the shared
+// entry too, once every overlapping caller is done with it.
+test('the shared read is released after overlapping callers on the missing and projected paths', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-shared-read-release-'))
+  try {
+    const file = path.join(dir, 'body.request.json')
+    const missing = await Promise.all([
+      loadSpooledBodies(bodyEvents(file), { spoolDir: dir }),
+      loadSpooledBodies(bodyEvents(file), { spoolDir: dir }),
+    ])
+    assert.equal(missing[0].missing + missing[1].missing, 2)
+
+    await fsp.writeFile(file, JSON.stringify({ model: 'first' }), 'utf8')
+    const projected = await Promise.all([
+      loadSpooledBodies(bodyEvents(file), { spoolDir: dir }),
+      loadSpooledBodies(bodyEvents(file), { spoolDir: dir }),
+    ])
+    assert.equal(projected[0].bodies.size + projected[1].bodies.size, 2, 'a released rejection, not a cached ENOENT')
+
+    await fsp.writeFile(file, JSON.stringify({ model: 'second' }), 'utf8')
+    const again = await loadSpooledBodies(bodyEvents(file), { spoolDir: dir })
+    const body = /** @type {any} */ (again.bodies.get(file))?.body
+    assert.equal(body?.model, 'second', 'a released read, not the earlier bytes')
+  } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
 })

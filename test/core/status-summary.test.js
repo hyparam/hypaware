@@ -37,31 +37,46 @@ test('compact status shows mixed sharing, probe-less sources, and hides unused c
   const text = render(report({
     layered: managed,
     clients: [
-      { name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true, attachable: true, mode: 'otel' },
-      { name: 'codex', plugin: '@hypaware/codex', configured: true, attached: false, attachable: false },
-      { name: 'cursor', plugin: '@hypaware/cursor', configured: false, attached: false, attachable: true },
+      { name: 'claude', plugin: '@hypaware/claude', configured: true, recording: true, attached: true, attachable: true, mode: 'otel' },
+      { name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false },
+      { name: 'cursor', plugin: '@hypaware/cursor', configured: false, recording: false, attached: false, attachable: true },
     ],
     clientSync: { syncing: ['claude'], localOnly: ['codex', 'hermes'] },
   }))
   assert.match(text, /^HypAware · Healthy/)
   assert.match(text, /606 MB · 90-day retention/)
-  assert.match(text, /claude\s+Attached \(otel\)\s+Sync/)
-  assert.match(text, /codex\s+Configured\s+Local only/)
-  assert.match(text, /hermes\s+Configured\s+Local only/)
+  assert.match(text, /claude\s+Recording \(otel\)\s+Sync/)
+  assert.match(text, /codex\s+Recording\s+Local only/)
+  assert.match(text, /hermes\s+Recording\s+Local only/)
   assert.doesNotMatch(text, /cursor|attach n\/a|active plugins|config:/)
   assert.match(text, /not delivery confirmation/)
 })
 
 test('missing enrolled policy stays unknown, while a solo client is local only', () => {
-  const clients = [{ name: 'codex', plugin: '@hypaware/codex', configured: true, attached: false, attachable: false }]
-  assert.match(render(report({ clients, layered: managed })), /codex\s+Configured\s+Unknown/)
-  assert.match(render(report({ clients })), /codex\s+Configured\s+Local only/)
+  const clients = [{ name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false }]
+  assert.match(render(report({ clients, layered: managed })), /codex\s+Recording\s+Unknown/)
+  assert.match(render(report({ clients })), /codex\s+Recording\s+Local only/)
+})
+
+// An unreadable central layer leaves `layered` and `clientSync` null exactly
+// as on a host that never joined, so only the collector's own diagnostic tells
+// the two apart (issue #2431).
+test('an unreadable central layer reads Unknown sharing, never solo-host local only', () => {
+  const clients = [{ name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false }]
+  const diagnostics = /** @type {HypAwareStatusReport['diagnostics']} */ ([{ severity: 'warning', kind: 'config_central_unreadable', message: 'central config layer /x is unreadable (boom)', repair: [] }])
+  const text = render(report({ clients, diagnostics }))
+  assert.match(text, /Sharing\s+Unknown \(organization config could not be read\)/)
+  assert.match(text, /codex\s+Recording\s+Unknown/)
+  assert.doesNotMatch(text, /No organization sync|Local only/)
+  const solo = render(report({ clients }))
+  assert.match(solo, /Sharing\s+No organization sync/)
+  assert.match(solo, /codex\s+Recording\s+Local only/)
 })
 
 test('warning gaps show both ages and one primary repair without asserting lost sessions', () => {
   const now = Date.now()
   const text = render(report({
-    clients: [{ name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true, attachable: true }],
+    clients: [{ name: 'claude', plugin: '@hypaware/claude', configured: true, recording: true, attached: true, attachable: true }],
     captureHealth: [{
       client: 'claude', plugin: '@hypaware/claude', source: 'claude-telemetry', state: 'gap',
       lastEventAt: new Date(now - 21 * 60000).toISOString(),
@@ -91,7 +106,7 @@ test('sharing holds and privacy exclusions remain visible in compact status', ()
 test('source and client probe errors remain visible and terminal-safe', () => {
   const text = render(report({
     sources: [{ name: 'github', plugin: '@hypaware/github', state: 'started', health: { state: 'ready', lastError: 'API timed out' } }],
-    clients: [{ name: 'broken', plugin: '@acme/broken', configured: false, attached: false, attachable: true, error: 'bad\n\u001b[31msettings' }],
+    clients: [{ name: 'broken', plugin: '@acme/broken', configured: false, recording: false, attached: false, attachable: true, error: 'bad\n\u001b[31msettings' }],
   }))
   assert.match(text, /^HypAware · Needs attention/)
   assert.match(text, /github: API timed out/)
@@ -125,4 +140,33 @@ test('CLI selects compact, verbose, and unchanged JSON with JSON precedence', as
   } finally {
     await fs.rm(temp, { recursive: true, force: true })
   }
+})
+
+test('an error-rank diagnostic reads differently from a warning-only advisory at default verbosity', () => {
+  const headline = (/** @type {string} */ text) => text.split('\n')[0]
+  const advisory = render(report({
+    diagnostics: [{ severity: 'warning', kind: 'client_attached_not_configured', message: 'codex still points at the gateway', repair: ['hyp client detach codex'] }],
+  }))
+  const outage = render(report({
+    overall: 'degraded',
+    diagnostics: [{ severity: 'error', kind: 'local_only_list_unreadable', message: 'local-only exclusion list is unreadable', repair: ['fix or remove the file'] }],
+  }))
+  assert.notEqual(headline(outage), headline(advisory))
+  assert.equal(headline(advisory), 'HypAware · Needs attention')
+  assert.equal(headline(outage), 'HypAware · Needs attention (degraded)')
+  // A report that contradicts its own breakdown cannot suppress the rank: the
+  // marker reads the error severity too, never the verdict alone.
+  const contradictory = render(report({
+    diagnostics: [{ severity: 'error', kind: 'config_invalid', message: 'bad', repair: [] }],
+  }))
+  assert.equal(headline(contradictory), 'HypAware · Needs attention (degraded)')
+  // The other direction: a verdict degraded without any error-severity
+  // diagnostic (the fresh no-config install) still carries the rank. The
+  // marker reads the verdict too, never the severity scan alone.
+  const freshInstall = render(report({
+    overall: 'degraded',
+    diagnostics: [{ severity: 'warning', kind: 'config_missing', message: 'no config file found', repair: ['hyp init'] }],
+  }))
+  assert.equal(headline(freshInstall), 'HypAware · Needs attention (degraded)')
+  assert.equal(headline(render(report())), 'HypAware · Healthy')
 })

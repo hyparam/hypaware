@@ -2,9 +2,11 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { SKILL_CLIENTS, clientSkillsDir } from '../helpers/client_skill_trees.js'
+import { readSkillFrontmatter } from '../helpers/skill_frontmatter.js'
 
 /**
  * Routing-surface tests for the `hypaware-query` skill frontmatter.
@@ -16,48 +18,30 @@ import { fileURLToPath } from 'node:url'
  * is model-mediated, so these tests cannot prove the routing works; they pin
  * the two things that ARE deterministic:
  *
- *   1. both client copies carry byte-identical frontmatter (no drift), and
+ *   1. every client copy carries byte-identical frontmatter (no drift), and
  *   2. the description names the natural session-search intents alongside the
  *      original product vocabulary.
  */
 
-const WORKSPACE = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../../hypaware-core/plugins-workspace'
-)
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
-const CLIENTS = ['claude', 'codex']
+const CLIENTS = SKILL_CLIENTS
 
 /**
- * Read the `key: value` frontmatter block of a SKILL.md. Deliberately tiny:
- * the frontmatter these skills use is flat single-line scalars, and the repo
- * has no YAML dependency.
+ * Read the `key: value` frontmatter block of a client's hypaware-query SKILL.md
+ * through the strict reader, so a quoted description compares by its value and
+ * one a real YAML parser would reject fails here too.
  *
  * @param {string} client
  * @returns {Record<string, string>}
  */
 function readFrontmatter(client) {
-  const file = path.join(WORKSPACE, client, 'skills/hypaware-query/SKILL.md')
-  const lines = fs.readFileSync(file, 'utf8').split('\n')
-  assert.equal(lines[0], '---', `${file}: expected frontmatter to open on line 1`)
-  const end = lines.indexOf('---', 1)
-  assert.ok(end > 0, `${file}: unterminated frontmatter`)
-  /** @type {Record<string, string>} */
-  const out = {}
-  for (const line of lines.slice(1, end)) {
-    const at = line.indexOf(': ')
-    // Skip non-scalar lines (block/list values, folded scalars) instead of
-    // asserting on them: this test only makes claims about the flat keys it
-    // actually reads, not about the shape of the whole frontmatter block.
-    if (at <= 0) continue
-    out[line.slice(0, at)] = line.slice(at + 2)
-  }
-  return out
+  return readSkillFrontmatter(path.join(clientSkillsDir(REPO_ROOT, client), 'hypaware-query/SKILL.md'))
 }
 
-test('hypaware-query frontmatter is identical across both client copies', () => {
-  const [claude, codex] = CLIENTS.map(readFrontmatter)
-  assert.deepEqual(claude, codex)
+test('hypaware-query frontmatter is identical across every client copy', () => {
+  const [claude, ...others] = CLIENTS.map(readFrontmatter)
+  for (const [i, other] of others.entries()) assert.deepEqual(other, claude, `${CLIENTS[i + 1]} frontmatter differs from claude`)
   assert.equal(claude.name, 'hypaware-query')
 })
 
@@ -84,6 +68,14 @@ test('hypaware-query description names the natural session-search intents', () =
   }
 })
 
+test('hypaware-query description reaches a team\'s history on a remote', () => {
+  // LLP 0481 T14: the skill body routes team history questions to the team
+  // graph commands; the description has to admit that scope at all.
+  for (const client of CLIENTS) {
+    assert.match(readFrontmatter(client).description.toLowerCase(), /team remote/, `${client}: description does not cover a team remote`)
+  }
+})
+
 test('hypaware-query description keeps its original product vocabulary', () => {
   // Widening the routing surface must not drop the SQL/telemetry triggers the
   // description already carried.
@@ -93,6 +85,17 @@ test('hypaware-query description keeps its original product vocabulary', () => {
     for (const pattern of kept) {
       assert.match(description, pattern, `${client}: description dropped ${pattern}`)
     }
+  }
+})
+
+test('hypaware-query discovery covers code-change intent and report operations', () => {
+  // Preserve discovery for responsibilities moved out of reference/report,
+  // alongside why/intent questions that otherwise start with git alone.
+  // These checks guard metadata coverage, not model invocation behavior.
+  const intents = [/recordings first/, /why code changed/, /removed/, /git/, /recommendations/i, /save/, /upload/, /list/, /view/, /hyprec-/, /fix/, /mark/]
+  for (const client of CLIENTS) {
+    const description = readFrontmatter(client).description
+    for (const intent of intents) assert.match(description, intent, `${client}: missing discovery intent ${intent}`)
   }
 })
 

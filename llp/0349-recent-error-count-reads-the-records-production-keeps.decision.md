@@ -3,7 +3,7 @@
 **Type:** Decision
 **Status:** Accepted
 **Systems:** Daemon, CLI
-**Extended-by:** LLP 0453 (export warning policy; historical counts retained)
+**Extended-by:** LLP 0453 (export warning policy; historical counts retained); LLP 0471 (finite retained diagnostic history, bounded metadata reads and ordinary-install failure/recovery transitions)
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-09-01

@@ -282,6 +282,18 @@ test('mutation guard never expires a live owner, recovers a dead owner, and fail
   assert.equal(isPartitionMutationBusy(new Error('cache partition mutation busy or lock unverifiable; retry after the writer finishes')), false)
 })
 
+// @ref LLP 0417#cache-mutation-guard [tests]: a container restart leaves a guard naming the new daemon's own PID
+test('mutation guard reclaims a guard left under this process PID by a previous incarnation', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cache-guard-pid-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const partition = path.join(root, 'partition')
+  const guard = path.join(root, '.partition.mutation-lock')
+  await fs.mkdir(guard)
+  await fs.writeFile(path.join(guard, `${process.pid}-00000000-0000-4000-8000-000000000000`), '')
+  await withPartitionMutationLock(partition, async () => {})
+  await assert.rejects(fs.stat(guard), { code: 'ENOENT' })
+})
+
 for (const source of [false, true]) test(`buffered append rechecks under the guard, source=${source}`, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cache-guard-append-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))

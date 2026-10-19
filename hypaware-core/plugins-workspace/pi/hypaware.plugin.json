@@ -22,14 +22,6 @@
         "format": "managed_file",
         "settings_file": ".pi/agent/extensions/hypaware.js",
         "marker_text": "// HYPWARE_PI_EXTENSION v1"
-      },
-      "launch": {
-        "bin": "pi",
-        "args": [
-          "-p",
-          "{prompt}"
-        ],
-        "label": "Pi"
       }
     },
     "picker": [
@@ -71,6 +63,12 @@
         "audience": "everyday",
         "summary": "Report whether this AI session is being dropped right now (fails closed)"
       }
+    ],
+    "skills": [
+      { "name": "hypaware-query", "clients": ["pi"] },
+      { "name": "hypaware-reference", "clients": ["pi"] },
+      { "name": "hypaware-privacy", "clients": ["pi"] },
+      { "name": "hypaware-report", "clients": ["pi"] }
     ],
     "config_sections": [
       {

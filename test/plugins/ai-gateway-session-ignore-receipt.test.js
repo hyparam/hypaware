@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -87,13 +88,6 @@ test('a successful ignore receipt does not claim a drop, for an id live traffic 
 
     // What it may claim - the write - it must claim plainly.
     assert.match(out, /in the gateway drop set/, 'report the membership that IS established')
-
-    // And it must state the bound, next to the success, where a caller reading
-    // "ignored" as done would see it.
-    assert.match(out, /what this proves/, 'the receipt names what it is a receipt for')
-    assert.match(out, /never inspects traffic/, 'why the gateway cannot say more')
-    assert.match(out, /suppresses nothing/, 'the failure this receipt cannot rule out')
-    assert.match(out, /the caller/, 'and where the guarantee actually comes from (R13)')
   })
 })
 
@@ -131,16 +125,55 @@ test('the unignore receipt reports the removal, not a resumption it cannot verif
   })
 })
 
-test('the reader carries the same qualifier, so writer and reader cannot drift', async () => {
-  // `status` answers the same `Set.has` question, so a confirmed `ignored`
-  // there rests on the identical bound. One shared constant, as with the
-  // ephemerality caveat: two statements of one contract drift apart.
-  const set = new Set(['sess-live'])
+test('a confirmed ignore says earlier rows remain and names the purge for this session', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
-    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-live' } })
-    assert.equal(await runSessionStatus([], ctx.ctx), 0)
-    assert.match(ctx.stdout(), /what this proves/)
-    assert.match(ctx.stdout(), /never inspects traffic/)
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['sess-purge-hint'], ctx.ctx), 0)
+    const out = ctx.stdout()
+    assert.match(out, /To delete what this session already recorded/)
+    assert.match(out, /`hyp privacy purge --session sess-purge-hint`/, 'the exact command, with the real id')
+    assert.match(out, /also deletes copies on configured remotes/, 'the remote reach of a session purge is not hidden')
+    assert.match(out, /`hyp privacy purge --session sess-purge-hint --local-only`/)
+  })
+})
+
+test('the --json ignore receipt carries the purge command an agent can run', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(["it's odd", '--json'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.deepEqual(out.purge, {
+      earlier_rows: 'retained',
+      command: "hyp privacy purge --session 'it'\\''s odd'",
+      command_deletes_remote: true,
+      local_only_command: "hyp privacy purge --session 'it'\\''s odd' --local-only",
+    })
+  })
+})
+
+test('a dash-led session id binds to --session with = so the purge command parses', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['--json', '--', '--opaque-id'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.equal(out.purge.command, 'hyp privacy purge --session=--opaque-id')
+    assert.equal(out.purge.local_only_command, 'hyp privacy purge --session=--opaque-id --local-only')
+  })
+})
+
+test('the unignore receipt carries no purge hint', async () => {
+  const set = new Set(['sess-purge-hint'])
+  await withControlServer(set, async (base) => {
+    const human = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['sess-purge-hint'], human.ctx), 0)
+    assert.doesNotMatch(human.stdout(), /privacy purge/)
+    set.add('sess-purge-hint')
+    const json = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['sess-purge-hint', '--json'], json.ctx), 0)
+    assert.equal(JSON.parse(json.stdout()).purge, undefined)
   })
 })
 
@@ -241,6 +274,84 @@ for (const rel of SKILLS) {
 
     // And the reply is described as the membership receipt it is.
     assert.match(text, /drop set, and nothing more/, 'state the narrow contract plainly')
+  })
+}
+
+/**
+ * The verifier each fallback pipes the reply through, run rather than read
+ * (issue #533). It prints `opt-out confirmed` for a reply that passes, and
+ * nothing it checks authenticates whoever answered on that port, so the copies
+ * print a caveat line under it saying so. The caveat has to ride the success
+ * line and only that line: printed on a refusal, it would sit beside an error
+ * as though something had been confirmed. Each case below is a synthetic reply
+ * on stdin, so no control endpoint is reached.
+ *
+ * @ref LLP 0066#receipt-is-membership [tests]: the success output states the
+ * membership bound itself, rather than leaving it to the prose around it.
+ */
+const hasPython = spawnSync('python3', ['--version']).status === 0
+
+/** @param {string} rel */
+function receiptVerifier(rel) {
+  const m = skillText(rel).match(/printf '%s' "\$response" \| python3 -c '\n([\s\S]*?)\n' "\$/)
+  assert.ok(m, `${rel} must still pipe the reply through its embedded verifier`)
+  return m[1]
+}
+
+const CAVEAT = /^caveat: the responder on that port is not authenticated, and this is a membership receipt, not proof that recording stopped$/m
+
+for (const rel of SKILLS) {
+  test(`${rel} verifier confirms a valid reply with the responder caveat, and refuses the rest without it`, { skip: !hasPython && 'python3 is not on PATH' }, () => {
+    const code = receiptVerifier(rel)
+    const sent = 'sess-A'
+    /** @param {string} reply */
+    const verify = (reply) => spawnSync('python3', ['-c', code, sent], { input: reply, encoding: 'utf8' })
+
+    const valid = verify(JSON.stringify({ session_id: sent, ignored: true, total: 3 }))
+    assert.equal(valid.status, 0, valid.stderr)
+    assert.match(valid.stdout, /^opt-out confirmed for session sess-A \(total ignored: 3\)\n/, 'the success phrase leads, unchanged')
+    assert.match(valid.stdout, CAVEAT, 'and the caveat travels with it in the same output')
+
+    const refusals = {
+      'wrong id': [JSON.stringify({ session_id: 'sess-B', ignored: true, total: 3 }), /about session "sess-B", not "sess-A"/],
+      'string ignored': [JSON.stringify({ session_id: sent, ignored: 'true', total: 3 }), /NOT confirmed/],
+      'boolean total': [JSON.stringify({ session_id: sent, ignored: true, total: true }), /NOT confirmed/],
+      'invalid JSON': ['<html>not the gateway</html>', /was not JSON/],
+    }
+    for (const [name, [reply, why]] of Object.entries(refusals)) {
+      const result = verify(/** @type {string} */ (reply))
+      assert.notEqual(result.status, 0, `${name}: a reply that fails a check must exit nonzero`)
+      assert.match(result.stderr, /** @type {RegExp} */ (why), `${name}: and say why`)
+      assert.equal(result.stdout, '', `${name}: and print neither the success line nor the caveat`)
+    }
+  })
+}
+
+// Issue #1688: a bystander opt-out undo that runs unconditionally revokes a
+// deliberate one. A repeat add answers `ignored: true` the same as a first one
+// (the control route is a Set add), so the receipt cannot say whether this
+// call made the membership, and the opt-out is durable, so a wrong undo
+// resumes recording until the user notices. Every copy, the host-neutral tree
+// included, must gate the undo on the user and must not order it outright.
+const BYSTANDER_UNDO_COPIES = [
+  'hypaware-core/plugins-workspace/claude/skills/hypaware-privacy/SKILL.md',
+  'hypaware-core/plugins-workspace/codex/skills/hypaware-privacy/SKILL.md',
+  'hypaware-core/skills/hypaware-privacy/SKILL.md',
+]
+
+for (const rel of BYSTANDER_UNDO_COPIES) {
+  test(`${rel} undoes a bystander opt-out only once the user rules out their own`, () => {
+    const text = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', rel), 'utf8')
+    const start = text.indexOf('## Step 1')
+    const step1 = text.slice(start, text.indexOf('## Step 2', start))
+    assert.doesNotMatch(step1, /undo it before you stop/, 'the undo must not be an unconditional order')
+    assert.match(
+      step1,
+      /`hyp session unignore "<the session_id it reported>"` only if the user confirms they did not opt that session out themselves/,
+      'the undo must wait for the user to rule out a deliberate opt-out'
+    )
+    assert.match(step1, /cannot say whether the write added that session or found it already opted out/,
+      'and say why the receipt alone cannot decide it')
   })
 }
 

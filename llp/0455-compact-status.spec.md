@@ -30,9 +30,18 @@ It is an attention cue, not a change to the collector's `overall` verdict
 Each configured client or picker source carries `Sync` or `Local only` from
 the existing sharing split (LLP 0188). An enrolled host without a readable
 policy shows `Unknown`; it must not infer permission from configuration
-provenance. Sync is policy, not delivery confirmation. Unconfigured clients
-are omitted unless attached or carrying a probe error. Sources without attach
-probes, including Hermes and raw gateway sources, remain visible in the split.
+provenance. A host whose central config layer status cannot read (the
+collector's `config_central_unreadable` diagnostic, whichever way the layer is
+unreadable) is the same case: compact `Sharing` reads `Unknown`, each client
+reads `Unknown`, and verbose prints the split as unknown and an empty sink
+list as none visible rather than keeping data local, never `No organization
+sync` or `Local only`. Unknown says what the report cannot see; it does not
+claim a running daemon stopped forwarding. `--json` keeps its null
+`client_sync` and carries the evidence in that diagnostic, so all three views
+rest on one collection. Sync is policy, not delivery confirmation.
+Unconfigured clients are omitted unless attached or carrying a probe error.
+Sources without attach probes, including Hermes and raw gateway sources,
+remain visible in the split.
 
 First-sync holds, directory withholding, and the new-folder policy remain
 visible in both views. Product telemetry remains visible when enabled.
@@ -49,6 +58,31 @@ diagnostic and inspection command but moves the partition inventory to verbose.
 Paths, plugin inventory, proxy trust details, configuration etags, recent
 entrypoint inventory, and completed setup actions also move to verbose.
 
+## The verdict rides on the heading {#verdict-headline}
+
+The heading is the compact view's only rank. `Needs attention` alone cannot
+separate an outage from an advisory, so the heading appends ` (degraded)`
+whenever the collector's verdict is not `healthy` or any diagnostic carries
+`error` severity: `HypAware · Needs attention (degraded)`. The two existing
+words are unchanged and the marker only ever follows `Needs attention`, so a
+`Healthy` heading and anything reading either word still see what they saw.
+
+The marker is the verdict and the rank at once because the collector derives
+one from the other: an `error`-severity diagnostic is what degrades
+`overall`. Reading both is what keeps the heading from contradicting the
+`[ERROR]` tags `--verbose` prints for a report whose `overall` disagrees with
+its own diagnostics. The heading prints a literal, never `overall`'s bytes,
+and both inputs are collector enums rather than anything read back out of
+`status.json`.
+
+The per-diagnostic `[ERROR]`/`[WARN ]` tag stays in `--verbose`, where the
+diagnostics section already prints it. The compact Attention block keeps its
+uniform `!`: severity is a property of diagnostics only, and the block also
+carries a stopped daemon, capture gaps, source and client probe errors,
+unfinished client actions, and flush failures, which have no severity to
+print. Ranking only the rows that have one would read as ranking the rest
+below them. `--verbose` and `--json` are unchanged.
+
 ## Cost and validation {#validation}
 
 Both views use one existing status collection. Rendering adds no filesystem,
@@ -56,6 +90,6 @@ network, process, or cache probes. Client and health maps bound lookup work to
 the number of report entries; flush evidence keeps its eight-table text cap.
 
 Tests cover mixed sharing, unknown policy, probe-less clients, quiet unused
-clients, warning headlines, gap timestamps, privacy notices, bounded flush
-failure evidence, and verbose/JSON CLI dispatch. Existing detailed renderer
-tests continue to cover the verbose report.
+clients, warning and degraded headlines, gap timestamps, privacy notices,
+bounded flush failure evidence, and verbose/JSON CLI dispatch. Existing
+detailed renderer tests continue to cover the verbose report.

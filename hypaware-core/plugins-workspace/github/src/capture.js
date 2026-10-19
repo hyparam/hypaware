@@ -16,7 +16,7 @@ import { commitKey, repoKey, str } from './keys.js'
  *
  * @ref LLP 0360#three-invariants [implements]: ignore is enforced at capture, forward-only, exact-match
  *
- * @import { CursorState, GithubActor, GithubClient, GithubComment, GithubCommit, GithubCommitTask, GithubConfig, GithubIssue, GithubPull, GithubPullTask, GithubReview, GithubRepoWork, PluginLogger, RepoCursor } from './types.js'
+ * @import { CursorState, GithubActor, GithubClient, GithubComment, GithubCommit, GithubCommitTask, GithubConfig, GithubIssue, GithubPull, GithubPullTask, GithubRepoWork, GithubRequestBudget, GithubReview, PluginLogger, RepoCursor } from './types.js'
  */
 
 // @ref LLP 0361#budget [implements]: one fixed request allowance bounds the whole repository-capture tick
@@ -94,14 +94,18 @@ export async function resolveRepos(config, client, log, observedRepos) {
  * @param {string[]} [args.only]  restrict to these repos (e.g. `hyp github backfill owner/repo`)
  * @param {string[]} [args.observedRepos] repositories evidenced by export-eligible local agent activity
  * @param {number} [args.requestLimit] test seam; production uses CAPTURE_REQUEST_LIMIT
- * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>} `repos` is the inventory this tick selected (after
+ * @param {AbortSignal} [args.signal] the invocation's stop. It ends the run,
+ *   not one repository: the result comes back `cancelled`, with the cursors
+ *   holding only progress whose rows landed and `next_repo` still naming the
+ *   repository it stopped in
+ * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, cancelled?: boolean, errors: Array<{ repo: string, error: string }> }>} `repos` is the inventory this tick selected (after
  *   `ignore[]` and any `only` narrowing); `visited` is how many of them the request
  *   budget let it reach. It is fewer only when the budget ran out before a repository
  *   the tick had not started: a budget spent inside the last one still reaches them
  *   all, so `pending` - not the gap between the two - is what reports bounded work
  *   remaining (LLP 0361#budget).
  */
-export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT }) {
+export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT, signal }) {
   if (mode === 'backfill' && only?.length) authorizeBackfill(cursors, only, config)
   const ignored = new Set(config.ignore.map((repo) => repo.toLowerCase()))
   // @ref LLP 0409#one-time-imports [implements]: unfinished explicit imports join this tick only; exclusions cancel eligibility
@@ -113,7 +117,13 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       delete cursor.work
     } else imports.push(repo)
   }
-  const inventory = mode === 'backfill' && only?.length ? [] : await resolveRepos(config, client, log, observedRepos)
+  let inventory
+  try {
+    inventory = mode === 'backfill' && only?.length ? [] : await resolveRepos(config, client, log, observedRepos)
+  } catch (err) {
+    if (!cancellation(err)) throw err
+    return { repos: 0, visited: 0, events: 0, requests: 0, pending: false, cancelled: true, errors: [] }
+  }
   let repos = [...new Set([...inventory, ...imports])].sort()
   // A positional `hyp github backfill owner/repo` narrows this one invocation.
   // The round-robin continuation is a property of the WHOLE inventory, so a
@@ -132,11 +142,16 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
   /** @type {Array<{ repo: string, error: string }>} */
   const errors = []
   let pending = false
+  let cancelled = false
   let visited = 0
 
   repos = rotateTo(repos, cursors.next_repo)
 
   for (let i = 0; i < repos.length; i++) {
+    if (signal?.aborted) {
+      cancelled = true
+      break
+    }
     if (budget.remaining === 0) {
       pending = true
       break
@@ -165,10 +180,19 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
           await append(rows)
           repoEvents += rows.length
         },
-      })
+      }).catch(budgetSpentMidRedirect)
       if (!complete) pending = true
       else delete cursor.one_time_import
     } catch (err) {
+      // A stop is not this repository's failure: recording it and moving on
+      // would spend one more request and one more error per remaining
+      // repository. The rows already appended stay counted, and `next_repo` is
+      // left on this repository so the next run resumes its saved work first.
+      if (cancellation(err)) {
+        events += repoEvents
+        cancelled = true
+        break
+      }
       // A failed repo leaves durable work behind, but a failure is NOT bounded
       // backlog: `pending` drives the source's cadence, and treating an error
       // as pending pins a daily source at the 15-minute backlog cadence for as
@@ -191,8 +215,8 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       const cleared = kind === 'github_foreign_origin' && cursor.work !== undefined
       if (cleared) delete cursor.work
       // An answer that is terminal for the repository itself - unknown or
-      // inaccessible (404), gone (410), or moved (301, since redirects are
-      // never followed on a credential-bearing request) - retires a one-time
+      // inaccessible (404), gone (410), or moved (301, since redirects
+      // off the API origin are never followed on a credential-bearing request) - retires a one-time
       // import: the marker would otherwise re-enter every later tick and a
       // typo'd `hyp github backfill` retries forever (LLP 0409#one-time-imports
       // makes imports durable, not permanent). 403 is deliberately not
@@ -220,14 +244,14 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
   }
 
   if (visited < repos.length) pending = true
-  if (budget.remaining === 0 && pending) {
+  if (budget.remaining === 0 && pending && !cancelled) {
     log.info('github.capture_budget_exhausted', {
       request_limit: budget.limit,
       requests: budget.used,
       pending_repos: repos.filter((repo) => cursors.repos[repo]?.work).length,
     })
   }
-  return { repos: repos.length, visited, events, requests: budget.used, pending, errors }
+  return { repos: repos.length, visited, events, requests: budget.used, pending, ...(cancelled ? { cancelled } : {}), errors }
 }
 
 /**
@@ -306,7 +330,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
     if (work.phase === 'issues') {
       if (!budget.take()) return false
       const gate = openGate(work.issues_high, work.issues_high_ids, cursor.since?.issues, cursor.boundary?.issues, work.gate_emitted)
-      const page = await client.listIssuesPage(owner, name, cursor.since?.issues, pageUrl(work.page))
+      const page = await client.listIssuesPage(owner, name, cursor.since?.issues, pageUrl(work.page), budget)
       for (const issue of page.items) if (issue.pull_request) prNumbers.add(issue.number)
       // A pull carried by the issues feed still raises the watermark, but it
       // emits no row here, so it takes no place in the boundary set.
@@ -338,7 +362,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       }
       if (!budget.take()) return false
       const requestedPage = pageUrl(work.page)
-      const page = await client.listPullRequestsPage(owner, name, cursor.etag?.pulls, requestedPage)
+      const page = await client.listPullRequestsPage(owner, name, cursor.etag?.pulls, requestedPage, budget)
       if (page.notModified) {
         work.page = null
         continue
@@ -387,7 +411,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       if (tasks.length > 0) {
         if (!budget.take()) return false
         const task = tasks[0]
-        const page = await client.listCommitFilesPage(owner, name, task.sha, pageUrl(task.page))
+        const page = await client.listCommitFilesPage(owner, name, task.sha, pageUrl(task.page), budget)
         const commit = commitFromTask(task)
         await flush(page.items.map((path) => commitFileRow(repo, commit, path)))
         task.page = page.next
@@ -400,7 +424,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       }
       if (!budget.take()) return false
       const gate = openGate(work.commits_high, work.commits_high_ids, cursor.since?.commits, cursor.boundary?.commits, work.gate_emitted)
-      const page = await client.listCommitsPage(owner, name, cursor.since?.commits, pageUrl(work.page))
+      const page = await client.listCommitsPage(owner, name, cursor.since?.commits, pageUrl(work.page), budget)
       const fresh = page.items.filter((c) => gate.admit(commitTime(c), commitEventId(c, null)))
       await flush(fresh.map((c) => commitRow(repo, c, null)))
       work.commits_high = gate.high
@@ -416,7 +440,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
 
     if (!budget.take()) return false
     const gate = openGate(work.comments_high, work.comments_high_ids, cursor.since?.comments, cursor.boundary?.comments, work.gate_emitted)
-    const page = await client.listIssueCommentsPage(owner, name, cursor.since?.comments, pageUrl(work.page))
+    const page = await client.listIssueCommentsPage(owner, name, cursor.since?.comments, pageUrl(work.page), budget)
     const fresh = page.items.filter((c) => gate.admit(itemTime(c), commentEventId(c)))
     await flush(fresh.map((c) => commentRow(repo, c, prNumbers)).filter((r) => r !== null))
     work.comments_high = gate.high
@@ -443,7 +467,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
  * @param {string} args.name
  * @param {string} args.repo
  * @param {GithubPullTask[]} args.tasks
- * @param {{ take: () => boolean }} args.budget
+ * @param {GithubRequestBudget} args.budget
  * @param {(rows: Record<string, unknown>[]) => Promise<void>} args.flush
  */
 async function drainPullTask({ client, owner, name, repo, tasks, budget, flush }) {
@@ -451,7 +475,7 @@ async function drainPullTask({ client, owner, name, repo, tasks, budget, flush }
   const task = tasks[0]
   const pr = /** @type {GithubPull} */ ({ number: task.number, created_at: task.created_at })
   if (task.phase === 'files') {
-    const page = await client.listPullRequestFilesPage(owner, name, task.number, pageUrl(task.page))
+    const page = await client.listPullRequestFilesPage(owner, name, task.number, pageUrl(task.page), budget)
     await flush(page.items.map((path) => prFileRow(repo, pr, path)))
     task.page = page.next
     if (page.next === null) {
@@ -461,7 +485,7 @@ async function drainPullTask({ client, owner, name, repo, tasks, budget, flush }
     return true
   }
   if (task.phase === 'reviews') {
-    const page = await client.listPullRequestReviewsPage(owner, name, task.number, pageUrl(task.page))
+    const page = await client.listPullRequestReviewsPage(owner, name, task.number, pageUrl(task.page), budget)
     await flush(page.items.map((rv) => reviewRow(repo, pr, rv)))
     task.page = page.next
     if (page.next === null) {
@@ -470,7 +494,7 @@ async function drainPullTask({ client, owner, name, repo, tasks, budget, flush }
     }
     return true
   }
-  const page = await client.listPullRequestCommitsPage(owner, name, task.number, pageUrl(task.page))
+  const page = await client.listPullRequestCommitsPage(owner, name, task.number, pageUrl(task.page), budget)
   await flush(page.items.map((c) => commitRow(repo, c, task.number)))
   task.page = page.next
   if (page.next === null) tasks.shift()
@@ -1005,6 +1029,25 @@ function rotateTo(repos, nextRepo) {
   if (!nextRepo) return repos
   const at = repos.indexOf(nextRepo)
   return at > 0 ? [...repos.slice(at), ...repos.slice(0, at)] : repos
+}
+
+/** @param {unknown} err */
+function cancellation(err) {
+  return /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind === 'github_capture_cancelled'
+}
+
+/**
+ * A redirect hop the allowance could not pay for ends the repository's turn the
+ * way a refused `budget.take()` does: the page call returned nothing, so `work`
+ * still names that page and the next tick asks for it again. It is bounded
+ * work remaining, not a failure.
+ *
+ * @param {unknown} err
+ * @returns {false}
+ */
+function budgetSpentMidRedirect(err) {
+  if (/** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind === 'github_budget_exhausted') return false
+  throw err
 }
 
 /** @param {number} requested */

@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
-import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, systemBootTimeMs, writeStatusFile } from '../../src/core/daemon/status.js'
 import { renderStatusText } from '../../src/core/commands/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { plistFileName } from '../../src/core/daemon/platform.js'
@@ -209,4 +209,116 @@ test('macOS: a deliberate stop that booted the LaunchAgent out is not an outage'
   assert.equal(diag?.severity, 'warning')
   assert.doesNotMatch(diag?.message ?? '', /nothing is being captured/)
   assert.deepEqual(diag?.repair, ['hyp daemon start'], 'the reverse of what stopped it, not a re-install')
+})
+
+// Issue #2267. Every clean shutdown writes `stopped`, a reboot's included, so
+// the snapshot alone cannot tell the operator's stop from a LaunchAgent that
+// failed to load at the next login. Only a stop dated during this boot is
+// read as the operator's.
+
+/**
+ * A macOS machine with the plist on disk, launchd holding nothing, and a last
+ * snapshot that recorded a completed stop at `stoppedAt`.
+ *
+ * @param {string | undefined} stoppedAt
+ * @param {() => number | undefined} bootTimeMs
+ */
+async function darwinAfterStop(stoppedAt, bootTimeMs) {
+  const { hypHome, stateRoot } = await makeHome()
+  const plistDir = path.join(hypHome, 'Library', 'LaunchAgents')
+  await fs.mkdir(plistDir, { recursive: true })
+  await fs.writeFile(path.join(plistDir, plistFileName()), '<plist/>\n')
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'stopped',
+    startedAt: new Date(Date.parse(stoppedAt ?? new Date().toISOString()) - 60_000).toISOString(),
+    ...(stoppedAt ? { stoppedAt } : {}),
+    sources: [],
+    sinks: [],
+  }))
+  const report = await collectHypAwareStatus({
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    platform: 'darwin',
+    homeDir: hypHome,
+    launchAgentStatus: async () => ({ loaded: false }),
+    bootTimeMs,
+  })
+  return { report, diag: report.diagnostics.find((d) => d.kind === 'daemon_loaded_no_pid') }
+}
+
+const HOUR = 60 * 60_000
+
+test('macOS: a stop from before this boot is a failed load, not the operator\'s stop', async () => {
+  const bootMs = Date.now() - HOUR
+  const { report, diag } = await darwinAfterStop(new Date(bootMs - 30_000).toISOString(), () => bootMs)
+  assert.equal(report.overall, 'degraded', 'a LaunchAgent that did not load at login is capturing nothing')
+  assert.equal(diag?.severity, 'error')
+  assert.match(diag?.message ?? '', /nothing is being captured/)
+  assert.match(diag?.message ?? '', /last stop came before this boot/)
+  assert.match(diag?.message ?? '', /reinstall it so launchd loads it again/)
+  assert.deepEqual(diag?.repair, ['hyp daemon install'])
+  assert.match(renderText(report), /Next: hyp daemon install/)
+})
+
+test('macOS: a stop during this boot keeps the warning', async () => {
+  const bootMs = Date.now() - HOUR
+  const { report, diag } = await darwinAfterStop(new Date(bootMs + 60_000).toISOString(), () => bootMs)
+  assert.equal(report.overall, 'healthy')
+  assert.equal(diag?.severity, 'warning')
+  assert.doesNotMatch(diag?.message ?? '', /nothing is being captured/)
+  assert.deepEqual(diag?.repair, ['hyp daemon start'])
+})
+
+test('macOS: a stop that cannot be dated against this boot errs toward degraded', async () => {
+  const stoppedAt = new Date().toISOString()
+  /** @type {Array<[string, string | undefined, () => number | undefined]>} */
+  const cases = [
+    ['boot time unknown', stoppedAt, () => undefined],
+    ['boot time not finite', stoppedAt, () => Number.NaN],
+    ['boot-time probe throws', stoppedAt, () => { throw new Error('no boot clock in this sandbox') }],
+    ['no stoppedAt recorded', undefined, () => Date.now() - HOUR],
+  ]
+  for (const [label, at, bootTimeMs] of cases) {
+    const { report, diag } = await darwinAfterStop(at, bootTimeMs)
+    assert.equal(report.overall, 'degraded', label)
+    assert.equal(diag?.severity, 'error', label)
+    assert.match(diag?.message ?? '', /could not be dated against this boot/, label)
+    assert.match(diag?.message ?? '', /reinstall the HypAware LaunchAgent so launchd loads it again/, label)
+    assert.deepEqual(diag?.repair, ['hyp daemon install'], label)
+  }
+})
+
+test('the default boot clock dates this boot from the platform', async (t) => {
+  const nowMs = Date.now()
+  const bootMs = systemBootTimeMs(nowMs)
+  assert.equal(typeof bootMs, 'number')
+  assert.ok(/** @type {number} */ (bootMs) < nowMs, 'boot is in the past')
+  if (process.platform !== 'linux') return t.skip('the btime cross-check reads /proc/stat')
+  const stat = await fs.readFile('/proc/stat', 'utf8').catch(() => '')
+  const btime = /^btime (\d+)$/m.exec(stat)
+  if (!btime) return t.skip('no btime in /proc/stat here')
+  // btime is whole seconds, and the clocks under the two reads can be
+  // adjusted between them, so agree to within a couple of seconds.
+  assert.ok(Math.abs(/** @type {number} */ (bootMs) - Number(btime[1]) * 1000) < 2_000, 'agrees with /proc/stat btime')
+})
+
+test('linux: an unloaded unit with a stop from this boot is still an outage, and the boot clock is not asked', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  await installAgainstBrokenSystemctl(hypHome)
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'stopped',
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    stoppedAt: new Date().toISOString(),
+    sources: [],
+    sinks: [],
+  }))
+  let asked = 0
+  const report = await collectHypAwareStatus({
+    ...collectOpts(hypHome),
+    bootTimeMs: () => { asked++; return Date.now() - HOUR },
+  })
+  assert.equal(report.overall, 'degraded')
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_loaded_no_pid')
+  assert.equal(diag?.severity, 'error')
+  assert.doesNotMatch(diag?.message ?? '', /this boot/, 'no boot claim where a stop never lands')
+  assert.equal(asked, 0)
 })

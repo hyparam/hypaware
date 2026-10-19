@@ -204,6 +204,78 @@ test('rewritePartition aborts the swap when the cursor changed during the rewrit
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
 
+/**
+ * A cache whose node table holds one cross-partition duplicate, plus a ctx
+ * capturing stdout/stderr and a snapshot of every cursor.json for comparison.
+ */
+async function withDuplicateGraph(/** @type {(deps: { ctx: any, out: string[], errs: string[], cursors: () => Promise<string[]> }) => Promise<void>} */ body) {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-maint-'))
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [nodeRow({ props: { a: 1 } })])
+    await appendRowsToSourceTable(cacheRoot, 'node', ['source=b'], NODE_COLUMNS, [
+      nodeRow({ first_seen: '2026-06-03T00:00:00Z', props: { b: 2 } }),
+    ])
+    /** @type {string[]} */
+    const out = []
+    /** @type {string[]} */
+    const errs = []
+    const ctx = /** @type {any} */ ({
+      storage: { cacheRoot },
+      stdout: { write: (/** @type {string} */ s) => out.push(s) },
+      stderr: { write: (/** @type {string} */ s) => errs.push(s) },
+    })
+    const cursors = () => Promise.all(['source=a', 'source=b'].map((p) =>
+      fs.readFile(path.join(cacheRoot, 'datasets', 'node', p, 'cursor.json'), 'utf8')))
+    await body({ ctx, out, errs, cursors })
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+}
+
+// Regression (#2565): the flag was read with argv.includes('--dry-run'), so
+// `--dry-run=true` (a spelling the CLI codec accepts) ran the real rewrite.
+for (const argv of [['--dry-run'], ['--dry-run=true']]) {
+  test(`graph compact ${argv.join(' ')} previews and rewrites nothing`, async () => {
+    await withDuplicateGraph(async ({ ctx, out, errs, cursors }) => {
+      const before = await cursors()
+      const code = await runGraphCompact(argv, ctx)
+      assert.equal(code, 0, errs.join(''))
+      assert.match(out.join(''), /graph compact \(dry-run\): node - 1 duplicate id\(s\)/)
+      assert.deepEqual(await cursors(), before)
+    })
+  })
+}
+
+test('graph compact --dry-run=false runs the real compaction', async () => {
+  await withDuplicateGraph(async ({ ctx, out, errs, cursors }) => {
+    const before = await cursors()
+    const code = await runGraphCompact(['--dry-run=false'], ctx)
+    assert.equal(code, 0, errs.join(''))
+    assert.match(out.join(''), /graph compact: node - merged 1 duplicate row\(s\)/)
+    assert.notDeepEqual(await cursors(), before)
+  })
+})
+
+// A malformed value or an unknown flag was ignored and the real rewrite ran;
+// it now refuses before touching any partition, as the codec does elsewhere.
+for (const [argv, message] of /** @type {Array<[string[], string]>} */ ([
+  [['--dry-run=TRUE'], '--dry-run expects true|false (got TRUE)'],
+  [['--bogus'], 'unknown flag --bogus'],
+  [['-n'], 'unknown flag -n'],
+  [['node'], "unexpected argument 'node' (quote multi-word values)"],
+])) {
+  test(`graph compact ${argv.join(' ')} exits 2 and rewrites nothing`, async () => {
+    await withDuplicateGraph(async ({ ctx, out, errs, cursors }) => {
+      const before = await cursors()
+      const code = await runGraphCompact(argv, ctx)
+      assert.equal(code, 2)
+      assert.equal(errs.join(''), `hyp graph compact: ${message}\n`)
+      assert.deepEqual(out, [])
+      assert.deepEqual(await cursors(), before)
+    })
+  })
+}
+
 test('graph compact CLI surfaces skipped partitions on stderr and exits nonzero for unreadable cursors', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-maint-'))
   await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [nodeRow({})])

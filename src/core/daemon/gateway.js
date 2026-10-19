@@ -7,19 +7,21 @@ import { fileURLToPath } from 'node:url'
 
 import { bootKernel } from '../runtime/boot.js'
 import { cacheTablePath } from '../cache/paths.js'
+import { claimPartitionMutation, isPartitionMutationBusy } from '../util/mutation_guard.js'
 import { installObservability } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { clearPidFile, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
+import { clearPidFile, isDaemonProcess, pidFilePath, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
 import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins, recordUnloadableManifests } from './boot_failure.js'
 import { openDaemonLog } from './logs.js'
+import { addressInUse, describePortOwner, probePortOwner } from './port_owner.js'
 
 /**
  * @import { ChildProcess } from 'node:child_process'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { DaemonStatus, FailedPluginSnapshot, RunDaemonOptions, SourceSnapshot } from '../../../src/core/daemon/types.js'
+ * @import { DaemonStatus, FailedPluginSnapshot, PidFileEntry, RunDaemonOptions, SourceSnapshot } from '../../../src/core/daemon/types.js'
  */
 
 const PROCESSOR_ENTRY = fileURLToPath(new URL('./processor.js', import.meta.url))
@@ -32,8 +34,57 @@ const RESTART_DELAY_MS = 1000
 // five-minute staleness window, so the status file has to keep being re-dated
 // even when nothing changed - but only on this cadence, not on every recompute.
 const STATUS_HEARTBEAT_MS = 30_000
-// Leave time for the CLI's five-second stop wait to observe the exit.
-const STOP_DEADLINE_MS = 4_000
+// The proxy's stop grace plus time for the turns it cut to settle, and still
+// inside the CLI's stop wait with the telemetry close after it.
+// @ref LLP 0520#window [implements]: grace, settlement, then the forced exit, all inside the stop window
+export const STOP_DEADLINE_MS = 8_000
+/**
+ * How long a supervised daemon whose boot found its port taken holds its
+ * failed process before exiting into the service manager's relaunch, so a
+ * conflict that persists costs one boot a minute rather than one every few
+ * seconds (issue #137).
+ */
+export const BIND_RETRY_INTERVAL_MS = 60_000
+const BIND_RETRY_SIGNALS = /** @type {const} */ (['SIGTERM', 'SIGINT'])
+
+/**
+ * Claim `stateRoot` for this daemon: refuse while another daemon holds it,
+ * otherwise consume stale control requests and write this daemon's pid file.
+ * The check and the write share one guard, so two starts that both find a
+ * stale file cannot both pass. A pid file naming a live process is stale only
+ * when that process's command line shows it is not a daemon (pid reuse after
+ * an unclean shutdown, #2583), or when it names this process, which has not
+ * written one yet. The holder is never signalled.
+ *
+ * @ref LLP 0515#claim [implements]: check and replace the pid file under one guard, so two starts cannot both pass
+ * @param {string} stateRoot
+ * @param {string} processingControlRoot
+ * @param {PidFileEntry} entry
+ */
+export function claimDaemonStart(stateRoot, processingControlRoot, entry) {
+  const pidFile = pidFilePath(stateRoot)
+  /** @type {() => void} */
+  let release
+  try {
+    release = claimPartitionMutation(pidFile)
+  } catch (err) {
+    if (!isPartitionMutationBusy(err)) throw err
+    throw new Error(`daemon start already in progress, or its claim is unverifiable (${path.join(path.dirname(pidFile), `.${path.basename(pidFile)}.mutation-lock`)})`)
+  }
+  try {
+    const previous = readPidFile(stateRoot)
+    // @ref LLP 0515#identity [implements]: a live pid is the daemon unless its command line shows otherwise
+    if (previous && previous.pid !== entry.pid && processIsAlive(previous.pid) && isDaemonProcess(previous.pid) !== false) {
+      throw new Error(`daemon already running (pid=${previous.pid})`)
+    }
+    const stale = clearControlRequests(stateRoot)
+    const staleProcessing = clearControlRequests(processingControlRoot)
+    writePidFile(stateRoot, entry)
+    return { stale, staleProcessing }
+  } finally {
+    release()
+  }
+}
 
 /**
  * The installed service owns the gateway; all kernel background work runs in
@@ -52,8 +103,7 @@ export async function runGatewayDaemon(opts = {}) {
   const startedAt = new Date().toISOString()
   const runId = opts.runId ?? `gateway-${process.pid}-${Date.now()}`
   installObservability()
-  const previous = readPidFile(stateRoot)
-  if (previous && processIsAlive(previous.pid)) throw new Error(`daemon already running (pid=${previous.pid})`)
+  const { stale, staleProcessing } = claimDaemonStart(stateRoot, processingControlRoot, { pid: process.pid, startedAt, runId, mode: 'foreground' })
   const log = openDaemonLog({ stateRoot, runId, mode: 'foreground' })
   /** @type {ChildProcess | undefined} */
   let child
@@ -85,6 +135,7 @@ export async function runGatewayDaemon(opts = {}) {
   /** @type {DaemonStatus} */
   const status = { state: 'starting', pid: process.pid, startedAt, healthyAt: startedAt, uptimeMs: 0, runId, mode: 'foreground', sources: [], sinks: [] }
   const { createCaptureSender, setGatewayProcessTransport } = await import(PROCESS_TRANSPORT_ENTRY)
+  const { mergeCaptureOutcomes } = await import(new URL('../../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js', import.meta.url).href)
   const sender = createCaptureSender({ getChild: () => child, log })
   setGatewayProcessTransport({ role: 'gateway', ...sender })
 
@@ -101,9 +152,6 @@ export async function runGatewayDaemon(opts = {}) {
     },
   }))
 
-  const stale = clearControlRequests(stateRoot)
-  const staleProcessing = clearControlRequests(processingControlRoot)
-  writePidFile(stateRoot, { pid: process.pid, startedAt, runId, mode: 'foreground' })
   writeStatusFile(stateRoot, status)
   log.info('gateway.starting')
 
@@ -137,7 +185,7 @@ export async function runGatewayDaemon(opts = {}) {
         // Only the gateway proves the bound endpoint and live ignore set.
         const recordedDetails = /** @type {Record<string, unknown>} */ (recorded?.details ?? {})
         const liveDetails = /** @type {Record<string, unknown>} */ (gateway.details ?? {})
-        gateway.details = { ...recordedDetails, ...liveDetails, recent_entrypoints: recordedDetails.recent_entrypoints ?? [] }
+        gateway.details = { ...recordedDetails, ...liveDetails, recent_entrypoints: recordedDetails.recent_entrypoints ?? [], capture_outcomes: mergeCaptureOutcomes(recordedDetails.capture_outcomes, liveDetails.capture_outcomes) }
         status.sources.unshift(gateway)
       }
       status.sinks = matches ? processor?.sinks ?? [] : []
@@ -184,6 +232,7 @@ export async function runGatewayDaemon(opts = {}) {
     })
     child = next
     next.on('message', sender.message)
+    next.on('disconnect', () => { if (child === next) sender.reset() })
     next.on('error', error => log.warn('processing.spawn_failed', { message: error.message }))
     next.on('exit', (code, signal) => {
       if (child !== next) return
@@ -202,10 +251,10 @@ export async function runGatewayDaemon(opts = {}) {
       void refreshStatus()
     })
     void gatewaySnapshot().then(snapshot => {
-      const details = /** @type {{ host?: string, port?: number } | undefined} */ (snapshot?.details)
+      const details = /** @type {{ host?: string, port?: number, recording_generation?: string } | undefined} */ (snapshot?.details)
       const host = details?.host
       const port = details?.port
-      next.send({ type: 'processing.start', hypHome, configPath: opts.configPath, runtimeStateRoot: processingRoot, runId: `${runId}-processing-${restarts}`, tickIntervalMs: opts.tickIntervalMs, endpoint: host && port ? { host, port } : undefined }, error => {
+      next.send({ type: 'processing.start', recordingGeneration: details?.recording_generation, hypHome, configPath: opts.configPath, runtimeStateRoot: processingRoot, runId: `${runId}-processing-${restarts}`, tickIntervalMs: opts.tickIntervalMs, endpoint: host && port ? { host, port } : undefined }, error => {
         if (error) log.warn('processing.start_failed', { message: error.message })
       })
     }).catch(error => { log.warn('processing.start_failed', { message: String(error) }); next.kill() })
@@ -251,17 +300,32 @@ export async function runGatewayDaemon(opts = {}) {
     // while the run still reports green (#1531). The SIGKILL the deadline
     // exists for happens either way.
     // @ref LLP 0038#lifecycle-and-operator-behavior [implements]: a stuck child or an open stream cannot strand the stop
+    /** @type {NodeJS.Timeout | undefined} */
+    let lastResort
     const deadline = setTimeout(() => {
       child?.kill('SIGKILL')
-      if (opts.installSignalHandlers !== false) process.exit(code)
+      if (opts.installSignalHandlers === false) return
+      // A run that relaunches itself on 75 needs this stop to finish, not to
+      // exit: the kill releases the wait on the child, so the stop completes
+      // and the relaunch follows. The exit stays, one window later, for a stop
+      // that is stuck in this process as well.
+      // @ref LLP 0529#deadline [implements]: past the deadline a self-relaunching run kills the child and finishes the stop instead of exiting
+      if (opts.relaunchesOnRestart) {
+        lastResort = setTimeout(() => process.exit(code), STOP_DEADLINE_MS)
+        lastResort.unref()
+        return
+      }
+      process.exit(code)
     }, STOP_DEADLINE_MS)
     deadline.unref()
-    if (child?.connected) child.send({ type: 'processing.stop' }, () => {})
     const stoppedChild = child
       ? new Promise(resolve => child?.once('exit', resolve))
       : Promise.resolve()
     try {
       try {
+        // The listener stops while the child is still receiving, so the turns
+        // it cuts reach the child as finished captures. Resetting the sender
+        // or stopping the child first discards every one of them (#610).
         await boot?.runtime.sources.stop('ai-gateway')
       } catch (error) {
         // Onto the gateway's own log, so a stop that failed is counted by
@@ -275,10 +339,13 @@ export async function runGatewayDaemon(opts = {}) {
         // stop that rejects past this wait leaves an unsupervised
         // `processor.js` on the same `HYP_HOME`, behind a snapshot that reads
         // `stopped` (#1531).
+        sender.reset()
+        if (child?.connected) child.send({ type: 'processing.stop' }, () => {})
         await stoppedChild
       }
     } finally {
       clearTimeout(deadline)
+      clearTimeout(lastResort)
       setGatewayProcessTransport(undefined)
       // `stopped` is the record that a shutdown completed, and a boot that
       // threw never served, so writing it here reads a relaunch loop as the
@@ -319,7 +386,10 @@ export async function runGatewayDaemon(opts = {}) {
     if (unloadable.length > 0) status.unloadableManifests = unloadable
     const source = boot.runtime.sources.get('ai-gateway')
     if (!source && boot.config?.plugins?.some(plugin => plugin.name === '@hypaware/ai-gateway' && plugin.enabled !== false)) {
-      throw new Error('configured gateway failed to activate')
+      // With the reason, so an activation that failed on a taken port is
+      // classified (and paced) the same as a start that did.
+      const reason = gatewayFailedPlugins.find(failed => failed.name === '@hypaware/ai-gateway')?.message
+      throw new Error(`configured gateway failed to activate${reason ? `: ${reason}` : ''}`)
     }
     if (source) {
       // The plugin the kernel recorded as registering the source, never
@@ -363,11 +433,55 @@ export async function runGatewayDaemon(opts = {}) {
     await refreshStatus()
     return { done, stop, snapshot: () => status, runtime: boot.runtime, restartProcessing: () => writeControlRequest(processingControlRoot, 'stop', log) }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    let message = error instanceof Error ? error.message : String(error)
+    // Asked once per failed boot, and only for a taken port. The answer rides
+    // the message, so the persisted boot-failure warning, daemon.log and the
+    // service's stderr all name the holder (or say it is unknown).
+    // @ref LLP 0521#owner-probe [implements]: one bounded, read-only probe per failed boot; pid and executable only
+    const inUse = addressInUse(error)
+    /** @type {Record<string, unknown>} */
+    let fields = {}
+    if (inUse) {
+      const owner = inUse.port > 0 ? await probePortOwner(inUse.port, { host: inUse.host }) : undefined
+      if (inUse.port > 0) message = `${message} (${describePortOwner(inUse.port, owner)})`
+      fields = { error_kind: 'port_in_use', port: inUse.port || undefined, owner_pid: owner?.pid, owner_executable: owner?.executable }
+    }
     // Onto the gateway's own log, so `recent_errors` counts the failure rather
     // than it reaching only stderr and the service's `daemon.err.log`.
-    log.error('daemon.boot_failed', { message })
+    log.error('daemon.boot_failed', { message, ...fields })
     await stop(1, message)
-    throw error
+    if (!inUse) throw error
+    throw Object.assign(new Error(message, { cause: error }), { code: 'EADDRINUSE', port: inUse.port })
   }
+}
+
+/**
+ * Hold a supervised daemon whose boot found its port taken for one retry
+ * interval, then let it exit so the service manager relaunches it. The failed
+ * boot has already released everything it held (`stop` ran), so what waits is
+ * one idle timer: no listener, no child, no pid file and no heartbeat, and the
+ * snapshot it leaves keeps saying the boot failed. A stop or restart the
+ * operator asks for reaches it as a signal and ends the wait at once.
+ *
+ * @ref LLP 0521#pacing [implements]: a supervised port conflict costs one boot per interval, and a signal ends the wait
+ * @param {{ delayMs?: number, signals?: { on(event: string, fn: () => void): unknown, off(event: string, fn: () => void): unknown }, setTimeout?: (fn: () => void, ms: number) => unknown, clearTimeout?: (handle: any) => void }} [opts]
+ * @returns {Promise<'elapsed' | 'signalled'>}
+ */
+export function waitBeforeBindRetry(opts = {}) {
+  const signals = opts.signals ?? process
+  const set = opts.setTimeout ?? setTimeout
+  const clear = opts.clearTimeout ?? clearTimeout
+  return new Promise(resolve => {
+    /** @type {unknown} */
+    let timer
+    /** @param {'elapsed' | 'signalled'} outcome */
+    const finish = outcome => {
+      clear(timer)
+      for (const signal of BIND_RETRY_SIGNALS) signals.off(signal, onSignal)
+      resolve(outcome)
+    }
+    const onSignal = () => finish('signalled')
+    for (const signal of BIND_RETRY_SIGNALS) signals.on(signal, onSignal)
+    timer = set(() => finish('elapsed'), opts.delayMs ?? BIND_RETRY_INTERVAL_MS)
+  })
 }

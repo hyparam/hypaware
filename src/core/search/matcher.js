@@ -61,7 +61,7 @@ export const MAX_QUERY_LENGTH = 1024
  * @param {string} text
  * @returns {string}
  */
-function escapeLiteral(text) {
+export function escapeLiteral(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 

@@ -1,7 +1,7 @@
 # LLP 0459: The unattended report and recommendation pickers need a stated outcome
 
 **Type:** RFC
-**Status:** Draft
+**Status:** Accepted
 **Systems:** CLI, Reports
 **Author:** Neutral / Claude
 **Date:** 2026-09-30
@@ -18,7 +18,8 @@
 > command starts an agent that edits the repository, so an auto-pick
 > would begin unrequested work on an arbitrary target. This RFC records
 > the evidence, lays out the candidate outcomes with their costs, and
-> asks for a decision. It changes no behavior by itself.
+> asks for a decision. The decision, candidate 1 with a deadline per
+> displayed picker, is recorded under #decision below.
 
 ## Context {#context}
 
@@ -114,6 +115,32 @@ produces: the usage error the non-interactive leg already prints (exit
 2), the cancel the escape legs already print (exit 0), or the status
 quo, documented. If a deadline lands, its scope across the two chained
 pickers should be stated where the rule is recorded.
+
+## Decision {#decision}
+
+Decided on issue #2400 (2026-10-05): **candidate 1, expiry is a usage
+error** (#fail-fast).
+
+- Each report and recommendation listing picker is asked under the
+  existing deadline, `armPickDeadline` with `PICK_DEADLINE_MS` (10s),
+  and no new timeout setting. The clock starts when the picker is
+  displayed and the first keypress lifts it, as on the client pickers.
+- Scope is per displayed picker: each display gets its own controller
+  and deadline. A keypress on the report picker does not lift the
+  recommendation picker's deadline, and returning to a picker (Back)
+  starts a fresh one. Timer and listener are cleaned up on every exit.
+- On expiry the run selects nothing and starts nothing. It prints a
+  usage message naming `hyp report fix <id>` and `hyp report list` to
+  stderr and exits 2.
+- An explicit cancel stays exit 0 (`Nothing started.`), and Back keeps
+  its navigation.
+- The deadline only arms on the leg that already prompts. A run that
+  fails the tty gate (stdin or stdout not a terminal, or `HYP_NO_TUI=1`)
+  keeps LLP 0414 #listing-is-the-picker's usage error. A run given an id
+  never meets these pickers.
+
+This answers the first open question below for these two pickers: the
+exit code follows the guard (2). The other two stay open.
 
 ## Open questions {#open-questions}
 

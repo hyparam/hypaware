@@ -426,6 +426,41 @@ test('dry-run performs the same version-floor preflight as a real attach', async
   assert.equal(buf.text(), '')
 })
 
+// Issue #892 finding 3: dry-run is the "tell me first" surface, and the
+// shell half of the override check is a pure read, so the plan names it too.
+test('dry-run reports a per-signal override the real attach would warn about', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const before = await r.raw()
+  /** @type {Record<string, string>} */
+  const env = r.env
+  env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'https://collector.corp:4318'
+
+  const human = makeBuf()
+  await r.gateway.client.attach({ endpoint: ENDPOINT, stdout: human, stderr: human, dryRun: true })
+  assert.match(human.text(), /\(dry-run\) Would attach/)
+  assert.match(human.text(), /! OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is exported in this shell's environment/)
+  assert.doesNotMatch(human.text(), /collector\.corp/)
+
+  const json = makeBuf()
+  await r.gateway.client.attach({ endpoint: ENDPOINT, stdout: json, stderr: json, dryRun: true, json: true })
+  const payload = JSON.parse(json.text())
+  assert.equal(payload.dry_run, true)
+  assert.equal(payload.warnings.length, 1)
+  assert.match(payload.warnings[0], /OTEL_EXPORTER_OTLP_LOGS_ENDPOINT/)
+
+  assert.equal(await r.raw(), before)
+})
+
+test('a dry-run with no per-signal override prints no warning', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const buf = makeBuf()
+  await r.gateway.client.attach({ endpoint: ENDPOINT, stdout: buf, stderr: buf, dryRun: true })
+  assert.match(buf.text(), /\(dry-run\) Would attach/)
+  assert.doesNotMatch(buf.text(), /!/)
+})
+
 test('a re-attach after the migration is routine: no migration notes, no offer', async (t) => {
   const r = await rig()
   t.after(() => r.cleanup())

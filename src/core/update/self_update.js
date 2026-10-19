@@ -38,15 +38,23 @@ const PROBE_TIMEOUT_MS = 5000
 export const NPM_TIMEOUT_MS = 120_000
 // How long a timed-out npm gets to honor SIGTERM before SIGKILL.
 export const NPM_KILL_GRACE_MS = 5000
+// How long the new install's entrypoint gets to print its version before
+// the apply is judged broken and rolled back.
+export const PREFLIGHT_TIMEOUT_MS = 30_000
+// The longest a live holder can legitimately hold the apply lock.
+// `applySelfUpdate` runs the prefix query, the install and the preflight,
+// then either the skills install or the rollback, never both. Every
+// command is bounded by its timeout plus the SIGKILL grace `runCommand`
+// gives it, so the worst path is three npm-length commands and one
+// preflight: 410s.
+const APPLY_LONGEST_HOLD_MS =
+  3 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS) + (PREFLIGHT_TIMEOUT_MS + NPM_KILL_GRACE_MS)
 // An apply lock this old belonged to a process that died mid-install;
-// honoring it forever would wedge updates permanently. The floor is the
-// longest a live holder can legitimately hold it: `applySelfUpdate` runs
-// up to three install commands (prefix, install, and either rollback or
-// skills install) plus the preflight, each bounded by its timeout, about
-// 390s of the 500s here. Reclaiming a lock its owner still holds starts
-// the second concurrent `npm install -g` this lock exists to prevent, so
-// erring long costs a slower recovery and erring short costs the machine.
-export const APPLY_LOCK_STALE_MS = 4 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS)
+// honoring it forever would wedge updates permanently. Reclaiming a lock
+// its owner still holds starts the second concurrent `npm install -g` this
+// lock exists to prevent, so erring long costs a slower recovery and
+// erring short costs the machine: twice the longest legitimate hold.
+export const APPLY_LOCK_STALE_MS = 2 * APPLY_LONGEST_HOLD_MS
 const DAILY_CHECK_MS = 24 * 60 * 60 * 1000
 // One hour when the previous boot never reached healthy: a machine
 // stuck on a broken release re-probes eagerly so it jumps to the fix
@@ -67,9 +75,6 @@ export const SELF_UPDATE_RESTART_EXIT_CODE = 75
  */
 const CONFIG_BASENAME = 'hypaware-config.json'
 
-// How long the new install's entrypoint gets to print its version before
-// the apply is judged broken and rolled back.
-export const PREFLIGHT_TIMEOUT_MS = 30_000
 // How many consecutive boots on a freshly installed version may fail to
 // reach the kernel before the pre-boot lane reinstalls the version it
 // replaced. One is not enough: the first relaunch after a power loss
@@ -675,6 +680,7 @@ export async function applySelfUpdate(opts) {
     // the assets on disk for `hyp skills install` or the next upgrade.
     // @ref LLP 0457#update-installs [constrained-by]: this lane declines 0457's post-preflight installer, leaving the rolled-back-from version's assets over older code, and 0457's own recovery paths (attach, hyp skills install, the next upgrade) are what close that mismatch
     // @ref LLP 0458#attached-only [constrained-by]: the flag is the new package's, so a rollback onto an older one does not use it
+    // @ref LLP 0535#rollback-skip [implements]: the permanent, decided exception; the skipped event is the whole explanation, with no version gate
     if (opts.skipSkillsInstall) {
       log('self_update.skills_install_skipped', { reason: 'rollback', version: opts.version })
       return { applied: true }
@@ -895,6 +901,15 @@ export async function runSelfUpdatePass(opts = {}) {
     }
 
     const supervised = opts.supervised ?? detectSupervisor(env)
+    // The refusal below is recorded for `hyp status`, and cleared here, on
+    // the first pass a supervised daemon makes, rather than on its next
+    // refusal: a replacement daemon under a service manager may not reach
+    // that gate for a day. Only the automatic lanes speak for the daemon;
+    // `hyp update` runs in a terminal, whose environment says nothing
+    // about it.
+    if (!opts.force && supervised && state.refusal !== undefined) {
+      writeSelfUpdateState(stateRoot, { refusal: undefined })
+    }
     if (!opts.force) {
       const stuck = previousBootLooksStuck(stateRoot)
       // Before the TTL gate: a version this updater installed that cannot
@@ -1061,6 +1076,8 @@ export async function runSelfUpdatePass(opts = {}) {
         ...(probeFailed ? {} : { latest_version: latest }),
         running_version: identity.version,
       })
+      // @ref LLP 0539#record [implements]: the refusal is recorded state the status line reads, not a probe error
+      if (state.refusal !== 'unsupervised') writeSelfUpdateState(stateRoot, { refusal: 'unsupervised' })
       return probeFailed
         ? { action: 'checked', reason: 'unsupervised' }
         : { action: 'checked', reason: 'unsupervised', latest }
@@ -1316,12 +1333,16 @@ export function describeSelfUpdate(opts) {
     ? undefined
     : Boolean(state.available && state.latest_version &&
       compareSemver(state.latest_version, identity.version) > 0)
-  // The daemon records what it loaded at boot; it only means something
-  // while that daemon is alive, so a leftover from a stopped one is not
-  // read as a stale daemon.
-  const runningVersion = typeof state.running_version === 'string' && daemonIsAlive(opts.stateRoot)
+  // The daemon records what it loaded at boot, and the refusal it last
+  // made; both only mean something while that daemon is alive, so a
+  // leftover from a stopped one is not read as a stale daemon or as a
+  // refusal nobody is making.
+  const alive = (typeof state.running_version === 'string' || state.refusal === 'unsupervised') &&
+    daemonIsAlive(opts.stateRoot)
+  const runningVersion = alive && typeof state.running_version === 'string'
     ? state.running_version
     : undefined
+  const refusal = alive && state.refusal === 'unsupervised' ? state.refusal : undefined
   // Gated on provenance, unlike every other comparison here: this one
   // reads `identity.version` as "the version installed on this machine",
   // which it only is when the process rendering status IS that install. A
@@ -1354,6 +1375,7 @@ export function describeSelfUpdate(opts) {
     auto_update: autoUpdate,
     provenance,
     ...(runningVersion !== undefined ? { running_version: runningVersion } : {}),
+    ...(refusal ? { refusal } : {}),
     ...(state.held_version ? { held_version: state.held_version } : {}),
     ...(state.checked_at ? { checked_at: state.checked_at } : {}),
     ...(state.latest_version ? { latest_version: state.latest_version } : {}),
@@ -1428,6 +1450,13 @@ export function describeSelfUpdate(opts) {
     return {
       line: `self-update: ${heldLatest} was installed and could not start here, so it was rolled back to ` +
         `${identity.version} and is held until a newer release publishes`,
+      json,
+    }
+  }
+  if (available && state.latest_version && refusal) {
+    return {
+      line: `self-update: ${state.latest_version} available (running ${identity.version}), but automatic ` +
+        "updates are unavailable because this daemon is not running under a service manager; run 'hyp update'",
       json,
     }
   }

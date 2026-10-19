@@ -373,7 +373,7 @@ function parseOpenclawSessionMessage(line) {
  * @param {Record<string, unknown>} row
  * @returns {Record<string, unknown>}
  */
-function openclawMessageEnvelope(row) {
+export function openclawMessageEnvelope(row) {
   return isPlainObject(row.message) ? row.message : row
 }
 

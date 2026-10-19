@@ -8,11 +8,15 @@ import {
   appendRowsToSourceTable,
   clearEscapeReport,
   discoverCachePartitions,
+  isPartitionMutationBusy,
   resolveClientName,
   sanitizePathSegment,
+  tryReadCursorSync,
+  withPartitionMutationLock,
 } from './partition.js'
 import { cacheTablePath } from './paths.js'
 import { readRowsFromTable } from './iceberg/store.js'
+import { cacheCleanupId, readCacheCleanup } from './purge-cleanup.js'
 
 /**
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
@@ -32,8 +36,12 @@ import { readRowsFromTable } from './iceberg/store.js'
  * source-table layout via `appendRowsToSourceTable`.  The legacy
  * directory is then moved to `.retired/` so subsequent runs are a no-op.
  *
+ * `deferred` counts partitions a forced run left in place because a purge
+ * cleanup is still outstanding for them, their cleanup state did not read,
+ * or another writer held their mutation guard. The next run retries them.
+ *
  * @param {{ cacheRoot: string, force: boolean }} opts
- * @returns {Promise<{ scanned: number, migrated: number, rowsMigrated: number }>}
+ * @returns {Promise<{ scanned: number, migrated: number, rowsMigrated: number, deferred: number }>}
  */
 export async function migrateLegacyPartitions({ cacheRoot, force }) {
   const discovered = await discoverCachePartitions(cacheRoot)
@@ -41,57 +49,88 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
 
   let migrated = 0
   let rowsMigrated = 0
+  let deferred = 0
 
   for (const partition of legacy) {
-    const icebergDir = resolveIcebergDirForLegacy(partition)
-    const rows = await readRowsFromTable(icebergDir)
     if (!force) {
-      rowsMigrated += rows.length
+      rowsMigrated += (await readRowsFromTable(resolveIcebergDirForLegacy(partition))).length
       continue
     }
-    if (rows.length > 0) {
-      const columns = inferColumnsFromRows(rows)
-      /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
-      const groups = new Map()
-      for (const row of rows) {
-        const source = sanitizePathSegment(resolveClientName(row))
-        const segments = [`source=${source}`]
-        const key = source
-        let group = groups.get(key)
-        if (!group) {
-          group = { segments, rows: [] }
-          groups.set(key, group)
-        }
-        group.rows.push(row)
-      }
-      // The same all-or-nothing rule the spool flush follows, for the same
-      // reason: this loop commits one destination partition at a time and
-      // `retirePartition` below is the only thing that stops the legacy
-      // directory being read again. An append that refuses partway through
-      // would leave the earlier destinations committed and the legacy
-      // directory in place, and the next `hyp query maintain --force` would
-      // re-read the same rows and commit them a second time. Nothing dedupes
-      // rows that already carry their native identity.
-      //
-      // Skipped rather than thrown: migration is per-partition and
-      // idempotent, the rows stay readable where they already are, and the
-      // next run retries. Throwing would abort the whole maintain tick and
-      // stop compaction and retention cache-wide over one broken cursor.
-      // @ref LLP 0347#rows-wait [implements]: a migration that cannot finish leaves its rows where they are instead of half-committing them
-      const refused = [...groups.values()].some(({ segments }) =>
-        appendRefusalReason(cacheTablePath(cacheRoot, partition.dataset, segments)) !== null
-      )
-      if (refused) continue
-      for (const { segments, rows: groupRows } of groups.values()) {
-        await appendRowsToSourceTable(cacheRoot, partition.dataset, segments, columns, groupRows)
-      }
-      rowsMigrated += rows.length
-      await retirePartition(partition.path)
+    // `null` is a deferral; a number is the rows moved.
+    const moved = await withPartitionMutationLock(partition.path, async () => {
+      // A purge's position deletes leave the erased bytes in the generations
+      // its journal names until maintenance rewrites and reclaims them, and
+      // that reclaimer walks only live partitions. Retiring the directory
+      // first would carry those bytes into `.retired/` and let the journal
+      // sweep drop the erasure as evicted. Checked under the guard every
+      // admission holds, so no purge can admit between the check and the
+      // move; an unreadable journal defers too.
+      // @ref LLP 0417#cache-reclamation [constrained-by]: a pending purge cleanup keeps its partition reachable until its generations are gone
+      const pending = await readCacheCleanup(cacheRoot, cacheCleanupId(cacheRoot, partition.path)).catch(() => true)
+      if (pending) return null
+      return migratePartition(cacheRoot, partition, await readRowsFromTable(resolveIcebergDirForLegacy(partition)))
+    }).catch(error => {
+      if (isPartitionMutationBusy(error)) return null
+      throw error
+    })
+    if (moved === null) deferred++
+    else if (moved > 0) {
+      rowsMigrated += moved
       migrated++
     }
   }
 
-  return { scanned: legacy.length, migrated, rowsMigrated }
+  return { scanned: legacy.length, migrated, rowsMigrated, deferred }
+}
+
+/**
+ * Move one legacy partition's rows into the source-table layout and retire
+ * it. Caller holds the partition's mutation guard.
+ *
+ * @param {string} cacheRoot
+ * @param {CachePartitionMeta} partition
+ * @param {Record<string, unknown>[]} rows
+ * @returns {Promise<number>} rows migrated; 0 when nothing moved
+ */
+async function migratePartition(cacheRoot, partition, rows) {
+  if (rows.length === 0) return 0
+  const columns = inferColumnsFromRows(rows)
+  /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
+  const groups = new Map()
+  for (const row of rows) {
+    const source = sanitizePathSegment(resolveClientName(row))
+    const segments = [`source=${source}`]
+    const key = source
+    let group = groups.get(key)
+    if (!group) {
+      group = { segments, rows: [] }
+      groups.set(key, group)
+    }
+    group.rows.push(row)
+  }
+  // The same all-or-nothing rule the spool flush follows, for the same
+  // reason: this loop commits one destination partition at a time and
+  // `retirePartition` below is the only thing that stops the legacy
+  // directory being read again. An append that refuses partway through
+  // would leave the earlier destinations committed and the legacy
+  // directory in place, and the next `hyp query maintain --force` would
+  // re-read the same rows and commit them a second time. Nothing dedupes
+  // rows that already carry their native identity.
+  //
+  // Skipped rather than thrown: migration is per-partition and
+  // idempotent, the rows stay readable where they already are, and the
+  // next run retries. Throwing would abort the whole maintain tick and
+  // stop compaction and retention cache-wide over one broken cursor.
+  // @ref LLP 0347#rows-wait [implements]: a migration that cannot finish leaves its rows where they are instead of half-committing them
+  const refused = [...groups.values()].some(({ segments }) =>
+    appendRefusalReason(cacheTablePath(cacheRoot, partition.dataset, segments)) !== null
+  )
+  if (refused) return 0
+  for (const { segments, rows: groupRows } of groups.values()) {
+    await appendRowsToSourceTable(cacheRoot, partition.dataset, segments, columns, groupRows)
+  }
+  await retirePartition(partition.path)
+  return rows.length
 }
 
 /**
@@ -110,14 +149,20 @@ function isLegacyPartition(partition) {
 
 /**
  * Legacy partitions store Iceberg data either directly (no cursor) or
- * under `epoch=<N>/` (with cursor).  Resolve the right path.
+ * under the generation their cursor names.  Resolve the right path.
+ *
+ * The cursor is re-read rather than trusting the `epoch` discovery saw: a
+ * purge rewrite publishes a `table-*` generation through `tableDir`, so the
+ * discovered `epoch=N` can be the purged generation awaiting reclamation.
  *
  * @param {CachePartitionMeta} partition
  * @returns {string}
  */
 function resolveIcebergDirForLegacy(partition) {
   if (partition.legacy) return partition.path
-  return path.join(partition.path, `epoch=${partition.epoch}`)
+  const cursor = tryReadCursorSync(partition.path)
+  const live = cursor?.tableDir ?? (cursor?.layout === 'source-table' ? 'table' : `epoch=${cursor?.epoch ?? partition.epoch}`)
+  return path.join(partition.path, live)
 }
 
 /**

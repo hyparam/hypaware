@@ -6,6 +6,7 @@
 **Author:** Kenny
 **Date:** 2026-09-18
 **Related:** LLP 0104, LLP 0253, LLP 0403; server LLP 0003, 0005, 0053, 0140
+**Extended-by:** [LLP 0513](./0513-one-spool-drainer-per-table.design.md) (the same guard, keyed on a table spool); [LLP 0515](./0515-daemon-start-survives-pid-reuse.design.md) (the same guard, keyed on the daemon pid file); [LLP 0449](./0449-hermes-mutable-transcripts.spec.md) (the same guard, keyed on a reconcile scope)
 
 ## Request {#request}
 
@@ -257,6 +258,19 @@ unmanaged legacy tables, native transcripts and derived reports are outside
 this scope. Pre-upgrade position deletes without cleanup journals are not
 retroactively certified. Disabled maintenance postpones cleanup.
 
+The status answer is ephemeral, and the journal lifecycle above is its whole
+evidence. A cleanup id identifies a cache partition, not one purge
+invocation: a later purge of the same partition reuses it, so a retained
+completion bit could falsely certify that later work. `completed` is
+observable only while a valid journal remains and every generation it names
+has been verified absent. The next sweep or a retention eviction removes that
+journal, and the next sweep may run immediately, so no minimum window in which
+`completed` can be read is promised. After that the answer is `unverified`,
+which means certification is unavailable: it is not a failed cleanup and not
+proof that the bytes remain. The purge receipt's `cache_cleanup` entries admit
+the cleanup; they are not a durable deletion certificate. No completion record,
+time-to-live, per-invocation id or inferred completion extends this.
+
 Cost is one streaming full-generation rewrite per affected partition; this is
 more I/O than a subset merge but retires the entire snapshot history. Existing
 batch, row-group and open partition-writer memory bounds apply. Journals cap
@@ -324,7 +338,10 @@ identifies the owner. Contention fails immediately for retry, with no polling
 or additional waiter queue. A live or unverifiable owner is never evicted by
 age. A dead owner is reclaimed by unlinking its exact filename, then removing
 the empty directory; a contender losing that unlink must stop. PID reuse may
-delay recovery but cannot permit concurrent writers. An empty or malformed
+delay recovery but cannot permit concurrent writers. An owner naming the
+claimant's own PID that the claimant does not hold is dead: a containerized
+daemon restarts as the same PID, so a liveness probe alone would keep that
+guard forever. An empty or malformed
 lock fails closed; after stopping all writers an operator may remove such a
 lock left by an interrupted ownership publication or recovery. Updated writers
 must be restarted before relying on this protocol; old binaries do not honor

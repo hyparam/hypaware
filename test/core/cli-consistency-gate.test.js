@@ -337,6 +337,22 @@ test('future setup lifecycle commands remain documentation-only', () => {
   }
 })
 
+// @ref LLP 0533#deferred [tests]: collect is deferred, not shipped, so neither it nor an inspect verb the config group once implied is registered or advertised
+test('deferred collect stays unregistered and the config group claims only validate', async () => {
+  const registry = coreRegistry()
+  for (const name of ['collect', 'collect list', 'collect remove', 'config show']) {
+    assert.equal(registry.get(name), undefined, `${name} must not register while it is deferred`)
+  }
+  assert.deepEqual(listGroupChildren(registry, 'config').map((c) => c.name), ['validate'])
+  const { run } = await harness(registry)
+  const config = await run(['config', '--help'])
+  assert.equal(config.code, 0)
+  assert.match(config.out, /^hyp config - Validate the HypAware config$/m)
+  assert.doesNotMatch(config.out, /inspect/i)
+  const top = await run(['--help'])
+  assert.doesNotMatch(top.out, /collect/)
+})
+
 // A verb declares one `inputSchema` from which the kernel projects both the
 // CLI usage and the MCP tool. A hand-written usage on the projection is the
 // drift that contract exists to prevent.
@@ -654,14 +670,14 @@ function destinationFamilies(help) {
   return DESTINATION_FAMILIES.filter(([, pattern]) => pattern.test(prose)).map(([family]) => family)
 }
 
-test('report render is retired while the shared server renderer remains exported', async () => {
+test('report rendering is absent from the CLI and package exports', async () => {
   const registry = coreRegistry()
   assert.equal(registry.list().some((entry) => entry.name === 'report render'), false)
   const { run } = await harness(registry)
   const { code } = await run(['report', 'render'])
   assert.notEqual(code, 0)
-  const { renderReports } = await import('hypaware/core/reports')
-  assert.equal(typeof renderReports, 'function')
+  const removedExport = 'hypaware/core/reports'
+  await assert.rejects(import(removedExport), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' })
 })
 
 /**

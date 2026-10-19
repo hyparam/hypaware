@@ -18,7 +18,8 @@ import {
   removePlugin,
   updatePlugin,
 } from '../plugin_install/install.js'
-import { getEntry } from '../plugin_install/lock.js'
+import { getEntry, isUsableEntry } from '../plugin_install/lock.js'
+import { pluginLockPath } from '../plugin_install/paths.js'
 import { SCOPED_NAME_RE } from '../plugin_install/resolver.js'
 import {
   buildTtyPrompt,
@@ -30,9 +31,10 @@ import { diagnosePlugin } from '../plugin_doctor/diagnose.js'
 import { renderReport } from '../plugin_doctor/render.js'
 import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 import { isTty } from '../cli/stdio.js'
+import { isPlainObject, stringValue } from '../util/json_util.js'
 
 /**
- * @import { CommandRunContext, PluginName } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, PluginLockEntry, PluginLockFile, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PluginMetadata } from '../../../src/core/config/types.js'
  * @import { ConfirmInstall } from '../../../src/core/plugin_install/types.js'
  * @import { LoadedManifest } from '../../../src/core/types.js'
@@ -695,18 +697,73 @@ export async function runPluginUpdate(argv, ctx) {
   // No target: keep the "refresh update-check state for all" behavior so
   // users still have a way to recompute `outdated` without re-installing.
   const { checkForPluginUpdate } = await import('../plugin_install/update_check.js')
-  const { upsertEntry, writeLock } = await import('../plugin_install/lock.js')
-  const lock = await loadLock(stateDir)
-  const entries = Object.values(lock.plugins)
-  let next = lock
-  for (const entry of entries) {
-    const probeInput = { ...entry, update: undefined }
-    const state = await checkForPluginUpdate({ entry: probeInput })
-    next = upsertEntry(next, { ...entry, update: state })
+  const { readLock, readLockKeyLines, writeLock } = await import('../plugin_install/lock.js')
+  /** @type {PluginLockFile} */
+  let lock
+  try {
+    // readLock, not loadLock: loadLock reads an unparseable lock as empty, and
+    // this command then wrote that empty lock over the file, every row lost
+    // behind exit 0 (issue #2120 review).
+    lock = await readLock(stateDir)
+  } catch (err) {
+    ctx.stderr.write(`hyp plugin update: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
   }
-  await writeLock(stateDir, next)
-  ctx.stdout.write(`refreshed update state for ${entries.length} plugin(s)\n`)
+  // Best effort over a hand-editable file (issue #2120): refresh the rows the
+  // probe can read, keep every other row exactly as found, and keep the map
+  // key as the row's identity, so a row with no `name`, or a `name` that
+  // disagrees with its key, can never be written back under a second key.
+  let refreshed = 0
+  /** @type {Array<[string, string]>} */
+  const skipped = []
+  for (const key of Object.keys(lock.plugins)) {
+    const entry = /** @type {unknown} */ (lock.plugins[key])
+    const skip = updateRefreshSkipReason(key, entry)
+    if (skip) {
+      skipped.push([key, skip])
+      continue
+    }
+    const row = /** @type {PluginLockEntry} */ (entry)
+    // In place under the key just read: an existing own key, '__proto__'
+    // included, takes a plain assignment as data (issue #1601).
+    lock.plugins[key] = { ...row, update: await checkForPluginUpdate({ entry: { ...row, update: undefined } }) }
+    refreshed++
+  }
+  await writeLock(stateDir, lock)
+  if (skipped.length > 0) {
+    // Named by line, never by the untrusted key, and the line of the file as
+    // written: writeLock sorts the keys, so a line read before it would name
+    // another row by the time the operator opens the file (as #2115 does).
+    const lines = await readLockKeyLines(stateDir)
+    const lockPath = pluginLockPath(stateDir)
+    for (const [key, reason] of skipped) {
+      const line = lines.get(key)
+      const row = line === undefined ? 'an entry' : `the entry on line ${line}`
+      ctx.stderr.write(`hyp plugin update: skipped ${row} of ${lockPath}: ${reason}\n`)
+    }
+  }
+  ctx.stdout.write(`refreshed update state for ${refreshed} plugin(s)\n`)
   return 0
+}
+
+/**
+ * Why a lock row cannot take a bulk update-state refresh, or undefined when it
+ * can. The probe reads `name` and `source.kind`, a row `hyp status`
+ * already reports as `plugin_lock_entry_invalid` is left for that repair, and
+ * the name guard is the one `partitionEntries` applies, so an empty key with
+ * an empty `name` is skipped here as `hyp plugin list` marks it unusable.
+ *
+ * @param {string} key
+ * @param {unknown} entry
+ * @returns {string | undefined}
+ */
+function updateRefreshSkipReason(key, entry) {
+  if (!isPlainObject(entry)) return 'not an object'
+  if (!isUsableEntry(entry)) return 'no usable install_dir'
+  if (stringValue(entry.name) === undefined) return 'no usable name'
+  if (entry.name !== key) return 'its name does not match its key'
+  if (!isPlainObject(entry.source) || typeof entry.source.kind !== 'string') return 'no usable source'
+  return undefined
 }
 
 /**
@@ -752,6 +809,9 @@ export async function runPluginRemove(argv, ctx) {
     return 1
   }
   ctx.stdout.write(`removed ${name}\n`)
+  if (result.cleanupSkipped !== undefined) {
+    ctx.stderr.write(`hyp plugin remove: deleted nothing on disk: ${result.cleanupSkipped}\n`)
+  }
   return 0
 }
 

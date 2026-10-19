@@ -32,12 +32,20 @@ export const CURSOR_ERROR_REPO = '(cursors)'
  *
  * @import { GithubRuntime } from './types.js'
  *
+ * A run given a `signal` is cancelled by it: GitHub work stops, the progress
+ * whose rows landed is committed, and no projection starts afterwards. The
+ * result then carries `cancelled` and never stands for a complete run. A
+ * projection already running is awaited as before, and rows it did not reach
+ * stay due through `projectionNeeded`.
+ *
  * @param {GithubRuntime} runtime
- * @param {{ mode: 'backfill' | 'poll', only?: string[], observedRepos?: string[] }} opts
- * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>}
+ * @param {{ mode: 'backfill' | 'poll', only?: string[], observedRepos?: string[], signal?: AbortSignal }} opts
+ * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, cancelled?: boolean, errors: Array<{ repo: string, error: string }> }>}
  */
 export async function runCaptureTick(runtime, opts) {
   const result = await captureTick(runtime, opts)
+  if (opts.signal?.aborted) result.cancelled = true
+  if (result.cancelled) return result
   // @ref LLP 0392#retry [implements]: first tick catches up durable rows; failed projections remain due even on an idle tick
   if (runtime.projectionNeeded !== false) {
     const started = Date.now()
@@ -69,7 +77,7 @@ export async function runCaptureTick(runtime, opts) {
 
 /**
  * @param {GithubRuntime} runtime
- * @param {{ mode: 'backfill' | 'poll', only?: string[], observedRepos?: string[] }} opts
+ * @param {{ mode: 'backfill' | 'poll', only?: string[], observedRepos?: string[], signal?: AbortSignal }} opts
  */
 async function captureTick(runtime, opts) {
   const cursors = readCursors(runtime.stateDir)
@@ -82,7 +90,7 @@ async function captureTick(runtime, opts) {
     await writeCursors(runtime.stateDir, cursors, knownImports)
     knownImports = authorizedImports(cursors)
   }
-  const client = getClient(runtime)
+  const client = getClient(runtime, opts.signal)
   /** @type {string[] | undefined} */
   let observedRepos = opts.observedRepos
   if (opts.mode === 'backfill' && opts.only?.length) observedRepos = []
@@ -190,6 +198,7 @@ async function captureTick(runtime, opts) {
       only: opts.only,
       observedRepos,
       requestLimit: runtime.captureRequestLimit,
+      signal: opts.signal,
     })
   } catch (err) {
     // The tick ended with no result to carry a report, so still commit whatever
@@ -209,9 +218,12 @@ async function captureTick(runtime, opts) {
   // it publishes no `next_repo`: its verdict covers a subset of the inventory.
   // A narrowed run that comes back clean has no opinion at all - it records
   // none, so `writeCursors` takes whatever verdict is on disk now instead of
-  // re-asserting the stale snapshot this tick started from.
+  // re-asserting the stale snapshot this tick started from. A cancelled run
+  // sized nothing either: its stop cut the rotation short, so like a thrown
+  // tick it records no verdict, and a saved backlog keeps its cadence.
   // @ref LLP 0438#writers [implements]: the tick that sized the work records the verdict beside the cursors it advanced
-  if (pending) cursors.pending = true
+  if (result.cancelled) delete cursors.pending
+  else if (pending) cursors.pending = true
   else if (!opts.only?.length) cursors.pending = false
   else delete cursors.pending
   const cursorError = await persistCursors()
@@ -225,6 +237,7 @@ async function captureTick(runtime, opts) {
     pending,
     inventory_pending: inventoryPending,
     errors: result.errors.length,
+    ...(result.cancelled ? { cancelled: true } : {}),
   })
   return { ...result, pending }
 }

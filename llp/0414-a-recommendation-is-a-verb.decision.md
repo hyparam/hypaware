@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-09-14
 **Extends:** LLP 0155 (#core-group: the `report` group gains a fifth server-facing member, `fix`, riding the same target and credential resolution), LLP 0398 (#run-directory: the launch mechanics of `hyp ask` are reused; the working directory rule gets its other half), LLP 0419 in the server corpus (#record: the evidence and basis lists on the record become the tail of the printed brief)
-**Extended-by:** LLP 0456 (#same-seams: an RFC asking what makes a client first on the piped path, where this decision says the first is taken), LLP 0459 (#listing-is-the-picker: an RFC asking what the picker does under an attended-looking tty nobody answers, where this decision settles only the run that cannot prompt)
+**Extended-by:** LLP 0456 (#same-seams: what makes a client first on the piped path, where this decision says the first is taken, is ascending client id), LLP 0459 (#listing-is-the-picker: an accepted RFC settling what the picker does under an attended-looking tty nobody answers, where this decision settles only the run that cannot prompt), LLP 0461 (#not-yet: the first item, recording that a recommendation was acted on, is closed by `hyp report mark`; #list-shows-ids and #page-is-the-brief: the listing and the brief gain the recommendation's state)
 **Related:** LLP 0198 (#real-launch, #path-probe, #no-preauth: the launch is real, the client must be attached, the session is not pre-authorised), LLP 0402 in the server corpus (the id this verb takes, and the resolve route it calls)
 
 > A published report ranks its recommendations and gives each a page. The
@@ -138,7 +138,9 @@ person is asked which; piped, the first is taken, as a named `hyp ask`
 does. The launch inherits the terminal and drops the child's exit code
 (LLP 0198 #real-launch), and nothing is pre-authorised (LLP 0198
 #no-preauth): the client reads the brief and asks for what it needs. The
-no-launcher failure prints the same runnable attach hint.
+no-launcher failure prints a runnable attach hint (`hyp ask` has since
+split its own refusal by which condition is missing, LLP 0198 #path-probe;
+this verb still prints the one hint).
 
 <a id="list-shows-ids"></a>**`hyp report list` prints the ids.** Each
 report's line is followed by one indented line per recommendation, id,

@@ -41,8 +41,9 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *   - The `/backend-api/codex/responses` rows carry `is_sse=true`, a
  *     positive `stream_event_count` under `attributes.gateway`, and
  *     Codex turn metadata projected into first-class columns.
- *   - Daemon self-telemetry (`source.start`, `sink.tick`,
- *     `cache.append`, `daemon.shutdown`) is present in JSONL.
+ *   - Daemon self-telemetry (`source.start`, the daemon dispatch counter,
+ *     `cache.append`, `daemon.shutdown`) is present in JSONL. With no
+ *     configured sinks, no `sink.export_batch` span is emitted.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -134,12 +135,22 @@ export async function run({ harness, expect }) {
   const codexThreadId = `thread-${harness.devRunId}`
   const codexSessionId = `session-${harness.devRunId}`
   const codexTurnId = `turn-${harness.devRunId}`
+  const codexBaseInstructions = 'You are Codex, a coding agent.'
   // @ref LLP 0151#body-is-authority: Codex states its lineage in the body's flat
   // `client_metadata` map on every request kind, so the fixture carries it there
-  // and NOT under the `thread-id` / `session-id` header names Codex never emits.
+  // and NOT under the bare `thread-id` / `session-id` header names.
+  // @ref LLP 0165#header-audit-correction: those two names are real on Codex's
+  // compaction and websocket paths, but no turn states its lineage in them.
   const responsesBody = JSON.stringify({
     model: 'gpt-5-codex',
-    input: [{ role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] }],
+    input: [
+      {
+        type: 'message', role: 'developer',
+        content: [{ type: 'input_text', text: codexBaseInstructions }],
+        internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] },
+      },
+      { role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] },
+    ],
     stream: true,
     client_metadata: {
       'x-codex-installation-id': `install-${harness.devRunId}`,
@@ -219,6 +230,7 @@ export async function run({ harness, expect }) {
       model,
       role,
       content_text,
+      system_text,
       conversation_id,
       cwd,
       client_name,
@@ -259,6 +271,11 @@ export async function run({ harness, expect }) {
 
   const chatRows = rows.filter((r) => r.path === '/v1/chat/completions')
   const responseRows = rows.filter((r) => r.path === '/backend-api/codex/responses')
+  expect.that(
+    'query: Codex 0.162 base instructions populate system_text without an extra developer row',
+    responseRows,
+    (v) => v.length === 2 && v.every((r) => r.system_text === codexBaseInstructions && r.role !== 'developer'),
+  )
   expect.that(
     'query: /v1/chat/completions rows carry provider=openai',
     chatRows.map((r) => r.provider),
@@ -364,10 +381,19 @@ export async function run({ harness, expect }) {
     ),
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
+  // @ref LLP 0471#instance-ownership [tests]: zero-sink dispatch counts a daemon tick without an instance export
+  const metrics = await expect.metrics()
   expect.that(
-    'traces: at least one sink.tick fired before shutdown',
-    traces.filter((/** @type {any} */ t) => t.name === 'sink.tick'),
-    (rows) => Array.isArray(rows) && rows.length >= 1,
+    'metrics: same-run daemon sink dispatch fired before shutdown',
+    metrics,
+    (rows) => rows.some((/** @type {any} */ m) =>
+      m.name === 'hyp_sink_ticks_total' && m.attributes?.source === 'daemon' &&
+      m.resource?.dev_run_id === harness.devRunId && Number(m.value) > 0),
+  )
+  expect.that(
+    'traces: zero-sink fixture emits no sink.export_batch spans',
+    traces.filter((/** @type {any} */ t) => t.name === 'sink.export_batch'),
+    (rows) => rows.length === 0,
   )
   expect.that(
     'traces: at least two cache.append spans for ai_gateway_messages',

@@ -44,6 +44,12 @@
         }
       }
     ],
+    "skills": [
+      { "name": "hypaware-query", "clients": ["openclaw"] },
+      { "name": "hypaware-reference", "clients": ["openclaw"] },
+      { "name": "hypaware-privacy", "clients": ["openclaw"] },
+      { "name": "hypaware-report", "clients": ["openclaw"] }
+    ],
     "config_sections": [
       {
         "section": "openclaw",

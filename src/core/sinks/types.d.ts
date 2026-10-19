@@ -164,7 +164,42 @@ export interface DriverOptions {
   /** Kernel state root (e.g. `<HYP_HOME>/hypaware`). */
   stateRoot: string
   config?: HypAwareV2Config
+  /** Actual admitted exports only, with bounded scalar summary and wall-clock completion. */
+  onComplete?: (completion: SinkCompletion) => void
+  /** Separate cleanup failure, never an export acknowledgement or payload reason. */
+  onDiagnosticCleanupFailure?: (instance: string, code: string) => void
 }
+
+/** Bounded scalar metadata for one recognized ordinary driver diagnostic. */
+export interface SinkDiagnosticRecord {
+  name: string
+  at: number
+  sequence: bigint
+}
+
+/**
+ * One sink instance's durable set of datasets its destination refused to
+ * register (LLP 0537). Each method rejects when its write fails, and a later
+ * call retries the write.
+ */
+export interface HeldDatasetStore {
+  /**
+   * Read the snapshot once, dropping holds for another destination or for a
+   * name not in `keep`. Resolves to the reason when the snapshot could not be
+   * read: the record then stays as it is until every name in `keep` is held,
+   * cleared or passed to `resolve`.
+   */
+  load(keep: ReadonlySet<string>): Promise<string | undefined>
+  /** Datasets known to hold nothing without asking the destination (no local rows). */
+  resolve(names: Iterable<string>): Promise<void>
+  /** Record that the destination refused `name`. */
+  hold(name: string): Promise<void>
+  /** Record that `name` no longer needs a hold. */
+  clear(name: string): Promise<void>
+}
+
+/** What `hyp status` reads back: the current holds, or why it could not tell. */
+export type HeldDatasetsRead = { datasets: string[] } | { unreadable: string }
 
 export interface TickOptions {
   /** Undefined progress starts a destination; subsequent events are acknowledged deltas. */
@@ -178,6 +213,18 @@ export interface TickOptions {
   source?: 'daemon' | 'manual'
 }
 
+/**
+ * What one sink run's partition discovery found for one dataset. `failed`:
+ * discovery threw before any of it was kept. `partial`: it threw after some
+ * was (the post-flush re-discovery). An empty dataset is `complete` with 0.
+ */
+export interface SinkDatasetDiscovery {
+  dataset: string
+  /** Partitions kept from this dataset and handed to the sink. */
+  partitions: number
+  discovery: 'complete' | 'partial' | 'failed'
+}
+
 export interface TickReport {
   sinks: Array<{
     instance: string
@@ -185,6 +232,8 @@ export interface TickReport {
     partitionsExported: number
     bytesWritten: number
     error?: string
+    /** Per-dataset discovery for this run; absent when the run never discovered. */
+    datasets?: SinkDatasetDiscovery[]
   }>
   /**
    * Present when the whole tick was skipped: an enrolling login's first-sync
@@ -193,6 +242,35 @@ export interface TickReport {
    * (LLP 0101).
    */
   held?: 'first_sync_hold'
+}
+
+/** Internal host seams, never part of the public plugin Sink contract. */
+export interface SinkCompletion {
+  instance: string
+  startedAt: string
+  completedAt: string
+  report: TickReport['sinks'][number]
+}
+
+export interface SinkRunOutcome {
+  report?: TickReport['sinks'][number]
+  held?: 'first_sync_hold'
+}
+
+export interface SinkManualReceipt {
+  run: () => Promise<SinkRunOutcome>
+  resolve: (outcome: SinkRunOutcome) => void
+  reject: (error: unknown) => void
+}
+
+export interface SinkExecutionState {
+  active: boolean
+  operation: Promise<SinkRunOutcome> | null
+  rerun: boolean
+  manual: SinkManualReceipt | null
+  stopped: boolean
+  stop: () => void
+  scheduled: (handle: ExtendedSinkHandle, state: SinkExecutionState) => void
 }
 
 export interface MaterializeResult {

@@ -26,6 +26,13 @@ export interface SelfUpdateState {
    */
   running_version?: string
   /**
+   * Why the daemon's automatic lanes are declining to apply, recorded by
+   * the pass that declines and cleared by a supervised one. Only
+   * `unsupervised` today: no service manager will relaunch the daemon.
+   * Read by `hyp status` only while that daemon is alive.
+   */
+  refusal?: 'unsupervised'
+  /**
    * A version that was installed and could not run here (its entrypoint
    * failed preflight, or boots on it kept failing). Never installed again;
    * cleared by a probe that finds something newer.

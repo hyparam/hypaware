@@ -115,12 +115,14 @@ export interface ProgressState {
 
 /**
  * Crash-safe, never-regressing monotonic int64 allocator for the
- * `_hyp_ingest_seq` column. `next()` reserves seq blocks durably
- * (reserve-before-stamp) so a resumed flush never re-issues a seq `<=` one
- * already stamped. See `createIngestSeqAllocator`.
+ * `_hyp_ingest_seq` column. `reserve(count)` durably reserves a contiguous
+ * run of `count` seqs under a cross-process guard and returns its first seq
+ * (reserve-before-stamp), so a resumed flush never re-issues a seq `<=` one
+ * already stamped. Call it inside the partition mutation guard, right before
+ * the rows commit. See `createIngestSeqAllocator`.
  */
 export interface IngestSeqAllocator {
-  next(): Promise<bigint>
+  reserve(count: number): Promise<bigint>
 }
 
 export interface SpoolAppendResult {
@@ -574,6 +576,14 @@ export type ExtendedQueryStorageService = QueryStorageService & {
   pendingInfo(tablePath: string): Promise<PendingInfo>
   /** Whether `tablePath` has rows spooled but not yet flushed to Iceberg. */
   hasPendingSync(tablePath: string): boolean
+  /**
+   * How many of `rows`, already read from `tablePath` through `readRowsSince`
+   * with every column, the export seam would withhold now: a purged session,
+   * an opted-out source, or a `cwd` whose current usage class (`.hypignore`
+   * included, within the resolver's TTL) is not `full`. Bounded to the rows
+   * given; no table scan.
+   */
+  exportWithheld(tablePath: string, rows: readonly Record<string, unknown>[]): number
   appendRowsToPartition(
     dataset: string,
     partitionSegments: string[],

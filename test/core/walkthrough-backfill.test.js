@@ -947,3 +947,53 @@ test('the result line keeps the counts that carry news and drops the rest', () =
     'failed (scanned 4, wrote 0, skipped 2)'
   )
 })
+
+// An importer that could not run at all (no `opencode` on PATH) is not an
+// empty history. The note says so in place of "nothing to import", dry run or
+// not, and only on a zero scan: a failure and a run that read sessions keep
+// their own lines.
+test('the result line says an unavailable importer was unavailable, not empty', () => {
+  const note = 'opencode was not found on PATH'
+  assert.equal(
+    describeBackfillResult({ ok: true, scanned: 0, rowsWritten: 0, skipped: 0, note }),
+    `unavailable: ${note}`
+  )
+  assert.equal(
+    describeBackfillResult({ ok: true, dryRun: true, scanned: 0, rowsWritten: 0, skipped: 0, note }),
+    `unavailable: ${note}`
+  )
+  assert.equal(
+    describeBackfillResult({ ok: true, scanned: 2, rowsWritten: 0, skipped: 0, note }),
+    'nothing new to import (scanned 2)'
+  )
+  assert.equal(
+    describeBackfillResult({ ok: false, scanned: 0, rowsWritten: 0, skipped: 0, note }),
+    'failed (scanned 0, wrote 0, skipped 0)'
+  )
+})
+
+test('the finale prints an unavailable import, and stays quiet on an empty one', async () => {
+  const note = 'opencode was not found on PATH, so its history was not imported; live capture is unaffected.'
+  for (const [entry, expected] of /** @type {const} */ ([
+    [{ provider: 'opencode', dryRun: false, ok: true, scanned: 0, rowsWritten: 0, skipped: 0, note }, true],
+    [{ provider: 'opencode', dryRun: false, ok: true, scanned: 0, rowsWritten: 0, skipped: 0 }, false],
+  ])) {
+    const env = await tmpEnv('hypaware-bf-unavailable-')
+    const stdout = makeBuf()
+    await runPickerFinale({
+      capabilities: noGateway,
+      stdout,
+      stderr: makeBuf(),
+      env,
+      clientsPicked: ['opencode'],
+      config: { version: 2, plugins: [{ name: '@hypaware/opencode' }] },
+      configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+      retentionDays: 7,
+      interactive: false,
+      backfill: makeBackfill(['opencode'], { opencode: entry }),
+      finale: { skipDaemon: true },
+    })
+    assert.equal(stdout.text().includes(`import unavailable: ${note}`), expected, stdout.text())
+    if (!expected) assert.doesNotMatch(stdout.text(), /import nothing to import|unavailable/)
+  }
+})

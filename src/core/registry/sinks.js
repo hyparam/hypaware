@@ -49,6 +49,18 @@ const instanceNames = new WeakMap()
  */
 const instanceConfigs = new WeakMap()
 
+/** @type {WeakMap<object, () => void>} */
+const executionStops = new WeakMap()
+/** @type {WeakSet<object>} */
+const closedHandles = new WeakSet()
+
+// @ref LLP 0471#instance-ownership [implements]: close invalidates the shared handle gate before awaiting plugin work
+/** @param {ExtendedSinkHandle} handle @param {() => void} stop */
+export function onSinkHandleClose(handle, stop) {
+  if (closedHandles.has(handle)) stop()
+  else executionStops.set(handle, stop)
+}
+
 /**
  * The instance name this module keyed `handle` under: the string
  * `instantiate` validated, out of the kernel's own record rather than off the
@@ -148,6 +160,8 @@ export function createSinkRegistry() {
    * @type {Map<string, PluginName>}
    */
   const owners = new Map()
+  /** @type {WeakMap<ExtendedSinkHandle, Promise<void>>} */
+  const closing = new WeakMap()
   const log = getLogger('sinks')
   const instruments = getKernelInstruments()
   /**
@@ -366,13 +380,10 @@ export function createSinkRegistry() {
    * kernel's materializer took out of the config row: the value every other
    * label on the instance comes from, and on the kernel's own path the name
    * `materializeRequest`/`materializeBlob` filtered the listing on to reach
-   * this contribution. That agreement holds only as far as the record does:
-   * `ownerName` reads a live, unfrozen property, so a plugin that rewrites its
-   * own `name` after activation moves every label on the instance, and this
-   * resolution moves with them only when the rewritten owner still holds a
-   * registration of this contribution (issue #2130). Otherwise the identity
-   * fallback in the next paragraph applies, and the tags are another
-   * registrant's validated set, a residual of #2130 this fix leaves unchanged.
+   * this contribution. That agreement holds as far as the record does, and
+   * `createActivationContext` freezes the record and locks `ctx.plugin`, so
+   * on the kernel's path the owner match below always hits and the identity
+   * fallback never hands one registrant another's validated set (issue #2130).
    *
    * An identity match under another owner is still preferred over reading the
    * contribution, because a host driving this registry itself records no owner
@@ -660,19 +671,39 @@ export function createSinkRegistry() {
    * @param {PluginName} [owner]
    */
   async function closeAll(owner) {
-    const names = Array.from(handles.keys())
-    for (const name of names) {
-      const handle = handles.get(name)
-      if (!handle) continue
-      if (owner !== undefined && owners.get(name) !== owner) continue
-      try {
-        await handle.sink.close()
-      } catch {
-        // best-effort during shutdown
-      }
-      handles.delete(name)
-      owners.delete(name)
+    const selected = Array.from(handles.entries()).filter(([name]) => owner === undefined || owners.get(name) === owner)
+    for (const [, handle] of selected) {
+      closedHandles.add(handle)
+      executionStops.get(handle)?.()
+      executionStops.delete(handle)
     }
+    // @ref LLP 0471#close-order [implements]: initiate every selected close before awaiting, and join concurrent callers
+    const pending = selected.map(([name, handle]) => {
+      const existing = closing.get(handle)
+      if (existing) return existing
+      /** @type {(value: void | PromiseLike<void>) => void} */
+      let resolveClose = () => {}
+      /** @type {(reason?: unknown) => void} */
+      let rejectClose = () => {}
+      const operation = new Promise((resolve, reject) => {
+        resolveClose = resolve
+        rejectClose = reject
+      })
+      const settled = operation.catch(() => {
+        log.warn('sink.close_failed', { [Attr.SINK_INSTANCE]: name, error_kind: 'sink_close' })
+      }).finally(() => {
+        if (handles.get(name) === handle) {
+          handles.delete(name)
+          owners.delete(name)
+        }
+      })
+      // Publish ownership before plugin code can reenter closeAll synchronously.
+      closing.set(handle, settled)
+      try { resolveClose(handle.sink.close()) }
+      catch { rejectClose(new Error('sink close failed')) }
+      return settled
+    })
+    await Promise.all(pending)
   }
 
   return {
@@ -702,11 +733,11 @@ function contributionKey(plugin, name) {
  * row (`src/core/sinks/materialize.js`). The loader builds that record from
  * the manifest it validated (`src/core/runtime/loader.js`), so it is the
  * kernel's own rather than a property of the contribution the instance came
- * from. It is not out of a plugin's reach: `ctx.plugin` is that very object,
- * unfrozen, so an activated plugin can still rewrite the name the kernel
- * resolves it under (issue #2130). Reading it once, here, is what keeps one
- * instantiation's labels, span, counter and owner record from disagreeing
- * whatever it answers.
+ * from. `ctx.plugin` is that very object, but `createActivationContext`
+ * freezes it and locks the member, so an activated plugin cannot rewrite the
+ * name the kernel resolves it under (issue #2130). Reading it once, here,
+ * still keeps one instantiation's labels, span, counter and owner record
+ * from disagreeing for a direct caller that hands in a record of its own.
  *
  * A record without a usable `name` answers `''` rather than falling back to
  * the contribution's claim, which `InstantiateArgs` makes unreachable for a

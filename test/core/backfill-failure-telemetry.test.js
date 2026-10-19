@@ -34,21 +34,35 @@ const ITEM = { dataset: 'ds', kind: 'test.kind', value: { x: 1 } }
  *   providerThrows?: boolean,
  *   providerThrowsAfterYield?: boolean,
  *   flushThrows?: boolean,
+ *   materializeThrows?: unknown,
+ *   appendThrows?: boolean,
+ *   reconcileThrows?: boolean,
+ *   leadingItem?: typeof ITEM,
  *   registerMaterializer?: boolean,
  *   materializerDataset?: string,
  *   registeredDatasets?: string[],
  * }} [opts]
  */
 function runnerCtx(opts = {}) {
+  // What the run did to the provider's iterator and the storage, for the
+  // tests that pin the abort rather than the kind.
+  const trace = { resumed: false, closed: false, flushes: 0 }
+  const item = opts.reconcileThrows ? { ...ITEM, reconcile: { where: { x: 1 }, key: 'a' } } : ITEM
   const backfills = createBackfillRegistry()
   backfills.register({
     name: 'tester',
     plugin: '@test/plugin',
     datasets: [ITEM.dataset],
     async *run() {
-      if (opts.providerThrows) throw new Error('provider generator blew up')
-      yield ITEM
-      if (opts.providerThrowsAfterYield) throw new Error('provider generator blew up mid-stream')
+      try {
+        if (opts.providerThrows) throw new Error('provider generator blew up')
+        if (opts.leadingItem) yield opts.leadingItem
+        yield item
+        trace.resumed = true
+        if (opts.providerThrowsAfterYield) throw new Error('provider generator blew up mid-stream')
+      } finally {
+        trace.closed = true
+      }
     },
   })
   const backfillMaterializers = createBackfillMaterializerRegistry()
@@ -57,7 +71,10 @@ function runnerCtx(opts = {}) {
       kind: ITEM.kind,
       dataset: opts.materializerDataset ?? ITEM.dataset,
       plugin: '@test/plugin',
-      materialize() { return [{ a: 1 }] },
+      materialize() {
+        if ('materializeThrows' in opts) throw opts.materializeThrows
+        return [{ a: 1 }]
+      },
     })
   }
   const registered = new Set(opts.registeredDatasets ?? [ITEM.dataset])
@@ -65,8 +82,15 @@ function runnerCtx(opts = {}) {
     cacheRoot: '/tmp/fake-cache',
     /** @param {string} dataset @param {string[]} segs */
     cacheTablePath(dataset, segs) { return `/tmp/fake-cache/datasets/${dataset}/${segs.join('/')}` },
-    async appendRows() {},
+    async appendRows() {
+      if (opts.appendThrows) throw new Error('append blew up')
+    },
+    async reconcileRows() {
+      if (opts.reconcileThrows) throw new Error('reconcile blew up')
+      return 1
+    },
     async flushTable() {
+      trace.flushes += 1
       if (opts.flushThrows) throw new Error('forced flush blew up')
     },
   }
@@ -77,7 +101,7 @@ function runnerCtx(opts = {}) {
       return { name, plugin: '@test/plugin', schema: { columns: [{ name: 'a', type: 'INT32', nullable: true }] } }
     },
   }
-  return /** @type {any} */ ({ env: {}, config: {}, backfills, backfillMaterializers, query, storage })
+  return /** @type {any} */ ({ env: {}, config: {}, backfills, backfillMaterializers, query, storage, trace })
 }
 
 /**
@@ -133,6 +157,26 @@ for (const scenario of [
     opts: { registeredDatasets: [] },
     errorKind: 'dataset_not_registered',
   },
+  {
+    name: 'the materializer throws',
+    opts: { materializeThrows: new Error('materialize blew up') },
+    errorKind: 'materialize_failed',
+  },
+  {
+    name: 'the materializer throws a value that is not an Error',
+    opts: { materializeThrows: 'materialize blew up as a string' },
+    errorKind: 'materialize_failed',
+  },
+  {
+    name: 'the item append throws',
+    opts: { appendThrows: true },
+    errorKind: 'write_failed',
+  },
+  {
+    name: 'the item reconcile throws',
+    opts: { reconcileThrows: true },
+    errorKind: 'write_failed',
+  },
 ]) {
   test(`provider_finish names the step that failed when ${scenario.name}`, async () => {
     // @ref LLP 0021#the-attribute-contract [tests]: a failure's `error_kind` names the step that broke
@@ -163,6 +207,16 @@ for (const scenario of [
     opts: { registerMaterializer: false, flushThrows: true },
     errorKind: 'materializer_missing',
   },
+  {
+    name: 'a throwing materializer beats a later flush failure',
+    opts: { materializeThrows: new Error('materialize blew up'), flushThrows: true },
+    errorKind: 'materialize_failed',
+  },
+  {
+    name: 'an earlier item failure beats a later throwing materializer',
+    opts: { leadingItem: { ...ITEM, kind: 'unclaimed.kind' }, materializeThrows: new Error('materialize blew up') },
+    errorKind: 'materializer_missing',
+  },
 ]) {
   test(`provider_finish reports the first failure when ${scenario.name}`, async () => {
     const { result, finish } = await runWithSpans(runnerCtx(scenario.opts))
@@ -171,6 +225,41 @@ for (const scenario of [
     assert.equal(result.errorKind, scenario.errorKind, 'the compact result carries the same kind')
   })
 }
+
+// A throw past the provider's own iterator still aborts the run: the generator
+// is closed without being resumed, the touched dataset still gets its forced
+// flush, and the error log carries the thrown message under the step's kind
+// (issue #2262).
+for (const scenario of [
+  { name: 'materializer', opts: { materializeThrows: new Error('materialize blew up') }, errorKind: 'materialize_failed', error: 'materialize blew up' },
+  { name: 'materializer throwing a string', opts: { materializeThrows: 'materialize blew up as a string' }, errorKind: 'materialize_failed', error: 'materialize blew up as a string' },
+  { name: 'append', opts: { appendThrows: true }, errorKind: 'write_failed', error: 'append blew up' },
+  { name: 'reconcile', opts: { reconcileThrows: true }, errorKind: 'write_failed', error: 'reconcile blew up' },
+]) {
+  test(`a throwing ${scenario.name} aborts the provider and keeps its message`, async () => {
+    const ctx = runnerCtx(scenario.opts)
+    const { result: run, records } = await withLogRecords(() => runWithSpans(ctx))
+    assert.equal(ctx.trace.resumed, false, 'the provider is not consumed past the item that threw')
+    assert.equal(ctx.trace.closed, true, 'the provider iterator is closed')
+    assert.equal(ctx.trace.flushes, 1, 'the touched dataset still gets its forced flush')
+    assert.equal(run.result.scanned, 1)
+    assert.equal(run.result.rowsWritten, 0)
+    const logged = records.find((record) => record.body === 'backfill.provider_error')
+    assert.ok(logged, 'the abort is logged')
+    assert.equal(logged.attributes.error_kind, scenario.errorKind)
+    assert.equal(logged.attributes.error, scenario.error)
+  })
+}
+
+test('a genuine provider throw is still provider_run_failed after a clean item', async () => {
+  const ctx = runnerCtx({ providerThrowsAfterYield: true })
+  const { result: run, records } = await withLogRecords(() => runWithSpans(ctx))
+  assert.equal(run.result.errorKind, 'provider_run_failed')
+  assert.equal(run.result.rowsWritten, 1, 'the item before the throw was written')
+  const logged = records.find((record) => record.body === 'backfill.provider_error')
+  assert.equal(logged?.attributes.error_kind, 'provider_run_failed')
+  assert.equal(logged?.attributes.error, 'provider generator blew up mid-stream')
+})
 
 test('provider_finish leaves a clean run unmarked', async () => {
   const { result, finish } = await runWithSpans(runnerCtx())

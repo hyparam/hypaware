@@ -20,6 +20,9 @@ import {
 /** The fallback when the wizard could not tell which server this machine syncs to. */
 const CLOUD_FALLBACK = 'the cloud'
 
+/** The qualification when the central set did not resolve (LLP 0509). */
+const TEAM_UNCONFIRMED = "Your team's configuration could not be confirmed"
+
 /**
  * The wizard's sync lane, on every enrolled run after the picker. It asks
  * nothing: the picker's answer is also the sharing answer (LLP 0396
@@ -85,11 +88,17 @@ export async function runWizardSyncScope(opts) {
   const optedOutAll = new Set(optedOutClientSourceIds(existing))
   const hiddenCandidates = opts.candidatesHiddenIds ?? []
   const hiddenCandidateSyncs = hiddenCandidates.some((id) => !optedOutAll.has(id))
+  // The equation above holds only when the central set resolved. When it
+  // did not, a hidden pick may be an org row whose stale opt-out the seam
+  // ignores, so neither "nothing syncs" nor "this definitely ships" is
+  // known; the lane says which part it could not confirm.
+  // @ref LLP 0509#unknown-is-not-empty [implements]: an unresolved central set qualifies the sync statement instead of reading as an org that locks nothing
+  const lockedResolved = opts.lockedResolved !== false
 
   if (opts.candidates.length === 0) {
     const said = opts.statement ?? opts.stdout
     const locked = opts.locked ?? []
-    // Five ways to reach this line, and they are not the same fact. With
+    // Six ways to reach this line, and they are not the same fact. With
     // org rows to name, they sync. With none nameable but locked rows still
     // standing - the enrolled machine whose locked set is entirely hidden
     // (LLP 0276 #sync-gate) - the fleet's own capture still ships, so the
@@ -98,21 +107,26 @@ export async function runWizardSyncScope(opts) {
     // does not already withhold - a carried raw source (LLP 0202
     // #carry-through) on a run whose org config has not converged - capture
     // still ships and the fleet does not own it, so the line names neither
-    // the row nor an owner. Only with nothing standing at all does nothing
-    // sync. The locked branch needs no such check: an org row always syncs
-    // (LLP 0188 #locked) and the export seam drops opt-out entries for
+    // the row nor an owner. With no central set resolved this run, the
+    // hidden picks may be org rows, so the line says the team's
+    // configuration is unconfirmed and claims neither direction. Only with
+    // nothing standing at all, known as such, does nothing sync. The locked
+    // branch needs no such check: an org row always syncs (LLP 0188
+    // #locked) and the export seam drops opt-out entries for
     // central-classified sources, so a store entry for one is inert.
     // @ref LLP 0276#no-candidates [implements]: the no-candidates line states the fleet only when there is a visible org row to name, and never claims nothing syncs while a filtered-out row stands
     // @ref LLP 0289#ask-the-store [implements]: a hidden pick the store withholds is not standing, so this branch reads "nothing syncs" instead of promising an export that will not happen
     if (locked.length === 0) {
       if ((opts.lockedHidden ?? 0) > 0) {
         said.write(`✓ Capture your team manages still syncs to ${server}\n`)
+      } else if (!lockedResolved) {
+        said.write(`! ${TEAM_UNCONFIRMED}, so capture your team manages may still sync to ${server}\n`)
       } else if (hiddenCandidateSyncs) {
         said.write(`✓ Capture already set up on this machine still syncs to ${server}\n`)
       } else {
         said.write(`✓ Nothing syncs to ${server}\n`)
       }
-      return await finishSpan({}, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+      return await finishSpan({}, opts, { hidden_picks_syncing: hiddenCandidateSyncs, locked_resolved: lockedResolved })
     }
     // A hidden pick beside the org rows is the machine's own capture, not
     // the fleet's: the org rows get their line, and the hidden pick gets a
@@ -123,16 +137,21 @@ export async function runWizardSyncScope(opts) {
     if (hiddenCandidates.length > 0 && hiddenCandidateSyncs) {
       said.write(`✓ Capture already set up on this machine also syncs to ${server}\n`)
     }
-    return await finishSpan({}, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+    return await finishSpan({}, opts, { hidden_picks_syncing: hiddenCandidateSyncs, locked_resolved: lockedResolved })
   }
 
   // The statement that names what leaves the machine (LLP 0188
   // #never-silent); the picker's line names what is recorded. The answer is
   // applied after the config commits (`commitWizardSyncScope`).
   // @ref LLP 0396#combined-selection [implements]: the collection answer also enables sharing, with no second picker
-  stateSyncing(opts.statement ?? opts.stdout, server, opts.locked ?? [], opts.candidates)
+  const said = opts.statement ?? opts.stdout
+  stateSyncing(said, server, opts.locked ?? [], opts.candidates)
+  if (!lockedResolved) {
+    said.write(`! ${TEAM_UNCONFIRMED}, so capture your team manages may also sync to ${server}\n`)
+  }
   return await finishSpan({ pendingSources: [...candidateIds] }, opts, {
     hidden_picks_syncing: hiddenCandidateSyncs,
+    locked_resolved: lockedResolved,
   })
 }
 
@@ -201,7 +220,7 @@ function stateSyncing(said, server, locked, candidates) {
  *
  * @param {WizardSyncScopeResult} result
  * @param {RunWizardSyncScopeOptions} opts
- * @param {{ hidden_picks_syncing?: boolean, sources_cleared?: number }} [extra]
+ * @param {{ hidden_picks_syncing?: boolean, locked_resolved?: boolean, sources_cleared?: number }} [extra]
  *   attributes only the caller knows, folded in when present
  * @returns {Promise<WizardSyncScopeResult>}
  */

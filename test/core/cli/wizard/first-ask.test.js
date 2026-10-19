@@ -97,6 +97,44 @@ test('resolveOnPath: finds an executable on PATH, ignores a non-executable match
   assert.equal(await resolveOnPath('fakeclient', {}, 'darwin'), undefined)
 })
 
+test('resolveOnPath: a mode-0755 directory named claude on PATH is not an installed CLI', async () => {
+  // @ref LLP 0198#path-probe [tests]: the probe looks for a launch binary, and
+  // the execute bit on a directory means traversable, not runnable
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-dir-'))
+  await fsp.mkdir(path.join(dir, 'claude'), { mode: 0o755 })
+
+  assert.equal(await resolveOnPath('claude', { PATH: dir }, 'darwin'), undefined)
+  // The launchable set, which is what decides which refusal `hyp ask` prints.
+  const launchers = await resolveLaunchers({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    env: { PATH: dir },
+    platform: 'darwin',
+  })
+  assert.deepEqual(launchers, [])
+
+  // Everything else a PATH entry can hold, against one real binary that must
+  // keep resolving: an install is normally a symlink to one.
+  const real = path.join(dir, 'real-claude')
+  await fsp.writeFile(real, '#!/bin/sh\n', { mode: 0o755 })
+  await fsp.symlink(real, path.join(dir, 'linked'))
+  await fsp.symlink(path.join(dir, 'claude'), path.join(dir, 'to-dir'))
+  await fsp.symlink(path.join(dir, 'gone'), path.join(dir, 'dangling'))
+
+  assert.equal(await resolveOnPath('linked', { PATH: dir }, 'darwin'), path.join(dir, 'linked'))
+  assert.equal(await resolveOnPath('to-dir', { PATH: dir }, 'darwin'), undefined)
+  assert.equal(await resolveOnPath('dangling', { PATH: dir }, 'darwin'), undefined)
+
+  // The `PATHEXT` loop walks past a rejected candidate, so a directory named
+  // `claude.EXE` does not shadow the real `claude.CMD` beside it.
+  const win = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-win-'))
+  await fsp.mkdir(path.join(win, 'claude.EXE'), { mode: 0o755 })
+  const cmd = path.join(win, 'claude.CMD')
+  await fsp.writeFile(cmd, 'rem\n', { mode: 0o755 })
+  const winEnv = { PATH: win, PATHEXT: '.COM;.EXE;.BAT;.CMD' }
+  assert.equal(await resolveOnPath('claude', winEnv, 'win32'), cmd)
+})
+
 test('resolveLaunchers: picked and resolvable only; a launch-less client is never offered', async () => {
   // @ref LLP 0198#path-probe [tests]: detection is not launchability
   const launchers = await resolveLaunchers({
@@ -109,6 +147,22 @@ test('resolveLaunchers: picked and resolvable only; a launch-less client is neve
   assert.deepEqual(launchers.map((l) => l.client), ['claude'])
   assert.equal(launchers[0].binPath, '/usr/local/bin/claude')
   assert.equal(launchers[0].label, 'Claude Code')
+})
+
+// #671: every command that needs one launcher takes the first and offers its
+// picker in this order. Mixed case and non-ASCII on purpose: by code unit
+// every uppercase id sorts before every lowercase one and both before an
+// accented one, where a locale compare would interleave them.
+// @ref LLP 0456#decision [tests]: discovery order never decides which launcher is first
+test('resolveLaunchers: ascending client id by code unit, whatever order the clients arrive in', async () => {
+  const ids = ['émile', 'zeta', 'Zulu', 'beta', 'Émile', 'alpha']
+  const map = new Map(/** @type {any} */ (ids.map((id) => [id, { plugin: `@test/${id}`, name: id, skillDir: `.${id}`, launch: { bin: `bin-${id}`, args: ['{prompt}'] } }])))
+  const launchers = await resolveLaunchers({ clients: ids, descriptors: map, env: {}, resolve: async (bin) => `/test-owned/${bin}` })
+  const order = launchers.map((l) => l.client)
+  assert.deepEqual(order, ['Zulu', 'alpha', 'beta', 'zeta', 'Émile', 'émile'])
+  assert.notDeepEqual(order, [...ids].sort((a, b) => a.localeCompare(b, 'en')), 'the order must not be a locale one')
+  // Order is all that changes: each launcher still carries its own resolution.
+  assert.deepEqual(launchers.map((l) => l.binPath), order.map((id) => `/test-owned/bin-${id}`))
 })
 
 test('resolveLaunchers: an unpicked client is not offered even when it resolves', async () => {
@@ -188,12 +242,14 @@ test('launchClient: a prompt is substituted literally, not read as a replacement
 })
 
 test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is filled', async () => {
+  // At least one element carries the placeholder, and every occurrence is
+  // replaced: two elements here, one of them holding it twice.
   const spawner = recordingSpawn()
   const result = await runWizardFirstAsk({
     clients: ['x'],
     descriptors: new Map(/** @type {any} */ ([['x', {
       plugin: '@hypaware/x', name: 'x', skillDir: '.x',
-      launch: { bin: 'x', args: ['run', '--prompt', '{prompt}'], label: 'X' },
+      launch: { bin: 'x', args: ['run', '--prompt', '{prompt}', '--title={prompt}|{prompt}'], label: 'X' },
     }]])),
     stdout: makeBuf(),
     env: {},
@@ -204,32 +260,45 @@ test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is fil
     prepareEvidence: fakeEvidence,
   })
   assert.equal(result.launched, true)
-  assert.deepEqual(spawner.calls[0].args.slice(0, 2), ['run', '--prompt'])
-  assert.equal(spawner.calls[0].args[2], FIRST.prompt)
+  assert.deepEqual(spawner.calls[0].args, ['run', '--prompt', FIRST.prompt, `--title=${FIRST.prompt}|${FIRST.prompt}`])
 })
 
-test('runWizardFirstAsk: no launchable client prints the list and launches nothing', async () => {
+// @ref LLP 0198#path-probe [tests]: nothing recorded and resolvable is one refusal, and the caller words it
+test('runWizardFirstAsk: no launchable client launches nothing and prints nothing, whatever the cache holds', async () => {
+  for (const hasRows of [true, false, undefined]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const spawner = recordingSpawn()
+    const result = await runWizardFirstAsk({
+      clients: ['claude-desktop'],
+      descriptors: descriptors(),
+      stdout,
+      stderr,
+      env: {},
+      interactive: true,
+      ...(hasRows === undefined ? {} : { hasRows }),
+      resolve: async () => undefined,
+      spawnFn: spawner.fn,
+      select: selectReturning(FIRST.id).fn,
+    })
+    // An empty cache does not win: "come back once you have history" would
+    // send the reader to this same refusal.
+    assert.deepEqual(result, { launched: false, reason: 'no-launcher' })
+    assert.equal(spawner.calls.length, 0)
+    // The caller owns the message, so the question it cannot ask is not printed.
+    assert.equal(stdout.text(), '')
+    assert.equal(stderr.text(), '')
+  }
+})
+
+test('the no-launch footer names the condition for a launch, never a prompt to paste', () => {
   const stdout = makeBuf()
-  const spawner = recordingSpawn()
-  const result = await runWizardFirstAsk({
-    clients: ['claude-desktop'],
-    descriptors: descriptors(),
-    stdout,
-    env: {},
-    interactive: true,
-    resolve: async () => undefined,
-    spawnFn: spawner.fn,
-    select: selectReturning(FIRST.id).fn,
-  })
-  assert.deepEqual(result, { launched: false, reason: 'no-launcher' })
-  assert.equal(spawner.calls.length, 0)
+  writeSuggestedPrompts({ stdout, footer: 'no-launch' })
   const text = stdout.text()
-  assert.match(text, /Worth asking your AI client/)
   for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.label), `missing question ${p.id}`)
   // The prompt names the evidence folder, which a reader with no launch
   // does not have, so it is never offered as something to paste.
   for (const p of SUGGESTED_PROMPTS) assert.ok(!text.includes(p.prompt), `prompt ${p.id} offered for pasting`)
-  // Nothing to start here, so the footer names the condition and the verb to run once it holds.
   // That condition is `askableClients`' predicate: attached, or configured with
   // no attach marker to write, which is recorded but not attached.
   assert.match(text, /Once a recorded client can be started here \(see `hyp status`\), run `hyp ask` again/)

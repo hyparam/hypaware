@@ -1,3 +1,4 @@
+import type { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
 import type { SinkInstanceConfig } from '../../../hypaware-plugin-kernel-types.d.ts'
 
 export type {
@@ -33,3 +34,6 @@ export function sinkInstanceName(handle: import('./types.d.ts').ExtendedSinkHand
  * empty config.
  */
 export function sinkInstanceConfig(handle: import('./types.d.ts').ExtendedSinkHandle): SinkInstanceConfig
+
+/** Internal lifecycle registration, one shared driver gate per handle. */
+export function onSinkHandleClose(handle: ExtendedSinkHandle, stop: () => void): void

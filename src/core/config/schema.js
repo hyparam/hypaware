@@ -111,7 +111,7 @@ export function isForgedGrepOnlyConfig(config) {
 // is one the parser drops, invisible to the reader holding the parsed
 // document, so the forged-shape test ignores it too. Extend this set and
 // `parsePluginEntry` together.
-const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'version', 'artifact_hash', 'source'])
+const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'version', 'artifact_hash', 'source', 'recording'])
 
 /**
  * Guard a write to the user-owned **local** config layer
@@ -480,6 +480,9 @@ function parsePluginEntry(entry, pointer, errors) {
   if (obj.enabled !== undefined && typeof obj.enabled !== 'boolean') {
     errors.push({ pointer: `${pointer}/enabled`, message: 'enabled must be a boolean when present' })
   }
+  if (obj.recording !== undefined && typeof obj.recording !== 'boolean') {
+    errors.push({ pointer: `${pointer}/recording`, message: 'recording must be a boolean when present' })
+  }
   if (obj.config !== undefined && !isPlainObject(obj.config)) {
     errors.push({ pointer: `${pointer}/config`, message: 'config must be an object when present' })
   }
@@ -493,6 +496,7 @@ function parsePluginEntry(entry, pointer, errors) {
   /** @type {PluginConfigInstance} */
   const out = { name: obj.name }
   if (typeof obj.enabled === 'boolean') out.enabled = obj.enabled
+  if (typeof obj.recording === 'boolean') out.recording = obj.recording
   if (isPlainObject(obj.config)) out.config = /** @type {JsonObject} */ (obj.config)
   if (isNonEmptyString(obj.version)) out.version = obj.version
   if (isNonEmptyString(obj.artifact_hash)) out.artifact_hash = obj.artifact_hash
@@ -745,8 +749,13 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       // threshold set above that bound. A partition would converge and still
       // read as due on every growth tick, forever, with no error anywhere.
       // Compared on EFFECTIVE values: a config that raises only the average
-      // is paired with the default batch bound, which is the likelier way to
-      // write this mistake.
+      // is paired with the default batch bound, and one that lowers only the
+      // batch bound is paired with the default average and is rejected too.
+      //
+      // @ref LLP 0540#avg-below-batch-scope: the rule guards routine
+      // source-table compaction (the growing layout). The generation-swap
+      // writer rolls files at `target_file_bytes`, and that higher ceiling is
+      // deliberately not a reason to compare against it.
       //
       // Silent when either key already failed its own check: the written
       // value is gone, so the pairing this rule would report is with a

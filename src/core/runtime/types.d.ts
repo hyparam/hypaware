@@ -68,6 +68,12 @@ export interface BootKernelOptions {
   env?: NodeJS.ProcessEnv
   /** Override OS temp root (tests). */
   tmpRoot?: string
+  /**
+   * A preview boot (`hyp setup --dry-run`): plugins activate as usual, but
+   * their durable state and cache dirs are not created and each activation
+   * context carries `preview: true` (LLP 0525).
+   */
+  preview?: boolean
   /** Apply-engine facade to expose on activation contexts (daemon only). */
   configControl?: ConfigControlFacade
 }
@@ -184,6 +190,12 @@ export interface DiscoverInstalledResult {
    * no directory.
    */
   malformed: PluginName[]
+  /**
+   * 1-based line of each `malformed` key in plugin-lock.json, so a repair
+   * can point at the row without repeating its untrusted key. A key whose
+   * line could not be read is absent.
+   */
+  malformedLines: Map<PluginName, number>
 }
 
 // --- activation ---
@@ -267,6 +279,8 @@ export interface ResolvedClientAsset {
   clients: string[]
   /** `sourceDir` for a skill, `sourceFile` for an agent. */
   source: string
+  /** The registering plugin, when the registry records one. */
+  plugin?: string
 }
 
 /**
@@ -336,8 +350,8 @@ export interface MaterializeClientAssetsOptions {
    * so the wizard finale (which threads a narrowed registry shape) and tests
    * (which pass fakes) can call this without constructing a full registry.
    */
-  skills?: { list(): { name: string; clients: string[]; sourceDir: string }[] }
-  agents?: { list(): { name: string; clients: string[]; sourceFile: string }[] }
+  skills?: { list(): { name: string; plugin?: string; clients: string[]; sourceDir: string }[] }
+  agents?: { list(): { name: string; plugin?: string; clients: string[]; sourceFile: string }[] }
   /**
    * State root (`<HYP_HOME>/hypaware`) holding the install ledger: the record
    * of which destinations HypAware itself wrote, which is what makes removing

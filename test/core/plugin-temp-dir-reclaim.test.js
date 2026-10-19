@@ -184,10 +184,12 @@ test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tm
 
 // Issue #2473. The reclaim above only ran on dispatch's success and
 // handled-error paths, and the sink-materialization warning pass writes to
-// `stderr` after the kernel has booted. A `stderr` whose `write` throws (what
-// a pipe write raises once the reader closed, `hyp sync | head`) therefore left
-// the whole boot behind: one temp dir per activated plugin, and every source the
-// activations started still listening.
+// `stderr` after the kernel has booted. A `stderr` whose `write` throws
+// synchronously therefore left the whole boot behind: one temp dir per activated
+// plugin, and every source the activations started still listening. The test
+// injects such a writer. A piped `process.stderr` on Linux is a socket, so a
+// closed reader (`hyp sync | head`) surfaces EPIPE as an asynchronous `error`
+// event rather than a throw, and is not what this regression drives.
 test('a throw from the post-boot sink warning path still reclaims the boot temp dirs', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-epipe-'))
   const tmpRoot = path.join(hypHome, 'plugin-temp-root')

@@ -44,6 +44,12 @@ export const SESSION_IGNORE_ROUTE = 'ignore/session'
  */
 const MAX_BODY_BYTES = 64 * 1024
 
+// A media-type refusal is always counted, but logged at most this often. The
+// route is unauthenticated and reachable by the browser page the gate exists
+// to refuse, so a line per refusal would trade blocked set growth for
+// unbounded growth in `logs`. Same posture as the opencode snapshot route.
+const REFUSED_MEDIA_TYPE_LOG_INTERVAL_MS = 60 * 1000
+
 /**
  * Recognize the reserved `/_hypaware/` local control prefix. Uses the same
  * segment-boundary discipline as the gateway's `pathMatchesPrefix`:
@@ -105,6 +111,8 @@ export function createControlHandler(opts) {
   const log = opts.log
   const logEvent = opts.logEvent ?? 'aigw.control.ignore_session'
   const logFields = opts.logFields ?? { component: 'ai-gateway' }
+  let refusedMediaTypes = 0
+  let refusedMediaTypeLoggedAt = -Infinity
 
   /**
    * @param {IncomingMessage} req
@@ -154,6 +162,30 @@ export function createControlHandler(opts) {
       drainRequestBody(req, res)
       res.setHeader('allow', 'GET, POST, DELETE')
       sendJson(res, 405, { error: 'method not allowed', method })
+      return
+    }
+
+    // A body that is not declared JSON is refused before it is read, so a
+    // browser page cannot reach the mutation as a CORS simple request
+    // (`text/plain`, form, or multipart need no preflight). Media-type
+    // parameters such as `charset` and letter case are accepted.
+    // @ref LLP 0507#json-only [implements]: POST/DELETE require application/json, 415 otherwise
+    const mediaType = (req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+    if (mediaType !== 'application/json') {
+      drainRequestBody(req, res)
+      refusedMediaTypes += 1
+      const now = Date.now()
+      if (now - refusedMediaTypeLoggedAt >= REFUSED_MEDIA_TYPE_LOG_INTERVAL_MS) {
+        refusedMediaTypeLoggedAt = now
+        log?.warn?.('session_ignore_unsupported_media_type', {
+          ...logFields, operation: 'ignore_session', method, status: 'refused',
+          error_kind: 'unsupported_media_type', media_type: mediaType.slice(0, 64) || 'none',
+          // Every refusal since the handler was built, so a burst the
+          // interval swallowed is still legible from one line.
+          rejected_total: refusedMediaTypes,
+        })
+      }
+      sendJson(res, 415, { error: 'content-type must be application/json' })
       return
     }
 

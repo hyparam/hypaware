@@ -6,7 +6,7 @@ import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue, s
 export const SCHEMA_VERSION = 7
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCaptureReason, AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { UsagePolicyDrop } from '../../../../src/core/usage-policy/types.js'
  * @import { RegisteredProjector, ThreadChain } from './types.js'
@@ -186,7 +186,7 @@ export function createAiGatewayMessageProjector(opts) {
   return {
     /**
      * @param {AiGatewayExchangeInput | Record<string, unknown>} exchange
-     * @param {{ journal?: (() => void)[], isSessionIgnored?: (id: string) => boolean }} [projectOpts] Pass a `journal`
+     * @param {{ journal?: (() => void)[], isSessionIgnored?: (id: string) => boolean, captureOutcome?: (reason: AiGatewayCaptureReason) => void }} [projectOpts] Pass a `journal`
      *   array to have every dedupe-state mutation this projection makes
      *   record its undo, so a caller whose append fails can hand it to
      *   `rollbackAiGatewayStateJournal` instead of leaving the shared state
@@ -195,7 +195,9 @@ export function createAiGatewayMessageProjector(opts) {
      */
     async projectExchange(exchange, projectOpts = {}) {
       const input = /** @type {AiGatewayExchangeInput} */ (exchange)
-      const projection = await dispatchProjector(projectors, input, log, projectOpts.isSessionIgnored ?? isSessionIgnored)
+      let outcomeReported = false
+      const reportOutcome = projectOpts.captureOutcome ? reason => { outcomeReported = true; projectOpts.captureOutcome?.(reason) } : undefined
+      const projection = await dispatchProjector(projectors, input, log, projectOpts.isSessionIgnored ?? isSessionIgnored, reportOutcome)
       // An intentional `.hypignore` usage-policy drop is a TERMINAL success, not
       // a projection miss: the adapter already logged the rich
       // `plugin.<adapter>.usage_policy_drop` event at the seam, so the gateway
@@ -211,6 +213,7 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
       if (!projection) {
+        if (outcomeReported) return []
         // Carry enough to identify WHAT went unrecorded: an operator
         // reading only this line must be able to tell a foreign wire
         // dialect (a path no projector decodes) from a failing client.
@@ -232,6 +235,16 @@ export function createAiGatewayMessageProjector(opts) {
           is_sse: input.is_sse === true,
         })
         return []
+      }
+
+      // @ref LLP 0469#exchange-scope [implements]: snapshots have no shared history or committed seed
+      if (typeof input.exchange_id === 'string' && input.exchange_id.length > 0 &&
+          projection.session_id === input.exchange_id && projection.conversation_id == null) {
+        return aiGatewayRowsFromProjectedExchange(projection, {
+          gatewayId,
+          gatewayAttributes: buildGatewayAttributes(input),
+          tsStart: stringValue(input.ts_start) ?? new Date().toISOString(),
+        })
       }
 
       // @ref LLP 0030#decision: seed by session_id (the partition key,
@@ -641,9 +654,9 @@ function canScanCommittedRows(storage) {
  * session: the started-at memo, per-conversation message-id history,
  * the cross-exchange dedup set, and the tool-call → tool-name lookup.
  *
- * Live capture keeps one instance per listener so identity fallback and
- * dedup span the whole session; backfill creates a fresh instance per
- * provider item (each item already carries a whole conversation), so the
+ * Ordinary live capture keeps one instance per listener so identity fallback
+ * and dedup span the whole session; exchange snapshots and backfill create
+ * fresh state per item (each item already carries a whole conversation), so the
  * identical expansion logic scopes naturally to that one conversation.
  */
 export function createAiGatewayConversationState() {
@@ -705,8 +718,8 @@ function threadMessageIds(state, threadScope, agentId) {
  *  - stripping to the advertised `AI_GATEWAY_MESSAGE_COLUMNS` set.
  *
  * Cross-message dedup and identity history live on `state`, owned by the
- * caller. Live capture passes one persistent state per listener;
- * backfill passes a fresh state per conversation item (the default).
+ * caller. Ordinary live capture passes one persistent state per listener;
+ * exchange snapshots and backfill use fresh state per item (the default).
  *
  * Expansion MUTATES `state` (the dedup set and the per-thread chain) as it
  * builds rows, but the append that makes those rows real happens after this
@@ -929,9 +942,10 @@ export function rollbackAiGatewayStateJournal(journal) {
  * @param {AiGatewayExchangeInput} input
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
  * @param {(sessionId: string) => boolean} isSessionIgnored
+ * @param {((reason: AiGatewayCaptureReason) => void) | undefined} captureOutcome
  * @returns {Promise<AiGatewayProjectedExchange | UsagePolicyDrop | undefined>}
  */
-async function dispatchProjector(projectors, input, log, isSessionIgnored) {
+async function dispatchProjector(projectors, input, log, isSessionIgnored, captureOutcome) {
   if (projectors.length === 0) return undefined
   const matching = projectors
     .filter((p) => safeMatch(p, input, log))
@@ -939,7 +953,7 @@ async function dispatchProjector(projectors, input, log, isSessionIgnored) {
   // The projector ctx already carries the logger; fold in the read-only
   // ignored-session membership test so an adapter can key its own resolved
   // session_id against the gateway's opt-out set. @ref LLP 0066#enforcement
-  const ctx = { log: { ...noopLogger(), ...(log ?? {}) }, isSessionIgnored }
+  const ctx = { log: { ...noopLogger(), ...(log ?? {}) }, isSessionIgnored, captureOutcome }
   for (const projector of matching) {
     let result
     try {

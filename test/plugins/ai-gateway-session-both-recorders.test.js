@@ -82,14 +82,11 @@ test('ignore lands the id in both recorders and the receipt reports each write',
         total: 1,
       })
 
-      // The human receipt names the second write and discloses the trust
-      // contract for BOTH endpoints (LLP 0166 is per responder).
+      // The human receipt names the second write.
       const human = fakeCtx({ env })
       assert.equal(await runSessionIgnore([], human.ctx), 0)
       assert.match(human.stdout(), /session sess-both-recorders: ignored - this id is in the gateway drop set/)
       assert.match(human.stdout(), /also claude-telemetry at .*: ignored - this id is in its drop set/)
-      const trustNotes = human.stdout().match(/nothing proves the responder/g) ?? []
-      assert.equal(trustNotes.length, 2, 'one trust disclosure per addressed endpoint')
       assert.ok(human.stdout().includes(listenerBase), 'the listener endpoint is named')
     })
   })
@@ -134,7 +131,6 @@ test('status confirms protection only after every advertised recorder reports ig
       const human = fakeCtx({ env })
       assert.equal(await runSessionStatus([], human.ctx), 0)
       assert.match(human.stdout(), /recorder claude-telemetry at .*: ignored/)
-      assert.equal((human.stdout().match(/nothing proves the responder/g) ?? []).length, 2)
     })
   })
 })
@@ -156,7 +152,7 @@ test('status reports recorded when any advertised recorder does not hold the id'
       // The headline speaks for the recorder that is still recording, which
       // here is NOT the first entry of the inventory. Every other recorder
       // gets its own line, so the gateway's `ignored` - the fact a user
-      // reading "this session IS being recorded" most needs beside it - is
+      // reading "not ignored" most needs beside it - is
       // printed, and the recorder the headline already covered is not
       // repeated. A blind `slice(1)` did the exact opposite of both.
       const human = fakeCtx({ env: { HYP_HOME: home, CLAUDE_CODE_SESSION_ID: SESSION } })
@@ -165,9 +161,6 @@ test('status reports recorded when any advertised recorder does not hold the id'
       assert.match(text, /recorder gateway at .*: ignored \(1 session on its ignore list\)/)
       assert.equal((text.match(/^recorder /gm) ?? []).length, 1, 'only the non-headline recorder gets a line')
       assert.doesNotMatch(text, /recorder claude-telemetry at/)
-      // Both endpoints still carry the per-responder trust disclosure.
-      assert.equal((text.match(/nothing proves the responder/g) ?? []).length, 2)
-      assert.ok(text.includes(listenerBase), 'the headline recorder endpoint is named')
       assert.ok(text.includes(gatewayBase), 'the other recorder endpoint is named')
     })
   })

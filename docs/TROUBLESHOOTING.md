@@ -1,33 +1,40 @@
-[← All documentation](README.md)
-
----
-
 # Troubleshoot a HypAware installation
 
 Check the installation's status and version:
 
+<!-- agent: Run hyp status and hyp version and tell me what needs attention and the exact commands to fix it. -->
 ```sh
 hyp status
 hyp version
+```
+```output
+HypAware · Healthy
+
+  Daemon     Running
+  Storage    37 MB · 90-day retention
+  Sharing    No organization sync
+
+  Clients                 Status                           Data
+  claude                  Recording (otel)                 Local only
+  codex                   Not recording                    Local only
+
+  To record codex again: hyp client attach codex
+
+No issues detected.
+
+More details: hyp status --verbose
+hypaware 1.41.0
+  node:     v26.10.0
+  platform: darwin arm64
 ```
 
 `hyp status` reports the background service, clients, storage, and problems,
 with guidance to help resolve them. Use `hyp status --verbose` for more detail
 or `hyp status --json` for scripts.
 
-## Contents
-
-- [No new recordings](#no-new-recordings)
-- [History or search results are missing](#history-or-search-results-are-missing)
-- [An export or team sync is missing](#an-export-or-team-sync-is-missing)
-- [A command is missing or rejects an option](#a-command-is-missing-or-rejects-an-option)
-- [The CLI and daemon run different versions](#the-cli-and-daemon-run-different-versions)
-- [Disk usage or maintenance problems](#disk-usage-or-maintenance-problems)
-- [A query or graph projection refuses for memory](#a-query-or-graph-projection-refuses-for-memory)
-- [Find diagnostic logs](#find-diagnostic-logs)
-
 ## No new recordings
 
+<!-- agent: HypAware is not recording new sessions. Run hyp client status, hyp daemon status, and hyp cache status, work through the checklist on the troubleshooting page, and tell me what is wrong. -->
 ```sh
 hyp client status
 hyp daemon status
@@ -39,19 +46,86 @@ hyp cache status
 2. Check that the client is attached. Preview and apply its attach using
    `hyp attach CLIENT --dry-run` and `hyp attach CLIENT`.
 3. Check the daemon is running. Use `hyp daemon start` for an installed service,
-   or follow [headless setup](TEAM_SETUP.md#ci-and-headless-deployment) when there is no service manager.
+   or follow [headless setup](integrations/ci-and-headless.md) when there is no service manager.
 4. Start a new client process and complete a turn so it uses the managed settings.
+   Ollama attach enables recording and prints recipes without editing client files
+   or shell/service `OLLAMA_HOST`; use its
+   [explicit CLI host or SDK constructor](integrations/ollama.md#route-a-cli-or-sdk-client).
 5. Check `hyp privacy show /absolute/path/to/project` for an ignore marking.
 
 For Claude Code, `hyp client status claude` reports the configured and live
 listener endpoints, recent telemetry, and transcript activity. If the endpoints
 differ, run `hyp attach claude`, restart the daemon, and start a new Claude Code
-process. Check the [client table](CLIENTS.md#choose-and-check-a-client) for minimum
-version requirements.
+process. Check the [Claude Code requirements](integrations/claude-code.md#requirements)
+for minimum versions.
 For transcript-only clients, allow time for the scheduled recovery sweep.
 
 Detaching a gateway-routed client restores its own connection settings if a
-stopped gateway is preventing normal use. See [client management](CLIENTS.md).
+stopped gateway is preventing normal use where that integration manages them.
+Ollama detach leaves the capture host unchanged. With its collector stopped,
+launch the CLI at the preserved direct root or construct a new SDK object with
+that root using [direct recovery](integrations/ollama.md#stop-and-resume-ollama-recording).
+
+## Ollama capture is unconfirmed
+
+<!-- @ref LLP 0474#diagnostics [implements]: default status and local diagnostics distinguish readiness, observed traffic, persistence evidence and actionable finite failures -->
+<!-- @ref LLP 0476#lifecycle [constrained-by]: completed inference with timed-out confirmation leaves settings unchanged and may finish in a live collector -->
+
+```sh
+hyp ollama setup
+hyp client status ollama
+hyp status --verbose
+```
+
+Check the **Direct upstream**, service/model inventory and **Capture root (live)**
+separately. An executable on PATH does not prove a service or model is ready.
+Use a model already listed and the supported CLI/SDK recipes in
+[clients](integrations/ollama.md#route-a-cli-or-sdk-client). A configured or stale capture root
+is not a live route. After saved endpoint changes with an unconfirmed restart,
+run `hyp daemon restart` and check setup again.
+
+| Result or reason | Next step |
+| --- | --- |
+| Ready, no traffic | Route the next client to the printed live `/ollama` root, or explicitly run `hyp ollama verify --model NAME`. |
+| Observed, awaiting persistence | Give the processor time to finish; use verify for a fresh committed-pair check. |
+| Persisted stamp | The append resolved. Verify or query the particular request to establish current visibility. |
+| Off or historical evidence | Successful detach keeps the running host forwarding without capture. Use `hyp client attach ollama` to resume new requests. |
+| `unsupported_shape` | Use native chat/generate with `think=False`, no nonempty thinking/tools, and supported fields. Unsupported exchanges are omitted in full. |
+| `malformed_stream`, `missing_terminal`, `trailing_record` | The stream must finish with exactly one completed terminal and no later nonblank records. Retry the request explicitly after fixing its producer. |
+| `http_error`, `upstream_unavailable`, `transport_error` | Check the direct Ollama service and saved custom upstream with setup. Direct inference and capture are separate outcomes. |
+| `capture_limit`, `processor_unavailable`, `append_failure` | Check the ordinary daemon log and processing health. Lost capture is not replayed. |
+| `policy_unreadable` | Restore readable, valid policy/configuration. Verification does not bypass policy. |
+| Unconfirmed attach/detach | Follow the command's recovery guidance and retry for live confirmation. A saved setting alone is not a completed barrier. |
+
+`hyp ollama verify --model NAME --json` returns machine-readable status, reason and
+whether HTTP completed; its prompt/export disclosure goes to stderr. A
+`persistence_timeout` means inference completed but storage confirmation timed
+out. The live collector may finish; settings are unchanged. A later check can
+report `settlement_busy` until the original storage operation actually settles.
+The command never retries inference automatically. If the actual collector stops
+or its processor is lost, confirmation can be interrupted and remains unconfirmed.
+
+<!-- @ref LLP 0476#cohort [implements]: the shared full refresh keeps ordinary earlier/other-client backlog and storage/sink hooks -->
+
+Verification refreshes the shared current gateway spool, including earlier and
+other-client pending rows, with normal storage/sink hooks. Its cost depends on
+that backlog. The disposable query worker only reads committed data with normal
+caller policy and disables legacy query-config migration. A receipt, spool row,
+HTTP result, old saved stamp or hidden row cannot establish verification success.
+
+Default status carries bounded capture evidence and finite recent failure reasons.
+These summaries can lag until the next processor status update. Check the ordinary
+daemon log for a safe failure reason while waiting; it also carries projection,
+append and lifecycle events.
+No prompt or response text is needed to diagnose these reasons. Optional dev
+telemetry can supply structured run/exchange correlation, but is not required for
+the ordinary status/log path. See [diagnostic logs](#find-diagnostic-logs).
+
+When the collector has stopped, use the preserved direct-host CLI command or a
+new `Client(host=...)` from [direct recovery](integrations/ollama.md#stop-and-resume-ollama-recording).
+This restores inference without recording. Off/stopped historical timestamps do
+not claim current health. Ollama has no history import or outage replay, and its
+unknown directory means directory exclusions cannot protect these API requests.
 
 ## History or search results are missing
 
@@ -71,6 +145,7 @@ See [querying](QUERYING.md) for searches, session drill-downs, and bounded SQL.
 
 ## An export or team sync is missing
 
+<!-- agent: Run hyp status, hyp sync --dry-run, and hyp remote list, and tell me why my recordings are not reaching HypAware Cloud. -->
 ```sh
 hyp status
 hyp sync --dry-run
@@ -84,12 +159,91 @@ Cloud. After reviewing the destination plan, use `hyp sync` to attempt
 delivery and inspect each sink's result. It can partially succeed and still
 return failure.
 
+<!-- @ref LLP 0471#chunk-lifetime: the elapsed deadline belongs to each logical Cloud chunk, not a whole sync -->
+Cloud sync gives each upload chunk a 330-second limit, including authentication,
+the request, response reading and retry waits. Retries share that limit;
+a healthy sync with several chunks can take longer overall. Timeout or stop
+cancels the current Cloud request and waits. Unacknowledged rows remain eligible
+for a later export while they remain in the local cache. Check connectivity
+and the destination's failure reason, then retry with `hyp sync` after fixing it.
+
+<!-- @ref LLP 0471#daemon-work: only a strictly later full completion for this destination establishes recovery -->
+An export warning clears only when that same configured destination records a
+full successful completion strictly after its failure was recorded. Starting
+an upload, acknowledging some rows, queuing a follow-up or succeeding at another
+destination does not clear it. The warning can remain after 24 hours; equal
+timestamps do not establish recovery. Ordinary daemon logs record failure and
+later recovery separately. See [diagnostic logs](#find-diagnostic-logs).
+
+<!-- @ref LLP 0472#t4: retained diagnostic history and unresolved warnings describe different facts -->
+The verbose status `recent errors` count describes retained history from the
+last 24 hours, including recovered failures. It is not a count of unsent rows
+or every failure the installation has ever had. A warning can clear while this
+count stays nonzero. Deleting failure records or letting them age does not
+deliver data; retries use the cache and saved export progress. See
+[storage paths](CONFIGURATION.md#know-where-data-lives) for the diagnostic cap
+and cleanup limits.
+
 Remote sign-in with `--no-forward` grants query access without setting up
 sync. `hyp leave` stops sync but keeps local recordings.
 See [team setup](TEAM_SETUP.md) and [privacy controls](PRIVACY.md).
 
+### Rows skipped by exports before v1.42.0
+
+<!-- @ref LLP 0492#mixed-versions: an old writer that is still running can still commit below a sink's watermark -->
+Before v1.42.0, a `hyp` command that refreshed the cache while the daemon was
+also writing could commit rows below the point a destination had already
+exported to. Those rows stay in the local cache but no scheduled export sends
+them ([issue 2225](https://github.com/hyparam/hypaware/issues/2225)). v1.42.0
+stops new skips once the daemon restarts on it; `hyp daemon restart` makes
+sure. Nothing finds the rows already skipped, so recovery is a manual step for
+each destination. It reaches only rows the local cache still holds: rows that
+retention has removed are gone from this host.
+
+<!-- @ref LLP 0345#central: central drops a replayed row it already has, by part id -->
+For HypAware Cloud, `hyp sync --history <client>` resends one client's
+retained `ai_gateway_messages` and leaves normal export progress alone. The
+server drops rows it already has, so a rerun is safe. Run it for each client
+that records on this host, and read the preview first: the client must be
+syncing, and the replay also sends rows it held back while it was local-only.
+Folders marked local-only stay withheld. Other datasets, such as traces and
+logs, have no Cloud replay.
+
+<!-- @ref LLP 0040#watermark-contract: one saved position per sink instance and partition; removing it re-reads the partition from the start -->
+<!-- @ref LLP 0040#applying-it-to-both-sinks: a file name carries only its seq range, so a re-export can reuse an earlier name -->
+A local folder or S3 destination has no replay, and it does not drop rows it
+already has. To export one dataset again in full, stop the daemon, move that
+dataset's earlier export files out of the destination, remove the
+destination's saved position for the dataset, then start the daemon and sync:
+
+```sh
+hyp daemon stop
+mv <dir>/<dataset> <kept>/<dataset>
+rm -r ~/.hyp/hypaware/plugins/@hypaware/local-fs/sink-instances/<instance>/watermarks/<dataset>
+hyp daemon start
+hyp sync <instance>
+```
+
+`<instance>` is the destination's name in `hyp sync --dry-run`, `<dir>` is its
+`dir` setting, and `<kept>` is any folder outside `<dir>`. The `~/.hyp` path
+is the default `HYP_HOME`; use yours if you set another. For S3, move the
+objects under `<prefix>/<dataset>/` in the destination's bucket to a prefix
+outside the destination instead, and the saved position is under
+`@hypaware/s3` instead of `@hypaware/local-fs`.
+
+Move the earlier files before the export, don't skip it. A file is named only
+by the range of rows it holds, so the re-export can reuse an earlier file's
+name and replace it, and if retention has since removed some of that file's
+rows from the local cache, they are lost. After the export, the destination
+holds every row the local cache still retains, once. The moved files are the
+only copy of rows that retention has removed, so keep them; a row in both
+places is the same row, and can be dropped where the data is read, for example
+by `part_id` for `ai_gateway_messages`. Rows held back as local-only stay held
+back.
+
 ## A command is missing or rejects an option
 
+<!-- agent: A hyp command or flag from the docs is missing on this host. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. -->
 ```sh
 hyp version
 hyp --help
@@ -119,6 +273,7 @@ For a missing global binary or broken service definition, follow
 
 ## Disk usage or maintenance problems
 
+<!-- agent: Use HypAware to show cache size and what a maintenance pass would remove, without applying it. -->
 ```sh
 hyp cache status
 hyp cache maintain ai_gateway_messages --dry-run
@@ -143,7 +298,10 @@ the process doing the work, in MB:
 
 Narrow the work first: add a `WHERE` or date filter, a `LIMIT`, or aggregate
 instead of selecting raw rows. Raise a budget only when the work genuinely
-needs the memory. A value that is blank or not a number is ignored and the
+needs the memory, and give it a positive value. A value that is blank or not a
+number is ignored and the default applies. At zero or below the two differ:
+`HYP_QUERY_MAX_HEAP_MB` turns the query heap guard off rather than tightening
+it, while `HYP_GRAPH_PROJECTION_MAX_HEAP_MB` is ignored and the projection
 default applies.
 
 For a command you run yourself, set it in the same shell:
@@ -196,6 +354,16 @@ other than `localhost` or `127.0.0.1`; point it at one of those instead.
 [Product telemetry](PRIVACY.md#product-telemetry) has separate controls; it is
 automatic for enrolled organizations, defaults off on standalone installations,
 and is not the captured conversations or the local diagnostic log.
+
+<!-- @ref LLP 0478#consequences [explains]: a body over the fixed 64 MiB decoded limit is refused with 413 and its records are lost -->
+An OTLP exporter refused with `413 Content Too Large` sent a request whose body
+is larger than 64 MiB after decompression. HypAware keeps none of that
+request's records, and the exporter does not retry it. The daemon log has no
+entry for this refusal, so the error appears only on the sending side. Lower the
+exporter's batch size so each request stays under the limit: SDKs that read the
+standard variables use `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` for logs and
+`OTEL_BSP_MAX_EXPORT_BATCH_SIZE` for traces. The limit is fixed and has no
+configuration setting.
 
 When reporting a problem, include the version, failing command, exit status,
 relevant status repair lines, and a short log excerpt around the failure.

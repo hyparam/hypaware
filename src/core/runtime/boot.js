@@ -348,6 +348,7 @@ export async function bootKernel(opts = {}) {
         runtime,
         tmpRoot: opts.tmpRoot,
         env: { ...env, HYP_HOME: hypHome },
+        preview: opts.preview,
       })
 
       const activePlugins = result.results
@@ -474,9 +475,9 @@ export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, know
  * catalog drives the validation pass, so it must reflect the same
  * bundled + installed plugin set the kernel runs.
  *
- * @param {{ stateRoot: string, configPath: string | null, workspaceDir?: string }} args
+ * @param {{ stateRoot: string, configPath: string | null, workspaceDir?: string, migrateGrep?: boolean }} args
  */
-export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, workspaceDir }) {
+export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, workspaceDir, migrateGrep = true }) {
   const discovered = await discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {})
   const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
   const catalog = buildPluginCatalog([...discovered.loaded, ...discovered.excluded], installed.loaded)
@@ -485,7 +486,7 @@ export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, wor
     configPath,
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
-    migrateGrep: true,
+    migrateGrep,
   })
 }
 

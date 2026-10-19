@@ -24,6 +24,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { PromptCancelledError, select } from '../tui/index.js'
 import { isPromptBackError } from '../tui/runtime.js'
 import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_ask_evidence.js'
+import { compareStrings } from '../../util/compare_strings.js'
 
 /**
  * The question setup offers, and `hyp ask` starts.
@@ -73,6 +74,10 @@ export const SUGGESTED_PROMPTS = Object.freeze([
  * so a manifest may name an absolute binary. Everything else walks
  * `PATH` in order, honouring `PATHEXT` on Windows.
  *
+ * A candidate must be a regular file as well as executable: the execute
+ * bit on a directory means "traversable", so `X_OK` on its own reports a
+ * directory named `claude` as an installed CLI.
+ *
  * Best-effort in the same sense as the picker's detection probes: any
  * failure means "not found", never a throw.
  *
@@ -95,10 +100,17 @@ export async function resolveOnPath(bin, env, platform = process.platform) {
     for (const ext of exts) {
       const full = candidate + ext
       try {
+        // `access` is the authoritative "may I execute this" (effective
+        // uid/gid, ACLs, a `noexec` mount), which mode bits cannot answer,
+        // and it still says yes to a traversable directory - so the
+        // candidate has to be a file as well. `stat`, not `lstat`: a
+        // symlink to a real binary is what nearly every install looks
+        // like, while one pointing at a directory follows through to it.
         await fsp.access(full, fsConstants.X_OK)
+        if (!(await fsp.stat(full)).isFile()) continue
         return full
       } catch {
-        // not here, or not executable: keep walking
+        // not here, not executable, or gone between the probes: keep walking
       }
     }
   }
@@ -115,6 +127,14 @@ export async function resolveOnPath(bin, env, platform = process.platform) {
  * state of Claude Desktop, a client that is detectable, pickable, and
  * capture-enabled but carries no `launch` block because it has no prompt
  * argument to carry one for.
+ *
+ * The result is in ascending client-id order, compared by code unit rather
+ * than by locale, whatever order `clients` arrived in. Every command that
+ * needs one launcher takes the first as its default and offers its picker
+ * in this order, so the picker's deadline fallback starts the same client
+ * a run that cannot prompt does. Workspace folder names and plugin
+ * discovery order never decide it. A newly recorded client whose id sorts
+ * earlier becomes the default.
  *
  * @ref LLP 0198#path-probe [implements]: offer only what is recorded and resolves
  * @param {{
@@ -148,6 +168,37 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
       args: launch.args,
     })
   }
+  // @ref LLP 0456#decision [implements]: one order for every default and picker, ascending client id
+  return out.sort((a, b) => compareStrings(a.client, b.client))
+}
+
+/**
+ * The launchers `hyp report generate` may start: a resolved launcher whose
+ * client has the `hypaware-report` skill on disk, paired with that skill's
+ * path. Setup asks the same question before it names the command, so the
+ * pointer and the command can never disagree about who qualifies.
+ *
+ * @ref LLP 0450#launch [implements]: only a recorded, launchable client with its installed report skill
+ * @param {{
+ *   launchers: FirstAskLauncher[],
+ *   descriptors: Map<string, ClientDescriptor>,
+ *   homeDir: string,
+ * }} args
+ * @returns {Promise<{ launcher: FirstAskLauncher, skill: string }[]>}
+ */
+export async function reportSkillLaunchers({ launchers, descriptors, homeDir }) {
+  const out = []
+  for (const launcher of launchers) {
+    const descriptor = descriptors.get(launcher.client)
+    if (!descriptor) continue
+    const skill = path.join(homeDir, descriptor.skillDir, 'hypaware-report', 'SKILL.md')
+    try {
+      await fsp.access(skill)
+      out.push({ launcher, skill })
+    } catch {
+      // Only offer clients that can read the report workflow.
+    }
+  }
   return out
 }
 
@@ -172,12 +223,14 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
  *
  * `footer` says who is reading:
  *
- * - `ask`: a launch is possible, and this run is not doing one (declined,
- *   piped, or `--list`). Names the verb that would.
- * - `no-launch`: this run could not start a client (none attached and on
- *   PATH, a spawn failure, an unforeseen error). There is no manual
- *   route, because the answer needs the evidence only the verb gathers,
- *   so it names what has to be true before the verb is worth running again.
+ * - `ask`: a launch is possible, and this run is not doing one (declined
+ *   or piped). Names the verb that would.
+ * - `no-launch`: this run found a client and still could not start it (a
+ *   spawn failure, an unforeseen error). There is no manual route,
+ *   because the answer needs the evidence only the verb gathers, so it
+ *   names what has to be true before the verb is worth running again.
+ *   Having no client to start at all is not this footer: `hyp ask` says
+ *   that itself, the same way with or without a question.
  *
  * Setup no longer prints this: it offers to run the ask instead
  * (`suggest_skill.js`), and carries its own empty-history note.
@@ -282,9 +335,10 @@ export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
 }
 
 /**
- * Run the explicit first ask. Never throws: a missing binary, a spawn
- * failure, a cancelled prompt, or an unforeseen error all degrade to the
- * printed list.
+ * Run the explicit first ask. Never throws: a spawn failure, a cancelled
+ * prompt, or an unforeseen error all degrade to the printed list. No
+ * launchable client returns `no-launcher` and prints nothing, leaving the
+ * message to the caller.
  *
  * @ref LLP 0198#first-ask [implements]: the explicit command owns the gather and the launch
  * @param {RunWizardFirstAskOptions} opts
@@ -301,19 +355,6 @@ export async function runWizardFirstAsk(opts) {
     async (span) => {
       const { stdout, env, clients, descriptors } = opts
       try {
-        // Checked before launchability, because it subsumes it: with no
-        // rows the answer is the same whether or not a client could have
-        // been started, and "nothing recorded yet" is the more useful
-        // half of it. `undefined` means the caller could not tell, which
-        // is never a reason to withhold the offer.
-        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the printed question
-        if (opts.hasRows === false) {
-          span.setAttribute('status', 'skipped')
-          span.setAttribute('skip_reason', 'no-rows')
-          writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
-          return { launched: false, reason: /** @type {const} */ ('no-rows') }
-        }
-
         const launchers = await resolveLaunchers({
           clients,
           descriptors,
@@ -323,11 +364,28 @@ export async function runWizardFirstAsk(opts) {
         })
         span.setAttribute('launcher_count', launchers.length)
 
+        // Checked first, ahead of the empty cache: with nothing to start,
+        // "come back once you have history" would send the reader to this
+        // same refusal later. Nothing is printed here. The caller owns the
+        // one message for it, because `hyp ask "<question>"` refuses the
+        // same way and the two must not drift.
+        // @ref LLP 0198#path-probe [implements]: nothing recorded and resolvable is one refusal, said the same way by every form of the verb
         if (launchers.length === 0) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-launcher')
-          writeSuggestedPrompts({ stdout, footer: 'no-launch' })
           return { launched: false, reason: /** @type {const} */ ('no-launcher') }
+        }
+
+        // Checked before anything that could launch: with no rows there is
+        // nothing to answer from, and "nothing recorded yet" is the useful
+        // thing to say. `undefined` means the caller could not tell, which
+        // is never a reason to withhold the offer.
+        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the printed question
+        if (opts.hasRows === false) {
+          span.setAttribute('status', 'skipped')
+          span.setAttribute('skip_reason', 'no-rows')
+          writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
+          return { launched: false, reason: /** @type {const} */ ('no-rows') }
         }
         // `HYP_NO_TUI` is the same veto the prompt runtime honours. Reading
         // it here rather than letting `select()` throw keeps a deliberate

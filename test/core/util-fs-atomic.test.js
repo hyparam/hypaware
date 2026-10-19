@@ -68,6 +68,33 @@ test('atomicWriteFile applies the requested file mode', { skip: process.platform
   }
 })
 
+test('every atomic write path sets the requested mode exactly under a restrictive umask (#2594)', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async () => {
+  const dir = await makeTmpDir()
+  const previous = process.umask(0o077)
+  try {
+    /** @type {Array<[string, (target: string, mode: number) => unknown]>} */
+    const writers = [
+      ['atomicWriteFile', (target, mode) => atomicWriteFile(target, '{}', { mode })],
+      ['atomicWriteFile fsync', (target, mode) => atomicWriteFile(target, '{}', { mode, fsync: true })],
+      ['atomicWriteFileSync', (target, mode) => atomicWriteFileSync(target, '{}', { mode })],
+      ['atomicWriteJson', (target, mode) => atomicWriteJson(target, {}, { mode })],
+      ['atomicWriteJsonSync', (target, mode) => atomicWriteJsonSync(target, {}, { mode })],
+    ]
+    for (const [name, write] of writers) {
+      for (const mode of [0o600, 0o640, 0o644]) {
+        const target = path.join(dir, `${name.replace(' ', '-')}-${mode.toString(8)}.json`)
+        // A rewrite of a file whose mode differs, as the Ollama setup does.
+        await fs.writeFile(target, 'old', { mode: 0o600 })
+        await write(target, mode)
+        assert.equal((await fs.stat(target)).mode & 0o777, mode, `${name} ${mode.toString(8)}`)
+      }
+    }
+  } finally {
+    process.umask(previous)
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('atomicWriteFile enforces expectedMtimeMs (CONCURRENT_EDIT)', async () => {
   const dir = await makeTmpDir()
   try {

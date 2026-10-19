@@ -410,6 +410,8 @@ export async function attach(opts) {
   const displaced = {}
   /** @type {string[]} */
   const warnings = []
+  /** @type {string[]} */
+  const overrideWarnings = []
   /** @type {(dottedPath: string, prior: unknown, expected: 'object' | 'array') => void} */
   const recordDisplaced = (dottedPath, prior, expected) => {
     if (Object.hasOwn(priorMalformed, dottedPath)) {
@@ -596,7 +598,9 @@ export async function attach(opts) {
       managedEnv[key] = value
       env[key] = value
     }
-    warnings.push(...perSignalOverrideWarnings(env, processEnv))
+    // Kept off `warnings`: that list is what the caller counts as
+    // `malformed_blocks_repaired`, and a leftover export is not a repair.
+    overrideWarnings.push(...perSignalOverrideWarnings(env, processEnv))
   } else {
     // Undo the defaults Claude Code flips because the gateway URL is not
     // api.anthropic.com: eager tool-schema loading, and a 200k assumed context
@@ -712,7 +716,30 @@ export async function attach(opts) {
   // marker but has nothing new to tell the user about, so it warns about
   // nothing.
   if (warnings.length > 0) result.warnings = warnings
+  if (overrideWarnings.length > 0) result.overrideWarnings = overrideWarnings
   return result
+}
+
+/**
+ * The per-signal override warnings an `otel` attach would raise, without
+ * writing anything: what `hyp client attach claude --dry-run` reports. The
+ * settings half reads the file as it stands, since attach never adds or
+ * removes a per-signal key. A file attach could not read anyway still gets
+ * the shell half, which needs no file at all.
+ *
+ * @param {{ settingsPath: string, processEnv?: Record<string, unknown> }} opts
+ * @returns {Promise<string[]>}
+ */
+export async function previewOverrideWarnings({ settingsPath, processEnv }) {
+  /** @type {Record<string, unknown>} */
+  let env = {}
+  try {
+    const { value } = await readSettings(settingsPath)
+    if (isPlainObject(value.env)) env = value.env
+  } catch (err) {
+    if (!(err instanceof ClaudeSettingsError)) throw err
+  }
+  return perSignalOverrideWarnings(env, processEnv)
 }
 
 /**

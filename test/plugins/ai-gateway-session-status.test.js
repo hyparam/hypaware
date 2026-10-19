@@ -171,14 +171,18 @@ test('an UNKNOWN that DID resolve an id keeps the unconditional fail-closed warn
   assert.doesNotMatch(text, /no session was identified/)
 })
 
-test('hyp session status names the folder governor rather than omitting it (R7)', async () => {
+// @ref LLP 0463#human-output [tests]: no trust, endpoint, or folder lines
+test('hyp session status prints no trust, endpoint, or folder lines', async () => {
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
     const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-open' } })
     await runSessionStatus([], ctx.ctx)
     const text = ctx.stdout()
     assert.match(text, /not ignored/)
-    assert.match(text, /hyp privacy show/, 'the session verb must point at the other, independent governor')
+    assert.doesNotMatch(text, /^(trust|endpoint|folder):/m)
+    const json = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-open' } })
+    await runSessionStatus(['--json'], json.ctx)
+    assert.equal(JSON.parse(json.stdout()).folder_policy, 'hyp privacy show')
   })
 })
 
@@ -937,16 +941,9 @@ test('a Codex answer discloses the grain it acts at, and names the thread beside
   })
 })
 
-test('an endpoint nothing proved is the gateway is reported as such', async () => {
-  // `validateControlResponse` proves the responder saw our token, not that it
-  // is the gateway. When the port came from a pinned `listen` rather than a
-  // live daemon's status.json, that gap is named next to the answer.
+test('an endpoint from a pinned `listen` is reported in --json', async () => {
   const set = /** @type {Set<string>} */ (new Set(['sess-pinned']))
   await withControlServer(set, async (base) => {
-    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-pinned' } })
-    assert.equal(await runSessionStatus([], ctx.ctx), 0)
-    assert.match(ctx.stdout(), /pinned `listen`, not a live daemon/)
-
     const json = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-pinned' } })
     await runSessionStatus(['--json'], json.ctx)
     assert.equal(JSON.parse(json.stdout()).endpoint_source, 'config_listen')

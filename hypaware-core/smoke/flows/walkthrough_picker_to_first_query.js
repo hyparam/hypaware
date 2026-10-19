@@ -227,6 +227,24 @@ export async function run({ harness, expect }) {
   try {
     await activateInjectedPlugins(kernel, 'picker_activate')
 
+    // @ref LLP 0462#verification [tests]: the guide handoff emits a run-scoped signal and leaves config absent
+    const guideStdout = makeBuf()
+    const guideStderr = makeBuf()
+    const guideCode = await runRoot('smoke.setup.guide', {
+      [Attr.COMPONENT]: 'smoke', [Attr.OPERATION]: 'setup.guide',
+      [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'agent_guide',
+      [Attr.DEV_RUN_ID]: harness.devRunId,
+    }, () => dispatch(['setup'], {
+      stdout: guideStdout, stderr: guideStderr, kernel, registry,
+      env: smokeEnv(harness),
+    }))
+    expect.that('guide: guide prints successfully (exit 0)', guideCode, (v) => v === 0)
+    expect.that('guide: detection and browser handoff reach the agent', guideStdout.text(),
+      (v) => typeof v === 'string' && v.includes('Codex (detected)') && v.includes('hyp remote login --no-browser'))
+    expect.that('guide: stderr remains empty', guideStderr.text(), (v) => v === '')
+    const guideConfigExists = await fs.access(defaultConfigPath(harness.hypHome)).then(() => true, () => false)
+    expect.that('guide: no config was written', guideConfigExists, (v) => v === false)
+
     // ----- 1. hyp setup via Phase 5 flags -----
     const initStdout = makeBuf()
     const initStderr = makeBuf()
@@ -533,6 +551,14 @@ export async function run({ harness, expect }) {
     await obs.shutdown()
 
     const traces = await expect.traces()
+
+    const guideSpan = traces.find((s) => s.name === 'wizard.setup.guide')
+    expect.that('traces: guide emitted its run-scoped skip reason', guideSpan,
+      (v) => v?.attributes?.hyp_reason === 'guide_only' && v.attributes?.exit_code === 0 &&
+        v.resource?.dev_run_id === harness.devRunId)
+    const guideRoot = traces.find((s) => s.name === 'smoke.setup.guide')
+    expect.that('traces: guide smoke step is named', guideRoot?.attributes,
+      (v) => v?.smoke_step === 'agent_guide' && v.dev_run_id === harness.devRunId)
 
     const startSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.start'

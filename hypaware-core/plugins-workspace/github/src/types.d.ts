@@ -200,7 +200,7 @@ export interface GithubRuntime {
   /** Undefined on activation: catch up existing rows once, then skip idle ticks. */
   projectionNeeded?: boolean
   /** Test seam; production defaults to the real fetch client. */
-  clientFactory?: () => GithubClient
+  clientFactory?: (opts?: { signal?: AbortSignal }) => GithubClient
   /** Test seam; production uses the fixed whole-tick request limit. */
   captureRequestLimit?: number
 }
@@ -385,17 +385,26 @@ export interface GithubActor {
   type?: string
 }
 
+/**
+ * The capture tick's request allowance (LLP 0361#budget). The caller spends one
+ * unit before each page call; the client spends one more for every redirect hop
+ * and rejects with `github_budget_exhausted` when none is left.
+ */
+export interface GithubRequestBudget {
+  take(): boolean
+}
+
 export interface GithubClient {
   /** Enumerate every repository visible to the authenticated local identity. */
   listViewerRepos(): Promise<string[]>
-  listIssuesPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubIssue>>
-  listPullRequestsPage(owner: string, repo: string, etag: string | undefined, page?: string): Promise<GithubPage<GithubPull>>
-  listPullRequestFilesPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<string>>
-  listPullRequestReviewsPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<GithubReview>>
-  listPullRequestCommitsPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<GithubCommit>>
-  listCommitsPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubCommit>>
-  listCommitFilesPage(owner: string, repo: string, sha: string, page?: string): Promise<GithubPage<string>>
-  listIssueCommentsPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubComment>>
+  listIssuesPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubIssue>>
+  listPullRequestsPage(owner: string, repo: string, etag: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubPull>>
+  listPullRequestFilesPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<string>>
+  listPullRequestReviewsPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubReview>>
+  listPullRequestCommitsPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubCommit>>
+  listCommitsPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubCommit>>
+  listCommitFilesPage(owner: string, repo: string, sha: string, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<string>>
+  listIssueCommentsPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubComment>>
 }
 
 export interface GithubPage<T> {

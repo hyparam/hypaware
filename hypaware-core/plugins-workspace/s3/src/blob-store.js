@@ -26,6 +26,27 @@ const RANGED_RESPONSE = /^bytes (\d+)-(\d+)\/(\d+|\*)$/
 const REQUESTED_RANGE = /^bytes=(\d*)-(\d*)$/
 
 /**
+ * Parse `input.range` into the endpoints it asks for, or null when it is not
+ * one of the three forms LLP 0452#range-contract admits. Endpoints follow
+ * local-fs's rule: at least one present, each a safe integer. The pattern
+ * matches ASCII digits only and anchors both ends, so whitespace, signs, case
+ * variants, CR/LF, multiranges and a missing unit all fail it.
+ *
+ * @param {string} range
+ * @returns {{ first: number | undefined, last: number | undefined } | null}
+ */
+function parseRequestedRange(range) {
+  const asked = REQUESTED_RANGE.exec(range)
+  if (asked === null) return null
+  const first = asked[1] === '' ? undefined : Number(asked[1])
+  const last = asked[2] === '' ? undefined : Number(asked[2])
+  if (first === undefined && last === undefined) return null
+  if (first !== undefined && !Number.isSafeInteger(first)) return null
+  if (last !== undefined && !Number.isSafeInteger(last)) return null
+  return { first, last }
+}
+
+/**
  * Report how a ranged response contradicts the range that was asked for, or
  * undefined when it does not.
  *
@@ -36,23 +57,21 @@ const REQUESTED_RANGE = /^bytes=(\d*)-(\d*)$/
  * defect, not an exotic one, and this provider is the only place holding both
  * the request and the response.
  *
- * Only a definite contradiction is reported. A request form this does not
- * model, or a total the response left unknown, yields undefined rather than a
- * rejection, so no response that is accepted today and actually correct starts
- * failing. Short reads stay with the consumer, as does a range narrower than
- * the one asked for.
+ * Only a definite contradiction is reported. A total the response left
+ * unknown yields undefined rather than a rejection, so no response that is
+ * accepted today and actually correct starts failing. Short reads stay with
+ * the consumer, as does a range narrower than the one asked for. The request
+ * always parses here: getObject rejects any other spelling before calling
+ * the store (issue #2309).
  *
- * @param {string} range the `input.range` that was sent
+ * @param {{ first: number | undefined, last: number | undefined }} asked the parsed `input.range` that was sent
  * @param {number} start first byte the response states it delivered
  * @param {number} end last byte the response states it delivered
  * @param {number | undefined} total complete length, when the response stated one
  * @returns {string | undefined}
  */
-function contradictsRequest(range, start, end, total) {
-  const asked = REQUESTED_RANGE.exec(range)
-  if (asked === null) return undefined
-  const first = asked[1] === '' ? undefined : Number(asked[1])
-  const last = asked[2] === '' ? undefined : Number(asked[2])
+function contradictsRequest(asked, start, end, total) {
+  const { first, last } = asked
   if (first === undefined) {
     if (last === undefined) return undefined
     if (end - start + 1 > last) return `delivers more than the ${last} bytes the suffix asked for`
@@ -162,6 +181,16 @@ export function createS3BlobStore({ bucket, prefix, client }) {
      */
     async getObject(input) {
       const Key = composeKey(input.key)
+      // A spelling the contract does not admit is the caller's error, so it
+      // is reported before any store call rather than as a response that
+      // failed to honor it, and the response check below always has a
+      // parsed request to compare against.
+      const asked = input.range === undefined ? undefined : parseRequestedRange(input.range)
+      if (asked === null) {
+        throw tagS3Error(undefined, 'blob_range_invalid',
+          `s3 blob-store: byte range '${input.range}' for '${input.key}' is not one of bytes=start-end, bytes=start- or bytes=-length`,
+          input.key)
+      }
       /** @type {Awaited<ReturnType<S3CommandsHandle['getObject']>>} */
       let result
       try {
@@ -197,7 +226,7 @@ export function createS3BlobStore({ bucket, prefix, client }) {
       // a header with nothing visibly amiss. Counting the delivered body
       // stays with the consumer; this never reads the body.
       // @ref LLP 0452#range-contract [implements]: honor the range or fail, checked against both the response's own account of itself and the request
-      if (input.range !== undefined) {
+      if (asked !== undefined) {
         const stated = contentRange === undefined ? null : RANGED_RESPONSE.exec(contentRange)
         const start = Number(stated?.[1])
         const end = Number(stated?.[2])
@@ -228,7 +257,7 @@ export function createS3BlobStore({ bucket, prefix, client }) {
         } else if (declared !== undefined && declared !== span) {
           detail = `response declared ContentLength ${result.ContentLength} against Content-Range '${contentRange}'`
         } else {
-          const contradiction = contradictsRequest(input.range, start, end, total)
+          const contradiction = contradictsRequest(asked, start, end, total)
           if (contradiction !== undefined) {
             detail = `response Content-Range '${contentRange}' ${contradiction}`
           }

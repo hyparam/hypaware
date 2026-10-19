@@ -1,3 +1,4 @@
+import type { configureWizardCloud } from '../../../../src/core/cli/wizard/codex_cloud.js'
 import type { dispatch } from '../../../../src/core/cli/dispatch.js'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
@@ -121,6 +122,15 @@ export interface RunWizardSyncScopeOptions {
    * its count already decides its sentence.
    */
   candidatesHiddenIds?: string[]
+  /**
+   * False when the wizard could not resolve the central set this run (a
+   * swallowed layered-resolution failure, or a join whose org config has
+   * not converged), so `locked`, `lockedHidden` and the hidden picks rest
+   * on an empty set nobody computed. The lane then says the team's
+   * configuration could not be confirmed instead of what syncs (LLP 0509
+   * #unknown-is-not-empty). Absent means resolved.
+   */
+  lockedResolved?: boolean
 }
 
 export interface WizardSyncScopeResult {
@@ -291,6 +301,7 @@ export interface EvaluateReturningGateOptions {
  */
 export interface ConfigurePhasePicked {
   descriptors: PickerDescriptor[]
+  config?: HypAwareV2Config
   /**
    * Picked source ids the existing config already composed before this
    * run. A `needs_setup` row here was consented to when it was first
@@ -395,14 +406,21 @@ export interface WizardJoinResult {
    * Present on a completed join (`'ok'` or `'daemon_incomplete'`): the
    * picker source ids owned by the central layer,
    * which the pick phase renders locked (LLP 0129 #join-before-picker).
-   * Empty on a timeout or the no-org-config 404 steady state - nothing is
+   * Empty when no org config has applied yet - nothing is
    * pinned, so the picker composes freely.
    */
   lockedSources?: string[]
   /**
+   * Present on a completed join: whether `lockedSources` is an answer.
+   * False when no org config has applied yet, so an empty set means "not
+   * known yet" rather than "the org locks nothing" (LLP 0509
+   * #unknown-is-not-empty).
+   */
+  lockedResolved?: boolean
+  /**
    * True when the org config converged, i.e. the machine now carries a
    * central layer. Drives the pick phase's `managed` annotation
-   * (LLP 0132 #never-silent). Absent on the timeout/404 fall-through:
+   * (LLP 0132 #never-silent). Absent when no config has applied yet:
    * nothing is pinned yet, so the picker renders unmanaged.
    */
   managed?: boolean
@@ -443,8 +461,8 @@ export interface RunWizardJoinOptions {
    */
   runLogin?: () => Promise<LoginLaneResult>
   /**
-   * Override the convergence wait (tests). Defaults to
-   * `waitForCentralConverge`.
+   * Override the applied-config check (tests). Defaults to
+   * `waitForCentralConverge` with a zero timeout: one probe, no wait.
    */
   waitForConverge?: (
     opts: { env: NodeJS.ProcessEnv },
@@ -657,7 +675,7 @@ export interface RunWizardSyncNowOptions {
 export type WizardSuggestSkillResult =
   | { asked: true; launched: true }
   | { asked: true; launched: false; reason: 'declined' | 'spawn-failed' | 'child-failed' }
-  | { asked: false; reason: 'no-rows' | 'not-interactive' | 'error' }
+  | { asked: false; reason: 'no-rows' | 'no-launcher' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSuggestSkill`. */
 export interface RunWizardSuggestSkillOptions {
@@ -672,6 +690,12 @@ export interface RunWizardSuggestSkillOptions {
    * could not tell, which never withholds the offer.
    */
   hasRows?: boolean
+  /**
+   * Whether any client `hyp ask` could start is on `$PATH`. `false` drops
+   * the offer and every mention of the verb (LLP 0398#setup-offer);
+   * `undefined` means the caller could not tell, which never withholds it.
+   */
+  launchable?: boolean
   stdin?: NodeJS.ReadableStream
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
@@ -745,6 +769,13 @@ export interface WizardOutputGuard {
    * run must end as a cancel (LLP 0341 #dead-surface).
    */
   checkpoint(): Promise<boolean>
+  /**
+   * Settle both streams' pending writes (bounded), so a failure either one
+   * has not reported yet reaches the guard's listener before `detach`. For
+   * a run that ends on its first write, such as the unsupported-platform
+   * refusal (#975).
+   */
+  settle(): Promise<void>
   /**
    * Remove the guard's `error` listeners from the caller's streams. The
    * run owns them only while it is running; call this when it ends,
@@ -840,6 +871,11 @@ export interface RunInitWizardOptions {
    * the spawn seam. Production callers pass none.
    */
   suggestSkill?: Partial<RunWizardSuggestSkillOptions>
+  /**
+   * Whether a recorded client can start `hyp report generate` (tests).
+   * Production callers pass none, and the finale's results decide.
+   */
+  reportGenerateAvailable?: boolean
   /** GitHub offer seam for tests. Login uses ctx.commands.run. */
   github?: Pick<RunWizardGithubOptions, 'confirm'>
   /** Phase overrides (tests). */
@@ -850,6 +886,7 @@ export interface RunInitWizardOptions {
   syncScope?: (opts: RunWizardSyncScopeOptions) => Promise<WizardSyncScopeResult>
   folderAsk?: (opts: RunWizardFolderAskOptions) => Promise<WizardFolderAskResult>
   express?: (opts: RunWizardExpressGateOptions) => Promise<WizardExpressChoice>
+  configureCloud?: typeof configureWizardCloud
   configure?: (picked: ConfigurePhasePicked, opts: RunConfigurePhaseOptions) => Promise<ConfigurePhaseResult>
   finaleRunner?: (args: Record<string, unknown>) => Promise<FinaleSummary>
   /**

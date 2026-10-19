@@ -7,7 +7,7 @@ import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ign
 import { SESSION_IGNORE_ROUTE, createControlHandler, isControlPath } from '../../../../src/core/control/session_ignore.js'
 import { isMisdirectedHost, listenAndResolve, requestUrlOf } from '../../../../src/core/otlp/server.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
-import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
+import { declaresBodyOverDrainCap, drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_writer.js'
 import { opencodeListenPort } from './config.js'
 import { projectOpenCodeSnapshot } from './projector.js'
@@ -82,6 +82,14 @@ export function createStartOpenCodeSource(deps) {
         return
       }
       if (req.method === 'GET' && url.pathname === '/') {
+        // Readiness reads no body. Left untouched, Node's `_dump()` fallback
+        // still reads whatever the sender attaches to EOF, so a body the drain
+        // cap would cut is refused outright and any other is discarded under it.
+        if (declaresBodyOverDrainCap(req)) {
+          rejectJson(req, res, 413, { error: 'request body too large' })
+          return
+        }
+        drainRequestBody(req, res)
         sendJson(res, 200, { name: 'hypaware/opencode', status: 'ready' })
         return
       }

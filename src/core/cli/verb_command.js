@@ -2,6 +2,7 @@
 
 import fs from 'node:fs/promises'
 
+import { useColor } from './stdio.js'
 import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
 import { VerbUsageError } from './verb_errors.js'
 
@@ -217,7 +218,8 @@ export async function runVerbCommand(verb, argv, ctx, body = verb) {
   /** @type {VerbRenderResult} */
   let rendered
   try {
-    rendered = body.render.call(verb, result, ctrl.controls)
+    const color = ctrl.controls.output === undefined && useColor(ctx.stdout, ctx.env)
+    rendered = body.render.call(verb, result, { ...ctrl.controls, color }, parsed.params)
   } catch (err) {
     ctx.stderr.write(`hyp ${verb.name}: render failed: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1

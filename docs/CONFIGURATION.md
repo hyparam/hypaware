@@ -1,21 +1,7 @@
-[← All documentation](README.md)
-
----
-
 # Configure storage, exports, and plugins
 
 Prefer `hyp setup` for routine changes. It composes the required plugins,
 preserves centrally managed settings, and reports the actions it will take.
-
-## Contents
-
-- [Locate and validate configuration](#locate-and-validate-configuration)
-- [Make a repeatable setup](#make-a-repeatable-setup)
-- [Set local retention](#set-local-retention)
-- [Choose an export destination](#choose-an-export-destination)
-- [Maintain the query cache](#maintain-the-query-cache)
-- [Know where data lives](#know-where-data-lives)
-- [Manage optional plugins](#manage-optional-plugins)
 
 ## Locate and validate configuration
 
@@ -34,7 +20,7 @@ To disable automatic updates, set `"auto_update": false` and restart the daemon.
 Organization policy may control this setting. Each plugin owns its own `config` block. Use
 `hyp plugin info PLUGIN` to inspect an installed plugin's manifest.
 
-On an enrolled machine, a separate central layer under `config-control/` is
+On an enrolled host, a separate central layer under `config-control/` is
 authoritative. Local settings are additive and cannot override central locks.
 `hyp status --verbose` identifies each layer and any rejected local entries.
 Joining does not replace your local configuration; leaving removes central
@@ -99,7 +85,7 @@ from that cache, not a prerequisite for querying it.
 
 These `--export` flags select unattended setup; they are not extra choices
 inside the guided walkthrough. New guided setups default to local Parquet
-exports; interactive reconfiguration preserves the existing export choice. An enrolled machine may also have a
+exports; interactive reconfiguration preserves the existing export choice. An enrolled host may also have a
 centrally managed sync sink regardless of its local export choice.
 
 For previewing destinations and sending recordings now, see
@@ -143,7 +129,7 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/config-control/` | Central enrollment and managed configuration |
 | `hypaware/cache/` | Local query cache |
 | `hypaware/plugins/` | Per-plugin state |
-| `hypaware/sinks/` | Export state and retry outboxes |
+| `hypaware/sinks/` | Export progress and retained failure diagnostics |
 | `exports/` | Default local Parquet destination |
 | `spool/claude-bodies/` | Transient Claude raw bodies |
 | `hypaware/logs/daemon.log` | Main structured daemon log |
@@ -154,6 +140,25 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/tls/` | Local proxy certificate authority and certificates |
 | `hypaware/processing/logs/daemon.log` | Processing daemon log |
 | `hypaware/dev-telemetry/` | Local development diagnostics |
+
+<!-- @ref LLP 0471#diagnostic-history: prune owned diagnostic evidence without acknowledging cache payload -->
+Each destination's `hypaware/sinks/<instance>/outbox/` holds failure diagnostics,
+not rows waiting to be uploaded. HypAware writes the new record atomically,
+then retains up to 100 recognized records per destination after successful cleanup.
+It protects the new record and the newest failure dated no later than cleanup,
+then fills the remaining places with the newest history.
+An unsuccessful write prunes nothing.
+Cleanup preserves unfamiliar files, symlinks and other destinations' records.
+It does not delete cache rows, advance export progress or clear an export warning.
+
+If filesystem access prevents cleanup, history can temporarily exceed 100.
+The daemon logs a separate cleanup failure and retries on its existing cache
+maintenance schedule, rather than rescanning old history on each export failure.
+With automatic cache maintenance disabled, no cleanup timer runs: a new sink
+handle after restart can retry cleanup when it next publishes a failure.
+Check directory permissions and the [diagnostic logs](TROUBLESHOOTING.md#find-diagnostic-logs).
+`hyp sink maintain` maintains export tables; it is not a command for pruning
+these diagnostics.
 
 ## Manage optional plugins
 

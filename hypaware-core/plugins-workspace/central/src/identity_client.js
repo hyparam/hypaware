@@ -1,11 +1,12 @@
 // @ts-check
 
 import fs from 'node:fs'
+import { centralLifetime, readCentralJson, readErrorDetail } from './backoff.js'
 
-import { atomicWriteJsonSync, isPlainObject, sha256Hex } from 'hypaware/core/util'
+import { atomicWriteJsonSync, canonicalOrigin, isPlainObject, sha256Hex } from 'hypaware/core/util'
 
 /**
- * @import { AcquireSource, PersistedIdentity } from './types.js'
+ * @import { AcquireSource, PersistedIdentity, RefreshLease, RefreshOperation } from '../../../../hypaware-core/plugins-workspace/central/src/types.js'
  */
 
 /**
@@ -64,7 +65,7 @@ export class IdentityClient {
     this.now = opts.now ?? Date.now
     /** @type {PersistedIdentity | undefined} */
     this.identity = undefined
-    /** @type {Promise<void> | undefined} */
+    /** @type {RefreshOperation | undefined} */
     this.refreshing = undefined
   }
 
@@ -99,11 +100,11 @@ export class IdentityClient {
       // cross-tenant leak. Refuse rather than silently mis-route; the
       // operator must re-run `hyp join` against the new server.
       // @ref LLP 0031#physical-layout [implements]: a re-point with no token cannot safely reuse the old identity, so loading is refused
-      if (persisted.central_url !== undefined && persisted.central_url !== this.centralUrl) {
+      if (persisted.central_url !== undefined && !sameCentral(persisted.central_url, this.centralUrl)) {
         // A login-seeded identity re-enrolls with a fresh login, not a join
         // token (LLP 0061 D3): point the operator at the seam that minted it.
         const remedy = persisted.origin === 'login'
-          ? 'Re-run `hyp remote login` against the new server to enroll this host'
+          ? `Run \`hyp remote login <name>\` for a remote that points at ${this.centralUrl} to enroll this host (register one with \`hyp remote add <name> ${this.centralUrl}\`)`
           : `Run \`hyp join ${this.centralUrl} <token>\` to enroll this host with the new server`
         throw new Error(
           `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. ${remedy}`
@@ -168,21 +169,59 @@ export class IdentityClient {
    * a burst of `getCurrentJwt()` calls right at the expiry edge causes
    * one network call, not N.
    *
+   * @param {AbortSignal} [signal]
    * @returns {Promise<void>}
    */
-  async refresh() {
-    if (this.refreshing) {
-      await this.refreshing
-      return
+  refresh(signal) {
+    if (signal?.aborted) return Promise.reject(signal.reason)
+    if (this.refreshing?.lifetime.signal.aborted) {
+      return Promise.reject(new Error('identity refresh closing; retry after settlement'))
     }
-    this.refreshing = this.doRefresh().finally(() => {
-      this.refreshing = undefined
+    if (!this.refreshing) {
+      /** @type {RefreshOperation} */
+      const operation = { lifetime: centralLifetime(undefined, 'identity refresh'), consumers: new Set() }
+      this.refreshing = operation
+      /** @param {unknown} [error] */
+      const settle = (error) => {
+        operation.lifetime.dispose()
+        if (this.refreshing === operation) this.refreshing = undefined
+        for (const lease of operation.consumers) lease.finish(error)
+        operation.consumers.clear()
+        operation.cancelled?.finish(operation.lifetime.signal.reason)
+        operation.cancelled = undefined
+      }
+      // @ref LLP 0471#shared-auth [implements]: one resource settlement handler; cancelled leases detach without shared-promise reactions
+      this.doRefresh(operation.lifetime.signal).then(() => settle(), settle)
+    }
+    const operation = this.refreshing
+    return new Promise((resolve, reject) => {
+      let finished = false
+      /** @type {RefreshLease} */
+      const lease = { finish(error) {
+        if (finished) return
+        finished = true
+        signal?.removeEventListener('abort', cancel)
+        operation.consumers.delete(lease)
+        if (error !== undefined) reject(error)
+        else resolve()
+      } }
+      const cancel = () => {
+        signal?.removeEventListener('abort', cancel)
+        operation.consumers.delete(lease)
+        if (operation.consumers.size) lease.finish(signal?.reason)
+        else {
+          operation.cancelled = lease
+          operation.lifetime.abort(signal?.reason)
+        }
+      }
+      operation.consumers.add(lease)
+      signal?.addEventListener('abort', cancel, { once: true })
+      if (signal?.aborted) cancel()
     })
-    await this.refreshing
   }
 
-  /** @returns {Promise<void>} */
-  async doRefresh() {
+  /** @param {AbortSignal} signal @returns {Promise<void>} */
+  async doRefresh(signal) {
     if (!this.identity) {
       throw new Error('identity refresh failed: no current JWT to refresh')
     }
@@ -191,15 +230,17 @@ export class IdentityClient {
     try {
       response = await this.fetchFn(url, {
         method: 'POST',
+        signal,
         headers: { authorization: `Bearer ${this.identity.jwt}` },
       })
-    } catch (err) {
-      throw new Error(`failed to reach central server ${this.centralUrl}: ${formatError(err)}`)
+    } catch {
+      signal.throwIfAborted()
+      throw new Error('identity refresh failed: transport unavailable')
     }
     if (!response.ok) {
-      throw new Error(`identity refresh failed: ${await readErrorDetail(response)}`)
+      throw new Error(`identity refresh failed: ${await readErrorDetail(response, signal)}`)
     }
-    const parsed = await readJsonResponse(response, 'refresh')
+    const parsed = await readCentralJson(response, signal)
     const identity = identityFromPayload(parsed, this.identity.gateway_id)
     // Preserve the mint provenance across refresh; the bootstrap token is
     // typically absent in steady state, so re-derive it from the prior
@@ -207,6 +248,7 @@ export class IdentityClient {
     identity.central_url = this.identity.central_url
     identity.bootstrap_token_fp = this.identity.bootstrap_token_fp
     if (this.identity.origin !== undefined) identity.origin = this.identity.origin
+    signal.throwIfAborted()
     this.identity = identity
     writePersistedFile(this.persistedPath, identity)
   }
@@ -215,15 +257,17 @@ export class IdentityClient {
    * Return the current JWT, lazily refreshing if it sits inside the
    * refresh window. Hot path is a single in-memory check.
    *
+   * @param {AbortSignal} [signal]
    * @returns {Promise<string>}
    */
-  async getCurrentJwt() {
+  async getCurrentJwt(signal) {
+    signal?.throwIfAborted()
     if (!this.identity) {
       throw new Error('identity not acquired - call acquire() first')
     }
     const remainingSec = this.identity.expires_at - Math.floor(this.now() / 1000)
     if (remainingSec <= REFRESH_WINDOW_SECONDS) {
-      await this.refresh()
+      await this.refresh(signal)
     }
     if (!this.identity) {
       throw new Error('identity refresh did not produce a JWT')
@@ -275,8 +319,37 @@ function readPersistedFile(filePath) {
 }
 
 /**
+ * Whether two central URLs name the same target. The origins must match after
+ * folding a moved built-in's old host into its new one, and the paths must
+ * match too: a path-scoped `central.url` is a distinct target on a shared host,
+ * so origin equality alone would reuse one tenant's gateway identity for
+ * another. Trailing slashes are ignored, as `joinUrl` ignores them.
+ *
+ * @ref LLP 0062#builtin [constrained-by]: BUILTIN_ORIGIN_ALIASES folds the built-in's old host into its new one
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function sameCentral(a, b) {
+  if (a === b) return true
+  const origin = canonicalOrigin(a)
+  return origin !== null && origin === canonicalOrigin(b) && centralPath(a) === centralPath(b)
+}
+
+/**
+ * The part of a parseable central URL after its origin, without trailing slashes.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function centralPath(url) {
+  const { pathname, search } = new URL(url)
+  return `${pathname.replace(/\/+$/, '')}${search}`
+}
+
+/**
  * Whether a persisted identity was minted by a different bootstrap token
- * or central URL than the ones now configured (i.e. a re-enrollment).
+ * or central target than the ones now configured (i.e. a re-enrollment).
  * An identity written by an older build (no stamp) cannot be proven to
  * match, so it counts as changed whenever a bootstrap token is set; that
  * forces one safe re-bootstrap rather than reusing a possibly-stale JWT.
@@ -287,7 +360,7 @@ function readPersistedFile(filePath) {
  * @returns {boolean}
  */
 function mintChanged(persisted, centralUrl, bootstrapToken) {
-  if (persisted.central_url !== undefined && persisted.central_url !== centralUrl) {
+  if (persisted.central_url !== undefined && !sameCentral(persisted.central_url, centralUrl)) {
     return true
   }
   // A login-seeded identity was minted by a human login, not by any bootstrap
@@ -392,35 +465,10 @@ function joinUrl(base, suffix) {
  */
 async function readJsonResponse(response, kind) {
   try {
-    return await response.json()
+    return await readCentralJson(response)
   } catch (err) {
     throw new Error(`identity ${kind} failed: invalid JSON in server response: ${formatError(err)}`)
   }
-}
-
-/**
- * @param {Response} response
- */
-async function readErrorDetail(response) {
-  let body
-  try {
-    body = await response.text()
-  } catch {
-    body = ''
-  }
-  if (body.length > 0) {
-    try {
-      const parsed = JSON.parse(body)
-      if (isPlainObject(parsed)) {
-        const error = typeof parsed.error === 'string' ? parsed.error : undefined
-        if (error) return `${response.status} ${error}`
-      }
-    } catch {
-      // plain text body: fall through
-    }
-    return `${response.status} ${body.trim().slice(0, 200)}`
-  }
-  return `${response.status} ${response.statusText || ''}`.trim()
 }
 
 /** @param {unknown} err */

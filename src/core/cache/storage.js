@@ -22,7 +22,7 @@ import {
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createIngestSeqAllocator } from './ingest-seq.js'
-import { reconcileCacheRows } from './reconcile.js'
+import { claimReconcileScope as claimReconcileScopeImpl, reconcileCacheRows, reconcileCacheSnapshots } from './reconcile.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
@@ -122,9 +122,19 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     description: 'Rows dropped due to missing required Iceberg partition fields',
   })
   const seqAllocator = createIngestSeqAllocator({ cacheRoot })
+  /**
+   * @param {Record<string, unknown>[]} rows
+   * @param {bigint} first
+   */
+  function stampRun(rows, first) {
+    rows.forEach((row, index) => { row[INGEST_SEQ_COLUMN.name] = first + BigInt(index) })
+  }
+  /** @param {Record<string, unknown>[]} rows */
+  async function stampRows(rows) {
+    stampRun(rows, await seqAllocator.reserve(rows.length))
+  }
   const spool = createCacheSpool({
     cacheRoot,
-    nextSeq: seqAllocator.next,
     async appendChunk(tablePath, columns, rows) {
       const beforePurge = rows.length
       rows = survivingRows(rows)
@@ -190,7 +200,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         }
       }
       let totalBytes = 0
-      const opts = { declaration, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
+      const opts = { declaration, stampRows, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
         const kept = survivingRows(rows)
         const removed = rows.length - kept.length
         droppedCount += removed
@@ -208,8 +218,24 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       if (groups.size > 1) {
         const dirs = Array.from(groups.values(), ({ segments }) => cacheTablePath(cacheRoot, dataset, segments))
         await withPartitionMutationLocks(dirs, async () => {
+          // The seq counter is a third thing that can refuse, so it is asked
+          // once for the whole chunk before any partition commits, and each
+          // partition is stamped from its own contiguous slice of that run.
+          // Every guard is already held, so no other process can commit to
+          // these partitions between this reservation and the commits below.
+          // Rows the purge re-check drops inside the loop leave a gap.
+          // @ref LLP 0347#rows-wait [implements]: counter contention, too, costs no partial commit to replay
+          // @ref LLP 0492#whole-chunk [implements]: one reservation per multi-partition chunk, sliced per partition
+          let next = await seqAllocator.reserve(Array.from(groups.values()).reduce((sum, group) => sum + group.rows.length, 0))
+          const stampSlice = {
+            /** @param {Record<string, unknown>[]} rows */
+            async stampRows(rows) {
+              stampRun(rows, next)
+              next += BigInt(rows.length)
+            },
+          }
           for (const { segments, rows: groupRows } of groups.values()) {
-            const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, { ...opts, mutationLockHeld: true })
+            const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, { ...opts, ...stampSlice, mutationLockHeld: true })
             totalBytes += result.bytesWritten
           }
         })
@@ -250,6 +276,70 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       return { bytesWritten: totalBytes, droppedCount }
     },
   })
+
+  /**
+   * The per-row withholding verdict `readRowsSince` applies after its purge
+   * fence and dataset-wide source verdict, shared with `exportWithheld` so a
+   * caller revalidating rows it already read gets the export seam's answer,
+   * not a copy of it. The attribution and entrypoint columns must already be
+   * on `row`. A corrupt/unreadable list makes `resolve` throw; we let it
+   * propagate so the caller fails closed (LLP 0080 #fail-safe), never a
+   * silent skip.
+   *
+   * @param {Record<string, unknown>} row
+   * @param {string} dataset
+   * @param {string | undefined} attributionColumn
+   * @param {string | undefined} entrypointColumn
+   * @returns {'cwd' | 'source' | 'unattributed' | undefined}
+   */
+  function rowWithholdReason(row, dataset, attributionColumn, entrypointColumn) {
+    // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time (no cache-schema marker, retroactive over already-cached rows); `cwd` is forced into the scan by `readRowsSince` so a caller's `columns` projection can't bypass this filter
+    // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
+    const cwd = row.cwd
+    if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '' && usagePolicyResolver.resolve(cwd).class !== 'full') return 'cwd'
+    // @ref LLP 0188#opt-out [implements]: a row attributed to an
+    // opted-out picker source on a machine with a central layer is
+    // withheld from the payload, and `readRowsSince` drops it with the same
+    // drop-but-advance semantics as the `cwd` filter above, so a sink's
+    // watermark still moves past a withheld row (LLP 0070#incremental).
+    if (!sourceWithholdResolver || attributionColumn === undefined) return undefined
+    const attributionValue = row[attributionColumn]
+    // @ref LLP 0192#fail-closed [implements]: a row with no usable
+    // attribution value cannot be tied to any synced source, so it is
+    // withheld once any of this dataset's declared owners (the picker
+    // sources whose plugin lists the dataset in `contributes.datasets`)
+    // is opted out, instead of shipped (pre-0192, every unattributed
+    // row escaped both withhold rules). Opting out `codex` alone
+    // leaves the unattributed path disarmed. For the bundled catalog,
+    // only an opt-out on a raw gateway row (`raw-anthropic`/
+    // `raw-openai`) arms it.
+    if (typeof attributionValue !== 'string' || attributionValue === '') {
+      return sourceWithholdResolver.shouldWithholdUnattributed?.(dataset) === true ? 'unattributed' : undefined
+    }
+    // @ref LLP 0346#entrypoint-refinement [implements]: a row whose
+    // `client_name` belongs to one client but whose `entrypoint` is
+    // claimed by another (`claude-desktop` stamping `client_name:
+    // "claude"`) is withheld when EITHER source is opted out; the
+    // `client_name` test is unchanged, so nothing that was withheld
+    // before is shipped now.
+    const withholdRow = sourceWithholdResolver.shouldWithhold(attributionValue) ||
+      sourceWithholdResolver.shouldWithholdEntrypoint?.(
+        attributionValue,
+        entrypointColumn === undefined ? undefined : row[entrypointColumn]
+      ) === true
+    return withholdRow ? 'source' : undefined
+  }
+
+  /**
+   * Drain legacy captured rows before reconciling them, so they cannot
+   * reappear on the next flush. New snapshot writes bypass the spool.
+   * @param {string} dataset
+   */
+  async function drainSpoolForReconcile(dataset) {
+    for (const table of await discoverSpoolTables(cacheRoot)) {
+      if (datasetForTablePath(cacheRoot, table) === dataset) await service.flushTable(table, { force: true })
+    }
+  }
 
   /** @type {ExtendedQueryStorageService} */
   const service = {
@@ -414,8 +504,6 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           yield { after, dropped: true }
           continue
         }
-        // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time (no cache-schema marker, retroactive over already-cached rows); `cwd` is forced into the scan above so a caller's `columns` projection can't bypass this filter
-        // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
         // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
         // A corrupt/unreadable list makes `resolve` throw; we let it propagate
         // so the partition read fails and the sink's per-partition retry leaves
@@ -426,50 +514,14 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           yield { after, dropped: true }
           continue
         }
-        const cwd = row.cwd
-        if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '' && usagePolicyResolver.resolve(cwd).class !== 'full') {
+        const withheld = rowWithholdReason(row, dataset, attributionColumn, entrypointColumn)
+        if (withheld !== undefined) {
           droppedRowCount += 1
-          droppedCwdHashes.add(hashCwd(cwd))
+          if (withheld === 'cwd') droppedCwdHashes.add(hashCwd(/** @type {string} */ (row.cwd)))
+          else droppedSourceRowCount += 1
+          if (withheld === 'unattributed') droppedUnattributedRowCount += 1
           yield { after, dropped: true }
           continue
-        }
-        // @ref LLP 0188#opt-out [implements]: a row attributed to an
-        // opted-out picker source on a machine with a central layer is
-        // dropped from the payload here, same drop-but-advance continuation
-        // semantics as the `cwd` filter above, so a sink's watermark still
-        // moves past a withheld row (LLP 0070#incremental).
-        if (sourceWithholdResolver && attributionColumn !== undefined) {
-          const attributionValue = row[attributionColumn]
-          // @ref LLP 0192#fail-closed [implements]: a row with no usable
-          // attribution value cannot be tied to any synced source, so it is
-          // withheld once any of this dataset's declared owners (the picker
-          // sources whose plugin lists the dataset in `contributes.datasets`)
-          // is opted out, instead of shipped (pre-0192, every unattributed
-          // row escaped both withhold rules). Opting out `codex` alone
-          // leaves the unattributed path disarmed. For the bundled catalog,
-          // only an opt-out on a raw gateway row (`raw-anthropic`/
-          // `raw-openai`) arms it.
-          const attributed = typeof attributionValue === 'string' && attributionValue !== ''
-          // @ref LLP 0346#entrypoint-refinement [implements]: a row whose
-          // `client_name` belongs to one client but whose `entrypoint` is
-          // claimed by another (`claude-desktop` stamping `client_name:
-          // "claude"`) is withheld when EITHER source is opted out; the
-          // `client_name` test is unchanged, so nothing that was withheld
-          // before is shipped now.
-          const withholdRow = attributed
-            ? sourceWithholdResolver.shouldWithhold(attributionValue) ||
-              sourceWithholdResolver.shouldWithholdEntrypoint?.(
-                attributionValue,
-                entrypointColumn === undefined ? undefined : row[entrypointColumn]
-              ) === true
-            : sourceWithholdResolver.shouldWithholdUnattributed?.(dataset) === true
-          if (withholdRow) {
-            droppedRowCount += 1
-            droppedSourceRowCount += 1
-            if (!attributed) droppedUnattributedRowCount += 1
-            yield { after, dropped: true }
-            continue
-          }
         }
         // We forced `cwd`/the attribution column/the entrypoint column in for
         // the filters only; don't leak any of them into a payload the caller's
@@ -500,6 +552,22 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           ...(droppedUnattributedRowCount > 0 ? { dropped_unattributed_row_count: droppedUnattributedRowCount } : {}),
         })
       }
+    },
+
+    // Bounded to the rows handed in: one purge-store stat, one dataset
+    // verdict, then the shared per-row verdict, whose `cwd` walk is memoized
+    // per directory inside the resolver's TTL.
+    exportWithheld(tablePath, rows) {
+      sessionPurges.refresh()
+      const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
+      if (sourceWithholdResolver?.shouldWithholdDataset?.(dataset) === true) return rows.length
+      const attributionColumn = sourceWithholdResolver?.attributionColumnFor(dataset)
+      const entrypointColumn = sourceWithholdResolver?.entrypointColumnFor?.(dataset)
+      let withheld = 0
+      for (const row of rows) {
+        if (sessionPurges.has(row) || rowWithholdReason(row, dataset, attributionColumn, entrypointColumn) !== undefined) withheld += 1
+      }
+      return withheld
     },
 
     // Cheap, no cache I/O: two small machine-local reads at most. Consumers
@@ -636,13 +704,20 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     },
 
     async reconcileRows(dataset, columns, rows, scope) {
-      // Drain legacy captured rows before reconciling them, so they cannot
-      // reappear on the next flush. New snapshot writes bypass the spool.
-      for (const table of await discoverSpoolTables(cacheRoot)) {
-        if (datasetForTablePath(cacheRoot, table) === dataset) await service.flushTable(table, { force: true })
-      }
+      await drainSpoolForReconcile(dataset)
       return reconcileCacheRows({ cacheRoot, dataset, columns, rows, scope,
-        declaration: getDeclaration?.(dataset), filterRows: survivingRows, nextSeq: seqAllocator.next })
+        declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
+    },
+
+    async reconcileRowsBatch(dataset, columns, snapshots) {
+      if (!snapshots.length) return 0
+      await drainSpoolForReconcile(dataset)
+      return reconcileCacheSnapshots({ cacheRoot, dataset, columns, snapshots,
+        declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
+    },
+
+    claimReconcileScope(dataset, where) {
+      return claimReconcileScopeImpl(cacheRoot, dataset, where)
     },
 
     discoverCachePartitions(scope) {

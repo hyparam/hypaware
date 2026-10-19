@@ -8,7 +8,8 @@ import path from 'node:path'
 import { loadManifest } from '../manifest.js'
 import { Attr, withSpan } from '../observability/index.js'
 import { provenanceFromUrl } from './git_source.js'
-import { installDirIsContained, pluginInstallDir } from './paths.js'
+import { captureGitOutput, GIT_OUTPUT_LIMIT } from './git_output.js'
+import { checkInstallDestination, installDirIsContained, pluginInstallDir } from './paths.js'
 import { sha256Hex } from '../util/json_util.js'
 
 /**
@@ -119,8 +120,8 @@ export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) 
         ok: false,
         errorKind: 'manifest_name_unsafe',
         message:
-          `plugin install: refused, manifest name '${manifest.name}' does not resolve to a ` +
-          `directory inside the plugin install root; nothing was installed and nothing was removed`,
+          `plugin install: refused, manifest name '${manifest.name}' is not an install name ` +
+          `(one name or @scope/name, inside the plugin install root); nothing was installed and nothing was removed`,
       }
     }
 
@@ -152,6 +153,16 @@ export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) 
       }
     }
 
+    // After the prompt, which can wait on a person, so the check sits next
+    // to the mkdir and backup rename it guards.
+    const destination = await checkInstallDestination(stateDir, manifest.name)
+    if (!destination.ok) {
+      return {
+        ok: false,
+        errorKind: 'install_dir_unsafe',
+        message: `plugin install: refused, ${destination.reason}; nothing was installed and nothing was removed`,
+      }
+    }
     const installDir = pluginInstallDir(stateDir, manifest.name)
     const copyResult = await runCopyArtifactSpan({
       sourceRoot: tmpRepo,
@@ -206,7 +217,7 @@ async function runGitCloneSpan(gitUrl, tmpRepo, provenance) {
       // git as an option (CVE-2018-17456 family). `parseGitSource`
       // already rejects leading-dash inputs but the separator is the
       // standard belt-and-braces defense at the spawn boundary.
-      const cloned = await execGit(['clone', '--filter=blob:none', '--no-checkout', '--', gitUrl, tmpRepo])
+      const cloned = await execGit(['clone', '--filter=blob:none', '--no-checkout', '--', gitUrl, tmpRepo], { discardStdout: true })
       if (cloned.code !== 0) {
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'git_clone_failed')
@@ -255,7 +266,7 @@ async function runGitCheckoutSpan(tmpRepo, ref, provenance) {
       // and blocks an injected `--upload-pack=`-style argument from
       // being parsed as an option. The clone path already vetted the
       // URL; this protects the user-supplied `ref`.
-      const checked = await execGit(['-C', tmpRepo, 'checkout', target, '--'])
+      const checked = await execGit(['-C', tmpRepo, 'checkout', target, '--'], { discardStdout: true })
       if (checked.code !== 0) {
         const isRefError = /pathspec|did not match|unknown revision|not a tree/i.test(checked.stderr)
         const errorKind = isRefError ? 'git_ref_not_found' : 'git_checkout_failed'
@@ -582,7 +593,7 @@ async function resolveDefaultBranch(tmpRepo) {
 
 /**
  * @param {string[]} args
- * @param {{ cwd?: string, env?: NodeJS.ProcessEnv }} [opts]
+ * @param {{ cwd?: string, env?: NodeJS.ProcessEnv, discardStdout?: boolean }} [opts]
  * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
  */
 function execGit(args, opts = {}) {
@@ -593,20 +604,18 @@ function execGit(args, opts = {}) {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    /** @type {Buffer[]} */
-    const stdoutChunks = []
-    /** @type {Buffer[]} */
-    const stderrChunks = []
-    child.stdout?.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)))
-    child.stderr?.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)))
+    const stdout = opts.discardStdout ? undefined : captureGitOutput(child.stdout)
+    if (opts.discardStdout) child.stdout?.resume()
+    const stderr = captureGitOutput(child.stderr, true)
     child.on('error', () => {
       resolve({ code: -1, stdout: '', stderr: 'git binary unavailable' })
     })
     child.on('close', (code) => {
+      const stdoutFailed = code === 0 && stdout?.overflowed()
       resolve({
-        code: code ?? -1,
-        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        code: stdoutFailed ? -1 : (code ?? -1),
+        stdout: stdout?.read() ?? '',
+        stderr: stdoutFailed ? `git stdout exceeded ${GIT_OUTPUT_LIMIT}-byte limit\n${stderr.read()}` : stderr.read(),
       })
     })
   })
@@ -614,7 +623,7 @@ function execGit(args, opts = {}) {
 
 /** @returns {Promise<boolean>} */
 async function isGitOnPath() {
-  const probe = await execGit(['--version'])
+  const probe = await execGit(['--version'], { discardStdout: true })
   return probe.code === 0
 }
 

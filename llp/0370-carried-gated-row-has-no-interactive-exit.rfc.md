@@ -37,7 +37,8 @@ forces), hyparam/hypaware#1296, PR #1290, PR #1303
 > prints no hidden row", and removal by LLP 0368 #display-only's carry, which
 > an `@ref`ed test pins.
 > This document states the gap, carries the reproduction, and lays out the
-> option space. It decides nothing.
+> option space. The decision, taken on issue #1296, is recorded under
+> #decision: R1, naming only the configured gated row.
 
 ## Context {#context}
 
@@ -271,6 +272,39 @@ and narrower than `--source` suggests, because that flag cannot name the row
 Linux, or a pre-gate version. #1290's triage judged the residue acceptable on
 the strength of the Desktop half being inert, which point 3 above qualifies
 rather than refutes: the rider is live capture the user asked to remove.
+
+## Decision {#decision}
+
+Decided on issue #1296 (2026-10-05): **R1**, scoped to a platform-gated
+row the config on disk already records. No new command, confirmation step, or config key.
+
+- `resolvePickSeeding` (`src/core/cli/wizard/pick.js`) adds to the rendered
+  list every row the `platforms` gate withholds that the config reads back
+  as collected. A `hidden` row is never added, whatever the config says, so
+  the raw gateway rows and every other hidden row stay unnamed (LLP 0289
+  #ask-the-store, LLP 0276 #no-candidates).
+- The added row is seeded from the config, so it renders checked, and
+  `promptPickSelection` labels it `Claude Desktop · unavailable on this
+  platform`. Keep is the default: an unchanged answer, a bare enter on the
+  numbered fallback, and the express accept all keep it, and the express
+  line names it with the other kept rows.
+- Because it renders, it is no longer withheld, so it never carries. Its
+  only way into the selection is the user's answer, and unchecking it
+  removes it. The compose fold then drops `@hypaware/claude-desktop`, and
+  drops `@hypaware/claude` too unless the Claude Code row is checked in its
+  own right (point 3 above). Unrelated config is untouched.
+- A fresh config records nothing, so the gated row is never offered there:
+  LLP 0368 #platform-gate is unchanged on a clean install, and on a platform
+  the row names nothing changes at all.
+- The sync lane is unchanged: it re-applies the display filter, so a kept
+  gated row still reaches it as a withheld id and is still not named there.
+
+What this narrows in settled text, recorded as forward-refs on those docs:
+LLP 0368 #display-only's carry no longer reaches a configured gated row on
+the pick menu; LLP 0202 #carry-through and #hidden-rows (the shared display
+filter) and LLP 0276's "absent from every wizard screen" now exclude it on
+the pick menu and the express gate; and LLP 0289's naming rule stays as
+written for the sync lane, while the pick lane may name this one row.
 
 ## What this does not cover {#not-covered}
 

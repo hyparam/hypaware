@@ -30,3 +30,16 @@ test('buildPickerBackfillRunner: sweeping derives from the real provider contrib
   assert.deepEqual([...runner.available].sort(), ['claude', 'codex', 'openclaw'])
   assert.deepEqual(runner.sweeping, ['claude', 'codex', 'openclaw'])
 })
+
+// @ref LLP 0462#parity [tests]: deferring optional imports preserves the sweep-backed providers
+test('declining optional imports keeps scheduled recovery providers available', () => {
+  const backfills = { list: () => [
+    { name: 'optional' },
+    { name: 'scheduled', sweep: {} },
+  ] }
+  const ctx = /** @type {any} */ ({ backfills })
+  assert.deepEqual(buildPickerBackfillRunner(ctx).available, ['optional', 'scheduled'])
+  const runner = buildPickerBackfillRunner(ctx, true)
+  assert.deepEqual(runner.available, ['scheduled'])
+  assert.deepEqual(runner.sweeping, ['scheduled'])
+})

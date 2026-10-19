@@ -23,7 +23,7 @@ import { createKernelRuntime, pluginRegistryFacades } from '../runtime/activatio
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
-import { activatePlugins } from '../runtime/loader.js'
+import { activatePlugins, loaderActivationKind } from '../runtime/loader.js'
 import { reclaimPluginTempDirs } from '../runtime/paths.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginScopedConfig } from '../config/plugin_scope.js'
@@ -32,11 +32,13 @@ import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
 import { colorizeStderr } from './style.js'
 import { compareStrings } from '../util/compare_strings.js'
+import { setupUnsupportedNote } from '../daemon/platform.js'
+import { booleanFlagValue } from './verb_codec.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { noteCommandTransition, noteInvocation, productAdapters, startInvocationDelivery, withProductInvocation } from '../product_telemetry/client.js'
 
 /**
- * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobSinkConfigInstance, CommandActivationOutcome, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  * @import { MaterializeError } from '../../../src/core/sinks/types.js'
@@ -157,6 +159,27 @@ function sinkPluginExcludedByBootProfile(err, { config, activePlugins, withheldB
 }
 
 /**
+ * The exit code for a setup run on a platform the daemon installer does not
+ * support, after saying so on `stderr`; `undefined` on a supported platform.
+ *
+ * @param {{ write(chunk: string): unknown }} stderr
+ * @param {NodeJS.Platform} [platform]
+ * @returns {number | undefined}
+ */
+function refuseUnsupportedSetupPlatform(stderr, platform = process.platform) {
+  const note = setupUnsupportedNote(platform)
+  if (note === undefined) return undefined
+  getLogger('cmd-dispatch').warn('dispatch.setup_refused', {
+    [Attr.COMPONENT]: 'cmd-dispatch',
+    [Attr.OPERATION]: 'setup.preflight',
+    [Attr.ERROR_KIND]: 'unsupported_platform',
+    platform,
+  })
+  stderr.write(note)
+  return 1
+}
+
+/**
  * Boot the kernel CLI and dispatch `argv` to a registered command.
  *
  * Lifecycle:
@@ -253,6 +276,14 @@ async function dispatchInternal(argv, opts) {
 
   // Past the help and version returns above, an empty argv is the walkthrough.
   if (argv.length === 0) noteInvocation({ command: 'setup', kind: 'execution' })
+  // Setup on a platform with no service manager would sign in, enroll and
+  // write config before the daemon installer refused (#975), so refuse every
+  // setup form here, ahead of the boot and the first network call. A help flag
+  // anywhere in its argv still reaches the setup help below.
+  if ((argv.length === 0 || earlyMatch?.command.name === 'setup') && !earlyMatch?.rest.some(isHelpFlag)) {
+    const refused = refuseUnsupportedSetupPlatform(stderr)
+    if (refused !== undefined) return refused
+  }
   if (earlyMatch?.command.name !== 'version' && !isHelpFlag(earlyMatch?.rest[0])) startInvocationDelivery()
 
   // Boot the kernel so plugin-contributed commands, sources, sinks,
@@ -272,6 +303,13 @@ async function dispatchInternal(argv, opts) {
    * @type {string[]}
    */
   let failedPlugins = []
+  /**
+   * Per-plugin activation outcomes, message withheld. Left undefined when the
+   * caller pre-built the kernel, so a reader sees "unknown" rather than an
+   * empty list it would read as "nothing failed" (issue #596).
+   * @type {CommandActivationOutcome[] | undefined}
+   */
+  let activations
   /** @type {HypAwareV2Config} */
   let activeConfig = { version: 2 }
   const ownsKernel = !opts.kernel
@@ -287,6 +325,7 @@ async function dispatchInternal(argv, opts) {
     kernel = opts.kernel
   } else {
     const bootProfile = decideBootProfile(argv, registry)
+    const preview = isSetupPreview(earlyMatch)
     const boot = await bootKernel({
       hypHome: obsEnv.hypHome,
       mode: 'cli',
@@ -297,6 +336,7 @@ async function dispatchInternal(argv, opts) {
       workspaceDir: opts.workspaceDir,
       tmpRoot: opts.tmpRoot,
       env,
+      preview,
     })
     kernel = boot.runtime
     activePlugins = boot.activePlugins
@@ -305,6 +345,9 @@ async function dispatchInternal(argv, opts) {
     // short never put a plugin there at all
     // (LLP 0219 #incomplete-activation-prunes-nothing).
     failedPlugins = boot.unavailablePlugins
+    activations = boot.activations.map((r) =>
+      r.ok ? { ok: true, plugin: r.plugin } : { ok: false, plugin: r.plugin, errorKind: loaderActivationKind(r.errorKind) }
+    )
     if (failedPlugins.length) noteInvocation({ degraded: true })
     if (boot.config) activeConfig = boot.config
     noteInvocation({ adapters: productAdapters(activeConfig.plugins ?? []) })
@@ -313,7 +356,8 @@ async function dispatchInternal(argv, opts) {
     // `sink_plugin_not_active` warning per configured sink. The daemon's
     // own materialization (src/core/daemon/runtime.js) is untouched, so a
     // sink that genuinely fails to materialize there still surfaces.
-    if (bootProfileActivatesPlugins(bootProfile)) {
+    // A preview boot opens no sink either: creating one makes its directory.
+    if (bootProfileActivatesPlugins(bootProfile) && !preview) {
       sinkPass = { config: boot.config, withheldByProfile: boot.withheldByProfile }
     }
   }
@@ -526,6 +570,7 @@ async function dispatchInternal(argv, opts) {
       config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner, activePlugins) : activeConfig,
       plugins: activePlugins,
       failedPlugins,
+      activations,
       capabilities: ownerFacades ? ownerFacades.capabilities : kernel.capabilities,
       clients: kernel.clients,
       query: kernel.query,
@@ -545,6 +590,7 @@ async function dispatchInternal(argv, opts) {
             stateRoot: obsEnv.stateDir,
             runId: devRunId ?? `cli-${process.pid}`,
             activePlugins,
+            env,
           })
           return runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel })
         },
@@ -568,6 +614,7 @@ async function dispatchInternal(argv, opts) {
           stateRoot: obsEnv.stateDir,
           runId: devRunId ?? `cli-${process.pid}`,
           activePlugins,
+          env,
         }),
       // Same owner, same rule again: registering a verb is a plugin extension
       // point, so a plugin's command body reaches the verb table through the
@@ -736,6 +783,30 @@ function isInteractiveStream(stream) {
 }
 
 /**
+ * Whether this argv is a setup preview (`hyp setup --dry-run`, any form,
+ * preset included), read the way the codec reads a boolean so
+ * `--dry-run=true` counts and `--dry-run=false` does not. A malformed value
+ * makes it a preview whatever follows: the codec refuses the first bad value,
+ * so the command never runs, and a refused preview should have created
+ * nothing on the way.
+ *
+ * @param {ReturnType<ReturnType<typeof createCommandRegistry>['match']>} matched
+ * @returns {boolean}
+ * @ref LLP 0525#preview-boot [implements]: an explicit setup dry-run boots as a preview
+ */
+function isSetupPreview(matched) {
+  if (matched?.command.name !== 'setup') return false
+  let preview = false
+  for (const token of matched.rest) {
+    if (token !== '--dry-run' && !token.startsWith('--dry-run=')) continue
+    const read = booleanFlagValue('dry-run', token === '--dry-run' ? undefined : token.slice('--dry-run='.length))
+    if (!read.ok) return true
+    preview = read.value
+  }
+  return preview
+}
+
+/**
  * Pick the boot profile based on the resolved semantic command. `hyp setup`
  * (interactive walkthrough or preset) needs bundled defaults plus
  * installed plugins loaded so the picker can list plugin presets before
@@ -892,9 +963,10 @@ async function teardownBootOwnedKernel(kernel) {
   try {
     await kernel.sources.stopAll()
   } catch {
-    // Source cleanup is best-effort; command result rendering has
-    // already completed, and individual source stop failures are not
-    // actionable from the dispatcher layer.
+    // Source cleanup is best-effort and must never throw: teardown runs after
+    // a successful command and on the throw path alike, and a failure here
+    // would replace that outcome (or mask the original error) with its own.
+    // Individual source stop failures are not actionable from the dispatcher.
   }
   try {
     // The activation contexts are the only record of where this boot's temp dirs
@@ -906,9 +978,10 @@ async function teardownBootOwnedKernel(kernel) {
       Array.from(kernel.activationContexts.values(), (ctx) => ctx.paths.tempDir)
     )
   } catch {
-    // Same best-effort contract as source cleanup above: teardown runs after
-    // the command result is already computed, so a scratch dir we cannot
-    // resolve or remove is a leak, not something the dispatcher can act on.
+    // Same best-effort contract as source cleanup above: a throw here would
+    // stand in for the command's own success or failure, so a scratch dir we
+    // cannot resolve or remove is a leak, not something the dispatcher can
+    // act on.
   }
 }
 
@@ -1250,10 +1323,11 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
  *   stateRoot: string,
  *   runId: string,
  *   activePlugins: ActivePlugin[],
+ *   env: NodeJS.ProcessEnv,
  * }} args
  * @returns {Promise<void>}
  */
-async function activateSeamCommandPlugins({ name, registry, kernel, discovery, stateRoot, runId, activePlugins }) {
+async function activateSeamCommandPlugins({ name, registry, kernel, discovery, stateRoot, runId, activePlugins, env }) {
   try {
     if (typeof name !== 'string' || name.length === 0 || name.startsWith('-')) return
     if (registry.match([name])) return
@@ -1280,6 +1354,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
       stateRoot,
       runId,
       activePlugins,
+      env,
     })
     // Parity with the pre-generalization guard: if the owner itself never
     // made it into `activated` (unresolvable, or resolvable but its own
@@ -1339,6 +1414,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
  *   runId: string,
  *   activePlugins: ActivePlugin[],
  *   selection?: Awaited<ReturnType<typeof computeBootSelection>>,
+ *   env: NodeJS.ProcessEnv,
  * }} args
  * @returns {Promise<{ activated: string[], failed: string[] }>}
  * @ref LLP 0174#prompt [implements]: the manual-attach accept path's
@@ -1353,6 +1429,7 @@ export async function activatePluginDependencyClosure({
   runId,
   activePlugins,
   selection,
+  env,
 }) {
   const activeNames = new Set(activePlugins.map((p) => p.name))
   const seeds = seedNames.filter((n) => typeof n === 'string' && n.length > 0 && !activeNames.has(n))
@@ -1423,7 +1500,7 @@ export async function activatePluginDependencyClosure({
       }))
     if (entries.length === 0) return { activated: [], failed: seeds }
 
-    const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel })
+    const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel, env })
     /** @type {string[]} */
     const activated = []
     for (const r of result.results) {

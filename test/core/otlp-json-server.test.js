@@ -12,7 +12,7 @@ import net from 'node:net'
 import os from 'node:os'
 import zlib from 'node:zlib'
 
-import { createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
+import { MAX_DECODED_BODY_BYTES, createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
 import { streamOversizedBody } from '../helpers/oversized_body.js'
 
 /**
@@ -172,6 +172,60 @@ test('GET / answers with the listener name banner', async () => {
   }
 })
 
+// A body with no declared length cannot be refused up front, because the
+// banner is written before its length is known, so it is cut at the drain cap
+// instead of read to EOF (issue #1367). A bodiless probe, the real shape, keeps
+// its connection.
+test('the GET / banner keeps a bodiless probe reusable and cuts an endless chunked body', async () => {
+  const s = await startServer({ name: 'hypaware/otel' })
+  try {
+    const probe = await fetch(`${s.origin}/`)
+    assert.equal(probe.status, 200)
+    assert.notEqual(probe.headers.get('connection'), 'close')
+    await probe.text()
+
+    s.sockets.length = 0
+    const out = await new Promise((resolve) => {
+      const socket = net.connect(s.bound.port, '127.0.0.1')
+      const chunk = Buffer.alloc(16 * 1024, 'x')
+      const frame = `${chunk.length.toString(16)}\r\n`
+      let received = ''
+      let closed = false
+      const timer = setTimeout(() => socket.destroy(), 3000)
+      function pump() {
+        while (!socket.destroyed) {
+          if (!socket.write(frame) || !socket.write(chunk) || !socket.write('\r\n')) {
+            socket.once('drain', pump)
+            return
+          }
+        }
+      }
+      socket.on('connect', () => {
+        socket.write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\ntransfer-encoding: chunked\r\n\r\n')
+        pump()
+      })
+      socket.on('data', (data) => { received += data.toString('utf8') })
+      socket.on('error', () => {})
+      socket.on('close', () => {
+        closed = true
+        clearTimeout(timer)
+        resolve({ received, closed })
+      })
+    })
+    const [served] = s.sockets
+    assert.ok(served, 'the chunked probe opened no server connection to measure')
+    if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+    assert.ok(served.bytesRead < 512 * 1024, `the banner read ${served.bytesRead} bytes of an endless body`)
+    const { received } = /** @type {{ received: string }} */ (out)
+    if (received) {
+      assert.match(received, /^HTTP\/1\.1 200 /)
+      assert.match(received, /\r\nconnection: close\r\n/i)
+    }
+  } finally {
+    await s.close()
+  }
+})
+
 test('each signal route answers with its own empty partialSuccess envelope', async () => {
   const s = await startServer()
   try {
@@ -295,6 +349,135 @@ test('gzip and deflate bodies are decoded before the handler sees them', async (
       assert.deepEqual(req.data, { resourceMetrics: [] })
       // The count is of decoded bytes, not of what came off the wire.
       assert.equal(req.payloadBytes, Buffer.byteLength(payload))
+    }
+  } finally {
+    await s.close()
+  }
+})
+
+// The bound is on decoded bytes, so a compressed body cannot buy its way past
+// it: a few KiB of gzip inflate to whatever the sender chose before the handler
+// ever ran.
+test('a body past the decoded cap is refused with 413 in every encoding, and the listener keeps serving', async () => {
+  const s = await startServer()
+  try {
+    // Valid JSON, so nothing but its size can refuse it.
+    const json = JSON.stringify({ resourceLogs: [] })
+    const oversized = Buffer.from(json + ' '.repeat(MAX_DECODED_BODY_BYTES + 1 - Buffer.byteLength(json)))
+    /** @type {[string, Buffer][]} */
+    const cases = [
+      ['identity', oversized],
+      ['gzip', zlib.gzipSync(oversized)],
+      ['deflate', zlib.deflateSync(oversized)],
+    ]
+    for (const [encoding, body] of cases) {
+      const res = await fetch(`${s.origin}/v1/logs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': encoding },
+        body,
+      })
+      assert.equal(res.status, 413, encoding)
+      const answer = /** @type {{ code: number, message: string }} */ (await res.json())
+      assert.equal(answer.code, 3, encoding)
+      assert.match(answer.message, new RegExp(`${MAX_DECODED_BODY_BYTES} bytes`), encoding)
+    }
+    assert.equal(s.seen.length, 0)
+
+    const after = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resourceLogs: [] }),
+    })
+    assert.equal(after.status, 200)
+    assert.equal(s.seen.length, 1)
+  } finally {
+    await s.close()
+  }
+})
+
+// The shape review used to refuse a 20 MiB limit: an OpenTelemetry SDK's
+// default BatchLogRecordProcessor exports 512 records at a time, and 48 KiB
+// records make that batch about 24 MiB. It has to keep arriving whole.
+// @ref LLP 0478#why [tests]: a default SDK batch fits under the limit
+test('a default 512-record SDK log batch with 48 KiB records still reaches the handler', async () => {
+  const s = await startServer()
+  try {
+    const record = 'x'.repeat(48 * 1024)
+    const batch = {
+      resourceLogs: [{
+        resource: { attributes: [{ key: 'service.name', value: { stringValue: 'sdk-batch' } }] },
+        scopeLogs: [{
+          scope: { name: 'sdk-batch' },
+          logRecords: Array.from({ length: 512 }, (_, i) => ({
+            timeUnixNano: String(1_760_000_000_000_000_000 + i),
+            severityNumber: 9,
+            severityText: 'INFO',
+            body: { stringValue: record },
+            attributes: [{ key: 'seq', value: { intValue: String(i) } }],
+          })),
+        }],
+      }],
+    }
+    const json = JSON.stringify(batch)
+    assert.ok(Buffer.byteLength(json) > 20 * 1024 * 1024, 'the batch is past the limit review refused')
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: zlib.gzipSync(json),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(s.seen.length, 1)
+    assert.equal(s.seen[0].payloadBytes, Buffer.byteLength(json))
+    const data = /** @type {any} */ (s.seen[0].data)
+    assert.equal(data.resourceLogs[0].scopeLogs[0].logRecords.length, 512)
+  } finally {
+    await s.close()
+  }
+})
+
+test('a body exactly at the decoded cap still reaches the handler', async () => {
+  const s = await startServer()
+  try {
+    const json = JSON.stringify({ resourceLogs: [] })
+    const atCap = json + ' '.repeat(MAX_DECODED_BODY_BYTES - Buffer.byteLength(json))
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: zlib.gzipSync(atCap),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(s.seen.length, 1)
+    assert.equal(s.seen[0].payloadBytes, MAX_DECODED_BODY_BYTES)
+    assert.deepEqual(s.seen[0].data, { resourceLogs: [] })
+  } finally {
+    await s.close()
+  }
+})
+
+test('an identity body past the decoded cap is read only up to about the cap', async () => {
+  const s = await startServer()
+  try {
+    const out = await streamOversizedBody(s.bound.port, {
+      requestLine: 'POST /v1/logs',
+      bytes: MAX_DECODED_BODY_BYTES + 8 * 1024 * 1024,
+    })
+    assert.ok(out.sent < out.total, `read all ${out.total} bytes of a body past the cap`)
+    assert.equal(s.seen.length, 0)
+    const [served] = s.sockets
+    assert.ok(served, 'the upload opened no server connection to measure')
+    if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+    // Up to the cap the body is read as a candidate export, and past it only
+    // the shared drain's bounded discard follows; the margin covers the
+    // socket reads already in flight when each stop lands.
+    assert.ok(
+      served.bytesRead < MAX_DECODED_BODY_BYTES + 2 * 1024 * 1024,
+      `read ${served.bytesRead} of the ${out.total} bytes it refused`
+    )
+    // A sender that reads while it uploads gets the refusal, announced as a
+    // closing connection rather than handed back to a pool.
+    if (out.received) {
+      assert.match(out.received, /^HTTP\/1\.1 413 /, out.received.slice(0, 80))
+      assert.match(out.received, /\r\nconnection: close\r\n/i, out.received.slice(0, 200))
     }
   } finally {
     await s.close()
@@ -678,8 +861,11 @@ test('a request target new URL rejects is answered 400, not thrown out of the ha
 // never read still has to be drained for that answer to reach a caller
 // mid-upload. Draining it with a bare `req.resume()` reads to EOF, which hands
 // the length of that read to the sender; the shared `drainRequestBody` bounds
-// it instead (issue #1351).
-for (const refusal of [
+// it instead (issue #1351). The banner and the later refusals answer without
+// touching the request at all, which reads to EOF just the same through
+// Node's `_dump()` fallback (issue #1367).
+/** @type {Array<{ name: string, requestLine: string, host: string, status: number, headers?: Record<string, string> }>} */
+const refusals = [
   {
     name: 'the misdirected-Host 421',
     requestLine: 'POST /v1/logs',
@@ -692,7 +878,27 @@ for (const refusal of [
     host: '127.0.0.1',
     status: 400,
   },
-]) {
+  // A banner probe reads no body, so one declared past the drain cap is
+  // refused rather than answered 200 and reset behind the answer.
+  { name: 'the GET / banner', requestLine: 'GET /', host: '127.0.0.1', status: 413 },
+  { name: 'the method 405', requestLine: 'PUT /v1/logs', host: '127.0.0.1', status: 405 },
+  { name: 'the unknown-route 404', requestLine: 'POST /v1/nope', host: '127.0.0.1', status: 404 },
+  {
+    name: 'the content-type 415',
+    requestLine: 'POST /v1/logs',
+    host: '127.0.0.1',
+    status: 415,
+    headers: { 'content-type': 'text/plain' },
+  },
+  {
+    name: 'the content-encoding 415',
+    requestLine: 'POST /v1/logs',
+    host: '127.0.0.1',
+    status: 415,
+    headers: { 'content-encoding': 'br' },
+  },
+]
+for (const refusal of refusals) {
   test(`${refusal.name} discards an oversized body only up to a cap`, async () => {
     const s = await startServer()
     try {

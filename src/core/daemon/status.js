@@ -9,9 +9,10 @@ import { configRecordsPickAnswer, defaultConfigPath, loadConfigFile } from '../c
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
 import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../config/client_detach_disk.js'
-import { endpointFromListen } from '../config/gateway_endpoint.js'
+import { endpointFromListen, configuredGatewayEndpoint, DEFAULT_GATEWAY_ENDPOINT } from '../config/gateway_endpoint.js'
 import { readAttachPolicy, readCodexCaptureMode } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
+import { isEntryRecording } from '../config/client_recording.js'
 import {
   isOtlpHeadersOverride,
   otlpOverrideSignal,
@@ -30,9 +31,14 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { sinkInstanceName } from '../registry/sinks.js'
+import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_history.js'
+import { readHeldDatasets } from '../sinks/held_datasets.js'
+import { instanceWatermarkStateDir } from '../sinks/incremental.js'
+import { pluginStateDir } from '../runtime/paths.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { isEphemeralRecordedBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
+import { clientAssetStateRoot, readClientAssetLedger } from '../runtime/client_asset_ledger.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
 import {
@@ -47,7 +53,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, SINK_MATERIALIZE_FAILED_WARNING_PREFIX, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -70,12 +76,12 @@ import {
  * @import { HypAwareV2Config, PluginConfigInstance, SourceContribution, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, OllamaCaptureStatus, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkMaterializeFailure, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
- * @import { DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
+ * @import { ClientAssetLedgerRecord, DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
  */
@@ -734,19 +740,35 @@ export function maintenanceSkipsFromStatus(status) {
     })
   }
 
-  const recordedTotal = nonNegativeInt(raw.skippedTotal)
-    ?? MAINTENANCE_SKIP_REASONS.reduce((sum, reason) => sum + reasons[reason], 0)
+  // Each count is floored at the partitions this list names for it: a foreign
+  // file with zeroed `reasons` beside named `compaction_ineffective` entries
+  // would otherwise render "reasons this build does not recognize" directly
+  // above lines this build does recognize (issue #764). A snapshot this build
+  // wrote counts every skip and names at most a capped subset, so the floor
+  // is a no-op there.
+  /** @type {Record<MaintenanceSkipReason, number>} */
+  const named = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
+  for (const p of partitions) named[p.reason]++
+  let reasonsTotal = 0
+  for (const reason of MAINTENANCE_SKIP_REASONS) {
+    reasons[reason] = Math.max(reasons[reason], named[reason])
+    reasonsTotal += reasons[reason]
+  }
+
+  // Floored at both the capped list and the reasons it reports: a total below
+  // either renders a sentence no tick could produce, "2 partitions" above
+  // three lines of them, or "0 partitions fragmented (2
+  // compaction_attempt_failed)" (issue #2360). A snapshot this build wrote
+  // has the total at exactly the reason sum, so both floors are no-ops there.
+  const skippedTotal = Math.max(nonNegativeInt(raw.skippedTotal) ?? 0, reasonsTotal, partitions.length)
   return {
     tickAt,
-    // Floored at the skipped total (and the named list, which the total
-    // itself is already floored at below): "visited" can never be smaller
-    // than "skipped", or the render says "5 of 0 partitions" for a snapshot
-    // no tick could have produced. A file this build did not write can claim
+    // Floored at the skipped total: "visited" can never be smaller than
+    // "skipped", or the render says "5 of 0 partitions" for a snapshot no
+    // tick could have produced. A file this build did not write can claim
     // whatever it wants here, so the floor is enforced rather than trusted.
-    partitionsVisited: Math.max(nonNegativeInt(raw.partitionsVisited) ?? 0, recordedTotal, partitions.length),
-    // The list is capped, so the count leads; but a count smaller than the
-    // list would render "2 partitions" above three lines of them.
-    skippedTotal: Math.max(recordedTotal, partitions.length),
+    partitionsVisited: Math.max(nonNegativeInt(raw.partitionsVisited) ?? 0, skippedTotal),
+    skippedTotal,
     reasons,
     partitions,
   }
@@ -896,6 +918,12 @@ function liveStatusSources(stateRoot) {
  * @ref LLP 0164#gateway-tracks-what-core-cannot-name [constrained-by]: a plugin string bound for status.json is bounded where it is recorded
  */
 const MAX_SOURCE_HEALTH_CHARS = 200
+
+/**
+ * How much of a recorded boot failure `daemon_boot_failed` quotes. Room for a
+ * bind error and the port-owner clause the gateway appends to it (#137).
+ */
+const MAX_BOOT_FAILURE_CHARS = 300
 
 /** The health words `SourceStatus.state` is allowed to carry. */
 const SOURCE_HEALTH_STATES = new Set(['starting', 'ready', 'degraded', 'stopped', 'error'])
@@ -1053,6 +1081,52 @@ export function daemonHeartbeatAgeMs(status, nowMs) {
   return nowMs - (healthyAtMs + uptimeMs)
 }
 
+/**
+ * When this machine last booted, as epoch ms, or `undefined` when the
+ * platform will not say. `os.uptime()` is the platform's own boot clock:
+ * libuv reads `kern.boottime` on macOS and `/proc/uptime` (the clock
+ * `/proc/stat`'s `btime` is derived from) on Linux, both counting sleep, so
+ * a laptop that slept since boot still dates its boot correctly. Never
+ * throws: a sandbox without `/proc` answers `undefined`, which the caller
+ * reads as "cannot tell", never as "no reboot".
+ *
+ * @param {number} [nowMs]
+ * @returns {number | undefined}
+ */
+export function systemBootTimeMs(nowMs = Date.now()) {
+  try {
+    const uptimeSeconds = os.uptime()
+    if (!Number.isFinite(uptimeSeconds) || uptimeSeconds <= 0) return undefined
+    return nowMs - uptimeSeconds * 1000
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether a daemon's recorded stop happened during this boot, before it, or
+ * cannot be placed (no `stoppedAt`, or no boot time). Only `'this_boot'` can
+ * stand for a stop the operator asked for: every clean shutdown writes
+ * `stopped`, a reboot's included, so a stop from before this boot says
+ * nothing about why launchd holds nothing now.
+ *
+ * @param {string | undefined} stoppedAt
+ * @param {() => number | undefined} bootTimeMs
+ * @returns {'this_boot' | 'before_boot' | 'unknown'}
+ */
+export function placeStopAgainstBoot(stoppedAt, bootTimeMs) {
+  const stoppedAtMs = parseIsoMs(stoppedAt)
+  if (stoppedAtMs === undefined) return 'unknown'
+  let bootMs
+  try {
+    bootMs = bootTimeMs()
+  } catch {
+    return 'unknown'
+  }
+  if (typeof bootMs !== 'number' || !Number.isFinite(bootMs)) return 'unknown'
+  return stoppedAtMs > bootMs ? 'this_boot' : 'before_boot'
+}
+
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
@@ -1067,6 +1141,82 @@ export function daemonHeartbeatAgeMs(status, nowMs) {
  */
 function attachWritesNoMarker(clientName, config) {
   return clientName === 'codex' && readCodexCaptureMode(config?.plugins) === 'transcript'
+}
+
+/**
+ * Whether a client has an attach marker to wait for in its configured capture
+ * mode: it declares an `attach_probe`, and that mode writes the marker the
+ * probe reads. The clients row and the login attach-wait share this one gate.
+ *
+ * @param {string} clientName
+ * @param {ClientDescriptor} descriptor
+ * @param {HypAwareV2Config | null | undefined} config
+ * @returns {boolean}
+ */
+export function isClientAttachable(clientName, descriptor, config) {
+  return !!descriptor.attachProbe && !attachWritesNoMarker(clientName, config)
+}
+
+/**
+ * Saved config and finite source snapshots are separate facts. A current route
+ * needs the exact daemon generation, fresh heartbeat and resolved alias.
+ * @ref LLP 0474#diagnostics [implements]: cheap capture evidence never queries datasets or treats retained stamps as current health
+ * @param {HypAwareV2Config | null} config
+ * @param {DaemonStatus | null | undefined} status
+ * @param {ReturnType<typeof readPidFile>} pid
+ * @returns {OllamaCaptureStatus}
+ */
+export function ollamaCaptureFromSnapshot(config, status, pid) {
+  const plugin = config?.plugins?.find(p => p.name === '@hypaware/ollama' && p.enabled !== false)
+  const gateway = config?.plugins?.find(p => p.name === '@hypaware/ai-gateway' && p.enabled !== false)
+  const upstreams = gateway?.config?.upstreams
+  const upstream = Array.isArray(upstreams) ? upstreams.find(u => isPlainObject(u) && u.name === 'ollama') : undefined
+  const direct = isPlainObject(upstream) && typeof upstream.base_url === 'string' ? upstream.base_url : 'http://127.0.0.1:11434'
+  const configuredRoot = (configuredGatewayEndpoint(config ?? { version: 2 }) ?? DEFAULT_GATEWAY_ENDPOINT).replace(/\/+$/, '') + '/ollama'
+  const age = daemonHeartbeatAgeMs(status, Date.now())
+  const current = !!pid && processIsAlive(pid.pid) && status?.pid === pid.pid && status.runId === pid.runId
+    && status.startedAt === pid.startedAt && ['healthy', 'degraded'].includes(status.state)
+    && age !== null && age >= 0 && age <= DAEMON_HEARTBEAT_STALE_MS
+  const source = Array.isArray(status?.sources) ? status.sources.slice(0, 128).find(s => s && s.name === 'ai-gateway' && s.state === 'started') : undefined
+  const details = isPlainObject(source?.details) ? source.details : {}
+  const bound = current && details.listening !== false ? gatewaySourceDetails(source ? [source] : []) : undefined
+  const captureRoot = bound ? endpointFromListen(`${bound.host}:${bound.port}`) + '/ollama' : null
+  const aliases = Array.isArray(details.upstream_aliases) ? details.upstream_aliases.slice(0, 32) : []
+  let routeConfirmed = false
+  try {
+    const directUrl = new URL(direct)
+    routeConfirmed = !!captureRoot && !directUrl.username && !directUrl.password && !directUrl.search && !directUrl.hash
+      && aliases.some(a => isPlainObject(a) && a.name === 'ollama-native' && a.canonical === 'ollama' && a.path_prefix === '/ollama' && a.base_url === directUrl.href)
+  } catch { /* Invalid saved transport is unconfirmed, never echoed. */ }
+  const processorReady = current && details.capture_ready === true && details.recording_enabled === true
+    && Array.isArray(details.projectors) && details.projectors.slice(0, 32).includes('ollama-native-chat')
+  const outcomes = Array.isArray(details.capture_outcomes) ? details.capture_outcomes.slice(0, 32)
+    .filter(o => isPlainObject(o) && typeof o.route === 'string' && ['ollama', 'ollama-native'].includes(o.route)) : []
+  const timestamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T[0-9:.]{12}Z$/.test(value) && Number.isFinite(Date.parse(value)) ? value : null
+  const newest = key => outcomes.reduce((last, o) => { const at = timestamp(o[key]); return at && (!last || at > last) ? at : last }, null)
+  const recent = Array.isArray(details.recent_entrypoints) ? details.recent_entrypoints.slice(0, 32) : []
+  const entrypointStamp = recent.reduce((last, e) => {
+    const at = isPlainObject(e) && e.client_name === 'ollama' ? timestamp(e.last_seen) : null
+    return at && (!last || at > last) ? at : last
+  }, null)
+  const lastPersisted = newest('last_persisted') ?? entrypointStamp
+  const lastFailed = newest('last_failed')
+  const failures = ['invalid_request', 'unsupported_shape', 'invalid_response', 'malformed_stream', 'trailing_record', 'missing_terminal', 'transport_error', 'upstream_unavailable', 'http_error', 'capture_limit', 'processor_unavailable', 'append_failure', 'policy_unreadable', 'recording_barrier_unconfirmed']
+  const failed = outcomes.find(o => timestamp(o.last_failed) === lastFailed && failures.includes(o.reason))
+  const reason = failed && typeof failed.reason === 'string' ? failed.reason : null
+  const historical = !current || !plugin || plugin.recording === false
+  const state = !plugin || plugin.recording === false ? 'disabled'
+    : !routeConfirmed || !processorReady ? 'unconfirmed'
+    : lastFailed && (!lastPersisted || lastFailed >= lastPersisted) ? 'failed'
+    : outcomes.some(o => timestamp(o.last_observed) && (!timestamp(o.last_outcome) || o.last_observed > o.last_outcome)) ? 'observed'
+    : lastPersisted ? 'persisted' : 'ready'
+  const next = state === 'disabled' ? 'hyp client attach ollama'
+    : state === 'unconfirmed' ? 'hyp daemon restart; hyp ollama setup'
+    : state === 'failed' ? (reason === 'upstream_unavailable' || reason === 'http_error' ? 'Check the direct service with hyp ollama setup, then rerun hyp ollama verify --model <installed-model>'
+      : reason === 'unsupported_shape' ? 'Use supported native chat/generate with think:false, then rerun hyp ollama verify --model <installed-model>'
+        : 'Check hyp status --verbose and the daemon log, then rerun hyp ollama verify --model <installed-model>')
+    : 'Route a client using the capture root, or run hyp ollama verify --model <installed-model>'
+  return { state, configuredRoot, captureRoot, routeConfirmed, processorReady, lastPersisted, lastFailed, historical, reason, next }
 }
 
 /**
@@ -1208,15 +1358,12 @@ export async function collectHypAwareStatus(opts = {}) {
   // `config_unreadable` / `config_local_unreadable` own the run.
   const localConfigUnreadable = !localLoaded.ok && localLoaded.errorKind !== 'config_missing'
 
-  // Same fact, central layer: a central file the host could not parse is not
-  // the operator removing anything either, so it must not be read as intent
-  // any more than a local parse failure is.
-  const centralLayerParseFailed = !!centralLoaded && !centralLoaded.ok && centralLoaded.errorKind !== 'config_missing'
-
   // Whether the central layer can be read at all, widest definition: every
   // load failure counts, `config_missing` included, and a null `centralLoaded`
   // is re-checked against the control directory instead of read as an
-  // absence. See `centralLayerUnreadable`'s own doc for why.
+  // absence. See `centralLayerUnreadable`'s own doc for why. Like a local
+  // parse failure, none of these is the operator removing anything, so the
+  // export-withhold gate below reads every one of them as uncertainty (#2432).
   const centralUnreadable = centralLayerUnreadable({ stateDir: stateRoot, centralLoaded })
 
   // Validate the *effective* (merged + pruned) config: that is what runs.
@@ -1321,7 +1468,7 @@ export async function collectHypAwareStatus(opts = {}) {
     diagnostics.push({
       severity: 'warning',
       kind: 'config_central_unreadable',
-      message: `central config layer ${centralUnreadable.configPath} is unreadable (${centralUnreadable.message}) - the team config it carries is not applied`,
+      message: `central config layer ${centralUnreadable.configPath} is unreadable (${centralUnreadable.message}) - its team config is not in this report, and a running daemon may still be on the config it last applied`,
       repair: [
         'hyp join <url> <token>',
         'hyp leave, then hyp remote login',
@@ -1354,13 +1501,21 @@ export async function collectHypAwareStatus(opts = {}) {
   // plugin remove` reads as not installed; for the reported shape (an object
   // missing `install_dir`) `removePlugin` falls back to the conventional
   // install directory and clears the row.
-  for (const name of manifests.installed.malformed) {
+  // The repair names the row by line, never by key: the key is
+  // hand-edited text, and a repair line is one an operator may paste, so no
+  // byte of it belongs there. The sanitized label stays in the message, where
+  // it identifies the row but is not offered as a command (issue #2115).
+  const { malformed, malformedLines } = manifests.installed
+  for (const name of malformed) {
     const label = sanitizeLabel(name, MAX_ACTIVATION_MESSAGE_CHARS) ?? '<unnamed>'
+    const lockPath = pluginLockPath(stateRoot)
+    const line = malformedLines.get(name)
+    const row = line === undefined ? 'that entry' : `the entry on line ${line}`
     diagnostics.push({
       severity: 'error',
       kind: 'plugin_lock_entry_invalid',
-      message: `plugin-lock.json entry '${label}' has no usable install_dir, so nothing it installed is running: ${pluginLockPath(stateRoot)}`,
-      repair: [`hyp plugin remove ${label}`],
+      message: `plugin-lock.json entry '${label}' has no usable install_dir, so nothing it installed is running: ${lockPath}`,
+      repair: [`open ${lockPath} and remove ${row}, or pass its exact key as one quoted argument to hyp plugin remove`],
     })
   }
 
@@ -1533,19 +1688,32 @@ export async function collectHypAwareStatus(opts = {}) {
     // 0383 settled that signal for the shape where the probe reports the unit
     // *loaded*, which is the block below. Reusing it here, where the probe
     // reports the opposite, is an extension of it rather than an application:
-    // it is the borrowed signal, but a wider claim, and it carries a cost 0383
-    // never had to weigh (a `stopped` snapshot is unbounded in age, and a clean
-    // shutdown writes one, so a LaunchAgent that fails to load after a reboot
-    // is warned about rather than raised). That trade is recorded in the 0300
-    // amendment, which is where this PR's stop design lives and is still Draft.
+    // it is the borrowed signal, but a wider claim: every clean shutdown writes
+    // `stopped`, a reboot's included, so a LaunchAgent that fails to load at
+    // the next login sits on a `stopped` snapshot too (#2267). The stop is
+    // therefore only read as the operator's when it happened during this
+    // boot; one from before it, or one that cannot be placed against it, is
+    // the failed load this block exists to raise.
     // @ref LLP 0383#the-signal-is-the-daemons-last-state [constrained-by]: the crash-versus-stopped signal this borrows, settled there for the loaded shape
-    // @ref LLP 0300#posix-keeps-signals [implements]: the stop that creates this shape on macOS, and the accepted cost of reading it this way
+    // @ref LLP 0300#posix-keeps-signals [implements]: the stop that creates this shape on macOS, bounded by the current boot
     // Platform-gated, because the shape is only ambiguous on one of them.
     // On Linux a stop never lands here at all, so a snapshot that ends in a
     // stop is no evidence about *this* pair of facts and reading it as such
     // would mask the failed load (#1387) the block exists for.
-    const stoppedOnPurpose = platform === 'darwin' && daemon.state === 'stopped'
+    const stopPlacement = platform === 'darwin' && daemon.state === 'stopped'
+      ? placeStopAgainstBoot(daemonStatusFile?.stoppedAt, opts.bootTimeMs ?? systemBootTimeMs)
+      : undefined
+    const stoppedOnPurpose = stopPlacement === 'this_boot'
     const capturingNothing = daemon.error === undefined && !daemon.running && !stoppedOnPurpose
+    // Why a recorded stop was not read as the operator's, in plain words,
+    // with the repair: the generic message alone would leave a reader who
+    // remembers stopping the daemon wondering why it now says outage.
+    const staleStop = !capturingNothing ? ''
+      : stopPlacement === 'before_boot'
+        ? `. The daemon's last stop came before this boot, so the ${artifact} did not load at login; reinstall it so ${manager} loads it again`
+        : stopPlacement === 'unknown'
+          ? `. The daemon's last stop could not be dated against this boot, so it is not read as a stop you asked for; reinstall the ${artifact} so ${manager} loads it again`
+          : ''
     diagnostics.push({
       severity: capturingNothing ? 'error' : 'warning',
       kind: 'daemon_loaded_no_pid',
@@ -1555,7 +1723,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // those is a wrong diagnosis rather than an unknown one.
       message: capturingNothing
         ? `${manager} is not loading the ${artifact} and no daemon process is running`
-          + ' - nothing is being captured'
+          + ' - nothing is being captured' + staleStop
         : `${manager} is not currently loading the ${artifact}`,
       // `hyp daemon restart` cannot repair a unit the service manager never
       // loaded: it sees the file on disk, calls straight through to
@@ -1631,6 +1799,12 @@ export async function collectHypAwareStatus(opts = {}) {
     const recordedBootFailure = bootFailed
       ? 'recorded a failed boot - the daemon never finished starting'
       : null
+    // `starting` is the same never-served ending with no record of why (issue
+    // #1418): a boot that threw, an OOM kill and a `kill -9` mid-boot all
+    // leave it, so this says where the run stopped and names no cause.
+    const recordedNeverServed = daemon.state === 'starting'
+      ? "recorded 'starting' and never recorded reaching service - the daemon exited before it finished starting"
+      : null
     const recordedWhileServing = `recorded '${daemon.state}' rather than a completed stop`
       + ' - the daemon exited without shutting down'
     diagnostics.push({
@@ -1640,10 +1814,30 @@ export async function collectHypAwareStatus(opts = {}) {
       // kill, a fault, and a `kill -9`, and naming one of those is a wrong
       // diagnosis rather than an unknown one.
       message: `the ${artifact} is still loaded but no daemon process is running,`
-        + ` and the last status snapshot ${stalledStop ?? recordedBootFailure ?? recordedWhileServing},`
+        + ` and the last status snapshot ${stalledStop ?? recordedBootFailure ?? recordedNeverServed ?? recordedWhileServing},`
         + ' and nothing is being captured',
       // Unlike the unloaded case above, the service manager is holding the
       // unit, so the restart path reaches it.
+      repair: ['hyp daemon restart'],
+    })
+  }
+
+  // The live half of the same record: a supervised daemon whose boot found its
+  // port taken holds its failed process for a retry interval before exiting
+  // into the relaunch (#137), so the probe reports a running pid while the
+  // snapshot, its own, still says the boot failed. Nothing is listening and
+  // nothing ticks, so it must not read as a serving daemon.
+  // @ref LLP 0521#status [implements]: a live process whose own snapshot records a failed boot is named, with the reason
+  if (snapshotIsLive && bootFailed) {
+    const recorded = (daemonStatusFile?.warnings ?? [])
+      .find(w => typeof w === 'string' && w.startsWith(`${BOOT_FAILED_WARNING_PREFIX}:`))
+    const reason = sanitizeLabel(recorded?.slice(BOOT_FAILED_WARNING_PREFIX.length + 1).trim(), MAX_BOOT_FAILURE_CHARS)
+    diagnostics.push({
+      severity: 'error',
+      kind: 'daemon_boot_failed',
+      message: `the daemon process is running but its last boot failed, and nothing is being captured`
+        + (reason ? `: ${reason}` : '')
+        + (reason && /EADDRINUSE/.test(reason) ? ' - it retries about once a minute while the port stays taken' : ''),
       repair: ['hyp daemon restart'],
     })
   }
@@ -1870,6 +2064,32 @@ export async function collectHypAwareStatus(opts = {}) {
     })
   }
 
+  // ----- configured sinks the running daemon could not materialize (issue #2547) -----
+  // The daemon degrades its boot on these, but a sink with no handle has no
+  // row in the snapshot, so the warning it persisted is the only record.
+  // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
+  const sinkMaterializePrefix = `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: `
+  // Also the first repair of the probation and recent-errors hints below.
+  const sinkMaterializeLogGrep = `grep -s sink_materialize_failed ${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')} ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`
+  const sinkMaterializeFailures = snapshotIsLive && Array.isArray(daemonStatusFile?.warnings)
+    ? daemonStatusFile.warnings.filter((w) => typeof w === 'string' && w.startsWith(sinkMaterializePrefix))
+    : []
+  for (const warning of sinkMaterializeFailures) {
+    // The writer bounds each part; this bound is for a file it did not write.
+    const detail = sanitizeLabel(warning.slice(sinkMaterializePrefix.length), 512)
+    diagnostics.push({
+      severity: 'error',
+      kind: 'sink_materialize_failed',
+      message: `${detail ?? 'a configured sink did not materialize'} - nothing is exported to it`,
+      // A restart alone reproduces the same error; it only helps once the
+      // cause is fixed, because sinks are materialized at boot.
+      repair: [
+        sinkMaterializeLogGrep,
+        'hyp daemon restart  # after fixing the cause; sinks are materialized at boot',
+      ],
+    })
+  }
+
   // ----- plugin directories whose manifest would not load (issue #1576) -----
   // The third door into `unavailablePlugins`, and the one no surface could
   // name: a manifest that is corrupt, unparseable, or fails schema validation
@@ -1932,9 +2152,10 @@ export async function collectHypAwareStatus(opts = {}) {
   // hourly walk, and `hyp status` reads no cache, so answering this any other
   // way would mean firing a second maintenance walk from a status command.
   const maintenance = maintenanceSkipsFromStatus(daemonStatusFile)
-  // `skippedTotal` and each `reasons` entry are clamped independently from a
-  // file this build may not have written, so a recorded failed attempt is
-  // tested directly rather than inferred from the difference between them.
+  // A recorded failed attempt is tested directly rather than inferred from
+  // the difference between the counts: the snapshot's floor makes the
+  // difference agree, but the gate must not depend on that, or narrowing the
+  // floor would silently suppress a real failure.
   // @ref LLP 0454#warning-policy [implements]: ineffective rewrites alone are verbose detail, not actionable failures
   if (maintenance && (maintenance.reasons.compaction_attempt_failed > 0 ||
     maintenance.skippedTotal > maintenance.reasons.compaction_ineffective)) {
@@ -1965,7 +2186,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // Cleared by the status-file fallback below, the one branch whose rows no
   // config entry and no live handle backs - but only when an empty
   // configured sink set is the operator's own removal. An unreadable local
-  // or central config (`localConfigUnreadable`, `centralLayerParseFailed`) and
+  // or central config (`localConfigUnreadable`, `centralUnreadable`) and
   // a `sinks` entry the central layer merge dropped (`merged.drops`, reason
   // `invalid_merge`) also leave `config.sinks` empty without the operator
   // having removed anything, so none of these is read as intent here; reading
@@ -2029,7 +2250,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // since an unreadable layer leaves no record of which instances it named.
     const recovered = (Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
       .filter((s) => !!s && typeof s === 'object')
-    sinksAreConfigured = localConfigUnreadable || centralLayerParseFailed
+    sinksAreConfigured = localConfigUnreadable || !!centralUnreadable
       || recovered.some((s) => sinkKeysDroppedByMerge.has(s.instance))
     sinks.push(...recovered)
   }
@@ -2139,8 +2360,16 @@ export async function collectHypAwareStatus(opts = {}) {
   /** @type {CaptureHealthReport[]} */
   const captureHealth = []
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
+  let capturePid
+  try { capturePid = readPidFile(stateRoot) } catch { /* Unreadable identity stays unconfirmed. */ }
   for (const [clientName, descriptor] of clientDescriptors) {
     const configured = activePlugins.includes(descriptor.plugin)
+    // One state per client: recording, or not. A detached client
+    // (`recording: false`) is a choice, not a fault, so nothing below warns
+    // about it; only a client that should be recording and whose wiring is
+    // gone does.
+    // @ref LLP 0466#status [implements]: status reads the same switch the runner and reconciler read
+    const recording = configured && isEntryRecording(config?.plugins?.find((entry) => entry.name === descriptor.plugin))
     // Attach state is only a real state for a client that declares an
     // `attach_probe`. Without one there is no settings-file write to read back,
     // `action_attach.desired()` skips the descriptor for exactly that reason
@@ -2169,13 +2398,15 @@ export async function collectHypAwareStatus(opts = {}) {
     const probe = descriptor.attachProbe
       ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
       : { attached: false }
-    const attachable = !!descriptor.attachProbe && !attachWritesNoMarker(clientName, config)
+    const attachable = isClientAttachable(clientName, descriptor, config)
     clients.push({
       name: clientName,
       plugin: descriptor.plugin,
       configured,
+      recording,
       attachable,
       attached: probe.attached,
+      ...(clientName === 'ollama' && configured ? { capture: ollamaCaptureFromSnapshot(config, daemonStatusFile, capturePid) } : {}),
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
       ...(probe.version !== undefined ? { version: probe.version } : {}),
       ...(probe.port !== undefined ? { port: probe.port } : {}),
@@ -2191,7 +2422,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // attach-missing warning would point at work capture does not need.
     // @ref LLP 0358#transcript-primary [implements]: Desktop capture health is
     //   independent of the optional managed-profile experiment
-    if (configured && attachable && !probe.attached) {
+    if (recording && attachable && !probe.attached) {
       // The repair is `hyp client attach` only for a client whose plugin registers a
       // runtime adapter the generic reconciler can drive. A client that
       // declares `contributes.client` for probe/status plumbing but no
@@ -2442,6 +2673,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // that would otherwise print "not being captured" and send the user off
       // to restart their daemon.
       // @ref LLP 0257#status-and-health [implements]: S17 compares the last event against last *transcript activity*; mtime only nominates a candidate, transcript content confirms it
+      // @ref LLP 0536#positive-evidence [implements]: a confirmed turn reads gap despite a partial read; an unsettled one reads unknown, never ok
       if (verdict.state === 'gap') {
         const baselineMs = captureBaselineMs(lastEventAt, attachedAt, listenerStartedAt)
         const confirmed = await confirmClientActivityFromDescriptor({
@@ -2641,6 +2873,10 @@ export async function collectHypAwareStatus(opts = {}) {
   try {
     remoteConfig = readConfigControlStatus({ stateRoot })
   } catch { /* best-effort probe */ }
+  // Kept so the recent-errors pass below, which reads the daemon log once,
+  // can name the sink that stopped this host confirming the revision.
+  /** @type {StatusDiagnostic | null} */
+  let rollbackDiagnostic = null
   if (remoteConfig?.lastRollback) {
     // The three values in this message are display-only, and none of them is
     // this build's own: the etag is whatever the joined server served, and
@@ -2663,12 +2899,16 @@ export async function collectHypAwareStatus(opts = {}) {
     // every diagnostic kind, not just this one.
     // @ref LLP 0225#decision [implements]: assembled prose is cleaned where it is assembled; the machine copy of the same values, `remote_config.last_rollback`, stays byte-exact
     const rolledBack = remoteConfig.lastRollback
-    diagnostics.push({
+    rollbackDiagnostic = {
       severity: 'warning',
       kind: 'remote_config_rolled_back',
       message: `remote config ${sanitizeLabel(rolledBack.etag) ?? ''} rolled back at ${sanitizeLabel(rolledBack.at) ?? ''} (${sanitizeLabel(rolledBack.reason) ?? ''})`,
-      repair: ['fix the central config revision; the gateway re-applies when the served etag changes'],
-    })
+      // @ref LLP 0517#retry: an unconfirmed revision is retried on its own, so the repair does not ask for a new one
+      repair: [rolledBack.reason === 'probation_unconfirmed'
+        ? 'the gateway retries this revision on its own after a backoff, or at once after a client upgrade'
+        : 'fix the central config revision; the gateway re-applies when the served etag changes'],
+    }
+    diagnostics.push(rollbackDiagnostic)
   }
 
   // ----- client-action reconciler state (LLP 0036 / 0041) -----
@@ -2749,24 +2989,51 @@ export async function collectHypAwareStatus(opts = {}) {
   // structurally zero on an ordinary machine (issue #1182), which is the one
   // answer a monitoring field must never give when it has not looked.
   // @ref LLP 0349#read-the-records-production-keeps [implements]: the count reads the daemon log and the sink outbox, which exist on every install, not only dev telemetry
-  // Only configured destinations arm the export warning: rows recovered from a
-  // prior daemon's file are shape, so their outbox files stay history.
+  // Not simply the configured set: an unreadable layer, or a recovered row
+  // whose `sinks` key the central merge dropped, leaves the gate armed over
+  // the status-file fallback's recovered rows.
   // @ref LLP 0453#warning-rule [implements]: a destination outside the configured set does not warn, however the removal was spelled
+  const lastRollback = remoteConfig?.lastRollback
   const recentErrors = await countRecentErrors(
     stateRoot,
     sinksAreConfigured ? sinks : [],
     daemonStatusFile?.sinks,
+    (lastRollback?.reason === 'probation_expired' || lastRollback?.reason === 'probation_unconfirmed') &&
+      typeof lastRollback.at === 'string' ? Date.parse(lastRollback.at) : NaN,
   )
   const recentErrorCount = recentErrors.total
   diagnostics.push(...recentErrors.sinkDiagnostics)
+  if (sinksAreConfigured && config?.sinks) {
+    diagnostics.push(...await heldDatasetDiagnostics(stateRoot, config))
+  }
+  // A probation that expired while a sink could not materialize says this
+  // host could not confirm the revision, not that the revision is bad, so the
+  // hint names the sink instead of blaming the config (issue #2547).
+  if (rollbackDiagnostic && recentErrors.probationSinkFailures.length > 0) {
+    const named = recentErrors.probationSinkFailures
+      .map((f) => `sink '${sanitizeLabel(f.instance) ?? 'unknown'}' (${sanitizeLabel(f.errorKind) ?? 'materialize_failed'})`)
+      .join(', ')
+    rollbackDiagnostic.message += `: this host could not confirm it because ${named} did not materialize`
+    rollbackDiagnostic.repair = [
+      sinkMaterializeLogGrep,
+      'fix the sink error the log shows; the revision itself may be fine',
+    ]
+  }
   if (recentErrors.warningCount > 0) {
+    // A restart reproduces a sink materialize failure, so it is offered only
+    // for the other errors, and never first when a sink failed.
+    const onlySinkFailures = recentErrors.sinkMaterialize === recentErrors.warningCount
     diagnostics.push({
       severity: 'warning',
       kind: 'recent_errors',
       // Export attempts have their own recovery-aware diagnostic. The history
       // count still includes them, but cannot make them actionable again.
       message: `${recentErrors.warningCount} error${recentErrors.warningCount === 1 ? '' : 's'} needing attention in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
-      repair: ['hyp daemon restart'],
+      repair: recentErrors.sinkMaterialize === 0
+        ? ['hyp daemon restart']
+        : onlySinkFailures
+          ? [sinkMaterializeLogGrep, 'fix the sink error the log shows']
+          : [sinkMaterializeLogGrep, 'hyp daemon restart  # for the other errors; a restart alone does not fix a sink materialize failure'],
     })
   }
 
@@ -2782,12 +3049,23 @@ export async function collectHypAwareStatus(opts = {}) {
   // `error` severity degrades through the severity rule below by design
   // (LLP 0262 open question 1): silent session loss is an outage, not an
   // unfinished setup.
-  const degradingKinds = new Set(['config_missing', 'config_unreadable'])
+  // @ref LLP 0537#status-warning [implements]: rows a configured destination cannot accept stay local, which is not healthy forwarding
+  const degradingKinds = new Set(['config_missing', 'config_unreadable', 'sink_dataset_unsupported'])
   const overall =
     diagnostics.some((d) => d.severity === 'error') ? 'degraded'
     : v1Diagnostics.length > 0 ? 'degraded'
     : diagnostics.some((d) => degradingKinds.has(d.kind)) ? 'degraded'
     : 'healthy'
+
+  // Read after `overall` and never pushed as a diagnostic: the notice reports
+  // coverage, not a fault, so it cannot move the verdict or the headline.
+  const assetCoverage = catalog
+    ? describeAssetCoverage({
+      records: await readClientAssetLedger(clientAssetStateRoot(env, homeDir)),
+      attached: clients.filter((c) => c.attached).map((c) => c.name),
+      labelOf: (name) => catalog.pickerDescriptors.get(name)?.label ?? name,
+    })
+    : null
 
   return {
     configPath,
@@ -2818,7 +3096,50 @@ export async function collectHypAwareStatus(opts = {}) {
     cacheFlushFailuresTotal,
     proxyTrust,
     selfUpdate: describeSelfUpdate({ stateRoot, env }),
+    assetCoverage,
   }
+}
+
+/** How many client names the coverage notice spells out before summarizing. */
+const ASSET_COVERAGE_MAX_NAMED = 3
+
+/**
+ * Per-name cap, so three names plus the sentence stay inside the renderers'
+ * 400-character line cap and the remedy is never the part that gets cut.
+ */
+const ASSET_COVERAGE_MAX_LABEL_CHARS = 64
+
+/**
+ * The informational notice for managed skills and agents that update-time
+ * installation will not refresh, or null when there are none.
+ *
+ * A client is covered when it is attached by the same settings-marker probe
+ * `skills install --attached` selects with (LLP 0458#attached-only); `attached`
+ * is that probe's result, already taken for the clients rows. The ledger only
+ * says HypAware once wrote assets for a client. It cannot say whether they are
+ * still present, edited, or older than this package, so the notice claims
+ * none of that, and it stands even right after a fresh explicit install.
+ *
+ * @ref LLP 0534#notice [implements]: ledger clients the attached probe does not select, named and bounded, never a diagnostic
+ * @param {{ records: ClientAssetLedgerRecord[], attached: string[], labelOf: (name: string) => string }} args
+ * @returns {string | null}
+ */
+export function describeAssetCoverage({ records, attached, labelOf }) {
+  const covered = new Set(attached)
+  /** @type {Set<string>} */
+  const uncovered = new Set()
+  for (const record of records) {
+    if (!covered.has(record.client)) uncovered.add(record.client)
+  }
+  if (uncovered.size === 0) return null
+  const names = [...uncovered].sort(compareStrings)
+  const shown = names.slice(0, ASSET_COVERAGE_MAX_NAMED)
+    .map((name) => sanitizeLabel(labelOf(name), ASSET_COVERAGE_MAX_LABEL_CHARS)
+      ?? sanitizeLabel(name, ASSET_COVERAGE_MAX_LABEL_CHARS)
+      ?? 'an unnamed client')
+  const rest = names.length - shown.length
+  const who = rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ')
+  return `Managed skills/agents for ${who} are outside automatic update coverage; run hyp skills install after package updates`
 }
 
 /**
@@ -3072,7 +3393,11 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
     const inert = !descriptor.attachProbe
     const raw = entry.config?.attach
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
-    if (hasBlock) {
+    // A detached client is one the reconciler skips (LLP 0466), so its attach
+    // action is suppressed, never pending.
+    if (!isEntryRecording(entry)) {
+      declaredAttach.set(clientName, { onJoin: false, inert })
+    } else if (hasBlock) {
       const onJoin = readAttachPolicy(entry).onJoin !== false
       declaredAttach.set(clientName, { onJoin, inert })
     } else if (hasCentral) {
@@ -3740,13 +4065,21 @@ const MAX_CONFIRM_TAIL_BYTES = 128 * 1024
  * and the caller must turn that into neither a gap nor a clean bill of
  * health.
  *
+ * The record shape read here is Claude Code's, so only the built-in claude
+ * descriptor is confirmed this way. Any other descriptor that declares an
+ * `activity_probe` answers `certain: false` before the filesystem is touched:
+ * its transcripts would never match, and "no conversation found" would read
+ * as a clean bill of health and hide a real gap.
+ *
  * @ref LLP 0257#status-and-health [implements]: "last transcript activity" is a conversation record, not a filesystem timestamp
+ * @ref LLP 0536#certainty-obligation [implements]: certain only when nothing that could hold a newer turn went unread; a no-turn answer needs full post-baseline coverage
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv, sinceMs: number }} args
  * @returns {Promise<{ activityAt?: string, certain: boolean }>}
  */
 export async function confirmClientActivityFromDescriptor({ descriptor, homeDir, env, sinceMs }) {
   const probe = descriptor.activityProbe
   if (!probe || !homeDir) return { certain: false }
+  if (descriptor.plugin !== '@hypaware/claude' || descriptor.name !== 'claude') return { certain: false }
   /** @type {string} */
   let dirPath
   try {
@@ -4027,7 +4360,7 @@ async function discoverStatusManifests({ stateDir }) {
   /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
   let bundled = { loaded: [], excluded: [] }
   /** @type {DiscoverInstalledResult} */
-  let installed = { loaded: [], failed: [], lockEntries: [], malformed: [] }
+  let installed = { loaded: [], failed: [], lockEntries: [], malformed: [], malformedLines: new Map() }
   try {
     bundled = await discoverBundledPlugins()
   } catch { /* bundled discovery failure is non-fatal */ }
@@ -4148,25 +4481,15 @@ const DAEMON_LOG_TAIL_BYTES = 1024 * 1024
 const DEV_TELEMETRY_TAIL_BYTES = 1024 * 1024
 
 /**
- * The timestamp the sink driver bakes into an outbox filename. `persistOutbox`
- * writes `<batchId>.json` where `batchId` is `<instance>-<iso>-<seq>`, so the
- * age of every failed export batch is readable from the directory listing
- * alone, with no file opened. Anything that does not match is not a batch this
- * daemon wrote and is not evidence of a failure, so it is skipped rather than
- * counted.
- */
-const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\d+\.json$/
-
-/**
- * Count the failures this install has actually recorded in the last
+ * Count the retained failures this install recorded in the last
  * {@link RECENT_ERROR_WINDOW_HOURS} hours, across every store that exists on
  * an ordinary install.
  *
  * The two stores a production install keeps are disjoint, so nothing there is
  * counted twice: `daemon.log` carries what `fileLog` emits (boot, tick,
  * reload, source and maintenance failures) and the sink driver does not write
- * to it at all, while the sink outbox carries one file per failed export batch
- * and nothing else writes one.
+ * to it directly. The daemon records bounded sink transitions as warnings,
+ * while the sink outbox retains up to 100 failed export records per instance.
  *
  * `daemon.log` is read twice because there are two of them (LLP 0038): the
  * gateway keeps the one at the primary state root, and the processing child
@@ -4191,10 +4514,11 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  * @param {string} stateRoot
  * @param {SinkSnapshot[]} configuredSinks
  * @param {unknown} snapshotSinks
+ * @param {number} rollbackAtMs when a config probation expired, NaN otherwise
  * @param {number} [nowMs]
- * @returns {Promise<{ total: number, warningCount: number, breakdown: string[], sinkDiagnostics: StatusDiagnostic[] }>}
+ * @returns {Promise<{ total: number, warningCount: number, sinkMaterialize: number, breakdown: string[], sinkDiagnostics: StatusDiagnostic[], probationSinkFailures: SinkMaterializeFailure[] }>}
  */
-async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, nowMs = Date.now()) {
+async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, rollbackAtMs, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
   // Config-derived sink rows omit runtime stamps, so the last success comes
   // from the already-loaded daemon snapshot, read after the daemon has exited
@@ -4214,22 +4538,38 @@ async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, nowM
     }
   }
   const [gatewayLog, processingLog, sinkOutbox, devTelemetry] = await Promise.all([
-    countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs),
-    countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs),
+    countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs, rollbackAtMs),
+    countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs, rollbackAtMs),
     countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs, nowMs, lastSuccess),
     countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
   ])
-  const daemonLog = gatewayLog + processingLog
+  const daemonLog = gatewayLog.count + processingLog.count
+  const daemonLogSinkMaterialize = gatewayLog.sinkMaterialize + processingLog.sinkMaterialize
   /** @type {string[]} */
   const breakdown = []
-  if (daemonLog > 0) breakdown.push(`${daemonLog} in the daemon log`)
-  if (devTelemetry.warningCount > 0) breakdown.push(`${devTelemetry.warningCount} in dev telemetry`)
+  if (daemonLog > 0) {
+    breakdown.push(`${daemonLog} in the daemon log${sinkMaterializeOfThem(daemonLogSinkMaterialize)}`)
+  }
+  if (devTelemetry.warningCount > 0) {
+    breakdown.push(`${devTelemetry.warningCount} in dev telemetry${sinkMaterializeOfThem(devTelemetry.sinkMaterialize)}`)
+  }
   return {
     total: daemonLog + sinkOutbox.total + devTelemetry.total,
     warningCount: daemonLog + devTelemetry.warningCount,
+    sinkMaterialize: daemonLogSinkMaterialize + devTelemetry.sinkMaterialize,
     breakdown,
     sinkDiagnostics: sinkOutbox.diagnostics,
+    // The kernel daemon is the processing child, so its log speaks first; a
+    // pre-split install keeps everything in the primary log.
+    probationSinkFailures: processingLog.probationSinkFailures.length > 0
+      ? processingLog.probationSinkFailures
+      : gatewayLog.probationSinkFailures,
   }
+}
+
+/** @param {number} n */
+function sinkMaterializeOfThem(n) {
+  return n > 0 ? `, ${n} of them sink materialize failure${n === 1 ? '' : 's'}` : ''
 }
 
 /**
@@ -4296,16 +4636,44 @@ async function readFileTail(filePath, maxBytes) {
 }
 
 /**
+ * How many sink materialize failures one boot's worth of the daemon log keeps
+ * for the probation hint. A boot logs one per configured sink that failed, so
+ * this only bounds a hostile or corrupt file.
+ */
+const PROBATION_SINK_FAILURES_MAX = 8
+
+/**
  * Count `level: "error"` records in the tail of the daemon log. This is the
  * production-side record: `openDaemonLog` runs on every boot, in every mode,
  * with no environment variable to enable it.
  *
+ * The same pass also answers the two questions the repair hints need (issue
+ * #2547), so the tail is read once. `sinkMaterialize` is how many of the
+ * counted errors are `daemon.sink_materialize_failed`, which a restart alone
+ * does not fix. `probationSinkFailures` is the sinks that failed to
+ * materialize in the boot that was running when a config probation expired
+ * at `rollbackAtMs`. A boot begins at `daemon.starting`. When that boot had
+ * not yet materialized its sinks by then (no materialize failure and no
+ * `daemon.healthy` or `daemon.degraded`), the expiry was found at boot, so
+ * the boot before it is the one that could not confirm the revision. A boot
+ * that did materialize with no failure explains nothing, whatever an earlier
+ * boot logged.
+ *
  * @param {string} logPath
  * @param {number} sinceMs
- * @returns {Promise<number>}
+ * @param {number} rollbackAtMs NaN when no probation expiry is in question
+ * @returns {Promise<{ count: number, sinkMaterialize: number, probationSinkFailures: SinkMaterializeFailure[] }>}
  */
-async function countDaemonLogErrors(logPath, sinceMs) {
+async function countDaemonLogErrors(logPath, sinceMs, rollbackAtMs) {
   let count = 0
+  let sinkMaterialize = 0
+  /** @type {SinkMaterializeFailure[]} */
+  let previousBoot = []
+  /** @type {SinkMaterializeFailure[]} */
+  let currentBoot = []
+  // True once the current boot has materialized its sinks, which it reports
+  // with a failure or with its `daemon.healthy` / `daemon.degraded` outcome.
+  let currentBootMaterialized = false
   for (const line of (await readFileTail(logPath, DAEMON_LOG_TAIL_BYTES)).split('\n')) {
     if (!line) continue
     /** @type {any} */
@@ -4316,11 +4684,80 @@ async function countDaemonLogErrors(logPath, sinceMs) {
       continue
     }
     if (!parsed || typeof parsed !== 'object') continue
+    const isSinkFailure = parsed.event === 'daemon.sink_materialize_failed'
+    if (Number.isFinite(rollbackAtMs)) {
+      const at = typeof parsed.ts === 'string' ? Date.parse(parsed.ts) : NaN
+      if (Number.isFinite(at) && at <= rollbackAtMs) {
+        if (parsed.event === 'daemon.starting') {
+          previousBoot = currentBoot
+          currentBoot = []
+          currentBootMaterialized = false
+        } else if (parsed.event === 'daemon.healthy' || parsed.event === 'daemon.degraded') {
+          currentBootMaterialized = true
+        } else if (isSinkFailure) {
+          currentBootMaterialized = true
+          if (currentBoot.length < PROBATION_SINK_FAILURES_MAX) {
+            currentBoot.push({
+              instance: typeof parsed.instance === 'string' ? parsed.instance : null,
+              errorKind: typeof parsed.error_kind === 'string' ? parsed.error_kind : null,
+            })
+          }
+        }
+      }
+    }
     if (parsed.level !== 'error') continue
     if (!recordedWithinWindow(parsed.ts, sinceMs)) continue
     count += 1
+    if (isSinkFailure) sinkMaterialize += 1
   }
-  return count
+  return { count, sinkMaterialize, probationSinkFailures: currentBootMaterialized ? currentBoot : previousBoot }
+}
+
+const HELD_DATASET_NAMES_SHOWN = 5
+
+/**
+ * One warning per configured request sink whose destination refused to
+ * register a dataset it would otherwise forward (LLP 0537). Read from the
+ * snapshot the sink keeps on disk, so a fresh `hyp status` sees it with no
+ * daemon to ask. A snapshot that cannot be read warns too: answering nothing
+ * would certify forwarding nobody checked.
+ *
+ * @param {string} stateRoot
+ * @param {HypAwareV2Config} config
+ * @returns {Promise<StatusDiagnostic[]>}
+ */
+async function heldDatasetDiagnostics(stateRoot, config) {
+  const disabled = new Set((config.plugins ?? []).filter((p) => p.enabled === false).map((p) => p.name))
+  /** @type {StatusDiagnostic[]} */
+  const out = []
+  for (const [instance, raw] of Object.entries(config.sinks ?? {})) {
+    const plugin = 'plugin' in raw && typeof raw.plugin === 'string' ? raw.plugin : undefined
+    const url = raw.config?.url
+    if (!plugin || disabled.has(plugin) || typeof url !== 'string' || url.length === 0) continue
+    const read = await readHeldDatasets(instanceWatermarkStateDir(pluginStateDir(stateRoot, plugin), instance), url)
+    const label = sanitizeLabel(instance) ?? 'unknown'
+    if ('unreadable' in read) {
+      out.push({
+        severity: 'warning',
+        kind: 'sink_dataset_unsupported',
+        message: `${label}: held-dataset state is unreadable (${sanitizeLabel(read.unreadable) ?? 'unknown'}), so it is unknown whether every dataset forwards`,
+        repair: ['it is rewritten once every forwarded dataset with local rows has registered or been held again'],
+      })
+      continue
+    }
+    if (read.datasets.length === 0) continue
+    const shown = read.datasets.slice(0, HELD_DATASET_NAMES_SHOWN).map((name) => sanitizeLabel(name) ?? 'unknown')
+    const more = read.datasets.length - shown.length
+    const names = more > 0 ? `${shown.join(', ')} and ${more} more` : shown.join(', ')
+    const count = read.datasets.length
+    out.push({
+      severity: 'warning',
+      kind: 'sink_dataset_unsupported',
+      message: `${label}: the server cannot accept ${count} dataset${count === 1 ? '' : 's'} (${names}); their rows stay local`,
+      repair: ['upgrade the server; held rows forward once it accepts the dataset'],
+    })
+  }
+  return out
 }
 
 /**
@@ -4346,12 +4783,15 @@ async function countDaemonLogErrors(logPath, sinceMs) {
  * is evidence about nothing and is skipped on both sides, so a clock that ran
  * ahead cannot invent a warning and one that was set back cannot clear one.
  *
- * Nothing drains these files, so the directory is a growing ledger. Costs one
- * directory listing per configured sink and opens no file: the batch id
- * carries its own timestamp, and both answers accumulate in the same pass
- * with no sort and nothing retained per failure. The collector already walks
- * the whole cache tree with a `stat` per file (`measureCacheStats`), so this
- * sits well inside its budget.
+ * Costs one listing of `sinksDir` plus one listing per sink directory on
+ * disk, configured or not (the walk does not consult the config), and one
+ * open with a read of at most a 4 KiB prefix per recognized record, since
+ * `recordedAt` sits ahead of the partition inventory. A configured sink's
+ * driver keeps its outbox to a bounded history; one a removed sink left
+ * behind is not pruned. Both answers accumulate in the same pass with no sort
+ * and nothing retained per failure. The collector already walks the whole
+ * cache tree with a `stat` per file (`measureCacheStats`), so this sits well
+ * inside its budget.
  *
  * An outbox with no entry in `lastSuccess` belongs to a destination this
  * install no longer has, since the map is keyed by the configured sinks alone.
@@ -4367,46 +4807,36 @@ async function countDaemonLogErrors(logPath, sinceMs) {
 // @ref LLP 0453#warning-rule [implements]: a destination warns while it holds an export failure with no later success, however old
 async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
   const result = { total: 0, diagnostics: /** @type {StatusDiagnostic[]} */ ([]) }
-  /** @type {Dirent[]} */
-  let instances
   try {
-    instances = await fsp.readdir(sinksDir, { withFileTypes: true })
-  } catch {
-    return result
-  }
-  for (const instance of instances) {
-    if (!instance.isDirectory()) continue
-    /** @type {string[]} */
-    let files
-    try {
-      files = await fsp.readdir(path.join(sinksDir, instance.name, 'outbox'))
-    } catch {
-      continue
+    const instances = await fsp.opendir(sinksDir)
+    for await (const instance of instances) {
+      if (!instance.isDirectory()) continue
+      const dir = path.join(sinksDir, instance.name, 'outbox')
+      const success = lastSuccess.get(instance.name)
+      let unresolved = 0
+      let last = -Infinity
+      try {
+        // @ref LLP 0471#diagnostic-history [implements]: stream retained evidence with bounded metadata, never partition inventories
+        for await (const name of diagnosticEntries(dir, instance.name)) {
+          const record = await readDiagnosticRecord(dir, name, instance.name)
+          if (!record) continue
+          const at = record.at
+          if (at >= sinceMs) result.total += 1
+          if (success === undefined || at > nowMs || at < success) continue
+          unresolved += 1
+          last = Math.max(last, at)
+        }
+      } catch { /* Missing or unreadable history contributes only evidence already read. */ }
+      if (unresolved > 0) {
+        result.diagnostics.push({
+          severity: 'warning',
+          kind: 'sink_export_failing',
+          message: `${sanitizeLabel(instance.name) ?? 'unknown'}: ${unresolved} retained failed export record${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
+          repair: [`check destination connectivity and inspect failure records in ${sanitizeLabel(dir, 512)}`],
+        })
+      }
     }
-    // `-Infinity` when the destination has never succeeded, so `at < success`
-    // is the one recovery test, and `undefined` when it is not configured.
-    const success = lastSuccess.get(instance.name)
-    let unresolved = 0
-    let last = -Infinity
-    for (const file of files) {
-      const match = OUTBOX_BATCH_TIMESTAMP.exec(file)
-      if (!match) continue
-      const at = Date.parse(match[1])
-      if (!Number.isFinite(at)) continue
-      if (at >= sinceMs) result.total += 1
-      if (success === undefined || at > nowMs || at < success) continue
-      unresolved += 1
-      last = Math.max(last, at)
-    }
-    if (unresolved > 0) {
-      result.diagnostics.push({
-        severity: 'warning',
-        kind: 'sink_export_failing',
-        message: `${sanitizeLabel(instance.name) ?? 'unknown'}: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
-        repair: [`check destination connectivity and inspect failure records in ${sanitizeLabel(path.join(sinksDir, instance.name, 'outbox'), 512)}`],
-      })
-    }
-  }
+  } catch { /* No readable sink history. */ }
   return result
 }
 
@@ -4423,10 +4853,10 @@ async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
  *
  * @param {string} telemetryDir
  * @param {number} sinceMs
- * @returns {Promise<{ total: number, warningCount: number }>}
+ * @returns {Promise<{ total: number, warningCount: number, sinkMaterialize: number }>}
  */
 async function countDevTelemetryErrors(telemetryDir, sinceMs) {
-  const result = { total: 0, warningCount: 0 }
+  const result = { total: 0, warningCount: 0, sinkMaterialize: 0 }
   /** @type {string[]} */
   let entries
   try {
@@ -4446,6 +4876,9 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
         if (!recordedWithinWindow(/** @type {any} */ (parsed).timestamp, sinceMs)) continue
         result.total += 1
         if (parsed.body !== 'sink.export_batch.failed') result.warningCount += 1
+        // The OTel half of `daemon.sink_materialize_failed`, so the repair
+        // hint treats it the same way (issue #2547).
+        if (parsed.body === 'sink.materialize_failed') result.sinkMaterialize += 1
       } catch {
         // skip malformed lines silently
       }
@@ -4469,6 +4902,13 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
  * so the local enable stays inert - but installing the dependency here repairs
  * nothing either when it is already installed and the central layer is what
  * withholds it, so that sub-case names the central enable as well.
+ *
+ * A central edit is named only where it changes something, and always as a
+ * change to the published fleet configuration through whoever owns it, never
+ * as an edit to the downloaded central file: the next pull replaces that copy,
+ * so an edit there is as inert as a local one. An already-enabled dependency
+ * has nothing to enable, so when the central layer owns both names the only
+ * step left for it is installing the dependency here (issue #1836).
  *
  * `dependency` is `undefined` for every reason that names no missing plugin
  * (a version mismatch, a capability require), and those keep the original
@@ -4494,15 +4934,20 @@ function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginName
   }
   // The dependency is central-owned, so a local entry adding it is dropped at
   // merge. What still changes something: installing it here (the central layer
-  // already asks for it), or the fleet edit that stops asking.
-  return pluginIsCentral
-    ? `install '${dependency}' on this host, or enable it in the central config`
+  // already asks for it), plus the fleet enable when the central layer is what
+  // withholds it.
+  if (pluginIsCentral) {
+    const step = centralDisabledPluginNames.has(dependency)
+      ? `enable '${dependency}' in the published fleet configuration and install it on this host`
+      : `install '${dependency}' on this host`
+    return step
       + ` - the central config names both '${plugin}' and '${dependency}', so no edit to ${configPath} survives the merge`
-    : centralDisabledPluginNames.has(dependency)
-      ? `remove '${plugin}' from ${configPath}, or enable '${dependency}' in the central config and install it on this host`
-        + ` - '${dependency}' is named by the central config but disabled there, so enabling it in the local file changes nothing`
-      : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
-        + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
+  }
+  return centralDisabledPluginNames.has(dependency)
+    ? `remove '${plugin}' from ${configPath}, or enable '${dependency}' in the central config and install it on this host`
+      + ` - '${dependency}' is named by the central config but disabled there, so enabling it in the local file changes nothing`
+    : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
+      + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
 }
 
 /**

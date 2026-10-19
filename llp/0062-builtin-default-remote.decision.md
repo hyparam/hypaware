@@ -32,7 +32,8 @@ public client is therefore consistent with that section, not a secrets leak.
 > `hypaware.hyperparam.app` remains an alias the server still answers on, and
 > `BUILTIN_ORIGIN_ALIASES` folds it into the built-in wherever the client asks
 > whether two URLs name the same server (the login gate, the seed match, purge
-> dedup, sync naming), so an install enrolled under the old host is not read
+> dedup, sync naming, and the central identity re-point guard, which still
+> requires the paths to match), so an install enrolled under the old host is not read
 > as connected elsewhere. The decision is unchanged, only the shipped value moved.
 
 This keeps the local-first default intact: a bare `hyp <verb>` still runs

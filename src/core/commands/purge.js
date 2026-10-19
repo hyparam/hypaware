@@ -9,7 +9,7 @@ import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { isTty } from '../cli/stdio.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { purgeCache, purgeCleanupFrom, purgeSkipsFrom } from '../cache/purge.js'
+import { purgeCache, purgeCleanupFrom, purgeObservationsFrom, purgeSkipsFrom } from '../cache/purge.js'
 import { createSessionPurgeStore } from '../cache/session-purges.js'
 import { BUILTIN_ORIGIN_ALIASES, effectiveRemotes } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, readCredentials, remoteTokenEnvVar, resolveAccessJwt } from '../remote/credentials.js'
@@ -130,8 +130,11 @@ export async function runPurge(argv, ctx) {
     // reports them and fails, exactly as a completed run with skips does; an
     // admitted cleanup job is a durable journal that still runs, and a receipt
     // naming none of them states there is no background work pending when
-    // there is.
-    summary = { ...summary, partitionsSkipped: purgeSkipsFrom(err), cacheCleanup: purgeCleanupFrom(err) }
+    // there is. The observations are partial (later partitions were never
+    // read) but each one is a fact the run established: a directory whose
+    // rows a committed delete removed still owes the resurrection warning, and
+    // a near-miss row is still in place.
+    summary = { ...summary, partitionsSkipped: purgeSkipsFrom(err), cacheCleanup: purgeCleanupFrom(err), ...purgeObservationsFrom(err) }
     ctx.stderr.write(`error: purge failed: ${message}\n`)
   }
 
@@ -242,7 +245,10 @@ export async function runPurge(argv, ctx) {
       spoolFilesRemoved: swept.filesRemoved,
       ...(target.kind === 'session' ? { local: { status: localIncomplete ? 'incomplete' : 'completed',
         containment: localIncomplete ? 'incomplete' : 'completed', physical_cleanup: { status: summary.cacheCleanup?.length ? 'incomplete' : 'not_implemented' },
-        cache_cleanup: (summary.cacheCleanup ?? []).map(job_id => ({ job_id, scope: 'cache_generations', status: 'pending' })),
+        // `job_scope` is the server receipt's disclosure (hypaware-server LLP
+        // 0437): a cleanup id hashes the partition, so the job is shared by
+        // every purge of that partition rather than owned by this session.
+        cache_cleanup: (summary.cacheCleanup ?? []).map(job_id => ({ job_id, scope: 'cache_generations', job_scope: 'cache_partition', status: 'pending' })),
         retained: ['historical_snapshots', 'original_data_and_metadata_files', 'search_sidecars', 'derived_copies_without_session_lineage', 'native_transcripts_and_backups'],
         ...localErrorField } } : localIncomplete ? { local: { status: 'incomplete', ...localErrorField } } : {}),
       ...(remotes.size ? { remotes: Object.fromEntries(remoteResults) } : {}),
@@ -305,8 +311,10 @@ export async function runPurge(argv, ctx) {
   if (retainedAliases.length > 0) {
     const rows = summary.retainedAliasRows
     const dirs = retainedAliases.length
+    // An aborted run never read the partitions after the failure, so its
+    // count is a floor.
     ctx.stderr.write(
-      `note: ${rows} cached row${rows === 1 ? '' : 's'} under a similarly spelled ` +
+      `note: ${localFailed ? 'at least ' : ''}${rows} cached row${rows === 1 ? '' : 's'} under a similarly spelled ` +
       `director${dirs === 1 ? 'y' : 'ies'} ${rows === 1 ? 'was' : 'were'} left in place - ` +
       `this filesystem does not report ${dirs === 1 ? 'it' : 'them'} as the directory you named ` +
       `(genuinely different, no longer on disk, or could not be checked):\n`

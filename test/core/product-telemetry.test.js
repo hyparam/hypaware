@@ -1015,12 +1015,20 @@ test('a custom plugin command is other and whole invocation duration includes wo
   const root = productRoot(env)
   writePolicy(root, 'local')
   const registry = createCommandRegistry()
+  // The work is timed on the clock withProductInvocation reads, not taken as
+  // the 20 ms asked of setTimeout: Node timers can fire a fraction of a
+  // millisecond early, and a loaded CI runner recorded under 20 against `>= 20`.
+  // The invocation window opens before the command starts and closes after
+  // it returns, so it covers the measured work exactly, with no margin.
+  let workMs = 0
   registry.register({
     name: 'customer-private-command',
     summary: '',
     usage: '',
     run: async () => {
+      const workStart = performance.now()
       await new Promise((resolve) => setTimeout(resolve, 20))
+      workMs = performance.now() - workStart
       return 0
     }
   })
@@ -1037,7 +1045,11 @@ test('a custom plugin command is other and whole invocation duration includes wo
     .flatMap((e) => JSON.parse(e.wire).records)
     .find((r) => r.name === 'cli.invocation')
   assert.equal(record.attributes.command, 'other')
-  assert(record.attributes.duration_ms >= 20)
+  assert(workMs > 0)
+  assert(
+    record.attributes.duration_ms >= workMs,
+    `invocation took ${record.attributes.duration_ms} ms, its work ${workMs} ms`
+  )
 })
 
 test('24-hour simulated receiver outage stays bounded and never starts a new retry window', async (t) => {
@@ -1163,6 +1175,42 @@ test('organization startup and persisted backoff do not read queue payloads', as
     delivery.close()
   }
   assert.equal(queueReads, 0, 'backoff must survive new senders without queue reads')
+})
+
+test('persisted backoff defers expiry only until the daemon five-minute flush', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  const policy = enroll(root)
+  assert(policy.binding)
+  const expired = NOW - 8 * 86400000
+  createOutbox(root, { now: () => expired }).append(batch(expired), policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  const stale = queue.entries()[0].id
+  queue.saveDelivery({ binding: policy.binding, next_at: NOW + 86400000 })
+  const delivery = createDelivery(root, {
+    now: () => NOW,
+    fetchFn: async () => { throw new Error('backoff must prevent requests') }
+  })
+  await delivery.drain()
+  delivery.close()
+  assert(
+    queue.entries().some((e) => e.id === stale),
+    'the gated drain leaves the expired slot during backoff'
+  )
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  let now = NOW
+  const client = createProductClient({ env, role: 'daemon', now: () => now })
+  t.after(() => client.close())
+  now += 300000
+  t.mock.timers.tick(30000)
+  assert(now < NOW + 86400000, 'the flush ran inside the backoff window')
+  assert.equal(
+    queue.entries().some((e) => e.id === stale),
+    false,
+    'the ungated daemon flush removes the expired slot'
+  )
 })
 
 test('eligible delivery scans once and sends the oldest surviving batch', async (t) => {

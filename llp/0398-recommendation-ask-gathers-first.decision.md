@@ -315,9 +315,20 @@ change anyone acts on. What they asked about is now answered from the
 one signal, with evidence, so there is no question menu at all: `hyp ask`
 goes straight from the gather to the launch. The one screen left is the
 client pick when two clients could answer, still framed, and cancelling
-it is "not now". `hyp ask --list` names the one question in plain words,
-never the launch prompt, which tells the client to read a folder only the
-gather creates. `hyp ask "<question>"` still skips the gather and starts
+it is "not now". There is no `--list` flag: it printed the list for
+someone choosing among several questions, and one question leaves nothing
+to list. Where the question is still printed (a run that cannot prompt, a
+declined pick), it is named in plain words, never as the launch prompt,
+which tells the client to read a folder only the gather creates.
+One reader gets a prompt to type anyway: a machine whose recorded client
+has no CLI (a desktop app) cannot be started on anything, so `hyp ask`
+prints a cold form of the question for the person to paste into the app
+(LLP 0198 #path-probe). It names no folder and tells the app to look
+through the history with `hyp query` itself. That is the slower, weaker
+answer the Context above describes, accepted here because the alternative
+for that reader is no answer at all; the gathered ask remains the only
+form a launch uses.
+`hyp ask "<question>"` still skips the gather and starts
 in the caller's directory, but it shares that one screen: the same client
 pick, cancelled the same way. What it starts the client on is the typed
 question framed as one to answer from the recorded history, since a client
@@ -333,7 +344,11 @@ question, "Suggest a new skill?", and a yes runs
 `hyp ask` as a child on the same terminal, the way LLP 0203 runs `hyp
 sync`. A no, a cancelled prompt, or a run that cannot prompt ends on one
 line naming the verb; an empty cache ends on the note that capture starts
-now. The list of questions to type later is gone from setup: a sentence to
+now. When no client that declares a `launch` block resolves on `$PATH`
+(LLP 0198 #path-probe), setup makes no offer and does not name the verb at
+all, since a yes would run an ask that has nothing to start; an empty cache
+still gets the capture-starts-now sentence, without the verb. The list of
+questions to type later is gone from setup: a sentence to
 act on later is the shape the Context above shows nobody acts on, and the
 offer is made at the moment the first look has just shown the person their
 own rows.
@@ -411,14 +426,14 @@ against.
 The server-side, per-org version of this ask exists as operator tooling
 outside the product and is not part of this decision.
 
-`SUGGESTED_PROMPTS` holds the one question. `hyp ask --list` prints it;
-setup offers to run it (#setup-offer); only a launch triggers the gather.
+`SUGGESTED_PROMPTS` holds the one question. Setup offers to run it
+(#setup-offer); only a launch triggers the gather.
 
 ## Telemetry
 
 `wizard.suggest_skill` records what setup's offer did: `launched`,
 `declined`, `spawn-failed`, `child-failed`, or the skip reason
-(`no-rows`, `not-interactive`, `error`), and `wizard.finish` carries the
+(`no-rows`, `no-launcher`, `not-interactive`, `error`), and `wizard.finish` carries the
 same value as `suggest_skill` in place of `first_ask`. `launched` against
 `declined` is whether the offer is one people take; `no-rows` is the rate
 of installs finishing with an empty cache.

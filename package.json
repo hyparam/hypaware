@@ -1,8 +1,9 @@
 {
   "name": "hypaware",
-  "version": "1.40.0",
+  "version": "1.43.0",
   "type": "module",
-  "description": "HypAware: AI agent observability with a plugin kernel. Records Claude Code, Codex, OTEL, and raw AI gateway traffic into one queryable history, kept on your machine or shared across machines and teams.",
+  "description": "The improvement loop for all your agents.",
+  "mcpName": "ai.hypaware/hypaware",
   "license": "MIT",
   "homepage": "https://hypaware.ai/?utm_source=npm&utm_medium=package",
   "repository": {
@@ -53,10 +54,6 @@
       "types": "./types/core/util/index.d.ts",
       "import": "./src/core/util/index.js"
     },
-    "./core/reports": {
-      "types": "./types/core/reports/render.d.ts",
-      "import": "./src/core/reports/render.js"
-    },
     "./integration": {
       "types": "./src/core/cli/integration.d.ts",
       "import": "./src/core/cli/integration.js"
@@ -90,13 +87,12 @@
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1142.0",
+    "@aws-sdk/client-s3": "3.1147.0",
     "@aws-sdk/credential-provider-ini": "3.973.17",
     "hyparquet": "1.31.2",
     "hyparquet-compressors": "1.1.2",
     "hysnappy": "1.1.1",
-    "icebird": "0.8.33",
-    "marked": "18.0.14",
+    "icebird": "0.8.35",
     "squirreling": "0.16.8"
   },
   "optionalDependencies": {
@@ -109,7 +105,7 @@
     }
   },
   "devDependencies": {
-    "@types/node": "26.6.3",
+    "@types/node": "26.6.4",
     "typescript": "7.0.2"
   }
 }

@@ -198,6 +198,13 @@ export async function sweepEvictedCacheCleanups(cacheRoot) {
 /**
  * Status verifies directory absence rather than inferring it from a cursor
  * swap. No content or filesystem paths leave this public status surface.
+ *
+ * The answer is ephemeral. `id` names a cache partition, not one purge, and a
+ * later purge of that partition reuses it. `completed` holds only while the
+ * journal remains; the next sweep or a retention eviction removes it, with no
+ * minimum window, and the answer becomes `unverified`. `unverified` means
+ * certification is unavailable, not that cleanup failed or the bytes remain.
+ * @ref LLP 0417#cache-reclamation: the journal is the only completion evidence; the receipt is not a durable certificate
  * @param {string} cacheRoot @param {string} id
  */
 export async function cachePurgeCleanupStatus(cacheRoot, id) {

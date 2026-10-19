@@ -275,10 +275,10 @@ export function verbAuthClass(verb) {
  *
  * The keys are returned rather than left for the caller to read again, because
  * every read of a plugin property is a fresh answer and what is checked here
- * has to be the string the Maps are keyed from. `exposure`, `authClass` and
- * `inputSchema` are read once each for the same reason: a truthiness test and
- * a membership (or `typeof`) test on two reads can pass on a value that is not
- * the one checked.
+ * has to be the string the Maps are keyed from. `exposure`, `authClass`,
+ * `scope` and `inputSchema` are read once each for the same reason: a
+ * truthiness test and a membership (or `typeof`) test on two reads can pass on
+ * a value that is not the one checked.
  *
  * `summary` and `inputSchema` are read again by the projection, which is not a
  * second answer this function can prevent and does not need to: neither is a
@@ -308,6 +308,10 @@ function validateVerb(verb) {
   if (typeof tool !== 'string' || tool.length === 0) {
     throw new TypeError(`registerVerb '${name}': verb.tool is required`)
   }
+  const title = verb.title
+  if (title !== undefined && (typeof title !== 'string' || title.length === 0)) {
+    throw new TypeError(`registerVerb '${name}': title must be a non-empty string when given`)
+  }
   if (typeof verb.summary !== 'string') {
     throw new TypeError(`registerVerb '${name}': summary is required`)
   }
@@ -328,8 +332,15 @@ function validateVerb(verb) {
     throw new TypeError(`registerVerb '${name}': unknown exposure '${exposure}'`)
   }
   const authClass = verb.authClass
-  if (authClass && !['read', 'operator'].includes(authClass)) {
+  if (authClass && !['read', 'write', 'operator'].includes(authClass)) {
     throw new TypeError(`registerVerb '${name}': unknown authClass '${authClass}'`)
+  }
+  // @ref LLP 0494#write-class [implements]: a write names the scope that admits it, or is refused (fail closed)
+  if (authClass === 'write') {
+    const scope = verb.scope
+    if (typeof scope !== 'string' || scope.length === 0) {
+      throw new TypeError(`registerVerb '${name}': a write verb must name a non-empty scope`)
+    }
   }
   return { name, tool, operation, render }
 }

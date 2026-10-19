@@ -18,7 +18,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { dispatch } from '../../src/core/cli/dispatch.js'
+import { dispatch, activatePluginDependencyClosure } from '../../src/core/cli/dispatch.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../src/core/runtime/loader.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
@@ -94,8 +94,19 @@ test('activatePlugins hands the injected env to each activation context', async 
 
 test('a dispatch boot places plugin state under the injected HYP_HOME, not the real home', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-env-home-'))
-  const realExports = path.join(os.homedir(), '.hyp', 'exports')
-  const realExistedBefore = await exists(realExports)
+
+  // Issue #2451. A boot that reads `process.env` instead of the env it was
+  // injected with resolves plugin state from the ambient home. Snapshotting
+  // `~/.hyp/exports`'s existence could not see that escape: `mkdir` over a
+  // directory already there is a no-op, so on a machine that has run HypAware
+  // the before and the after are both `true`. An empty directory this test
+  // owns gives the escape somewhere visible to land, and takes the real home
+  // out of reach of every ambient arm (`HYP_HOME`, and `os.homedir()` through
+  // HOME or USERPROFILE). `process.env` is private to this file's worker
+  // (`node --test` runs one process per file, tests within a file in
+  // sequence), so no concurrent test file can write here or see the swap.
+  const ambientHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-env-ambient-home-'))
+  const savedAmbient = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, HYP_HOME: process.env.HYP_HOME }
 
   // Issue #2465. Deliberately a path that does not exist yet:
   // `createPluginPaths` mkdirs `<tmpRoot>/<plugin>-<runId>` recursively, so
@@ -108,6 +119,10 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
   await fs.writeFile(fromFile, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n')
 
   try {
+    process.env.HOME = ambientHome
+    process.env.USERPROFILE = ambientHome
+    process.env.HYP_HOME = ambientHome
+
     const runId = `issue-2462-${process.pid}-${Date.now()}`
     const stderr = makeBuf()
     const code = await dispatch(['init', '--from-file', fromFile], {
@@ -127,10 +142,10 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
     // `@hypaware/local-fs` mkdirs `<HYP_HOME>/exports` in `activate()`, so where
     // that directory landed is the shortest proof of where activation read its env.
     assert.ok(await exists(path.join(hypHome, 'exports')), 'the exports dir did not land under the injected HYP_HOME')
-    assert.equal(
-      await exists(realExports),
-      realExistedBefore,
-      'the boot created .hyp/exports in the invoking user\'s real home'
+    assert.deepEqual(
+      await fs.readdir(ambientHome),
+      [],
+      'the boot placed plugin state under the ambient env\'s home, not the injected HYP_HOME'
     )
 
     // Issue #2465, two assertions on one directory that fail for opposite
@@ -164,7 +179,12 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
       'plugin boot temp dirs from this boot survived in the OS temp root'
     )
   } finally {
+    for (const [key, value] of Object.entries(savedAmbient)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(ambientHome, { recursive: true, force: true })
   }
 })
 
@@ -202,5 +222,63 @@ test('bootKernel forces its resolved hypHome into the env activation reads', asy
   } finally {
     await fs.rm(booted, { recursive: true, force: true })
     await fs.rm(ambient, { recursive: true, force: true })
+  }
+})
+
+// Issue #2445, the same gap on a second activation path. `bootKernel` is not
+// the only producer of activation entries: `activatePluginDependencyClosure`
+// activates a config-selected plugin mid-command (the dispatch-miss seam and
+// the manual-attach enable prompt), and it called `activatePlugins` with no
+// `env` at all, so `createActivationContext` fell back to `process.env` there
+// no matter what the command was invoked with. The injected env below carries
+// nothing but the marker, so a `ctx.env` that came from the ambient process
+// cannot accidentally satisfy the assertion.
+test('the dependency-closure activation path hands the injected env to ctx.env', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-closure-plugin-'))
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-closure-state-'))
+  const seen = path.join(stateRoot, 'seen.txt')
+  const runId = `issue-2445-${process.pid}-${Date.now()}`
+  await fs.writeFile(
+    path.join(rootDir, 'index.js'),
+    'import fs from \'node:fs/promises\'\n' +
+    'export async function activate(ctx) {\n' +
+    `  await fs.writeFile(${JSON.stringify(seen)}, String(ctx.env.HYP_CLOSURE_MARKER))\n` +
+    '}\n'
+  )
+  const manifest = /** @type {any} */ ({
+    schema_version: 1,
+    name: '@acme/closure-env-reader',
+    version: '1.0.0',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './index.js',
+  })
+
+  try {
+    // The `selection` seam the dispatch-miss caller uses, so the closure runs
+    // off this fixture instead of a disk discovery of the real install.
+    const result = await activatePluginDependencyClosure({
+      seedNames: [manifest.name],
+      kernel: createKernelRuntime({ cacheRoot: path.join(stateRoot, 'cache') }),
+      stateRoot,
+      runId,
+      activePlugins: [],
+      selection: /** @type {any} */ ({
+        selectedManifests: [{ manifest, rootDir }],
+        layered: { effective: { plugins: [{ name: manifest.name, config: {} }] } },
+      }),
+      env: /** @type {any} */ ({ HYP_CLOSURE_MARKER: 'injected' }),
+    })
+    assert.deepEqual(result, { activated: [manifest.name], failed: [] })
+    assert.equal(await fs.readFile(seen, 'utf8'), 'injected')
+  } finally {
+    // This path passes no `tmpRoot`, so the fixture's boot temp dir lands in
+    // the shared OS temp root; `runId` is unique to this run, so matching on
+    // it reclaims only what this test made (issue #2477's residue stays).
+    for (const entry of (await fs.readdir(os.tmpdir())).filter((e) => e.endsWith('-' + runId))) {
+      await fs.rm(path.join(os.tmpdir(), entry), { recursive: true, force: true })
+    }
+    await fs.rm(rootDir, { recursive: true, force: true })
+    await fs.rm(stateRoot, { recursive: true, force: true })
   }
 })

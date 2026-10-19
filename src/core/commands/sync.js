@@ -1,5 +1,6 @@
 // @ts-check
 
+import { runSyncCheck } from './sync-check.js'
 import { requireConfirmation } from '../cli/confirm.js'
 import { withSpinner } from '../cli/spinner.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
@@ -18,16 +19,17 @@ import {
 } from '../usage-policy/first_sync_hold.js'
 import { readClientSyncEntries, readLocalOnlyEntries } from '../usage-policy/index.js'
 import { groupThousands } from '../util/format_number.js'
+import { escapeForDisplay } from '../util/json_util.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
- * @import { PendingVolume, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
+ * @import { PendingVolume, SinkDatasetDiscovery, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
-const USAGE = 'usage: hyp sync [instance] [--history <client>] [--yes] [--dry-run]'
+const USAGE = 'usage: hyp sync [instance] [--history <client>] [--yes] [--dry-run]\n       hyp sync <instance> --check --dataset ai_gateway_messages [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]\n       hyp sync <instance> --missing --dataset ai_gateway_messages [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--dry-run | --yes] [--json]'
 
 /**
  * `hyp sync [instance] [--history <client>] [--yes] [--dry-run]`
@@ -59,6 +61,12 @@ export async function runSync(argv, ctx) {
       type: 'object',
       properties: {
         instance: { type: 'string' },
+        check: { type: 'boolean', default: false },
+        missing: { type: 'boolean', default: false },
+        dataset: { type: 'string' },
+        from: { type: 'string' },
+        to: { type: 'string' },
+        json: { type: 'boolean', default: false },
         history: { type: 'string' },
         yes: { type: 'boolean', default: false },
         'dry-run': { type: 'boolean', default: false },
@@ -73,6 +81,24 @@ export async function runSync(argv, ctx) {
   }
   if (!parsed.ok) {
     ctx.stderr.write(`hyp sync: ${parsed.error}\n${USAGE}\n`)
+    return 2
+  }
+  if (parsed.params.check) {
+    if (parsed.params.missing || parsed.params.history !== undefined || parsed.params.yes || parsed.params['dry-run']) {
+      ctx.stderr.write('hyp sync: --check cannot be combined with upload options\n')
+      return 2
+    }
+    return runSyncCheck(parsed.params, ctx)
+  }
+  if (parsed.params.missing) {
+    if (parsed.params.history !== undefined) {
+      ctx.stderr.write('hyp sync: --missing cannot be combined with --history\n')
+      return 2
+    }
+    return runSyncCheck(parsed.params, ctx)
+  }
+  if (parsed.params.dataset !== undefined || parsed.params.from !== undefined || parsed.params.to !== undefined || parsed.params.json) {
+    ctx.stderr.write('hyp sync: --dataset, --from, --to and --json require --check or --missing\n')
     return 2
   }
   const { instance, history, yes, 'dry-run': dryRun } =
@@ -369,26 +395,39 @@ export async function runSync(argv, ctx) {
   }
 
   const described = new Map(destinations.map((d) => [d.instance, d]))
+  let incomplete = false
   for (const r of report.sinks) {
-    // Successful file copies are incidental to sharing. Failures still need
-    // their diagnostic and continue to determine the command's exit code.
-    if (!displayedInstances.has(r.instance) && r.status === 'exported') continue
-    ctx.stdout.write(renderResult(r, described.get(r.instance)))
+    const unread = (r.datasets ?? []).filter((d) => d.discovery !== 'complete')
+    if (unread.length > 0) incomplete = true
+    const dest = described.get(r.instance)
+    // Successful file copies are incidental to sharing. Failures, including a
+    // dataset the copy could not read, still need their diagnostic and
+    // continue to determine the command's exit code.
+    if (displayedInstances.has(r.instance) || r.status !== 'exported') {
+      ctx.stdout.write(renderResult(r, dest) + renderPrepared(r))
+    }
+    for (const d of unread) ctx.stderr.write(renderUnread(d, dest?.text ?? r.instance))
   }
-  return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+  if (incomplete) {
+    ctx.stderr.write('  Data that could not be read stays in the local cache; run `hyp sync` again to retry.\n')
+  }
+  return incomplete || report.sinks.some((r) => r.status === 'failed') ? 1 : 0
 }
 
 /**
  * Reuse the consent preview without rescanning the backlog. Keep only the
  * current destination's counters: sinks run sequentially, and each ETA covers
  * that destination.
- * @param {Map<string, PendingVolume>} volumes
+ * @param {Map<string, Pick<PendingVolume, 'rows' | 'status'>>} volumes
  * @param {() => number} [now]
  */
 export function createSyncProgress(volumes, now = Date.now) {
   let instance = ''
   let rows = 0
   let firstAck = 0
+  let resumedRows = 0
+  let wireBytes = 0
+  let waitUntil = 0
   let lastAck = now()
   /** @type {TickOptions['onProgress']} */
   const update = (name, delta) => {
@@ -396,6 +435,9 @@ export function createSyncProgress(volumes, now = Date.now) {
       instance = name
       rows = 0
       firstAck = 0
+      resumedRows = 0
+      wireBytes = 0
+      waitUntil = 0
       lastAck = now()
       return
     }
@@ -404,7 +446,11 @@ export function createSyncProgress(volumes, now = Date.now) {
     // zero rows, so a sink calling it in a loop would otherwise refresh
     // `lastAck` on every pass and hold the stall warning off the line for as
     // long as the loop ran.
+    if (delta.waitMs && Number.isFinite(delta.waitMs) && delta.waitMs > 0) waitUntil = now() + delta.waitMs
     if (!(delta.rows > 0)) return
+    waitUntil = 0
+    resumedRows += Math.min(delta.rows, delta.resumedRows ?? 0)
+    wireBytes += delta.wireBytes ?? 0
     // The rate is measured from the first acknowledgement, not from the
     // destination's start. The driver announces a destination before
     // `discoverReadyPartitions` lists every dataset, flushes every pending
@@ -423,8 +469,10 @@ export function createSyncProgress(volumes, now = Date.now) {
     const total = volume?.status === 'counted' ? volume.rows : undefined
     const count = total !== undefined && total > 0 && rows <= total
       ? `${groupThousands(rows)}/${groupThousands(total)} rows (${Math.min(99, Math.floor(rows / total * 100))}%)`
-      : `${groupThousands(rows)} rows sent`
-    const prefix = `${instance}: ${count}`
+      : `${groupThousands(rows)} rows ${resumedRows ? 'complete' : 'sent'}`
+    const detail = `${wireBytes > 0 ? ` | ${(wireBytes / 1048576).toFixed(1)} MiB uploaded` : ''}${resumedRows > 0 ? ` | ${groupThousands(resumedRows)} resumed` : ''}`
+    const prefix = `${instance}: ${count}${detail}`
+    if (waitUntil > now()) return `${prefix} | retrying in ${Math.ceil((waitUntil - now()) / 1000)}s`
     // Every line that cannot quote an ETA still ticks, and what it ticks is
     // the time since anything last moved. `onProgress` is optional on the
     // export contract and half the shipped sinks never call it
@@ -444,10 +492,11 @@ export function createSyncProgress(volumes, now = Date.now) {
     // acknowledgement is coming and a long one would otherwise flip a finished
     // transfer to "99% | waiting for progress" - the one reading that is both
     // alarming and wrong.
-    if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing... (${waited}s)`
+    if (rows === total) return `${instance}: ${groupThousands(rows)} rows ${resumedRows ? 'complete' : 'sent'}${detail} | finalizing... (${waited}s)`
     if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
     const seconds = Math.max(1, (now() - firstAck) / 1000)
-    const rate = rows / seconds
+    const rate = (rows - resumedRows) / seconds
+    if (rate <= 0) return `${prefix} | ETA unavailable`
     if (total === undefined || rows > total) return `${prefix} | ETA unavailable`
     const remaining = Math.max(1, Math.ceil((total - rows) / rate))
     const eta = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`
@@ -617,14 +666,16 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     return 0
   }
 
+  const progress = createSyncProgress(new Map([...previews].map(([name, preview]) => [name, { rows: preview.rows, status: 'counted' }])))
   let failed = false
   for (const handle of capable) {
     const instance = sinkInstanceName(handle)
     let result
+    progress.update(instance)
     try {
       result = await withSpinner(
-        { stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${instance}...` },
-        async () => handle.sink.replaySourceHistory?.({ source })
+        { status: progress.render, stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${instance}...` },
+        async () => handle.sink.replaySourceHistory?.({ source, onProgress: (delta) => progress.update(instance, delta) })
       )
     } catch (err) {
       failed = true
@@ -892,11 +943,45 @@ function renderResult(r, dest) {
   if (r.status === 'failed') {
     return `Could not send to ${where}: ${r.error ?? 'no reason given; see `hyp status`'}\n`
   }
+  // A destination that read no dataset at all sent nothing, and saying so
+  // with a check mark would be a confident zero-work success.
+  if (r.datasets?.length && r.datasets.every((d) => d.discovery === 'failed')) {
+    return `Nothing sent to ${where}: no dataset could be read\n`
+  }
   const verb = dest?.offMachine === true ? 'uploaded' : 'exported'
   if (r.status === 'partial') {
     return `Partly ${verb} to ${where}${r.error ? ` (${r.error})` : ''}; the rest goes on the next sync\n`
   }
   return `✓ ${verb.charAt(0).toUpperCase()}${verb.slice(1)} to ${where}\n`
+}
+
+/**
+ * The partitions discovery handed this destination, per dataset, under its
+ * result line. Empty datasets are left out; a partly read one says so.
+ *
+ * @param {TickReport['sinks'][number]} r
+ * @returns {string}
+ */
+function renderPrepared(r) {
+  return (r.datasets ?? [])
+    .filter((d) => d.partitions > 0)
+    .map((d) => `  ${escapeForDisplay(d.dataset)}: ${plural(d.partitions, 'partition')}${d.discovery === 'partial' ? ' (incomplete)' : ''}\n`)
+    .join('')
+}
+
+/**
+ * One dataset this destination's discovery could not fully read. The cause
+ * is plugin-owned and stays in the `sink.discover_partitions_failed` log.
+ * The dataset name is plugin-registered too, so it is escaped for display.
+ *
+ * @param {SinkDatasetDiscovery} d
+ * @param {string} where
+ * @returns {string}
+ */
+function renderUnread(d, where) {
+  return d.discovery === 'failed'
+    ? `warning: could not read ${escapeForDisplay(d.dataset)} for ${where}; this sync left it out\n`
+    : `warning: read only part of ${escapeForDisplay(d.dataset)} for ${where}; this sync did not cover all of it\n`
 }
 
 /**

@@ -5,7 +5,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { isTty } from '../tui-router.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
-import { commitWizardPickedConfig } from './pick.js'
+import { commitWizardPickedConfig, enableGithubCollection } from './pick.js'
 
 /**
  * @import { RunWizardGithubOptions } from '../../../../src/core/cli/wizard/types.js'
@@ -93,12 +93,7 @@ export async function connectWizardGithub(opts) {
     let config
     try {
       config = JSON.parse(await fs.readFile(opts.configPath, 'utf8'))
-      const plugins = config.plugins ??= []
-      for (const name of ['@hypaware/context-graph', '@hypaware/github']) {
-        const existing = plugins.find((plugin) => plugin.name === name)
-        if (existing) existing.enabled = true
-        else plugins.push({ name })
-      }
+      enableGithubCollection(config)
       // Silent: setup already said it saved the settings, and this is the
       // same file gaining the GitHub plugins.
       const committed = await commitWizardPickedConfig({

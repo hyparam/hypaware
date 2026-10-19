@@ -1,22 +1,68 @@
 {
-  "hypaware-privacy": {
-    "claudeOnly": 26,
-    "codexOnly": 95,
-    "hash": "89a57ccf7e0aca45"
+  "claude-codex": {
+    "hypaware-privacy": {
+      "claudeOnly": 26,
+      "codexOnly": 104,
+      "hash": "fc991eae39a4d3b5"
+    },
+    "hypaware-query": {
+      "claudeOnly": 0,
+      "codexOnly": 3,
+      "hash": "992def97167d4984"
+    },
+    "hypaware-reference": {
+      "claudeOnly": 0,
+      "codexOnly": 0,
+      "hash": "d8156bae0c4243d3"
+    },
+    "hypaware-report": {
+      "claudeOnly": 6,
+      "codexOnly": 8,
+      "hash": "b2731b19375b7c49"
+    }
   },
-  "hypaware-query": {
-    "claudeOnly": 2,
-    "codexOnly": 3,
-    "hash": "51b0dc6be60deee9"
+  "neutral-claude": {
+    "hypaware-privacy": {
+      "neutralOnly": 18,
+      "claudeOnly": 72,
+      "hash": "6577f0b50915c4f1"
+    },
+    "hypaware-query": {
+      "neutralOnly": 13,
+      "claudeOnly": 0,
+      "hash": "fae00b5f9efa0ec8"
+    },
+    "hypaware-reference": {
+      "neutralOnly": 5,
+      "claudeOnly": 0,
+      "hash": "701ea4df1972b5a8"
+    },
+    "hypaware-report": {
+      "neutralOnly": 10,
+      "claudeOnly": 6,
+      "hash": "fbefcc8dabb7b524"
+    }
   },
-  "hypaware-reference": {
-    "claudeOnly": 0,
-    "codexOnly": 0,
-    "hash": "d8156bae0c4243d3"
-  },
-  "hypaware-report": {
-    "claudeOnly": 13,
-    "codexOnly": 23,
-    "hash": "0c0a14afe75bb615"
+  "neutral-codex": {
+    "hypaware-privacy": {
+      "neutralOnly": 18,
+      "codexOnly": 150,
+      "hash": "62476c134ec5aec9"
+    },
+    "hypaware-query": {
+      "neutralOnly": 13,
+      "codexOnly": 3,
+      "hash": "ee4805be46d9ce37"
+    },
+    "hypaware-reference": {
+      "neutralOnly": 5,
+      "codexOnly": 0,
+      "hash": "701ea4df1972b5a8"
+    },
+    "hypaware-report": {
+      "neutralOnly": 10,
+      "codexOnly": 8,
+      "hash": "ce1e2500cdca4f5e"
+    }
   }
 }

@@ -55,6 +55,29 @@ const LOCAL_SINK = {
 
 const QUERY = { cache: { retention: { default_days: RETENTION } } }
 
+// @ref LLP 0474#setup [tests]: selected Ollama preserves its transport and unmanaged upstreams without resurrecting deselected rows
+test('Ollama fresh/add/repeat/deselect preserves custom transport, unrelated choices and recording off', async () => {
+  const descriptors = await realPickerDescriptors()
+  const fresh = compose(descriptors, ['ollama'], 'keep-local')
+  assert.ok(fresh.plugins?.some(p => p.name === '@hypaware/ollama'))
+  const custom = { name: 'ollama', base_url: 'http://localhost:21500/service/', path_prefix: '/api/chat', provider: 'ollama', priority: 7 }
+  const unmanaged = { name: 'custom', base_url: 'http://localhost:21600', path_prefix: '/custom' }
+  const existing = /** @type {HypAwareV2Config} */ ({ version: 2, plugins: [
+    { name: '@hypaware/ai-gateway', config: { upstreams: [custom, unmanaged, ANTHROPIC], proxy_mode: false } },
+    { name: '@hypaware/ollama', recording: false },
+    { name: '@hypaware/otel', config: { listen_port: 4321 } },
+  ] })
+  const args = { descriptors, exportChoice: /** @type {PickerExport} */ ('keep-local'), retentionDays: RETENTION, hypHome: HYP_HOME }
+  const added = composePickerConfig({ ...args, sources: ['ollama', 'otel'], existing })
+  assert.deepEqual(added.plugins?.find(p => p.name === '@hypaware/ai-gateway')?.config?.upstreams, [custom, unmanaged])
+  assert.equal(added.plugins?.find(p => p.name === '@hypaware/ollama')?.recording, false)
+  assert.equal(added.plugins?.find(p => p.name === '@hypaware/otel')?.config?.listen_port, 4321)
+  assert.deepEqual(composePickerConfig({ ...args, sources: ['ollama', 'otel'], existing: added }), added)
+  const removed = composePickerConfig({ ...args, sources: ['otel'], existing: added })
+  assert.ok(!removed.plugins?.some(p => p.name === '@hypaware/ollama'))
+  assert.deepEqual(removed.plugins?.find(p => p.name === '@hypaware/ai-gateway')?.config?.upstreams, [unmanaged])
+})
+
 test('claude alone composes the gateway writer with no proxy upstream plus the claude adapter', async () => {
   const d = await realPickerDescriptors()
   assert.deepEqual(compose(d, ['claude']), {

@@ -18,6 +18,7 @@ import { parseConfigShape } from './schema.js'
  *   ConfigSlot,
  *   CreateConfigControlOptions,
  *   ProbationMarker,
+ *   RememberedBadEtag,
  * } from '../../../src/core/config/types.js'
  */
 
@@ -45,6 +46,15 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 300
  * @ref LLP 0025#post-apply-probation [implements]: window formula with the floor settled at 120s
  */
 export const PROBATION_FLOOR_SECONDS = 120
+
+/**
+ * How long a revision this host could not confirm is held back before
+ * the same etag is applied again. Long enough that a host whose sink
+ * keeps failing restarts onto it a few times a day at most; a client
+ * version change retries at once instead of waiting.
+ * @ref LLP 0517#retry [implements]: bounded backoff for an unconfirmed revision, settled at 6 hours
+ */
+export const UNCONFIRMED_RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000
 
 const CONTROL_DIRNAME = 'config-control'
 const STATE_BASENAME = 'state.json'
@@ -269,6 +279,7 @@ export function resetCentralLayerToSeed(stateRoot) {
 export function createConfigControl(opts) {
   const { stateRoot, requestRestart, onConfirmed } = opts
   const now = opts.now ?? Date.now
+  const clientVersion = opts.clientVersion ?? 'unknown'
   const log = getLogger('config-control')
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
   const statePath = path.join(controlDir, STATE_BASENAME)
@@ -370,7 +381,12 @@ export function createConfigControl(opts) {
     flipPointer(marker.previous_slot)
     const state = readState()
     delete state.probation
-    state.bad_etag = { etag: marker.etag, reason, recorded_at: at }
+    state.bad_etag = {
+      etag: marker.etag,
+      reason,
+      recorded_at: at,
+      ...(reason === 'probation_unconfirmed' ? { client_version: marker.client_version } : {}),
+    }
     state.last_rollback = {
       etag: marker.etag,
       reason,
@@ -451,6 +467,40 @@ export function createConfigControl(opts) {
     return { action: /** @type {const} */ ('recovered_bad_active'), recovery: /** @type {const} */ ('repull') }
   }
 
+  /**
+   * The reason an expired probation records. A sink that failed to
+   * materialize during the window means this host could not run the
+   * confirming poll, which says nothing about the revision itself.
+   * @param {ProbationMarker} marker
+   * @returns {ConfigRollbackReason}
+   * @ref LLP 0517#unconfirmed [implements]: an expiry after a sink materialize failure is "could not confirm", not a bad revision
+   */
+  function expiryReason(marker) {
+    return marker.client_version === undefined ? 'probation_expired' : 'probation_unconfirmed'
+  }
+
+  /**
+   * Stamp the active probation marker when a sink failed to materialize
+   * at this boot, so its expiry, by the timer or at a later boot, is
+   * recorded as unconfirmed. Persisted rather than held in memory because
+   * the boot-path expiry runs in a later process. The latest failing
+   * version wins, so an upgrade mid-probation that still fails does not
+   * earn an immediate retry.
+   */
+  function noteSinkMaterializeFailed() {
+    const state = readState()
+    if (!state.probation || state.probation.client_version === clientVersion) return
+    state.probation.client_version = clientVersion
+    writeState(state)
+    log.warn('config.probation_unconfirmable', {
+      [Attr.COMPONENT]: 'config-control',
+      [Attr.OPERATION]: 'config.probation',
+      config_etag: state.probation.etag,
+      client_version: clientVersion,
+      hyp_reason: 'sink_materialize_failed',
+    })
+  }
+
   function disarmProbationWatchdog() {
     if (watchdog) {
       clearTimeout(watchdog)
@@ -475,16 +525,18 @@ export function createConfigControl(opts) {
       watchdog = null
       const current = readState().probation
       if (!current || current.etag !== marker.etag) return
+      const reason = expiryReason(current)
       log.error('config.probation_expired', {
         [Attr.COMPONENT]: 'config-control',
         [Attr.OPERATION]: 'config.probation_expired',
         config_etag: marker.etag,
         status: 'failed',
+        hyp_reason: reason,
       })
       // Only restart when there was somewhere distinct to roll back to;
       // a no-op rollback leaves the same config active, so restarting
       // onto it would just re-probate and re-fail forever (#141).
-      const rolledBack = rollback(current, 'probation_expired')
+      const rolledBack = rollback(current, reason)
       if (rolledBack) {
         restartPending = true
         requestRestart('probation_expired')
@@ -529,7 +581,7 @@ export function createConfigControl(opts) {
     }
 
     if (Date.parse(marker.until) <= now()) {
-      const rolledBack = rollback(marker, 'probation_expired')
+      const rolledBack = rollback(marker, expiryReason(marker))
       return rolledBack
         ? { action: /** @type {const} */ ('rolled_back') }
         : { action: /** @type {const} */ ('rollback_no_target') }
@@ -549,6 +601,12 @@ export function createConfigControl(opts) {
     if (!state.probation) return
     const etag = state.probation.etag
     delete state.probation
+    // A revision has now survived probation, so an earlier rollback is
+    // history, not a condition: keeping it would leave `hyp status` reporting
+    // "Needs attention" forever. That includes this etag's own rollback,
+    // when this is an unconfirmed revision's retry. The bad etag stays as
+    // the re-apply backoff.
+    delete state.last_rollback
     writeState(state)
     disarmProbationWatchdog()
     log.info('config.probation_cleared', {
@@ -605,8 +663,11 @@ export function createConfigControl(opts) {
         const state = readState()
         // Re-apply backoff: one remembered bad etag, skipped until the
         // server serves a different revision. Re-polling is fine; an
-        // apply-crash loop is not.
-        if (state.bad_etag && state.bad_etag.etag === etag) {
+        // apply-crash loop is not. A revision this host only could not
+        // confirm is retried once its backoff elapses or the client changes.
+        const bad = state.bad_etag && state.bad_etag.etag === etag ? state.bad_etag : null
+        const retry = bad ? unconfirmedRetryReason(bad) : null
+        if (bad && !retry) {
           span.setAttribute('apply_action', 'skipped_bad_etag')
           log.warn('config.apply_skipped', {
             [Attr.COMPONENT]: 'config-control',
@@ -614,6 +675,13 @@ export function createConfigControl(opts) {
             hyp_reason: 'bad_etag_backoff',
           })
           return { ok: true, action: 'skipped_bad_etag' }
+        }
+        if (retry) {
+          log.info('config.apply_retry_unconfirmed', {
+            [Attr.COMPONENT]: 'config-control',
+            config_etag: etag,
+            hyp_reason: retry,
+          })
         }
 
         const serialized = JSON.stringify(document, null, 2) + '\n'
@@ -686,6 +754,22 @@ export function createConfigControl(opts) {
   }
 
   /**
+   * Why an unconfirmed revision may be applied again now, or null while
+   * it stays held back. A revision recorded for any other reason is
+   * never retried: its etag must change.
+   * @param {RememberedBadEtag} bad
+   * @returns {'client_version_changed' | 'backoff_elapsed' | null}
+   * @ref LLP 0517#retry [implements]: the same etag is retried after a bounded backoff or a client version change; a bad revision still waits for a new etag
+   */
+  function unconfirmedRetryReason(bad) {
+    if (bad.reason !== 'probation_unconfirmed') return null
+    if (bad.client_version !== clientVersion) return 'client_version_changed'
+    const recordedAt = Date.parse(bad.recorded_at)
+    if (!Number.isFinite(recordedAt) || now() - recordedAt >= UNCONFIRMED_RETRY_BACKOFF_MS) return 'backoff_elapsed'
+    return null
+  }
+
+  /**
    * Remember a rejected revision so re-polls don't become an
    * apply-fail loop. Pre-flip failures (validation, install) record
    * only the bad etag + reason; `last_rollback` is reserved for actual
@@ -748,6 +832,9 @@ export function createConfigControl(opts) {
     const pollSeconds = pollIntervalFromConfig(config)
     const windowSeconds = Math.max(3 * pollSeconds, PROBATION_FLOOR_SECONDS)
     const state = readState()
+    // An unconfirmed retry re-applies its own remembered etag; leaving the
+    // mark would make the active slot carry a bad etag (#141).
+    if (state.bad_etag && state.bad_etag.etag === etag) delete state.bad_etag
     state.probation = {
       etag,
       applied_at: new Date(now()).toISOString(),
@@ -782,6 +869,7 @@ export function createConfigControl(opts) {
     attachApplyDeps(deps) { applyDeps = deps },
     armProbationWatchdog,
     disarmProbationWatchdog,
+    noteSinkMaterializeFailed,
     status,
   }
 }

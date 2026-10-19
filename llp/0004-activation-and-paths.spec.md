@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0005, LLP 0006, LLP 0012
-**Extended-by:** LLP 0420 (#the-activation-context: the per-plugin facade rule holds for `CommandRunContext` too, so a plugin-contributed command body reaches the registries through the same facades its `activate()` holds)
+**Extended-by:** LLP 0420 (#the-activation-context: the per-plugin facade rule holds for `CommandRunContext` too, so a plugin-contributed command body reaches the registries through the same facades its `activate()` holds); LLP 0525 (#the-activation-context, #state-directories: a `hyp setup --dry-run` boot is a preview, whose context carries `preview: true` and whose durable plugin dirs are named but not created)
 
 > How a plugin is activated and what the kernel hands it. Decomposed from
 > `hypaware-design.md` (Activation, Sources).
@@ -56,3 +56,6 @@ default): per-plugin state dirs, the plugin install root and lock file
 ([LLP 0013](./0013-local-query-cache.decision.md)), and collection entries
 ([LLP 0015](./0015-query-and-datasets.spec.md)). Plugins receive scoped paths
 and must not reach into each other's directories.
+
+> **Extended by [LLP 0533](./0533-collect-is-deferred-not-shipped.decision.md#deferred).**
+> Collection entries are deferred with `collect`; the kernel creates none today.

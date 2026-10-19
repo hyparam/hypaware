@@ -3,10 +3,12 @@
 import os from 'node:os'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { ensureAiGatewayStorageContracts } from '../../ai-gateway/src/storage_contracts.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../ai-gateway/src/session_command.js'
+import { registerNeutralSkills } from '../../../skills/index.js'
 import { attachCursorHooks } from './attach.js'
 import { cursorListenPort, validateCursorConfig } from './config.js'
 import { createStartCursorSource } from './listener.js'
@@ -33,7 +35,7 @@ export async function activate(ctx) {
 
   ensureAiGatewayStorageContracts(ctx)
   const localPolicyPath = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
-  const ignoredSessions = new Set()
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
   const activeRecoveries = new Set()
   ctx.backfills.register(createCursorBackfillProvider({ env: ctx.env, localOnlyListPath: localPolicyPath, ignoredSessions, activeRecoveries, config: ctx.config }))
   ctx.sources.register({
@@ -45,6 +47,7 @@ export async function activate(ctx) {
   })
 
   registerSessionCommands(ctx)
+  registerNeutralSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
 
   // @ref LLP 0306#endpoint-free-clients [implements]: install native hooks
   //   into the shared configuration through the intrinsic registry, with no gateway endpoint

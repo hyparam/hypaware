@@ -4,6 +4,8 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { performance } from 'node:perf_hooks'
 import crypto from 'node:crypto'
 
+import { normalizeValue } from './attrs.js'
+
 export const SpanStatusCode = Object.freeze({
   UNSET: 0,
   OK: 1,
@@ -267,9 +269,16 @@ export class Span {
     return this._context
   }
 
-  /** @param {string} key @param {unknown} value */
+  /**
+   * A body's write takes the same value bound as the opening bag: without it
+   * an object, `NaN` or oversized string written mid-span reached the
+   * exporter as-is (hyparam/hypaware#2376). Keys are left as written.
+   *
+   * @param {string} key @param {unknown} value
+   */
   setAttribute(key, value) {
-    if (value !== undefined) this.attributes[key] = value
+    const normalized = normalizeValue(value)
+    if (normalized !== undefined) this.attributes[key] = normalized
     return this
   }
 

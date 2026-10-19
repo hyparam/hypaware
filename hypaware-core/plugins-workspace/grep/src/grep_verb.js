@@ -1,12 +1,13 @@
 // @ts-check
 
+import { ANSI } from '../../../../src/core/cli/style.js'
 import { VerbUsageError } from '../../../../src/core/cli/verb_errors.js'
-import { buildQuerySqlOutput } from '../../../../src/core/query/format.js'
+import { applyContextControls, buildQuerySqlOutput, renderResult } from '../../../../src/core/query/format.js'
 import { renderLocalOnlyNotice } from '../../../../src/core/query/verb.js'
 // The matcher module is pulled in for its refusal kind alone, and imports
 // nothing beyond the allowlist below, so the boot-path deferral that keeps
 // the Iceberg store out of `hyp --help` is untouched.
-import { GrepQueryError } from '../../../../src/core/search/matcher.js'
+import { GrepQueryError, escapeLiteral } from '../../../../src/core/search/matcher.js'
 import { SEARCHABLE_COLUMNS } from '../../../../src/core/search/searchable_columns.js'
 
 /**
@@ -46,6 +47,7 @@ export const queryGrepVerb = {
   category: 'explore-share',
   audience: 'everyday',
   tool: 'grep_search',
+  title: 'Search session text',
   // The coverage clause is not decoration. An MCP caller sees only this
   // text, so without it zero hits are indistinguishable from "that text is
   // not stored" - the exact wrong answer an agent would then report.
@@ -82,10 +84,12 @@ export const queryGrepVerb = {
       // also the schema an MCP caller validates against. A bare `number`
       // let `--limit 0`, `--limit -5` and `--limit 2.5` fall through to a
       // silent rewrite to 50, so a caller asking for fewer rows got more
-      // and exit 0. The ceiling stays out of the schema: it clamps rather
-      // than refuses (see `operation`).
+      // and exit 0. The ceiling is in the schema too, so `--limit 5000` is
+      // refused before any search or remote request instead of quietly
+      // answering as if it were 1000.
       // @ref LLP 0302#usage-exit [constrained-by]: a value the flag cannot use is refused, not quietly replaced with a different answer
-      limit: { type: 'integer', minimum: 1, default: DEFAULT_LIMIT, description: `Max hits (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
+      // @ref LLP 0528#refuse [implements]: above the ceiling is refused by the schema, not clamped
+      limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT, description: `Max hits (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
       // @ref LLP 0105#override [implements]: the informed-consent override; the help text names the transcript-capture consequence and bundled skills never pass it
       'include-local-only': {
         type: 'boolean',
@@ -100,16 +104,18 @@ export const queryGrepVerb = {
   },
   async operation(params, ctx) {
     const rawLimit = params.limit
-    // Only the ceiling is applied here; the schema above already refused
-    // every value the flag cannot use, so nothing unusable reaches this
-    // line and the fallback is just the absent case. Above the ceiling
-    // clamps rather than refuses, because refusing would answer a request
-    // for MORE rows with an error where a capped answer is what the help
-    // text promises, and "raise --limit" is advice a caller at the ceiling
-    // cannot follow.
+    // The schema above already refused every value the flag cannot use on
+    // both the CLI and MCP paths, so the fallback is just the absent case.
+    // A host that calls `operation` directly skips that check, so a value
+    // above the ceiling is refused here as well rather than handed to the
+    // backend uncapped.
+    // @ref LLP 0528#refuse [implements]: no clamp on any path; the ceiling is a refusal
+    if (typeof rawLimit === 'number' && rawLimit > MAX_LIMIT) {
+      throw new VerbUsageError(`--limit expects an integer from 1 to ${MAX_LIMIT} (got ${rawLimit})`)
+    }
     const limit =
       typeof rawLimit === 'number' && Number.isInteger(rawLimit) && rawLimit >= 1
-        ? Math.min(rawLimit, MAX_LIMIT)
+        ? rawLimit
         : DEFAULT_LIMIT
     const from = dayBound(params.from, 'from')
     const to = dayBound(params.to, 'to')
@@ -123,7 +129,7 @@ export const queryGrepVerb = {
     if (from !== undefined && to !== undefined && from > to) {
       throw new VerbUsageError(`--from ${from} is after --to ${to}, so the window selects no days`)
     }
-    // The verb owns the argument rules above and the clamp fact below; the
+    // The verb owns the argument rules above and the ceiling fact below; the
     // data plane is whatever the host handed it. Nothing past this line
     // knows which backend answered, which is what lets the process hold one
     // `grep_search` registration instead of a second verb displacing this
@@ -165,40 +171,22 @@ export const queryGrepVerb = {
       if (err instanceof GrepQueryError) throw new VerbUsageError(err.message)
       throw err
     }
-    // A backend that answered with the wrong shape must not read as an
-    // empty archive. The render falls back field by field, so a missing or
-    // misnamed `hits` renders as a clean zero-row table with neither
-    // completeness notice and exit 0, and the one guard that would have
-    // caught it (the zero-files line below) cannot fire for a
-    // server-shaped result: its counters are the local service's own and
-    // are undefined, not 0. That is the forged "nothing is stored" the
-    // summary's coverage clause exists to prevent, so a malformed answer
-    // is a failed search rather than an honest zero.
-    if (!Array.isArray(result?.hits)) {
-      throw new Error('the grep_search backend returned no hits array')
-    }
-    // The same argument reaches the two completeness facts, which are
-    // required booleans on `GrepSearchResult`, not local extras a
-    // server-shaped result is entitled to omit. The render reads each with
-    // a strict comparison, so a backend that stopped at its own deadline
-    // and left `exhausted` off prints no "stopped before covering every
-    // file" line and its partial answer reads as a complete one; an
-    // omitted `truncated` hides the beyond-the-limit notice the same way.
-    // @ref LLP 0303#completeness-signals [constrained-by]: a consumer told only one of the two facts is told the wrong half, so a backend reporting neither is the same forgery as one reporting no hits
-    if (typeof result.truncated !== 'boolean' || typeof result.exhausted !== 'boolean') {
-      throw new Error('the grep_search backend returned no truncated/exhausted booleans')
-    }
-    // The clamp's own promise, carried through to the render: at the
+    assertGrepResultShape(result)
+    // The ceiling's own promise, carried through to the render: at the
     // ceiling there is no larger `--limit` left to ask for, so the
     // truncation notice must not send the caller back to a flag that
-    // cannot move. It is the verb's fact about its own clamp, so it rides
+    // cannot move. It is the verb's fact about its own ceiling, so it rides
     // whichever backend answered: a backend never sees an absent or
-    // unclamped limit, so it has nothing to say about the ceiling. Like the
+    // out-of-range limit, so it has nothing to say about the ceiling. Like the
     // freshness and visibility fields, a server-shaped result carries none
     // of the local extras and the render falls back field by field.
     return { ...result, limitCeilingReached: limit >= MAX_LIMIT }
   },
-  render(result, controls) {
+  render(result, controls, params) {
+    // `--remote` adopts the server's answer without running `operation`, so
+    // the shape floor is enforced here too: a malformed remote answer is a
+    // failed render (exit 1) rather than an empty or complete success.
+    assertGrepResultShape(result)
     const r = /** @type {Partial<GrepSearchResult> & { localOnly?: LocalOnlyVisibilityReport, freshnessMessages?: string[], limitCeilingReached?: boolean, indexedFiles?: number, scannedFiles?: number }} */ (result)
     const hits = Array.isArray(r.hits) ? r.hits : []
     // One row per matched column, rg-style: the locator columns lead, the
@@ -215,6 +203,9 @@ export const queryGrepVerb = {
       maxCell: controls.maxCell,
       maxBytes: controls.maxBytes,
     })
+    const stdout = controls.color === true && format === 'table' && typeof params?.query === 'string'
+      ? highlightSnippets(out.stdout, flattened, controls.maxCell, params.query, params.regex === true)
+      : out.stdout
     let stderr = (r.freshnessMessages ?? []).map((m) => `${m}\n`).join('')
     stderr += renderLocalOnlyNotice(r.localOnly)
     // The two completeness signals, on stderr so stdout stays a valid
@@ -234,7 +225,7 @@ export const queryGrepVerb = {
         : 'grep: more matches exist beyond the limit - narrow with --from/--to or --session-id, or raise --limit\n'
     }
     if (r.exhausted === false) {
-      stderr += 'grep: the search stopped before covering every file; results may be incomplete\n'
+      stderr += 'grep: the search stopped before covering every file; results may be incomplete. Narrow with --from/--to or --session-id and retry.\n'
     }
     // Zero hits over zero files is not the answer the summary's coverage
     // clause promises to make honest: "searched everything, found nothing"
@@ -256,11 +247,43 @@ export const queryGrepVerb = {
         'or --from/--to excluded every file\n'
     }
     return {
-      stdout: out.stdout,
+      stdout,
       stderr: stderr + out.stderr,
       ...(out.file ? { file: out.file } : {}),
     }
   },
+}
+
+/**
+ * The minimum answer shape both routes require before anything renders.
+ *
+ * @param {unknown} value
+ */
+function assertGrepResultShape(value) {
+  const result = /** @type {Partial<GrepSearchResult> | null | undefined} */ (value)
+  // A backend that answered with the wrong shape must not read as an
+  // empty archive. The render falls back field by field, so a missing or
+  // misnamed `hits` renders as a clean zero-row table with neither
+  // completeness notice and exit 0, and the one guard that would have
+  // caught it (the zero-files line in `render`) cannot fire for a
+  // server-shaped result: its counters are the local service's own and
+  // are undefined, not 0. That is the forged "nothing is stored" the
+  // summary's coverage clause exists to prevent, so a malformed answer
+  // is a failed search rather than an honest zero.
+  if (!Array.isArray(result?.hits)) {
+    throw new Error('the grep_search backend returned no hits array')
+  }
+  // The same argument reaches the two completeness facts, which are
+  // required booleans on `GrepSearchResult`, not local extras a
+  // server-shaped result is entitled to omit. The render reads each with
+  // a strict comparison, so a backend that stopped at its own deadline
+  // and left `exhausted` off prints no "stopped before covering every
+  // file" line and its partial answer reads as a complete one; an
+  // omitted `truncated` hides the beyond-the-limit notice the same way.
+  // @ref LLP 0303#completeness-signals [constrained-by]: a consumer told only one of the two facts is told the wrong half, so a backend reporting neither is the same forgery as one reporting no hits
+  if (typeof result.truncated !== 'boolean' || typeof result.exhausted !== 'boolean') {
+    throw new Error('the grep_search backend returned no truncated/exhausted booleans')
+  }
 }
 
 /**
@@ -323,6 +346,58 @@ function dayBound(value, flag) {
     throw new VerbUsageError(`--${flag} expects a day as YYYY-MM-DD (got ${value})`)
   }
   return value
+}
+
+/**
+ * Paint every match in the snippet column of a rendered table, ripgrep
+ * style. Only the snippet column is painted, so a query that happens to
+ * look like a date or a session id does not light up the locators.
+ *
+ * The snippet is the last column (see {@link flattenHits}), but its start
+ * is not the header's `snippet` offset on every row: `renderTable` pads a
+ * column to at most 80 characters without truncating a longer cell, so a
+ * long session id pushes its row's snippet to the right. Each row's start
+ * comes instead from the shown rows rendered again with a one-character
+ * snippet, which prints every locator cell and width exactly as the table
+ * did. A row whose locators do not match that render stays plain.
+ *
+ * The matcher is the search's own (case-insensitive, literal or regex), run
+ * over the escaped cell a reader sees. A match the table escaping split (a
+ * query spanning a newline, say) stays unpainted, which costs only colour.
+ *
+ * @param {string} table  the rendered table
+ * @param {{ columns: string[], rows: Record<string, unknown>[] }} flattened  the rows it was rendered from
+ * @param {number} maxCell  the `--max-cell` budget it was rendered with
+ * @param {string} query
+ * @param {boolean} regex
+ * @returns {string}
+ */
+function highlightSnippets(table, flattened, maxCell, query, regex) {
+  /** @type {RegExp} */
+  let re
+  try {
+    re = new RegExp(regex ? query : escapeLiteral(query), 'gi')
+  } catch {
+    return table
+  }
+  const lines = table.split('\n')
+  // The header, the divider, one line per shown row (the byte budget keeps
+  // a prefix of the rows), then the empty tail after the final newline.
+  const shown = lines.length - 3
+  if (shown <= 0 || shown > flattened.rows.length) return table
+  const marked = applyContextControls({
+    columns: flattened.columns,
+    rows: flattened.rows.slice(0, shown).map((row) => ({ ...row, snippet: '.' })),
+  }, { maxCell, maxBytes: 0 }).result
+  const starts = renderResult(marked, 'table').split('\n')
+  for (let i = 2; i < 2 + shown; i += 1) {
+    const line = lines[i]
+    const at = starts[i].length - 1
+    if (line.length <= at || !line.startsWith(starts[i].slice(0, at))) continue
+    const snippet = line.slice(at).replace(re, (m) => m ? `${ANSI.bold}${ANSI.red}${m}${ANSI.reset}` : m)
+    lines[i] = line.slice(0, at) + snippet
+  }
+  return lines.join('\n')
 }
 
 /**

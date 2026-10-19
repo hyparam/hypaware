@@ -1,6 +1,7 @@
 // @ts-check
 
 import process from 'node:process'
+import path from 'node:path'
 import { createProductClient, productAdapters } from '../product_telemetry/client.js'
 import { productEvent } from '../product_telemetry/collection.js'
 
@@ -23,10 +24,12 @@ import { attachHandler } from '../config/action_attach.js'
 import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
+import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_history.js'
 import { sinkInstanceName } from '../registry/sinks.js'
 import { materializeSinks } from '../sinks/materialize.js'
+import { sanitizeLabel } from '../util/json_util.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
-import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, MAX_ACTIVATION_MESSAGE_CHARS, SINK_MATERIALIZE_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
 import {
   clearControlRequests,
   watchControlRequests,
@@ -221,9 +224,10 @@ export const RESTART_EXIT_DEADLINE_MS = 120_000
  *  4. Once every configured source returns a `StartedSource`, status
  *     flips to `healthy`. Failures degrade the state to `degraded`
  *     but do not abort the daemon. Operators get a partial system.
- *  5. A 60s (or `tickIntervalMs`) loop drives the sink driver. Each
- *     tick is a `sink.tick` child span; the bundled sink driver opens
- *     its own `sink.export_batch` spans inside.
+ *  5. A 60s (or `tickIntervalMs`) loop dispatches due sink instances
+ *     and independently requests `daemon.bookkeeping`. Dispatch emits
+ *     the daemon tick counter; actual instance exports open
+ *     `sink.export_batch` spans.
  *  6. SIGTERM / SIGINT / a `stop.request` control file /
  *     `handle.stop()` flip the daemon into `stopping`, stop every
  *     source (each one inside a `source.stop` span), close the daemon
@@ -283,6 +287,11 @@ export async function runDaemon(opts = {}) {
   // that had already recovered, and nothing could clear it afterwards.
   // @ref LLP 0453#warning-rule [implements]: historical success survives daemon exit, so the warning is defined against a stable point
   const sinkSnapshots = recoverSinkSnapshots(runtimeStateRoot)
+  // The first write below lands before any plugin activates, so leaving the
+  // literal's empty list makes the boot erase what it has just recovered
+  // (issue #2359). Copied, so the written rows never alias the map the tick
+  // mutates in place.
+  status.sinks = [...sinkSnapshots.values()].map((row) => ({ ...row }))
   /** @type {NodeJS.Timeout | null} */
   let tickHandle = null
   /** @type {((reason: 'signal'|'manual'|'restart'|'control') => Promise<number>) | null} */
@@ -334,6 +343,19 @@ export async function runDaemon(opts = {}) {
   writeStatusFile(runtimeStateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
+  // What this process loaded. Read once, at boot: the global root can be
+  // replaced underneath a running daemon, and the updater has to compare
+  // the registry against the code that is actually running, not the code
+  // on disk, or a replaced root reads as "up to date" while the daemon
+  // stays on the old version. Read before the config apply engine is
+  // created, which stamps it on a probation this host could not confirm.
+  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
+  /** @type {string | undefined} */
+  let runningVersion
+  try {
+    runningVersion = readSelfPackageIdentity().version
+  } catch { /* an install mid-replacement; the disk version stands in */ }
+
   // ----- Config apply engine (LLP 0025 / LLP 0031) -----
   // Created before bootKernel so probation expiry is evaluated before
   // any plugin activates: a kernel-killing-but-valid config that
@@ -367,6 +389,7 @@ export async function runDaemon(opts = {}) {
     onConfirmed: () => {
       if (scheduleReconcile) scheduleReconcile('confirm-edge')
     },
+    clientVersion: runningVersion,
   })
   const bootEval = await configControl.evaluateAtBoot()
   if (bootEval.action !== 'none') {
@@ -485,17 +508,6 @@ export async function runDaemon(opts = {}) {
   // config layers.
   // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
   let autoUpdateEnabled = true
-  // What this process loaded. Read once, at boot: the global root can be
-  // replaced underneath a running daemon, and the updater has to compare
-  // the registry against the code that is actually running, not the code
-  // on disk, or a replaced root reads as "up to date" while the daemon
-  // stays on the old version.
-  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
-  /** @type {string | undefined} */
-  let runningVersion
-  try {
-    runningVersion = readSelfPackageIdentity().version
-  } catch { /* an install mid-replacement; the disk version stands in */ }
   const supervised = detectSupervisor(env)
   /**
    * Re-derive the effective flag and re-cache it. Called at boot and
@@ -665,20 +677,77 @@ export async function runDaemon(opts = {}) {
   if (sinkResult.errors.length > 0) {
     for (const e of sinkResult.errors) {
       fileLog.error('daemon.sink_materialize_failed', {
+        [Attr.COMPONENT]: 'daemon',
         instance: e.instance,
         error_kind: e.errorKind,
         message: e.message,
       })
     }
+    // A configured sink that never materialized exports nothing, so the boot
+    // is degraded exactly as it is for a source that failed to start (issue
+    // #2547). Reload does not re-materialize sinks, so this holds until a boot
+    // whose materialize succeeds.
+    status.state = 'degraded'
+    status.warnings = sinkResult.errors.map((e) =>
+      `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: sink '${sanitizeLabel(e.instance) ?? 'unknown'}' (${sanitizeLabel(e.errorKind) ?? 'materialize_failed'}): ${sanitizeLabel(e.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`)
+    // The same signal tells the apply engine this host may be unable to run
+    // the poll that confirms a probation, so its expiry is not a verdict on
+    // the revision.
+    // @ref LLP 0517#unconfirmed [implements]: a sink materialize failure during probation marks it unconfirmable
+    try {
+      configControl.noteSinkMaterializeFailed()
+    } catch { /* best-effort: an unwritable state file leaves the plain expiry */ }
   }
 
   // ----- Sink driver -----
+  /** @type {Map<string, number>} */
+  const failingSinks = new Map()
+  // @ref LLP 0471#daemon-work [implements]: one boot pass restores unresolved transitions, never one scan per completion
+  const historyNow = Date.now()
+  for (const handle of boot.runtime.sinks.listHandles()) {
+    const instance = sinkInstanceName(handle)
+    const dir = path.join(stateRoot, 'sinks', instance, 'outbox')
+    const success = Date.parse(sinkSnapshots.get(instance)?.lastSuccessAt ?? '')
+    const recoveredAt = Number.isFinite(success) && success <= historyNow ? success : -Infinity
+    try {
+      for await (const name of diagnosticEntries(dir, instance)) {
+        const record = await readDiagnosticRecord(dir, name, instance)
+        if (record && record.at <= historyNow && record.at >= recoveredAt) {
+          failingSinks.set(instance, Math.max(failingSinks.get(instance) ?? -Infinity, record.at))
+        }
+      }
+    } catch { /* Restore only evidence actually read; absent history makes no transition claim. */ }
+  }
   const driver = createSinkDriver({
     sinkRegistry: boot.runtime.sinks,
     queryRegistry: boot.runtime.query,
     storage: boot.runtime.storage,
     stateRoot,
     config: boot.config ?? undefined,
+    onDiagnosticCleanupFailure(instance, code) {
+      fileLog.warn('daemon.sink_outbox_cleanup_failed', { hyp_sink_instance: instance, error_kind: code })
+    },
+    // @ref LLP 0471#daemon-work [implements]: actual completion stamps and bounded transition state, never a queued report
+    onComplete({ instance, startedAt, completedAt, report }) {
+      if (shutdownInFlight) return
+      const snap = sinkSnapshots.get(instance) ?? { instance, plugin: '', kind: '' }
+      snap.lastTickAt = startedAt
+      if (report.status === 'exported') {
+        snap.lastSuccessAt = completedAt
+        const failedAt = failingSinks.get(instance)
+        if (failedAt !== undefined && Date.parse(completedAt) > failedAt) {
+          failingSinks.delete(instance)
+          fileLog.info('daemon.sink_export_recovered', { hyp_sink_instance: instance })
+        }
+      } else {
+        if (!failingSinks.has(instance)) fileLog.warn('daemon.sink_export_failed', {
+          hyp_sink_instance: instance, status: report.status, error_kind: 'sink_export',
+        })
+        failingSinks.set(instance, Math.max(failingSinks.get(instance) ?? -Infinity, Date.parse(completedAt)))
+      }
+      sinkSnapshots.set(instance, snap)
+      requestBookkeeping()
+    },
   })
 
   // ----- Backfill sweep driver -----
@@ -694,13 +763,24 @@ export async function runDaemon(opts = {}) {
     config: boot.config ?? undefined,
   })
 
-  status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
+  // The destinations this boot's effective config still names. Their recovered
+  // stamps survive a boot that registered nothing for them (plugin missing,
+  // activation failed, sink unmaterialized), which otherwise leaves the
+  // destination reading as never-succeeded and warning until a success that
+  // cannot happen while it stays unregistered (issue #2359). Scoped to the
+  // configured set, so rows cannot accumulate across boots and a destination
+  // the operator removed still loses its row.
+  // @ref LLP 0453#warning-rule [implements]: the daemon carries the stamp across its own restarts, and a destination outside the configured set keeps nothing
+  const configuredSinkInstances = new Set(Object.keys(boot.config?.sinks ?? {}))
+
+  status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, retain: configuredSinkInstances })
   persist()
   // Derive the boot health event from the SAME aggregate written to
   // status.json: a degraded boot (any source failed to start) must not log
   // `daemon.healthy`. Monitoring keyed off that event would read a false
   // positive, and a health event never lists a source that failed to
-  // start; it reports only the sources that actually came up.
+  // start; it reports only the sources that actually came up. A sink that
+  // failed to materialize degrades the boot the same way.
   // @ref LLP 0017#the-primary-daemon [implements]: the boot health event reports the same state as `hyp daemon status`
   const startedSourceNames = sourceSnapshots
     .filter((s) => s.state !== 'failed')
@@ -718,6 +798,7 @@ export async function runDaemon(opts = {}) {
       failed_sources: sourceSnapshots
         .filter((s) => s.state === 'failed')
         .map((s) => s.name),
+      failed_sinks: sinkResult.errors.map((e) => ({ instance: e.instance, error_kind: e.errorKind })),
       sinks: status.sinks.map((s) => s.instance),
     })
   }
@@ -838,83 +919,78 @@ export async function runDaemon(opts = {}) {
     }
   }
 
-  async function runTick() {
-    const now = new Date()
-    await withSpan(
-      'sink.tick',
-      {
-        [Attr.COMPONENT]: 'daemon',
-        [Attr.OPERATION]: 'sink.tick',
-        daemon_mode: mode,
-        status: 'ok',
-      },
-      async () => {
-        const report = await driver.tick({ now, source: 'daemon' })
-        // The scheduled backfill sweep (LLP 0170) rides this same tick. The
-        // await covers only the cron due-check and the fire: each due
-        // provider's run is started unblocked inside `tick`, so a slow
-        // transcript scan never stalls the sink snapshots, the source-detail
-        // refresh, or `persist()` below.
-        // @ref LLP 0172#lane-b-sweep [implements]: one sibling call on the existing 60-second loop, not a second timer
-        await sweepDriver.tick({ now })
-        for (const sinkReport of report.sinks) {
-          const snap = sinkSnapshots.get(sinkReport.instance) ?? {
-            instance: sinkReport.instance,
-            plugin: '',
-            kind: '',
-          }
-          snap.lastTickAt = now.toISOString()
-          if (sinkReport.status === 'exported') {
-            snap.lastSuccessAt = snap.lastTickAt
-          }
-          sinkSnapshots.set(sinkReport.instance, snap)
-        }
-      },
-      { component: 'daemon' }
-    ).catch((err) => {
-      const message = err instanceof Error ? err.message : String(err)
-      fileLog.error('daemon.tick_failed', { message })
-    })
-    status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
-    await refreshSourceStatus()
-    persist()
+  /** @type {Promise<void> | null} */
+  let bookkeepingInFlight = null
+  let bookkeepingRequested = false
 
-    // The daily self-update check rides this tick rather than owning a
-    // timer (same shape as the backfill sweep above). The pass itself
-    // is TTL-gated and provenance-guarded, so this is a cheap state
-    // read on almost every tick. An applied update exits through the
-    // staged-restart path: the service manager relaunches onto the new
-    // code.
-    // @ref LLP 0309#cadence [implements]: boot + daily with jitter, applied via the staged restart
-    if (autoUpdateEnabled && !selfUpdateInFlight) {
-      selfUpdateInFlight = true
-      void runSelfUpdatePass({
-        stateRoot,
-        env,
-        configPath: boot.configPath ?? opts.configPath,
-        autoUpdate: autoUpdateEnabled,
-        runningVersion,
-        // A restart exit is only an update when something relaunches us;
-        // hand-run in a terminal, the pass installs nothing and says why.
-        supervised,
-        log: (event, fields) => fileLog.info(event, fields ?? {}),
-      }).then((result) => {
-        if (result.action === 'updated' && triggerShutdown) {
-          void triggerShutdown('restart')
-        }
-      }).catch((err) => {
-        // `runSelfUpdatePass` never throws, but the restart handler above
-        // can, and an unhandled rejection is a dead daemon under Node's
-        // default `--unhandled-rejections=throw`.
-        fileLog.error('self_update.tick_failed', {
-          message: err instanceof Error ? err.message : String(err),
-        })
-      }).finally(() => { selfUpdateInFlight = false })
-    }
+  // @ref LLP 0471#daemon-work [implements]: a synchronous one-active/one-bit gate cannot retain one promise per timer fire
+  function requestBookkeeping() {
+    if (shutdownInFlight) return
+    if (bookkeepingInFlight) { bookkeepingRequested = true; return }
+    bookkeepingInFlight = (async () => {
+      do {
+        bookkeepingRequested = false
+        await runBookkeeping()
+      } while (bookkeepingRequested && !shutdownInFlight)
+    })().catch(() => {
+      fileLog.error('daemon.tick_failed', { error_kind: 'bookkeeping' })
+    }).finally(() => { bookkeepingInFlight = null })
+  }
+
+  function runTick() {
+    if (shutdownInFlight) return
+    driver.dispatch()
+    requestBookkeeping()
+  }
+
+  async function runBookkeeping() {
+    return withSpan('daemon.bookkeeping', {
+      [Attr.COMPONENT]: 'daemon', [Attr.OPERATION]: 'daemon.bookkeeping', daemon_mode: mode,
+    }, async () => {
+      const now = new Date()
+      // @ref LLP 0172#lane-b-sweep [implements]: the existing interval requests a bounded due-check, never waits for provider completion
+      await sweepDriver.tick({ now })
+      status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, retain: configuredSinkInstances })
+      await refreshSourceStatus()
+      persist()
+
+      // The daily self-update check rides this tick rather than owning a
+      // timer (same shape as the backfill sweep above). The pass itself
+      // is TTL-gated and provenance-guarded, so this is a cheap state
+      // read on almost every tick. An applied update exits through the
+      // staged-restart path: the service manager relaunches onto the new
+      // code.
+      // @ref LLP 0309#cadence [implements]: boot + daily with jitter, applied via the staged restart
+      if (autoUpdateEnabled && !selfUpdateInFlight) {
+        selfUpdateInFlight = true
+        void runSelfUpdatePass({
+          stateRoot,
+          env,
+          configPath: boot.configPath ?? opts.configPath,
+          autoUpdate: autoUpdateEnabled,
+          runningVersion,
+          // A restart exit is only an update when something relaunches us;
+          // hand-run in a terminal, the pass installs nothing and says why.
+          supervised,
+          log: (event, fields) => fileLog.info(event, fields ?? {}),
+        }).then((result) => {
+          if (result.action === 'updated' && triggerShutdown) {
+            void triggerShutdown('restart')
+          }
+        }).catch((err) => {
+          // `runSelfUpdatePass` never throws, but the restart handler above
+          // can, and an unhandled rejection is a dead daemon under Node's
+          // default `--unhandled-rejections=throw`.
+          fileLog.error('self_update.tick_failed', {
+            message: err instanceof Error ? err.message : String(err),
+          })
+        }).finally(() => { selfUpdateInFlight = false })
+      }
+    }, { component: 'daemon' })
   }
 
   if (tickIntervalMs > 0) {
-    tickHandle = setInterval(() => { void runTick() }, tickIntervalMs)
+    tickHandle = setInterval(runTick, tickIntervalMs)
     if (typeof tickHandle.unref === 'function') tickHandle.unref()
   }
 
@@ -966,7 +1042,7 @@ export async function runDaemon(opts = {}) {
     // with the tracer directly instead, so only this one call site's status
     // handling changes and `withSpan` (and everything else that calls it)
     // is untouched.
-    async function runMaintenance() {
+    async function maintenanceTick() {
       const tracer = getTracer('daemon')
       const attrs = buildAttrs({
         [Attr.COMPONENT]: 'daemon',
@@ -976,6 +1052,8 @@ export async function runDaemon(opts = {}) {
       })
       await tracer.startActiveSpan('maintenance.tick', { attributes: attrs }, async (span) => {
         try {
+          // @ref LLP 0471#diagnostic-history [implements]: cleanup retries use this existing cadence, including when exports keep failing
+          await driver.maintainDiagnostics()
           const report = await maintainCache({
             cacheRoot: boot.runtime.storage.cacheRoot,
             budgetMs: mCfg.max_tick_ms,
@@ -1081,16 +1159,24 @@ export async function runDaemon(opts = {}) {
           // (hyparam/hypaware#2363). `withSpan` writes this line for the
           // spans it owns; this tick owns its own, so it writes it here.
           span.setAttribute('status', 'failed')
-          span.setAttribute('error_kind', attrs.error_kind ?? 'unhandled_exception')
+          span.setAttribute('error_kind', 'unhandled_exception')
           throw err
         } finally {
           span.end()
         }
-      }).catch((err) => {
+      })
+    }
+
+    async function runMaintenance() {
+      // `maintenanceTick` is async so a throw in its span prologue arrives
+      // here as a rejection too: `maintenanceInFlight` has no catch of its
+      // own, and an unhandled rejection would end the daemon.
+      await maintenanceTick().catch((err) => {
         // Still reachable: partition discovery, the retired-generation
-        // sweep, and anything else outside the per-partition catch.
+        // sweep, and anything else outside the per-partition catch. Logged
+        // with the kind the span carries, so the line and the span agree.
         const message = err instanceof Error ? err.message : String(err)
-        fileLog.error('daemon.maintenance_failed', { message })
+        fileLog.error('daemon.maintenance_failed', { [Attr.ERROR_KIND]: 'unhandled_exception', message })
       })
       // Retention rides the tail of the same tick, so `maintenanceInFlight`
       // (and with it shutdown, which awaits it) covers a delete in progress.
@@ -1209,6 +1295,10 @@ export async function runDaemon(opts = {}) {
       clearInterval(maintenanceHandle)
       maintenanceHandle = null
     }
+    // @ref LLP 0471#close-order [implements]: stop admission and signal all sink resources before any unrelated shutdown await
+    driver.stop()
+    bookkeepingRequested = false
+    const sinksClosing = closeAllSinks({ runtime: boot.runtime, fileLog })
     if (maintenanceInFlight) {
       await maintenanceInFlight
     }
@@ -1225,8 +1315,8 @@ export async function runDaemon(opts = {}) {
     // timer is unref'd so it can never be what keeps the process alive.
     //
     // Armed here rather than at the top of shutdown, so the deadline
-    // covers the part that can wedge (a client stream holding a source's
-    // `server.close()` open) and not the reconcile pass the line above
+    // covers sink settlement and a client stream holding a source's
+    // `server.close()` open and not the reconcile pass the line above
     // deliberately waits for: `hyp backfill` is a multi-minute import by
     // design, and forcing an exit through it is the orphaned child and
     // lost marker that settle exists to prevent.
@@ -1249,6 +1339,7 @@ export async function runDaemon(opts = {}) {
       }, RESTART_EXIT_DEADLINE_MS)
       forcedExit.unref()
     }
+    await Promise.all([driver.drain(), bookkeepingInFlight])
     // Last chance to capture accruing source details: the sources are still
     // running here, and after `stopAllSources` below their probes are gone.
     // A daemon that never reached a tick (or stopped between ticks) would
@@ -1277,7 +1368,7 @@ export async function runDaemon(opts = {}) {
         for (const snap of status.sources) {
           snap.state = 'stopped'
         }
-        await closeAllSinks({ runtime: boot.runtime, fileLog })
+        await sinksClosing
       },
       { component: 'daemon' }
     ).catch((err) => {
@@ -1830,8 +1921,9 @@ async function safeStatus(runtime, name, fileLog) {
  * hostile snapshot yields no stamps, and a row without a parseable one is
  * skipped, so a garbled file can lose recovery evidence but never invent it.
  * `readStatusFile` validates only that it read an object, hence the row guards.
- * Rows for instances this boot no longer registers are harmless:
- * `collectSinkSnapshots` emits from the live handles.
+ * A row for an instance this boot does not register is kept only while the
+ * effective config still names the destination: `collectSinkSnapshots` emits
+ * those alongside the live handles, and drops the rest.
  *
  * @param {string} stateRoot
  * @returns {Map<string, SinkSnapshot>}
@@ -1857,16 +1949,24 @@ function recoverSinkSnapshots(stateRoot) {
 }
 
 /**
- * Build a snapshot row per registered sink instance. The kernel sink
- * driver doesn't surface failure / next-tick fields, so those stay
+ * Build a snapshot row per registered sink instance, then one more per
+ * `retain` instance that registered nothing but has a recovered row. The
+ * kernel sink driver doesn't surface failure / next-tick fields, so those stay
  * `undefined`.
  *
- * @param {{ runtime: KernelRuntime, sinkSnapshots: Map<string, SinkSnapshot> }} args
+ * `retain` keeps a recorded success from dying with the boot that did not
+ * register its destination (issue #2359): omitted, the live handles alone are
+ * emitted and every recovered stamp they do not account for is erased, so the
+ * daemon passes its configured sink instances.
+ *
+ * @param {{ runtime: KernelRuntime, sinkSnapshots: Map<string, SinkSnapshot>, retain?: Set<string> }} args
  * @returns {SinkSnapshot[]}
  */
-function collectSinkSnapshots({ runtime, sinkSnapshots }) {
+function collectSinkSnapshots({ runtime, sinkSnapshots, retain }) {
   /** @type {SinkSnapshot[]} */
   const out = []
+  /** @type {Set<string>} */
+  const live = new Set()
   for (const handle of runtime.sinks.listHandles()) {
     // The registry's key, not the handle's own `instanceName`: this runs on
     // every tick and outside the tick's `.catch`, so an owner's accessor on
@@ -1875,6 +1975,7 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
     // property, still read off the handle, so that outage is narrowed here
     // and not yet closed (issue #2059).
     const instance = sinkInstanceName(handle)
+    live.add(instance)
     const existing = sinkSnapshots.get(instance) ?? {
       instance,
       plugin: handle.plugin,
@@ -1884,6 +1985,13 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
     existing.kind = handle.kind
     sinkSnapshots.set(instance, existing)
     out.push({ ...existing })
+  }
+  // Only an instance `recoverSinkSnapshots` found a usable stamp for has a row
+  // to carry, so a configured destination that never succeeded stays that way.
+  for (const instance of retain ?? []) {
+    if (live.has(instance)) continue
+    const existing = sinkSnapshots.get(instance)
+    if (existing) out.push({ ...existing })
   }
   return out
 }
@@ -1919,7 +2027,7 @@ export async function requestDaemonStop({
 }) {
   const entry = readPidFile(stateRoot)
   if (!entry || !processIsAlive(entry.pid)) {
-    if (entry) clearPidFile(stateRoot)
+    if (entry) clearStalePidFile(stateRoot)
     // A gateway that is already gone is what a hard kill leaves behind, so
     // this is the arm of #2288 that actually accumulates: the child it
     // supervised went with it and its pid file below `processing/` is
@@ -1935,7 +2043,7 @@ export async function requestDaemonStop({
     } catch (err) {
       const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
       if (code === 'ESRCH') {
-        clearPidFile(stateRoot)
+        clearStalePidFile(stateRoot)
         clearStalePidFile(processingStateRoot(stateRoot))
         return 'not_running'
       }
@@ -1945,7 +2053,7 @@ export async function requestDaemonStop({
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (!processIsAlive(entry.pid)) {
-      clearPidFile(stateRoot)
+      clearStalePidFile(stateRoot)
       // The supervised processing child dies with the gateway that spawned it
       // and leaves its own pid file below `processing/` behind whenever it got
       // no shutdown to run (#2288). Reconciled rather than deleted: that pid

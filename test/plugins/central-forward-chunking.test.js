@@ -5,10 +5,15 @@ import assert from 'node:assert/strict'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { gunzipSync } from 'node:zlib'
 
-import { createForwardSink, initializeOpenDatasetRollouts } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { createForwardSink, initializeOpenDatasetRollouts, openDatasetsWithoutPartitions } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { createHeldDatasetStore, readHeldDatasets } from '../../src/core/sinks/held_datasets.js'
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 import { readRequestBody } from '../helpers/request_body.js'
+import { temporaryDirectory } from '../helpers/temp_dir.js'
+
+/** @import { HeldDatasetStore } from '../../src/core/sinks/types.js' */
 
 function makeLog() {
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
@@ -169,6 +174,7 @@ function makeQuery(signal) {
 function makeIdentity() {
   let refreshes = 0
   return {
+    identity: { gateway_id: 'gateway-test' },
     get refreshes() { return refreshes },
     async getCurrentJwt() { return 'jwt-test' },
     async refresh() { refreshes += 1 },
@@ -220,6 +226,53 @@ function makeFetch(responder) {
 
 const TABLE = '/cache/ai_gateway_messages/source=claude'
 
+test('missing-row repair binds the org, preserves its retry batch and never advances watermarks', async () => {
+  const watermarks = makeWatermarks()
+  const calls = []
+  let org = 'test-org'
+  let valid = true
+  let validations = 0
+  let reply = { syncRestore: 1, status: 'accepted', restored: 1, present: 0, purged: 0 }
+  const sink = createForwardSink({ config: /** @type {any} */ ({ url: 'http://server:8740' }),
+    query: /** @type {any} */ (makeQuery('proxy')), storage: /** @type {any} */ (makeStorage(TABLE, 0)),
+    watermarks, rollouts: makeRollouts(), log: makeLog(), sleepFn: async () => {},
+    identityClient: /** @type {any} */ ({ async getCurrentJwt() { return `header.${Buffer.from(JSON.stringify({ org })).toString('base64url')}.signature` } }),
+    fetchFn: /** @type {typeof fetch} */ (async (url, init) => {
+      calls.push({ url: String(url), headers: init?.headers, body: await readRequestBody(init?.body) })
+      if (calls.length === 1) return new Response('', { status: 503, headers: { 'retry-after': '0' } })
+      return Response.json(reply, { status: 202 })
+    }),
+  })
+  const request = { org: 'test-org', revision: 'a'.repeat(64), rows: [{ part_id: 'missing', session_id: 's' }],
+    async validate() {
+      validations++
+      if (!valid) throw new Error('policy changed')
+    } }
+  try {
+    assert.ok(sink.restoreMissingRows)
+    assert.equal((await sink.restoreMissingRows(request)).restored, 1)
+    assert.equal(calls.length, 2)
+    assert.equal(validations, 2, 'policy and local revision revalidated before every attempt')
+    assert.equal(calls[0].url, 'http://server:8740/v1/ingest-missing/ai_gateway_messages')
+    assert.equal(calls[0].headers['x-hyp-batch-id'], calls[1].headers['x-hyp-batch-id'])
+    assert.equal(calls[1].headers['x-hyp-sync-org'], 'test-org')
+    assert.equal(calls[0].body, calls[1].body)
+    assert.equal(watermarks.writes.length, 0)
+    org = 'different-org'
+    await assert.rejects(sink.restoreMissingRows(request), /different organizations/)
+    assert.equal(calls.length, 2, 'wrong-org identity never sends the payload')
+    org = 'test-org'
+    valid = false
+    await assert.rejects(sink.restoreMissingRows(request), /policy changed/)
+    assert.equal(calls.length, 2)
+    valid = true
+    reply = /** @type {any} */ ({})
+    await assert.rejects(sink.restoreMissingRows(request), /unsupported repair acknowledgement/)
+    await assert.rejects(sink.restoreMissingRows({ ...request, rows: Array(1001).fill(request.rows[0]) }), /invalid missing-row/)
+    await assert.rejects(sink.restoreMissingRows({ ...request, rows: [{ content_text: 'x'.repeat(4 * 1024 * 1024) }] }), /4 MiB/)
+  } finally { await sink.close() }
+})
+
 /**
  * @param {{
  *   count: number | (() => number),
@@ -233,9 +286,12 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
  *   rollout?: { v: 1, partitions: string[], initializedAt: string, updatedAt: string } | null,
  *   nowFn?: () => number,
  *   watermarkFilePath?: string,
+ *   receiptsDir?: string,
+ *   fetchFn?: typeof fetch,
+ *   held?: HeldDatasetStore,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath }) {
+function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath, receiptsDir, fetchFn, held }) {
   const storage = makeStorage(TABLE, count, rowFactory, dropRow)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
@@ -256,7 +312,9 @@ function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', que
     watermarks: /** @type {any} */ (watermarks),
     rollouts: /** @type {any} */ (rollouts),
     log: /** @type {any} */ (log),
-    fetchFn: fn,
+    fetchFn: fetchFn ?? fn,
+    receiptsDir,
+    held,
     sleepFn: sleepFn ?? recordingSleep,
     nowFn,
   })
@@ -307,7 +365,7 @@ test('upload progress counts acknowledgements, excluding retries and withheld ro
     dropRow: (i) => i === 0,
     responder: () => {
       requests += 1
-      assert.equal(progress.length, requests <= 2 ? 0 : 1)
+      assert.equal(progress.filter((p) => p.rows > 0).length, requests <= 2 ? 0 : 1)
       return requests === 1 ? { status: 429, retryAfter: 1 } : requests === 3 ? 400 : 202
     },
   })
@@ -316,9 +374,10 @@ test('upload progress counts acknowledgements, excluding retries and withheld ro
     onProgress: (delta) => progress.push(delta),
   })
   assert.equal(result.status, 'failed')
-  assert.equal(progress.length, 1)
-  assert.equal(progress[0].rows, 5000)
-  assert.equal(progress[0].bytes, Buffer.byteLength(calls[1].lines.join('\n') + '\n'))
+  assert.deepEqual(progress[0], { rows: 0, bytes: 0, waitMs: 1000 })
+  assert.equal(progress.length, 2)
+  assert.equal(progress[1].rows, 5000)
+  assert.equal(progress[1].bytes, Buffer.byteLength(calls[1].lines.join('\n') + '\n'))
 })
 
 test('a partition that fits in one chunk makes exactly one POST', async () => {
@@ -725,7 +784,7 @@ test('an open-dataset baseline failure never falls back to historical ingest', a
   const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
 
   assert.equal(result.status, 'failed')
-  assert.match(result.error ?? '', /watermark disk unavailable/)
+  assert.match(result.error ?? '', /central.forward local rollout failed/)
   assert.equal(calls.filter((c) => c.method === 'POST').length, 0)
   // The baseline now precedes registration, so a local state failure makes no
   // remote call at all and the partition can retry without duplicate history.
@@ -895,6 +954,174 @@ test('an older server holds an open dataset locally and re-probes slowly', async
   await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
   assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT', 'POST'])
   assert.deepEqual(calls[2].lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
+})
+
+// @ref LLP 0537#held-outcome [tests]: a refused registration is held durably, neither counted nor retried, and only acceptance clears it
+test('a held registration is recorded, not counted or retried, and survives reprobe expiry', async () => {
+  const dir = temporaryDirectory('hyp-central-held-')
+  const url = 'http://server:8740'
+  let count = 10
+  let now = 0
+  let putStatus = 405
+  const held = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await held.load(new Set(['claude_telemetry_events']))
+  const { sink, calls, watermarks } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+    nowFn: () => now,
+    held,
+    responder: (c) => c.method === 'PUT' ? putStatus : 202,
+  })
+
+  const first = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(first.status, 'exported')
+  assert.equal(first.partitionsExported, 0, 'held work is not an exported partition')
+  assert.equal(first.retryPartitions, undefined, 'no outbox entry for a capability hold')
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+  const baseline = watermarks.record?.continuation.seq
+
+  // The reprobe window expires and the server still refuses: the hold stays
+  // and the watermark does not move past rows that never left.
+  count = 12
+  now = 5 * 60_000 + 1
+  const second = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(second.partitionsExported, 0)
+  assert.equal(watermarks.record?.continuation.seq, baseline)
+  assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT'])
+
+  // Expiry alone is not recovery: a tick inside the next window still holds.
+  now = 6 * 60_000
+  await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+
+  // A fresh process reads the same hold.
+  const restarted = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await restarted.load(new Set(['claude_telemetry_events']))
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+
+  putStatus = 202
+  now = 11 * 60_000
+  const upgraded = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(upgraded.partitionsExported, 1)
+  assert.deepEqual(calls.at(-1)?.lines.map((line) => JSON.parse(line).message_id), ['m10', 'm11'])
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: [] })
+})
+
+test('an accepted registration clears the hold even when the ingest after it fails', async () => {
+  const dir = temporaryDirectory('hyp-central-held-')
+  const url = 'http://server:8740'
+  let count = 10
+  let now = 0
+  let putStatus = 404
+  const held = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await held.load(new Set(['claude_telemetry_events']))
+  const { sink, calls } = buildSink({
+    count: () => count,
+    signal: 'claude_telemetry',
+    nowFn: () => now,
+    held,
+    responder: (c) => c.method === 'PUT' ? putStatus : 500,
+  })
+
+  await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
+
+  putStatus = 202
+  count = 12
+  now = 5 * 60_000 + 1
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed', 'the ingest failure still retries')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT', 'POST'])
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: [] }, 'not reported as a server that cannot take it')
+})
+
+test('only open datasets with no local partition count as holding nothing', async () => {
+  /**
+   * @param {string} name
+   * @param {() => Promise<unknown[]>} discoverPartitions
+   */
+  const dataset = (name, discoverPartitions) => ({ name, discoverPartitions })
+  const query = {
+    listDatasets: () => [
+      dataset('stored', async () => [{ tablePath: '/t/stored' }]),
+      dataset('spooled', async () => [{ tablePath: '/t/spooled' }]),
+      dataset('empty', async () => []),
+      dataset('unmaterialized', async () => [{ tablePath: '/t/none' }]),
+      dataset('unknown', async () => { throw new Error('discovery failed') }),
+      dataset('logs', async () => []),
+    ],
+  }
+  const storage = {
+    cacheRoot: '/t',
+    tableExists: (/** @type {string} */ p) => p === '/t/stored',
+    hasPendingSync: (/** @type {string} */ p) => p === '/t/spooled',
+  }
+  assert.deepEqual(
+    await openDatasetsWithoutPartitions(/** @type {any} */ (query), /** @type {any} */ (storage)),
+    ['empty', 'unmaterialized'],
+  )
+})
+
+test('a hold that cannot be recorded fails the partition rather than reading as settled', async () => {
+  const { sink } = buildSink({
+    count: 10,
+    signal: 'claude_telemetry',
+    nowFn: () => 0,
+    held: {
+      async load() { return undefined },
+      async resolve() {},
+      async hold() { throw new Error('EACCES: held-datasets.json') },
+      async clear() {},
+    },
+    responder: (c) => c.method === 'PUT' ? 404 : 202,
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.match(String(result.error), /held-dataset state/)
+})
+
+test('one batch keeps healthy, held and privacy-withheld datasets apart', async () => {
+  const dir = temporaryDirectory('hyp-central-held-')
+  const url = 'http://server:8740'
+  const base = makeQuery(null)
+  const held = createHeldDatasetStore({ stateDir: dir, destination: url })
+  await held.load(new Set(['claude_telemetry_events', 'private_graph']))
+  // A dataset that is withheld now holds nothing, even if it once did.
+  await held.hold('private_graph')
+  const { sink, calls } = buildSink({
+    count: 10,
+    nowFn: () => 0,
+    held,
+    query: {
+      getDataset(name) {
+        const dataset = base.getDataset(name)
+        if (name === 'ai_gateway_messages') return { ...dataset, sourceSignal: 'logs' }
+        if (name === 'private_graph') return { ...dataset, localOnlyContentColumns: ['content_text'] }
+        return dataset
+      },
+    },
+    responder: (c) => c.method === 'PUT' ? 404 : 202,
+  })
+
+  const result = await sink.exportBatch(/** @type {any} */ ({
+    partitions: [
+      { dataset: 'ai_gateway_messages', tablePath: TABLE },
+      { dataset: 'claude_telemetry_events', tablePath: TABLE },
+      { dataset: 'private_graph', tablePath: TABLE },
+    ],
+  }), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 1, 'only the healthy partition counts')
+  assert.equal(result.retryPartitions, undefined)
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.url}`), [
+    'POST http://server:8740/v1/ingest/logs',
+    'PUT http://server:8740/v1/datasets/claude_telemetry_events',
+  ])
+  assert.deepEqual(await readHeldDatasets(dir, url), { datasets: ['claude_telemetry_events'] })
 })
 
 test('an unresolvable dataset fails only its own partition', async () => {
@@ -1244,7 +1471,7 @@ test('backpressure drains the throttle response body before parking', async () =
   })
   const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
   assert.equal(result.status, 'exported')
-  assert.equal(drains(), 2) // both throttle bodies cancelled; the 202 returns without draining
+  assert.equal(drains(), 3) // two throttle bodies and the final acknowledgement are released
 })
 
 test('each backpressure wait emits central.forward.backpressure telemetry', async () => {
@@ -1391,7 +1618,9 @@ test('a fresh partition (no watermark) reads from the start and advances', async
   assert.equal(watermarks.record?.continuation.seq, '10')
 })
 
-test('an unordered scan never skips a lower-seq row when a later chunk fails (BLOCKER, LLP 0040 §4 risk #3)', async () => {
+test('an unordered scan never skips a lower-seq row when a later chunk fails (BLOCKER, LLP 0040 §4 risk #3)', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'unordered-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
   // The scan is NOT seq-ordered: a high-seq row leads the partition, so the
   // running-max `after` saturates inside chunk 0 while chunk 1 holds LOWER seqs.
   // Per-chunk advance would jump the watermark past chunk 1's rows on the
@@ -1452,6 +1681,7 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
     rollouts: /** @type {any} */ (makeRollouts()),
     log: /** @type {any} */ (makeLog()),
     fetchFn,
+    receiptsDir,
     sleepFn: async () => {},
   })
 
@@ -1467,6 +1697,166 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
   for (let i = 5000; i < TOTAL; i += 1) {
     assert.ok(acked.includes(i), `low-seq row ${i} from the previously-failed chunk was delivered (no skip)`)
   }
-  assert.equal(new Set(acked).size, TOTAL, 'every row delivered exactly once across the retry')
+  assert.equal(new Set(acked).size, TOTAL, 'every row delivered across the retry')
+  assert.equal(acked.length, TOTAL, 'saved receipts skip the acknowledged high-seq chunk')
   assert.equal(watermarks.record?.continuation.seq, '1000000', 'watermark advances only after the whole partition acks')
+})
+
+// A dropped connection mid-upload (the edge's HTTP/2 GOAWAY, a reset socket)
+// rejects fetch with a TypeError carrying the undici code. The chunk is
+// idempotent by batch id, so it is re-sent instead of failing the partition
+// (issue #2581).
+test('a dropped connection re-sends the same chunk and the export succeeds', async () => {
+  let n = 0
+  const { sink, calls, sleeps } = buildSink({
+    count: 12_000,
+    responder: () => {
+      if (++n === 2) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_INFO', message: 'HTTP/2: "GOAWAY" frame received with code 0' } })
+      return 202
+    },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 1)
+  // Three chunks plus one resend of the dropped one, with the same batch id and body.
+  assert.equal(calls.length, 4)
+  assert.equal(calls[2].batchId, calls[1].batchId)
+  assert.deepEqual(calls[2].lines, calls[1].lines)
+  assert.deepEqual(sleeps, [2_000])
+})
+
+test('a connection that keeps dropping fails the chunk with the transport code after bounded resends', async () => {
+  const { sink, calls, sleeps, log } = buildSink({
+    count: 100,
+    responder: () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }) },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.equal(calls.length, 4, 'one attempt plus three resends')
+  assert.deepEqual(sleeps, [2_000, 4_000, 6_000])
+  const failure = log.rows.find((row) => row.message === 'central.forward.failed')
+  assert.match(String(failure?.fields?.error ?? failure?.fields?.message ?? ''), /transport failed: ECONNRESET/)
+})
+
+test('an abort during the upload is not retried as a dropped connection', async () => {
+  const { sink, calls } = buildSink({
+    count: 100,
+    responder: () => { throw Object.assign(new Error('closed'), { name: 'AbortError' }) },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(calls.length, 1)
+})
+
+
+const firstSyncBatch = { batchId: 'test', partitions: [{ dataset: 'ai_gateway_messages', tablePath: TABLE, partition: { source: 'claude' } }] }
+
+test('502 and 504 retry the same chunk within a shared three-retry budget', async () => {
+  let attempt = 0
+  const { sink, calls, sleeps, log } = buildSink({ count: 10, responder: () => [502, 504, 202][attempt++] })
+  assert.equal((await sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(new Set(calls.map((c) => c.batchId)).size, 1)
+  assert.deepEqual(sleeps, [2000, 4000])
+  assert.equal(log.rows.filter((r) => r.message === 'central.forward.http_retry').length, 2)
+  const broken = buildSink({ count: 10, responder: () => 502 })
+  assert.equal((await broken.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'failed')
+  assert.equal(broken.calls.length, 4)
+  assert.deepEqual(broken.sleeps, [2000, 4000, 6000])
+})
+
+test('acknowledged chunks survive a new sink instance; completion clears receipts', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'central-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
+  let attempts = 0
+  const first = buildSink({ count: 12_000, receiptsDir, responder: () => ++attempts === 2 ? 400 : 202 })
+  assert.equal((await first.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'failed')
+  assert.equal(first.watermarks.writes.length, 0)
+  await first.sink.close?.()
+  const next = buildSink({ count: 12_000, receiptsDir })
+  const progress = []
+  assert.equal((await next.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *', onProgress: (p) => progress.push(p) })).status, 'exported')
+  assert.deepEqual(next.calls.map((c) => c.rowCount), [5000, 2000])
+  assert.equal(progress[0].resumedRows, 5000)
+  assert.equal(progress[0].wireBytes, 0)
+  assert.equal(next.watermarks.record?.exportedRowCount, 12_000)
+  assert.equal(next.log.rows.filter((r) => r.message === 'central.forward.chunk' && r.fields.resumed).length, 1)
+  assert.deepEqual(await fsp.readdir(receiptsDir), [])
+})
+
+test('changed privacy filtering invalidates a saved chunk receipt', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'central-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
+  let attempts = 0
+  const first = buildSink({ count: 10_001, receiptsDir, responder: () => ++attempts === 2 ? 400 : 202 })
+  await first.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })
+  const next = buildSink({ count: 10_001, receiptsDir, dropRow: (i) => i === 0 })
+  assert.equal((await next.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(next.calls.length, 2)
+  assert.ok(next.calls.every((call) => call.lines.every((line) => JSON.parse(line).message_id !== 'm0')))
+  assert.notEqual(next.calls[0].batchId, first.calls[0].batchId)
+})
+
+test('compression is negotiated, bounded to each chunk, and falls back on 415', async () => {
+  const requests = []
+  const fetchFn = async (_url, init) => {
+    const headers = init.headers
+    const wire = Buffer.from(await new Response(init.body).arrayBuffer())
+    const decoded = headers['content-encoding'] === 'gzip' ? gunzipSync(wire) : wire
+    if (headers['content-encoding']) assert.equal(decoded.length, Number(headers['x-hyp-uncompressed-length']))
+    requests.push({ headers, wire: wire.length, decoded: decoded.length })
+    return new Response('', { status: requests.length === 2 ? 415 : 202, headers: { 'accept-encoding': 'gzip' } })
+  }
+  const { sink } = buildSink({ count: 12_000, fetchFn })
+  assert.equal((await sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(requests.length, 4)
+  assert.equal(requests[0].headers['content-encoding'], undefined)
+  assert.equal(requests[1].headers['content-encoding'], 'gzip')
+  assert.ok(requests[1].wire < requests[1].decoded / 2)
+  assert.equal(requests[2].headers['content-encoding'], undefined)
+  assert.equal(requests[1].headers['x-hyp-batch-id'], requests[2].headers['x-hyp-batch-id'])
+})
+
+test('close() stops a resumed export on its saved-receipt prefix without a watermark', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'central-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
+  let scanned = 0
+  const rowFactory = (/** @type {number} */ i) => { scanned += 1; return { message_id: `m${i}`, content_text: `row ${i}` } }
+  // Every chunk is acknowledged, then the watermark write fails: the journal
+  // keeps all four receipts for the next sink instance.
+  const first = buildSink({ count: 20_000, receiptsDir, rowFactory })
+  first.watermarks.write = async () => { throw new Error('fixture watermark disk failure') }
+  assert.equal((await first.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'failed')
+  assert.equal(first.calls.length, 4)
+  await first.sink.close?.()
+
+  for (const closeAfter of [1, 4]) {
+    const next = buildSink({ count: 20_000, receiptsDir, rowFactory })
+    scanned = 0
+    let progress = 0
+    let closedAt = 0
+    /** @type {Promise<void> | undefined} */
+    let closing
+    const result = await next.sink.exportBatch(firstSyncBatch, {
+      format: 'native', schedule: '* * * * *',
+      onProgress: () => {
+        progress += 1
+        if (progress === closeAfter) { closedAt = scanned; closing = next.sink.close?.() }
+      },
+    })
+    await closing
+    assert.equal(result.status, 'failed', `close after resumed chunk ${closeAfter}`)
+    assert.match(String(result.error), /closed/)
+    assert.equal(progress, closeAfter, 'no resumed chunk is reported after close')
+    assert.ok(scanned - closedAt <= 5000, `scan stops within one chunk of close (scanned ${scanned - closedAt} more)`)
+    assert.equal(next.calls.length, 0)
+    assert.equal(next.watermarks.writes.length, 0, 'a cancelled run does not checkpoint')
+    assert.equal((await fsp.readdir(receiptsDir)).length, 1, 'receipts stay for the next resume')
+  }
+
+  const resumed = buildSink({ count: 20_000, receiptsDir })
+  assert.equal((await resumed.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(resumed.calls.length, 0)
+  assert.equal(resumed.watermarks.record?.continuation.seq, '20000')
+  assert.deepEqual(await fsp.readdir(receiptsDir), [])
 })

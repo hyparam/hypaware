@@ -82,6 +82,14 @@ const PROVIDER = 'openai'
 const CONVERSATION_SOURCE = 'codex'
 
 const COMPONENT = 'plugin.codex.backfill'
+// Most rollout paths whose read failure the sweep remembers, so a file that
+// keeps failing warns once instead of every minute (#2070). Each entry is a
+// path (bounded by the OS path limit, 4096 bytes on Linux) plus a short error
+// code, so the map tops out near 256 x 4 KiB = 1 MiB and holds a few KiB for
+// ordinary ~120-byte rollout paths. A sweep failure past the cap is counted
+// in `scan_complete` but not warned per file, so the warn stream stays bounded
+// however many files fail.
+const MAX_READ_FAILURES = 256
 
 /**
  * Build the Codex backfill provider. Registered at plugin activation via
@@ -123,12 +131,23 @@ export function createCodexBackfillProvider(opts) {
   // so it is bounded by disk and normally empty.
   /** @type {Map<string, number>} */
   const deferrals = new Map()
+  // Rollouts whose last sweep read failed, with the error code it failed on.
+  // Keyed and pruned like `fingerprints`, dropped when the read succeeds, and
+  // capped at MAX_READ_FAILURES.
+  /** @type {Map<string, string>} */
+  const readFailures = new Map()
   // One `.hypignore` resolver per backfill run, holding its per-cwd cache for
   // the whole scan (LLP 0049 R6).
   // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
   // source, so `hyp backfill` skips `--private` (`ignore`) dirs, never re-importing
   // sessions a live capture already dropped.
   const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
+  // `on_join: false` declines the history import, and a cold sweep would
+  // otherwise import every retained rollout. Floor the sweep at activation so
+  // it records only what happens from here on; manual `hyp backfill` is
+  // unaffected.
+  // @ref LLP 0466#on-join [implements]: the sweep keeps recording without importing declined history
+  const sweepFloorMs = readBackfillPolicy({ name: pluginName, config }).onJoin === false ? Date.now() : undefined
 
   return {
     name: clientName,
@@ -138,8 +157,13 @@ export function createCodexBackfillProvider(opts) {
     // Gateway mode selects the provider writer, so it registers no sweep:
     // running both lanes forever would be permanent unpaid work for a route
     // the operator explicitly opted out of.
+    // `backfill.on_join` does not gate it: in transcript mode the sweep is
+    // the only capture lane, so opting out of the join-time history import
+    // must not also stop recording (#2076). The off switch for recording is
+    // `hyp client detach codex`, which the backfill runner enforces.
     // @ref LLP 0429#sweep [implements]: ordinary capture rides the existing background queue, including Desktop
-    ...(config?.capture_mode !== 'gateway' && readBackfillPolicy({ name: pluginName, config }).onJoin !== false
+    // @ref LLP 0466#on-join [implements]: on_join is the join-time import only; recording is the detach switch
+    ...(config?.capture_mode !== 'gateway'
       ? { sweep: { cron: stringValue(backfill.sweep_cron) ?? '* * * * *' } }
       : {}),
     async *run(ctx) {
@@ -169,9 +193,25 @@ export function createCodexBackfillProvider(opts) {
           })
         }
       }
-      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, deferrals, ignoredSessions: opts.ignoredSessions })
+      yield* runCodexBackfill({
+        ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, deferrals, readFailures,
+        ignoredSessions: opts.ignoredSessions,
+        ...(ctx.sweep && sweepFloorMs !== undefined ? { floorMs: sweepFloorMs } : {}),
+      })
     },
   }
+}
+
+/**
+ * A short, stable key for why a rollout read failed, so a sweep can tell the
+ * same failure repeating from a changed one without holding the message.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function readFailureCode(err) {
+  if (err && typeof err === 'object' && 'code' in err && typeof err.code === 'string') return err.code.slice(0, 32)
+  return err instanceof Error ? err.name.slice(0, 32) : 'unknown'
 }
 
 /** @param {string} homeDir */
@@ -241,6 +281,8 @@ function defaultUnsupportedLocations(homeDir, gatewayCapture = false) {
  *   ignoredSessions?: Set<string>,
  *   fingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
  *   deferrals: Map<string, number>,
+ *   readFailures: Map<string, string>,
+ *   floorMs?: number,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
@@ -249,6 +291,9 @@ async function* runCodexBackfill(args) {
   refreshSessionIgnores(args.ignoredSessions)
   const log = ctx.log
   const window = resolveWindow(ctx)
+  if (args.floorMs !== undefined && (window.sinceMs === undefined || window.sinceMs < args.floorMs)) {
+    window.sinceMs = args.floorMs
+  }
 
   log.info('codex.backfill.scan_started', {
     component: COMPONENT,
@@ -273,6 +318,7 @@ async function* runCodexBackfill(args) {
   let messagesProjected = 0
   let filesRead = 0
   let filesUnchanged = 0
+  let filesReadFailing = 0
   let sessionsDeferred = 0
   // Every other drop on this path is counted (ignored sessions, deferred
   // suffixes). Count this one too, so an operator can tell a session that
@@ -285,6 +331,9 @@ async function* runCodexBackfill(args) {
   }
   for (const filePath of args.deferrals.keys()) {
     if (!present.has(filePath)) args.deferrals.delete(filePath)
+  }
+  for (const filePath of args.readFailures.keys()) {
+    if (!present.has(filePath)) args.readFailures.delete(filePath)
   }
 
   for (const filePath of files) {
@@ -309,15 +358,34 @@ async function* runCodexBackfill(args) {
       filesRead += 1
       sessions = await parseRolloutFile(filePath)
     } catch (err) {
-      log.warn('codex.backfill.rollout_read_failed', {
+      filesReadFailing += 1
+      // The file is left unfingerprinted so the next sweep retries it and a
+      // permission fix imports with no restart. Only the warn is deduplicated:
+      // a sweep repeats it only when the failure changes, and the per-sweep
+      // count rides `scan_complete`.
+      const code = readFailureCode(err)
+      const prior = args.readFailures.get(filePath)
+      const tracked = prior !== undefined || args.readFailures.size < MAX_READ_FAILURES
+      if (!ctx.sweep || (tracked && prior !== code)) {
+        log.warn('codex.backfill.rollout_read_failed', {
+          component: COMPONENT,
+          operation: 'backfill.scan',
+          source_path: filePath,
+          status: 'error',
+          error_kind: 'rollout_read_failed',
+          error: errMessage(err),
+        })
+        if (ctx.sweep) args.readFailures.set(filePath, code)
+      }
+      continue
+    }
+    if (args.readFailures.delete(filePath)) {
+      log.info('codex.backfill.rollout_read_recovered', {
         component: COMPONENT,
         operation: 'backfill.scan',
         source_path: filePath,
-        status: 'error',
-        error_kind: 'rollout_read_failed',
-        error: errMessage(err),
+        status: 'ok',
       })
-      continue
     }
 
     let fileDeferred = 0
@@ -415,6 +483,7 @@ async function* runCodexBackfill(args) {
     files_seen: filesSeen,
     files_read: filesRead,
     files_unchanged: filesUnchanged,
+    files_read_failing: filesReadFailing,
     sessions_deferred: sessionsDeferred,
     sessions_projected: sessionsProjected,
     sessions_ignored: sessionsIgnored,
