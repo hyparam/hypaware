@@ -261,6 +261,14 @@ test('docs/README.md links MCP.md and MCP_REFERENCE.md', () => {
   assert.match(quickstart, /\]\(MCP\.md\)/, 'the Quickstart links MCP.md')
 })
 
+// @ref LLP 0494#docs-mcp [tests]: the README row change replaces the Querying setup lines with a link to MCP.md
+test('QUERYING.md hands MCP setup to MCP.md', () => {
+  const querying = readFileSync(path.join(REPO_ROOT, 'docs', 'QUERYING.md'), 'utf8')
+  const section = querying.split(/^## Connect an MCP client$/m)[1].split(/^## /m)[0]
+  assert.match(section, /\]\(MCP\.md\)/, 'the Querying MCP section links MCP.md')
+  assert.ok(!/configure a \*\*stdio\*\* server/.test(section), 'the Querying MCP section no longer carries its own setup lines')
+})
+
 /**
  * Speak newline-delimited JSON-RPC to `hyp mcp serve` in a bare HYP_HOME, as a
  * client would: initialize, the initialized notification, then tools/list.
