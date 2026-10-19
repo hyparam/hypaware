@@ -465,7 +465,15 @@ export interface CaptureHealthReport {
   plugin: string
   /** The listener source's snapshot name in status.json, or null when no daemon recorded one. */
   source: string | null
-  /** Last telemetry event the listener saw, or null when none is recorded. */
+  /**
+   * Last telemetry event the listener saw, or null when none is recorded.
+   *
+   * For a client that captures by transcript sweep and writes no marker
+   * (default-mode Codex), there is no listener: this is the
+   * `message_created_at` of the newest row its sweep landed in the cache, and
+   * `state` is `ok` when one exists and `unknown` when none does
+   * (LLP 0546#newest-partition).
+   */
   lastEventAt: string | null
   /**
    * The newest transcript activity the probe could establish, or null when
