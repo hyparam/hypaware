@@ -71,6 +71,7 @@ for (const harness of ['local', 'agent-host']) test(`${harness}: WAL source proj
     assert.equal(usage.reduce((n, u) => n + u.output_tokens, 0), 6)
     assert.equal(usage.reduce((n, u) => n + u.cache_read_tokens, 0), 10)
     assert.ok(first.rows.some(r => r.tool_call_id === 'call-1' && r.part_type === 'tool_result' && r.content_text === 'fixture contents'))
+    assert.deepEqual(first.rows.find(r => r.tool_call_id === 'call-1' && r.part_type === 'tool_call')?.tool_args, { filePath: path.join(f.cwd, 'fixture.txt') })
     assert.ok(!JSON.stringify(first.rows).includes('duplicated model history'))
     assert.equal((await f.scan()).items.length, 0)
     assert.equal(f.health.read, 0)

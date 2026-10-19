@@ -79,7 +79,7 @@ export async function copilotFixture({ root, cwd, id, harness, now = Date.now(),
     })
     insert({ span_id: 'chat-' + i, parent_span_id: 'invoke-' + i, operation_name: 'chat', start_time_ms: now + i * 100, input_tokens: 20, output_tokens: 3, cached_tokens: 5 }, {
       'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'duplicated model history must not be fetched' }] }],
-      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Repeated answer' }, ...(i === 0 ? [{ type: 'tool_call', id: 'call-1', name: 'read_file', arguments: { filePath: path.join(cwd, 'fixture.txt') } }] : [])] }],
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Repeated answer' }, ...(i === 0 ? [{ type: 'tool_call', id: 'call-1', name: 'read_file', arguments: local ? JSON.stringify({ filePath: path.join(cwd, 'fixture.txt') }) : { filePath: path.join(cwd, 'fixture.txt') } }] : [])] }],
       'gen_ai.response.id': 'response-' + i,
     })
   }

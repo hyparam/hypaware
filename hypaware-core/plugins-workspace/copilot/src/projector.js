@@ -73,7 +73,7 @@ export function projectSpan(span, attrs, sessionId, cwd, harness) {
       for (const part of message.parts) {
         if (part?.type === 'text' && typeof part.content === 'string') content.push({ type: 'text', text: part.content })
         else if (part?.type === 'reasoning' && typeof part.content === 'string') content.push({ type: 'thinking', thinking: part.content })
-        else if (part?.type === 'tool_call' && typeof part.id === 'string' && typeof part.name === 'string') content.push({ type: 'tool_use', id: part.id, name: part.name, input: part.arguments ?? {} })
+        else if (part?.type === 'tool_call' && typeof part.id === 'string' && typeof part.name === 'string') content.push({ type: 'tool_use', id: part.id, name: part.name, input: typeof part.arguments === 'string' ? parsed(part.arguments) : part.arguments ?? {} })
         else throw new Error('output_part_schema')
       }
       selectedParts += content.length
