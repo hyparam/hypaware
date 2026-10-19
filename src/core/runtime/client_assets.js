@@ -752,7 +752,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
     return { carried: record, removed: false, removal }
   }
 
-  const { digest, missing } = await inspectClientAsset(dest)
+  const { digest, missing, errno } = await inspectClientAsset(dest)
   // Already gone (removed by hand, or by an earlier pass whose ledger write
   // lost the race). Nothing to report and nothing left to record.
   if (missing) return { carried: undefined, removed: false }
@@ -770,7 +770,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
   if (!digest) {
     stderr?.write(
       `warning: ${label} ${kind} '${name}' at ${dest} could not be read to check whether the bytes are ` +
-        'still ours; left in place - check its permissions\n'
+        'still ours; left in place - check its permissions, or whether something else is writing to it\n'
     )
     getLogger('client-assets').warn('client_assets.prune_withheld', {
       [Attr.COMPONENT]: 'client-assets',
@@ -778,6 +778,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
       hyp_client: client,
       [Attr.STATUS]: 'ok',
       [Attr.ERROR_KIND]: 'digest_unreadable',
+      hyp_errno: errno,
       detail: dest,
     })
     return { carried: record, removed: false, removal }
