@@ -29,6 +29,7 @@ agents it collects from your machine through the login you already have.
 | [Claude Code](integrations/claude-code.md) | Supported | Your machine, a server, or CI | Claude Code's OpenTelemetry events, plus transcript recovery every five minutes | Yes | `claude` |
 | [Claude Desktop](integrations/claude-desktop.md) | Supported, macOS | Your machine | Claude Code sessions run in the desktop app, imported from local transcripts every five minutes | Yes | `claude-desktop` |
 | [Codex](integrations/codex.md) | Supported | Your machine, a server, or CI | Codex CLI and desktop session files, imported every minute; gateway capture is optional | Yes | `codex` |
+| [VS Code (GitHub Copilot)](integrations/copilot.md) | Beta | Your machine | Completed Local and Agent Host chat/model/tool spans from VS Code's native databases, imported every minute; local single-folder workspaces only | Within native retention | `copilot` |
 | [Cursor](integrations/cursor.md) | Supported | Your machine | Cursor hooks, then a read-only read of Cursor's own session store, for the editor and CLI; no token usage | Yes | `cursor` |
 | [OpenCode](integrations/opencode.md) | Supported | Your machine | A managed OpenCode plugin sends live session snapshots, for the CLI and desktop app | Yes | `opencode` |
 | [Pi](integrations/pi.md) | Supported | Your machine | A managed Pi extension sends completed entries, plus session recovery every five minutes | Yes | `pi` |

@@ -16,6 +16,11 @@ checkpoints or automatically discover projects.
 
 ## Choose and check a client
 
+[VS Code (GitHub Copilot)](integrations/copilot.md) uses the setup id `copilot`.
+Attach enables its native database exporters; reload VS Code afterward. Capture
+runs every minute for local single-folder workspaces, within VS Code's native
+history retention.
+
 ```sh
 hyp setup
 hyp client status
