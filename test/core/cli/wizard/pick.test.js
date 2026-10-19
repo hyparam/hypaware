@@ -311,7 +311,7 @@ test('runWizardPick: autoAccept takes the default rows and prints what it accept
   // One line, plain names: the locked row is named on the fast path too,
   // and whether it is the team's is said on the sync line, not here. The
   // save confirmation follows it.
-  assert.equal(stdout.text(), '✓ Recording Claude Code, Codex, and Codex Cloud (experimental)\n✓ Saved settings\n')
+  assert.equal(stdout.text(), '✓ Recording Claude Code, Codex, and Codex Cloud (beta)\n✓ Saved settings\n')
   assert.deepEqual(result.sourcesPicked, ['codex', 'codex-cloud'])
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
