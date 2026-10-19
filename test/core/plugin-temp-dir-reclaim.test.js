@@ -24,7 +24,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
@@ -428,6 +428,77 @@ test('a dispatch nested inside another owning dispatch adds no second signal lis
     assert.deepEqual(counts(), before, 'nested dispatches left their SIGINT/SIGTERM listeners installed after both completed')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The signal and the `finally` racing for one release. A body that returns
+// while the signal's teardown is still stopping sources used to find the
+// release already claimed and return at once, and the bin's `process.exit` then
+// ended the process with the body's code: exit 0, sources half stopped, both
+// boot temp dirs left. The child here is a plain `dispatch` so the body can
+// slow the source stop down and return inside that window on purpose.
+test('a command body returning mid-signal-teardown waits for it and still exits by the signal', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-signal-race-'))
+  const scratch = path.join(root, 'scratch')
+  try {
+    await fs.mkdir(path.join(root, 'home'))
+    await fs.writeFile(
+      path.join(root, 'home', 'hypaware-config.json'),
+      JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n'
+    )
+    const here = path.dirname(fileURLToPath(import.meta.url))
+    const url = (/** @type {string} */ rel) => JSON.stringify(pathToFileURL(path.resolve(here, '..', '..', rel)).href)
+    const script = `
+      import fs from 'node:fs/promises'
+      import { dispatch } from ${url('src/core/cli/dispatch.js')}
+      import { createCommandRegistry } from ${url('src/core/registry/commands.js')}
+      const root = ${JSON.stringify(root)}
+      const registry = createCommandRegistry()
+      registry.register({
+        name: 'probe race',
+        summary: 'signal during the body, return during the release',
+        usage: 'probe race',
+        run: async (_argv, ctx) => {
+          const stop = ctx.sources.stopAll
+          ctx.sources.stopAll = async () => {
+            await new Promise((r) => setTimeout(r, 300))
+            await stop()
+            await fs.writeFile(root + '/stop-done', 'yes')
+          }
+          setTimeout(() => process.kill(process.pid, 'SIGTERM'), 10)
+          await new Promise((r) => setTimeout(r, 80))
+          return 0
+        },
+      })
+      const code = await dispatch(['probe', 'race'], {
+        registry,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        env: { ...process.env, HYP_HOME: root + '/home', HYP_CONFIG: '' },
+        tmpRoot: root + '/scratch',
+      })
+      process.exit(code)
+    `
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    const timer = setTimeout(() => child.kill('SIGKILL'), 60_000)
+    /** @type {{ code: number | null, signal: NodeJS.Signals | null }} */
+    const exit = await new Promise((resolve, reject) => {
+      child.on('error', reject)
+      child.on('close', (code, signal) => resolve({ code, signal }))
+    })
+    clearTimeout(timer)
+    assert.deepEqual(exit, { code: null, signal: 'SIGTERM' }, `the child did not end by the re-raised signal\nstderr: ${stderr}`)
+    assert.equal(await exists(path.join(root, 'stop-done')), true, 'the process ended before the signal teardown finished stopping sources')
+    assert.deepEqual(
+      (await fs.readdir(scratch).catch(() => [])).filter((e) => e.includes('-boot-')),
+      [],
+      'the boot temp dirs survived a body that returned mid-teardown'
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
   }
 })
 

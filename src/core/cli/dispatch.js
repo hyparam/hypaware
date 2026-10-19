@@ -372,14 +372,12 @@ async function dispatchInternal(argv, opts) {
   //
   // A termination signal is the other exit that never reaches that `finally`:
   // the default disposition kills the process where it stands (issue #2482). One
-  // release, guarded, so the signal path and the `finally` can both reach for it
-  // and only the first of them does the work.
-  let released = false
-  const release = async () => {
-    if (released) return
-    released = true
-    await teardownBootOwnedKernel(kernel)
-  }
+  // release, shared, so the signal path and the `finally` can both reach for it:
+  // the first starts the work and the second waits on that same teardown,
+  // rather than returning while sources are still stopping.
+  /** @type {Promise<void> | undefined} */
+  let releasing
+  const release = () => (releasing ??= teardownBootOwnedKernel(kernel))
   // Only a boot that activated something has anything to release, and gating on
   // that is what keeps every `{ activate: [] }` command (`hyp daemon run` among
   // them, which owns its own boot and its own shutdown) on exactly the signal
@@ -696,10 +694,20 @@ async function dispatchInternal(argv, opts) {
       )
     )
   } finally {
-    // A handler outliving the boot it was there to tear down is the same class
-    // of leak as the temp dirs, so it comes off here and not only on the signal.
-    removeSignalTeardown?.()
+    // The release comes before the handlers do, so a signal landing while it
+    // runs still waits for it instead of taking the default disposition halfway
+    // through. A handler outliving the boot it was there to tear down is the
+    // same class of leak as the temp dirs, so it comes off here and not only on
+    // the signal.
     if (ownsKernel) await release()
+    removeSignalTeardown?.()
+    // A signal that started a release owns the exit. Returning would hand the
+    // caller its exit code, and `bin/hypaware.js` would `process.exit` with it
+    // before the release finished or the signal was re-raised.
+    if (signalExit) {
+      await signalExit
+      await new Promise(() => {})
+    }
   }
 }
 
@@ -865,6 +873,14 @@ const pendingBootReleases = new Set()
 let removeInstalledSignalHandlers
 
 /**
+ * Set once a signal has started releasing the pending boots, and settled after
+ * the re-raise. Every owning dispatch still in its `finally` waits on it rather
+ * than returning into a process that is already on its way out.
+ * @type {Promise<void> | undefined}
+ */
+let signalExit
+
+/**
  * Release a boot-owned kernel when this process is interrupted, then let the
  * signal do what it would have done.
  *
@@ -903,7 +919,7 @@ function installSignalTeardown(release) {
         // Both arms: the releases swallow their own failures today, and a
         // process stranded mid-signal is not the way to find out that changed.
         const reraise = () => { process.kill(process.pid, signal) }
-        releasePendingBoots().then(reraise, reraise)
+        signalExit = releasePendingBoots().then(reraise, reraise)
       }
       installed.push([signal, handler])
       process.on(signal, handler)
@@ -921,8 +937,8 @@ function installSignalTeardown(release) {
 
 /**
  * Release every boot still live in this process, innermost first, one at a
- * time. Each release is already guarded against running twice, so the `finally`
- * of a boot that outlives the signal finds nothing left to do.
+ * time. Each release is shared with its boot's `finally`, so a boot whose body
+ * returns mid-release waits on the same teardown instead of starting another.
  *
  * @returns {Promise<void>}
  */
