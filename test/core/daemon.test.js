@@ -450,6 +450,7 @@ test('serviceDaemonStatus degrades to "not loaded" when the service manager cann
   assert.equal(status.installed, true)
   assert.equal(status.loaded, false)
   assert.equal(status.pid, undefined)
+  assert.equal(status.unreachable, true, 'the degraded answer says the probe never ran (#1406)')
 })
 
 // `ensureFsOp` exists so an EACCES on the plist/unit directory reaches the

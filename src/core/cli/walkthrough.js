@@ -1820,8 +1820,21 @@ export async function runPickerFinale(args) {
     // first `daemon/install.js`.
     try {
       const service = args.daemonService ?? await import('../daemon/install.js')
-      const restartable = platformIsSupported(process.platform) && (!installFailed
-        || (await service.serviceDaemonStatus(serviceOptions)).pid !== undefined)
+      let restartable = platformIsSupported(process.platform) && !installFailed
+      if (platformIsSupported(process.platform) && installFailed) {
+        const status = await service.serviceDaemonStatus(serviceOptions)
+        restartable = status.pid !== undefined
+        // A probe that could not reach the service manager has no pid to give
+        // whether or not a daemon is serving the old config, and the restart
+        // would drive the same manager that just failed to answer. The restart
+        // stays withheld, and the summary says why rather than reading as "no
+        // daemon to restart" (#1406). No line is printed: the install failure
+        // above already holds this fault's one diagnosis (#1393).
+        // @ref LLP 0545#withheld [implements]: an unreachable service manager is recorded on the summary, not printed
+        if (status.unreachable) {
+          summary.daemonRestart = { skipped: true, dryRun: false, ok: false, withheld: 'service_manager_unreachable' }
+        }
+      }
       if (restartable) {
         await service.restartServiceDaemon(serviceOptions)
         summary.daemonRestart = { skipped: false, dryRun: false, ok: true }

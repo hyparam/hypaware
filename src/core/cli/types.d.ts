@@ -289,8 +289,11 @@ export interface FinaleSummary {
    * `skipped` is "the restart did not run": the caller asked for no daemon or
    * no restart, or the install above failed, which leaves nothing to restart.
    * `daemonInstall.failed` is where a run says it was the latter.
+   * `withheld` is set when the install failed and the daemon probe could not
+   * reach the service manager, so whether a daemon was left running on the
+   * old config is unknown (LLP 0545).
    */
-  daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
+  daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean; withheld?: 'service_manager_unreachable' }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]
   /**

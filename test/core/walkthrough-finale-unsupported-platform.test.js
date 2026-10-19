@@ -379,6 +379,45 @@ test('a durable-bin failure over a running daemon still restarts it onto the con
   await fs.rm(home, { recursive: true, force: true })
 })
 
+// The probe the gate reads can itself fail (#1406): a dead user bus or a
+// broken `launchctl` degrades it to "not loaded" with no pid, which is also
+// what "no daemon running" looks like. The restart stays withheld, since it
+// would drive the manager that just failed to answer, but the summary records
+// why, so a run that left a daemon on the old config is not read as one that
+// had nothing to restart. Nothing is printed: the install failure is already
+// this fault's one diagnosis.
+
+test('a durable-bin failure with an unreachable service manager records the restart as withheld', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-unreachable-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  let restarted = false
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false },
+    installDaemonFn: async () => {
+      throw new GlobalInstallError(
+        "npx detected, but npm install -g hypaware@1.0.0 failed: EACCES. Run 'npm install -g hypaware@1.0.0' manually"
+      )
+    },
+    daemonService: {
+      serviceDaemonStatus: async () => ({ installed: true, loaded: false, unreachable: true, platform: process.platform }),
+      restartServiceDaemon: async () => { restarted = true },
+    },
+  }))
+
+  assert.equal(summary.daemonInstall.failed, true)
+  assert.equal(restarted, false, 'the restart is not driven through a manager that could not answer a status query')
+  assert.deepEqual(
+    summary.daemonRestart,
+    { skipped: true, dryRun: false, ok: false, withheld: 'service_manager_unreachable' },
+    'the summary says the restart was withheld because the probe could not run, not that no daemon was running'
+  )
+  assert.doesNotMatch(stderr.text(), /daemon restart/i, 'no restart line is printed under the install failure')
+  await fs.rm(home, { recursive: true, force: true })
+})
+
 // The other side of the same predicate, and why it is a pid rather than
 // `loaded`: LLP 0317 D1's failure mode is a service the manager registered and
 // never spawned. The install raises for it, and there is no process serving the
