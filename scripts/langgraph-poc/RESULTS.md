@@ -1,6 +1,43 @@
-# LangGraph parity findings, 2026-10-16
+# LangGraph capture findings
 
-The prototype now captures normal HypAware session rows as well as traces.
+## Production PR verification, 2026-10-19
+
+Rebased behavior on the current core by merging master. The bundled plugin is
+documented in `docs/integrations/langgraph.md` and the integration matrix;
+Draft LLP 0548 records its transport, privacy and Python helper design.
+The earlier LLP number 0517 was already claimed on master and was renumbered.
+
+Production SDK fixture runs for JavaScript, Python sync and Python native async
+each recovered 11 rows with four usage carriers from seven events after producer
+exit. Replaying after a collector restart added zero duplicates. The harness
+now asserts both SQL rows and run-specific delivery telemetry: 11 writes, then
+11 skips. Required CI repeats all three flows without provider credentials.
+
+Regression tests exposed and fixed three concrete failures: short filesystem
+reads could truncate a valid journal event, long Python session IDs could
+overflow the acknowledgement limit, and parallel models in one conversation
+could misattribute a tool result to the last model. Tests cover complete reads,
+bounded acknowledgements and correlated tool context, including eviction.
+
+The tarball was installed into a sandboxed global npm prefix. Installed setup
+and attach produced paths inside that prefix, and both installed JavaScript
+and Python callbacks wrote queued events with zero drops. This validates
+package contents and recipes; the sandbox service-manager shims do not prove
+real launchd or systemd installation. Local SDK validation ran on macOS;
+the required SDK CI job runs on Linux. No release was published.
+
+CPU and memory review: no unbounded retained queue or per-token serialization
+was found. Disk is bounded to 256 events of 512 KiB; reads allocate only the
+event size plus one byte. The source drains at most 32 events per one-second
+pass, with one pass in flight. Active callbacks, message history, conversations
+and pending tool-context correlation are bounded; the latter keeps at most 64
+entries and releases them on successful tool completion or graph completion.
+Python has one bounded IPC request in flight and one Node process per open
+callback. That process and synchronous durable writes are real overhead;
+reuse callbacks and close them when done. No production-scale performance
+benchmark or full Windows support claim is made.
+
+The historical OTLP prototype below captures normal HypAware session rows as well as traces.
 It collects project context and offered tool definitions, and prevents duplicate
 messages, usage and traces when completed records are replayed. The earlier
 append-only receiver findings below are retained as historical baselines.
