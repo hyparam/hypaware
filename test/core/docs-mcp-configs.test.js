@@ -240,15 +240,16 @@ test('the VS Code remote block declares the input its header reads, with every r
 })
 
 // @ref LLP 0494#cli-mint [tests]: the page states the token's reach in the mint reminder's plain words, as the minter
-test('the page names the mint, the token\'s reach, and the mark tool as not yet live', () => {
+test('the page names the mint, the token\'s reach, and the mark tool as live', () => {
   assert.match(PAGE, /hyp remote mint --scope query --label /)
   assert.match(PAGE, /hyp remote tokens revoke <jti>/)
   assert.match(PAGE, /acts \*\*as you\*\*, the person who minted it/)
   for (const can of ['mark a recommendation\'s status', 'publish reports', 'delete any report']) {
     assert.ok(PAGE.includes(can), `token can: ${can}`)
   }
-  // The mark tool ships with a later server release; the page must not call it live.
-  assert.match(PAGE, /`set_recommendation_status` tool, which comes with an\s+upcoming server release/)
+  // The mark tool is live on HypAware Cloud: the check names it and nothing calls it upcoming.
+  assert.match(PAGE, /With a\s+token that can mark, it also sees `set_recommendation_status`\./)
+  assert.doesNotMatch(PAGE, /upcoming server release/)
 })
 
 // @ref LLP 0494#docs-order [tests]: gate step 1, no published page links MCP.md before the README row lands

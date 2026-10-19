@@ -2,16 +2,16 @@
 
 <!-- @ref LLP 0494#docs-mcp: hand-written setup page; every config block is checked by test/core/docs-mcp-configs.test.js -->
 HypAware speaks the Model Context Protocol (MCP), so an AI client can query
-your recorded AI work and your team's recommendations as tools. There are two
+your recorded AI work and your organization's recommendations as tools. There are two
 ways to connect:
 
-- **Local:** the client starts `hyp mcp serve` on your computer. It needs
+- **Local:** the client starts `hyp mcp serve` on your host. It needs
   `hyp` installed and uses your own sign-in. No token is involved.
 - **Remote:** the client connects over HTTPS to your team's server at
   `/v1/mcp` and sends an agent token. Use it for cloud agents, CI jobs, and
   any client that has no `hyp` on its host.
 
-> **Tip:** At your own computer, use the local setup, even to reach your
+> **Tip:** On your own host, use the local setup, even to reach your
 > team's history: `hyp mcp serve --remote` uses the session you already
 > have. You do not need an agent token.
 
@@ -21,10 +21,9 @@ Configure your client to run `hyp` with the arguments `mcp` and `serve`. The
 client starts it and talks to it over stdio. `hyp mcp serve` speaks the
 protocol on stdout; it is not an interactive command.
 
-- `hyp mcp serve` answers from this computer's recordings.
+- `hyp mcp serve` answers from this host's recordings.
 - `hyp mcp serve --remote` answers from your team's server instead, as you.
-  Sign in once first with `hyp remote login`. For a server other than
-  HypAware Cloud, name its target: `--remote <target>`.
+  Sign in once first with `hyp remote login`.
 
 The client must be able to find `hyp`. Desktop apps often do not read your
 shell's `PATH`, so if the client reports that it cannot start the server,
@@ -38,8 +37,7 @@ The endpoint for HypAware Cloud is:
 https://api.hypaware.ai/v1/mcp
 ```
 
-For a self-hosted server, use its base URL followed by `/v1/mcp`. The client
-sends the token in the `Authorization` header as `Bearer <token>`.
+The client sends the token in the `Authorization` header as `Bearer <token>`.
 
 ### Mint an agent token
 
@@ -52,8 +50,7 @@ hyp remote mint --scope query --label devin-prod
 
 The command prints the token, and nothing else, on stdout. Put it straight
 into the secret store of the agent or CI job that needs it: HypAware keeps no
-copy, and the token is not shown again. For a self-hosted server, name its
-target: `hyp remote mint <target> --scope query`.
+copy, and the token is not shown again.
 
 The token lasts for the server's default lifetime, 21 days unless the server
 sets another. Ask for a different lifetime with `--expires-days <n>`, up to
@@ -78,10 +75,6 @@ promote a report, manage the organization, or mint more tokens.
 > history and publish or delete reports as you. Keep it in a secret store,
 > never in a file you commit.
 
-Marking is done by the `set_recommendation_status` tool, which comes with an
-upcoming server release. Until your client's tool list shows it, an agent
-cannot mark a recommendation over MCP.
-
 ### List and revoke tokens
 
 ```sh
@@ -90,16 +83,14 @@ hyp remote tokens revoke <jti>
 ```
 
 `hyp remote tokens` lists the `jti`, label, creation time, expiry, and revoked
-state of each of your agent tokens. It never shows a token value. For a
-self-hosted server, use `hyp remote tokens <target>` and
-`hyp remote tokens revoke <jti> --remote <target>`.
+state of each of your agent tokens. It never shows a token value.
 
 ## Client setup
 
 Each client below has a local block and, where the client supports a bearer
 header, a remote block. Remote blocks read the token from the
 `HYPAWARE_AGENT_TOKEN` environment variable unless the client stores secrets
-itself. For a self-hosted server, replace `https://api.hypaware.ai`.
+itself.
 
 ### Claude Code
 
@@ -290,8 +281,9 @@ Click **Test tools** to check the connection.
 ## Check the connection
 
 Ask the agent to list its HypAware tools. Over `/v1/mcp` it sees read tools
-such as `query_sql`, `list_recommendations` and `get_recommendation`. Locally
-it sees the tools of this computer's `hyp`. The client's tool list is the
+such as `query_sql`, `list_recommendations` and `get_recommendation`. With a
+token that can mark, it also sees `set_recommendation_status`. Locally it sees
+the tools of this host's `hyp`. The client's tool list is the
 exact set.
 
 If the connection fails:
