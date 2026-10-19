@@ -9,6 +9,9 @@ node_modules/
 package-lock.json
 *.tgz
 
+# Python callback bytecode
+__pycache__/
+
 # Generated declaration output (built by `npm run build:types`, shipped via the
 # package `files` allowlist; never committed).
 types/

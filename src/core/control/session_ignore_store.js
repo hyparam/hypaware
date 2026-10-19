@@ -115,7 +115,7 @@ export class SessionIgnoreSet extends Set {
 }
 
 /** @param {string} id */
-function markerName(id) {
+export function markerName(id) {
   return `${createHash('sha256').update(JSON.stringify(id)).digest('hex')}.json`
 }
 

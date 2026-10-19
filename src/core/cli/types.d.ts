@@ -79,6 +79,7 @@ export type PickerSource =
   | 'claude-desktop'
   | 'openclaw'
   | 'ollama'
+  | 'langgraph'
   | 'hermes'
   | 'raw-anthropic'
   | 'raw-openai'
@@ -334,7 +335,7 @@ export interface InitFlags {
   dryRun: boolean
   github?: boolean
   noBackfill?: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'ollama')[]
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'ollama' | 'langgraph')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number

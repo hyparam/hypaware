@@ -46,6 +46,7 @@ agents it collects from your machine through the login you already have.
 | --- | --- | --- | --- | --- | --- |
 | [OpenClaw](integrations/openclaw.md) | Supported | Your machine or a server | Anthropic and OpenAI model calls through the local gateway, plus a transcript sweep every five minutes | Yes | `openclaw` |
 | [Hermes Agent](integrations/hermes.md) | Supported | Your machine or a server | Hermes's local state database, read-only, polled every 60 seconds | Yes | `hermes` |
+| [LangGraph](integrations/langgraph.md) | Beta | Your machine, a server, or CI | JavaScript or Python callbacks write a bounded local queue; the daemon collects completed events, including after an outage; only under **Customize** | No checkpoint import; queued-event recovery | `langgraph` |
 
 ## Software factories and CI
 
