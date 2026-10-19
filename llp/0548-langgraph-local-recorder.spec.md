@@ -1,4 +1,4 @@
-# LLP 0517: LangGraph records through a bounded local journal
+# LLP 0548: LangGraph records through a bounded local journal
 
 **Type:** Spec
 **Status:** Draft
@@ -44,6 +44,12 @@ Project facts are captured on the producer, never reconstructed during replay.
 Callback run and parent IDs accompany the event in attributes. Generic raw
 traces are not copied into a second dataset: conversation contents and policy
 remain governed together in ai_gateway_messages.
+
+Keep at most 64 pending tool-call context entries, shared by both languages,
+so concurrent models in one conversation retain their own provider, model and
+offered tool definitions on results. Remove a match after success and clear the
+map at the end of a graph run. An evicted or unmatched explicit call ID has
+unknown model context instead of borrowing another model's configuration.
 
 The gateway owns schema expansion and dedupe (LLP 0252). The adapter reuses its
 storage contracts without enabling a model proxy (LLP 0306). No new runtime

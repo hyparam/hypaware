@@ -148,3 +148,47 @@ test('stale staging never reclaims a live writer or an oversized unknown owner',
   assert.equal(await readSlot(directory, '000'), undefined)
   assert.ok((await fs.stat(slot)).isDirectory())
 })
+
+test('parallel models keep their own offered tools and model on correlated tool results', () => {
+  const project = new SessionProjection('s', { cwd: '/example' }, {})
+  const firstTools = [{ name: 'first-tool' }]
+  const secondTools = [{ name: 'second-tool' }]
+  const first = project.modelStart([], { ls_model_name: 'first', ls_provider: 'openai' }, { tools: firstTools }, 'first-run')
+  const second = project.modelStart([], { ls_model_name: 'second', ls_provider: 'anthropic' }, { tools: secondTools }, 'second-run')
+  project.modelEnd(first, [{ role: 'ai', tool_calls: [{ id: 'call-first', name: 'first-tool', args: {} }] }])
+  project.modelEnd(second, [{ role: 'ai', tool_calls: [{ id: 'call-second', name: 'second-tool', args: {} }] }])
+  const result = project.toolEnd({}, 'tool-run', 'call-first', 'first-tool', {}, 'done')
+  assert.equal(result.model, 'first')
+  assert.equal(result.provider, 'openai')
+  assert.deepEqual(result.tools, firstTools)
+})
+
+test('tool correlation is bounded and an evicted call does not borrow another model', () => {
+  const project = new SessionProjection('s', { cwd: '/example' }, {})
+  for (let i = 0; i < 65; i++) {
+    const state = project.modelStart([], { ls_model_name: `model-${i}` }, {}, `run-${i}`)
+    project.modelEnd(state, [{ role: 'ai', tool_calls: [{ id: `call-${i}`, name: 'tool', args: {} }] }])
+  }
+  assert.equal(project.toolContexts.size, 64)
+  const result = project.toolEnd({}, 'tool-run', 'call-0', 'tool', {}, 'done')
+  assert.equal(result.model, undefined)
+  assert.equal(result.messages.length, 1)
+  project.resetRun()
+  assert.equal(project.toolContexts.size, 0)
+})
+
+test('journal reads retain complete events when the filesystem returns short reads', async t => {
+  const { stateDir } = await fixture(t)
+  const directory = journalPath(stateDir)
+  const event = { version: 1, projection: { session_id: 's', cwd: '/example', messages: [] } }
+  await publish(directory, event)
+  const [slot] = await pendingSlots(directory)
+  const open = fs.open.bind(fs)
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args)
+    const read = handle.read.bind(handle)
+    t.mock.method(handle, 'read', (buffer, offset, length, position) => read(buffer, offset, Math.min(length, 7), position))
+    return handle
+  })
+  assert.deepEqual(await readSlot(directory, slot), event.projection)
+})

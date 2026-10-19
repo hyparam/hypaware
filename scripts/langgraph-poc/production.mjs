@@ -87,7 +87,15 @@ if (process.argv[2] === 'collector') {
     await stop()
     const replayed = await rows()
     assert.equal(replayed.length, first.length)
+    const telemetryDir = path.join(hypHome, 'hypaware/dev-telemetry')
+    const logs = (await Promise.all((await fs.readdir(telemetryDir)).filter(n => /^logs-.*\.jsonl$/.test(n))
+      .map(n => fs.readFile(path.join(telemetryDir, n), 'utf8'))))
+      .flatMap(body => body.trim().split('\n').filter(Boolean).map(line => JSON.parse(line)))
+    const drains = logs.filter(l => l.body === 'langgraph.journal.drain' && l.attributes?.dev_run_id === runId)
+    assert.ok(drains.some(l => Number(l.attributes.rows_written) === first.length), 'telemetry confirms recovery writes')
+    assert.ok(drains.some(l => Number(l.attributes.rows_skipped) === first.length), 'telemetry confirms duplicate skips')
     const evidence = { status: 'passed', mode, language: python ? 'python' : 'javascript', invocation, records: first.length, usageRows: 4,
+      telemetryVerified: true,
       models: [...new Set(first.map(r => r.model).filter(Boolean))],
       replayDuplicates: replayed.length - first.length, producer: result.recorder }
     await fs.writeFile(path.join(root, 'results.json'), JSON.stringify(evidence, null, 2))

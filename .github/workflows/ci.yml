@@ -1,4 +1,4 @@
-# Four jobs per PR (typecheck, plus a test job per Node version), times the
+# The typecheck, Node test matrix and LangGraph SDK job, times the
 # PRs in flight, put enough concurrent cold
 # `npm i` runs against the registry to burn the whole job budget before a test
 # ran, reddening the required gate on PRs that failed nothing (issue #1313), so
@@ -49,10 +49,53 @@ jobs:
       - run: npm i
       - run: npm test
 
+  langgraph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HYP_LANGGRAPH_POC_DEPS: ${{ runner.temp }}/langgraph-js
+      HYP_LANGGRAPH_PYTHON: ${{ runner.temp }}/langgraph-python/bin/python
+      TMPDIR: ${{ runner.temp }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: package.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: npm i
+      - name: Install isolated SDK test dependencies
+        run: |
+          npm install --prefix "$HYP_LANGGRAPH_POC_DEPS" --ignore-scripts --no-audit --no-fund \
+            @langchain/langgraph@1.5.0 @langchain/core@1.2.18 \
+            @langchain/openai@1.6.2 @langchain/anthropic@1.5.12 zod@4.6.7
+          python -m venv "$RUNNER_TEMP/langgraph-python"
+          "$HYP_LANGGRAPH_PYTHON" -m pip install langgraph==1.2.16 langchain-core==1.6.12 langchain-openai==1.7.2
+      - name: Plugin wiring, privacy and recovery
+        run: npm run smoke -- langgraph_capture
+      - name: Real SDK callbacks and durable replay, without model credentials
+        run: |
+          node scripts/langgraph-poc/production.mjs
+          node scripts/langgraph-poc/production.mjs --python
+          node scripts/langgraph-poc/production.mjs --python --async
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: langgraph-sdk-evidence
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/hyp-langgraph-production-*/results.json
+            ${{ runner.temp }}/hyp-langgraph-production-*/agent.log
+            ${{ runner.temp }}/hyp-langgraph-production-*/home/.hyp/hypaware/dev-telemetry/*.jsonl
+
   required:
     name: CI required
     if: ${{ always() }}
-    needs: [typecheck, test]
+    needs: [typecheck, test, langgraph]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -60,6 +103,8 @@ jobs:
         env:
           TYPECHECK_RESULT: ${{ needs.typecheck.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          LANGGRAPH_RESULT: ${{ needs.langgraph.result }}
         run: |
           test "$TYPECHECK_RESULT" = success
           test "$TEST_RESULT" = success
+          test "$LANGGRAPH_RESULT" = success

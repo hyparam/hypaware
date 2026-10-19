@@ -33,7 +33,7 @@ export function encodeEvent(value) {
   return body
 }
 
-// @ref LLP 0517#journal: fixed exclusive slots bound aggregate disk across processes
+// @ref LLP 0548#journal: fixed exclusive slots bound aggregate disk across processes
 export async function publish(directory, event) {
   const body = encodeEvent(event)
   await fs.mkdir(directory, { recursive: true, mode: 0o700 })
@@ -81,9 +81,14 @@ export async function readSlot(directory, name) {
     const stat = await handle.stat()
     if (!stat.isFile() || stat.size > MAX_EVENT_BYTES) throw new Error('event_invalid')
     // Bounded read even if another process changes the file after stat.
-    const buffer = Buffer.alloc(MAX_EVENT_BYTES + 1)
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-    if (bytesRead > MAX_EVENT_BYTES) throw new Error('event_invalid')
+    const buffer = Buffer.alloc(stat.size + 1)
+    let bytesRead = 0
+    while (bytesRead < buffer.length) {
+      const chunk = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead)
+      if (!chunk.bytesRead) break
+      bytesRead += chunk.bytesRead
+    }
+    if (bytesRead > stat.size) throw new Error('event_invalid')
     const event = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'))
     if (event?.version !== 1 || !event.projection || !Array.isArray(event.projection.messages)
       || event.projection.messages.length > 4096 || typeof event.projection.session_id !== 'string'

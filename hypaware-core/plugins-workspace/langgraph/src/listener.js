@@ -21,7 +21,7 @@ export async function startLangGraphSource(ctx) {
   /** @type {Promise<void> | undefined} */
   let pending
 
-  // @ref LLP 0517#journal: one bounded batch, acknowledged only after durable append
+  // @ref LLP 0548#journal: one bounded batch, acknowledged only after durable append
   async function drain() {
     const slots = await pendingSlots(directory)
     state.pending = slots.length

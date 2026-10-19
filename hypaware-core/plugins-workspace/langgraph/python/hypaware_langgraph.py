@@ -112,7 +112,7 @@ def _cleanup(child, requests, worker):
         stream.close()
 
 
-# @ref LLP 0517#python: Python adapts the callbacks; the existing recorder owns policy, projection and durable acknowledgement
+# @ref LLP 0548#python: Python adapts the callbacks; the existing recorder owns policy, projection and durable acknowledgement
 class HypAwareCallback(BaseCallbackHandler):
     raise_error = False
     run_inline = False
@@ -139,7 +139,7 @@ class HypAwareCallback(BaseCallbackHandler):
         result = self._replies.get(timeout=_TIMEOUT)
         if not isinstance(result, dict):
             raise RuntimeError('helper_failed')
-        self._status = result
+        self._status = {**result, 'session_id': self.session_id}
 
     def _open(self):
         bridge = Path(__file__).resolve().parent.parent / 'src/python_bridge.js'

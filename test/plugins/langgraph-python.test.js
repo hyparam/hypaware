@@ -11,7 +11,7 @@ import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-
 const exec = promisify(execFile)
 const python = process.env.HYP_LANGGRAPH_PYTHON ?? 'python3'
 
-for (const mode of ['capture', 'privacy', 'concurrent', 'failure', 'timeout', 'bounds']) {
+for (const mode of ['capture', 'privacy', 'concurrent', 'failure', 'timeout', 'bounds', 'long-session']) {
   test(`Python callback: ${mode}, bounded IPC and helper cleanup`, async t => {
     try { await exec(python, ['--version']) } catch (error) {
       if (error.code === 'ENOENT') { t.skip('Python is not installed'); return }

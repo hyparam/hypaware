@@ -1,5 +1,8 @@
 # LangGraph for HypAware
 
+Customer setup, verification and troubleshooting:
+[LangGraph integration guide](../../../docs/integrations/langgraph.md).
+
 Choose **LangGraph (JavaScript / Python)** under **Customize** during setup. If you
 already chose **Record everything**, run:
 

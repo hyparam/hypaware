@@ -20,11 +20,13 @@ async function receive(line) {
     if (!methods.has(request.method) || !Array.isArray(request.args)) throw new Error('invalid_method')
     await capture[request.method](...request.args)
   }
-  if (!process.stdout.write(JSON.stringify(capture?.status()) + '\n')) await once(process.stdout, 'drain')
+  // The caller already owns the session ID. Keep acknowledgements scalar and
+  // small even for an ID near the recorder's 4096-character limit.
+  if (!process.stdout.write(JSON.stringify({ ...capture?.status(), session_id: undefined }) + '\n')) await once(process.stdout, 'drain')
 }
 
 try {
-  // @ref LLP 0517#python: one acknowledged event in flight, no unbounded IPC queue
+  // @ref LLP 0548#python: one acknowledged event in flight, no unbounded IPC queue
   for await (const chunk of process.stdin) {
     for (let start = 0; start < chunk.length;) {
       const newline = chunk.indexOf(10, start)

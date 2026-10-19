@@ -63,6 +63,7 @@ export function contentBlocks(message) {
 
 export class SessionProjection {
   threads = new Map()
+  toolContexts = new Map()
   count = 0
   runCount = 0
   constructor(sessionId, context, attributes) {
@@ -76,6 +77,7 @@ export class SessionProjection {
     // Retain a bounded root conversation history across graph invocations.
     const root = this.threads.get('')
     this.threads.clear()
+    this.toolContexts.clear()
     if (root) this.threads.set('', root)
     this.runCount = 0
   }
@@ -153,6 +155,16 @@ export class SessionProjection {
       const item = this.addMessage(state.thread, message, state.inputCount + i,
         state.projection.provider, state.projection.model, `${state.runId}:${i}`)
       if (item) state.projection.messages.push(item)
+      const config = { provider: state.projection.provider, model: message.model ?? state.projection.model,
+        tools: state.projection.tools, system_text: state.projection.system_text }
+      for (const call of message.tool_calls ?? []) {
+        if (!call.id) continue
+        const key = hash(`${state.thread.id}\0${call.id}`)
+        if (!this.toolContexts.has(key) && this.toolContexts.size >= 64) {
+          this.toolContexts.delete(this.toolContexts.keys().next().value)
+        }
+        this.toolContexts.set(key, config)
+      }
     }
     return state.projection
   }
@@ -167,7 +179,10 @@ export class SessionProjection {
 
   toolEnd(metadata, id, callId, name, args, result, error) {
     const thread = this.thread(metadata)
-    const projection = this.exchange(thread, thread.config ?? { provider: 'unknown' })
+    const key = callId ? hash(`${thread.id}\0${callId}`) : undefined
+    const config = key ? this.toolContexts.get(key) : thread.config
+    const projection = this.exchange(thread, config ?? { provider: 'unknown' })
+    if (key && !error) this.toolContexts.delete(key)
     let input = args
     if (typeof args === 'string') { try { input = JSON.parse(args) } catch { /* string-valued tool input */ } }
     const item = this.add(thread, error ? `tool-error:${id}` : `tool:${callId ?? id}`, {

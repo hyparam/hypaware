@@ -1645,7 +1645,7 @@ export async function runPickerFinale(args) {
           summary.attach.push({ client, dryRun, ok: true })
         } else {
           // @ref LLP 0474#routes [implements]: a probe-less Ollama attach is a next-launch recipe, not a changed running client
-          // @ref LLP 0517#onboarding: LangGraph setup must show the application callback recipe
+          // @ref LLP 0548#onboarding: LangGraph setup must show the application callback recipe
           if (client === 'ollama' || client === 'langgraph') {
             stdout.write(report)
             summary.attach.push({ client, dryRun, ok: true })

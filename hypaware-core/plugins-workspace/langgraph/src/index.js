@@ -17,7 +17,7 @@ export async function activate(ctx) {
     summary: 'Collect completed LangGraph callbacks from the local durable journal',
     configSection: LANGGRAPH_CONFIG_SECTION, start: startLangGraphSource })
   registerSessionCommands(ctx)
-  // @ref LLP 0517#onboarding: global attach installs the importable callback module
+  // @ref LLP 0548#onboarding: global attach installs the importable callback module
   ctx.clients.registerClient({ name: 'langgraph', requiresEndpoint: false,
     async attach(attachCtx) {
       const result = await attachLangGraph({ env: ctx.env, dryRun: attachCtx.dryRun })

@@ -39,13 +39,18 @@ def model(capture, suffix='one'):
     capture.on_llm_end(SimpleNamespace(generations=[[SimpleNamespace(message=reply)]]), run_id='model-' + suffix)
 
 
-with make() as capture:
+with make('s' * 4096 if mode == 'long-session' else 'python-test') as capture:
     capture.on_chain_start({}, {}, run_id='root')
     if mode == 'capture':
         model(capture)
         capture.on_tool_start({'name': 'add'}, "{'a': 19}", run_id='tool', parent_run_id='root',
             tool_call_id='call', inputs={'a': 19}, metadata={'langgraph_checkpoint_ns': 'researcher:one|tools:two'})
         capture.on_tool_end(SimpleNamespace(content='42', tool_call_id='call'), run_id='tool')
+    elif mode == 'long-session':
+        model(capture)
+        assert capture.status()['dropped'] == 0, capture.status()
+        assert capture.status()['queued'] == 1, capture.status()
+        assert capture.status()['session_id'] == 's' * 4096
     elif mode == 'privacy':
         model(capture)
         assert capture.status()['queued'] == 0, capture.status()

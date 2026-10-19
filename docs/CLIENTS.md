@@ -8,6 +8,12 @@ import history. Ollama attach enables recording and prints
 [explicit host recipes](integrations/ollama.md#route-a-cli-or-sdk-client); it does not edit client files
 or the calling shell's or service's `OLLAMA_HOST`.
 
+[LangGraph](integrations/langgraph.md) is also an explicit application setup:
+choose it under **Customize**, or run `hyp client attach langgraph` later and
+add the printed JavaScript or Python callback to your application. It recovers
+events the callback saved while the collector was down, but does not import old
+checkpoints or automatically discover projects.
+
 ## Choose and check a client
 
 ```sh

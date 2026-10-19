@@ -3,7 +3,7 @@ import { createClientRecordingPolicyReader } from '../../../../src/core/config/c
 import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 
-// @ref LLP 0517#privacy: policy is checked before journaling and again on delivery
+// @ref LLP 0548#privacy: policy is checked before journaling and again on delivery
 export function createPolicy(env, stateDir, ignored = new SessionIgnoreSet(stateDir)) {
   const recording = createClientRecordingPolicyReader({ env, plugin: '@hypaware/langgraph' })
   let signature = ''

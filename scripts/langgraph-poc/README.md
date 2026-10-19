@@ -1,10 +1,13 @@
 # LangGraph capture parity prototype
 
-Historical OTLP experiment on `codex/langgraph-parity-poc`. The bundled plugin
-is now in `hypaware-core/plugins-workspace/langgraph`; see its README for setup.
+The bundled plugin is in `hypaware-core/plugins-workspace/langgraph`; see the
+[customer guide](../../docs/integrations/langgraph.md) for setup.
 `node scripts/langgraph-poc/production.mjs [--live]` tests the production recorder,
-producer exit, daemon restart and duplicate replay. The instructions below
-describe the original OTLP experiment.
+producer exit, daemon restart and duplicate replay, with SQL and delivery-log
+assertions. Required CI runs it for JavaScript, Python sync and Python async
+using real SDKs and synthetic responses without provider credentials. Test
+dependencies live outside the published package. The original OTLP experiment
+is retained below as historical evidence, not the production capture path.
 It asks whether standard LangChain callbacks can preserve local-session-like
 content, nested agent relationships, and offline recovery through HypAware.
 
