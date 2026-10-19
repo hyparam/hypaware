@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
+import { projectContext, SessionProjection } from './projection.mjs'
 
 export const deps = process.env.HYP_LANGGRAPH_POC_DEPS ?? '/tmp/hypaware-langgraph-poc-deps'
 export const requireFixture = createRequire(path.join(deps, 'package.json'))
@@ -12,6 +13,8 @@ const ns = () => String(BigInt(Date.now()) * 1_000_000n)
 
 export function message(value) {
   return {
+    id: value.id,
+    name: value.name,
     role: value.getType?.() ?? value.type,
     // Responses can carry non-text reasoning items. Only record visible text.
     content: Array.isArray(value.content)
@@ -31,9 +34,12 @@ export class Capture extends BaseCallbackHandler {
   active = new Map()
   completed = 0
 
-  constructor(directory, runId, scenario, threadId) {
+  constructor(directory, runId, scenario, threadId, cwd = process.cwd()) {
     super()
     Object.assign(this, { directory, runId, scenario, threadId })
+    this.project = projectContext(cwd).then(context => new SessionProjection(threadId, context, {
+      dev_run_id: runId, smoke_name: 'langgraph_parity_poc', smoke_step: scenario,
+    }))
     fs.mkdirSync(directory, { recursive: true })
     this.bytes = fs.readdirSync(directory).filter(f => f.endsWith('.json'))
       .reduce((n, f) => n + fs.statSync(path.join(directory, f)).size, 0)
@@ -63,14 +69,17 @@ export class Capture extends BaseCallbackHandler {
     const span = this.active.get(id)
     if (!span) throw new Error(`missing start for ${id}`)
     this.active.delete(id)
+    delete span.captureState
+    delete span.toolState
     span.endTimeUnixNano = ns()
     span.status = error ? { code: 2, message: error.name } : { code: 1 }
     span.attributes = Object.entries({ ...span.attributes, ...extra }).filter(([, v]) => v !== undefined)
       .map(([key, value]) => ({ key, value: typeof value === 'number'
         ? { doubleValue: value } : { stringValue: typeof value === 'string' ? value : JSON.stringify(value) } }))
     const body = JSON.stringify(span)
-    this.bytes += Buffer.byteLength(body)
-    if (body.length > 64 * 1024 || this.bytes > 16 * 1024 * 1024 || ++this.completed > 1024) {
+    const bytes = Buffer.byteLength(body)
+    this.bytes += bytes
+    if (bytes > 64 * 1024 || this.bytes > 16 * 1024 * 1024 || ++this.completed > 1024) {
       throw new Error('prototype spool limit')
     }
     // Flush each completed span before publishing it to the replay process.
@@ -86,15 +95,22 @@ export class Capture extends BaseCallbackHandler {
   }
   handleChainEnd(outputs, id) { this.finish(id) }
   handleChainError(error, id) { this.finish(id, {}, error) }
-  handleChatModelStart(llm, messages, id, parent, extra, tags, metadata, name) {
+  async handleChatModelStart(llm, messages, id, parent, extra, tags, metadata, name) {
+    const inputs = messages.flat().map(message)
+    const project = await this.project
     this.start('llm', name ?? llm.id.at(-1), id, parent, metadata, {
-      'gen_ai.input.messages': messages.flat().map(message),
+      'gen_ai.input.messages': inputs,
+      'gen_ai.tool.definitions': extra?.invocation_params?.tools,
     })
+    this.active.get(id).captureState = project.modelStart(inputs, metadata, extra?.invocation_params, id)
   }
-  handleLLMEnd(output, id) {
+  async handleLLMEnd(output, id) {
     const messages = output.generations.flat().map(g => message(g.message))
     const usage = messages[0]?.usage
+    const project = await this.project
+    const projection = project.modelEnd(this.active.get(id).captureState, messages)
     this.finish(id, {
+      'hypaware.projection': projection,
       'gen_ai.output.messages': messages,
       'gen_ai.response.model': messages[0]?.model,
       'gen_ai.usage.input_tokens': usage?.input_tokens,
@@ -102,17 +118,25 @@ export class Capture extends BaseCallbackHandler {
       'gen_ai.usage.input_token_details': usage?.input_token_details,
     })
   }
-  handleLLMError(error, id) { this.finish(id, {}, error) }
+  handleLLMError(error, id) {
+    this.finish(id, { 'hypaware.projection': this.active.get(id)?.captureState?.projection }, error)
+  }
   handleToolStart(tool, input, id, parent, tags, metadata, name, callId) {
     this.start('tool', name ?? tool.id.at(-1), id, parent, metadata, {
       'gen_ai.tool.name': name ?? tool.id.at(-1), 'gen_ai.tool.call.id': callId,
       'gen_ai.tool.call.arguments': input,
     })
+    this.active.get(id).toolState = { metadata, callId, name: name ?? tool.id.at(-1), input }
   }
-  handleToolEnd(output, id) {
-    this.finish(id, { 'gen_ai.tool.call.result': output?.content ?? output })
+  async finishTool(id, output, error) {
+    const project = await this.project
+    const { metadata, callId, name, input } = this.active.get(id).toolState
+    const result = output?.content ?? output
+    this.finish(id, { 'gen_ai.tool.call.result': result,
+      'hypaware.projection': project.toolEnd(metadata, id, callId, name, input, result, error) }, error)
   }
-  handleToolError(error, id) { this.finish(id, {}, error) }
+  handleToolEnd(output, id) { return this.finishTool(id, output) }
+  handleToolError(error, id) { return this.finishTool(id, undefined, error) }
 }
 
 export function envelope(spans) {
@@ -135,7 +159,7 @@ export async function flush(directory, endpoint) {
         body: JSON.stringify(envelope(spans)), signal: AbortSignal.timeout(3000),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const ack = await response.json()
+      const ack = /** @type {any} */ (await response.json())
       if (Number(ack.partialSuccess?.rejectedSpans ?? 0) !== 0) throw new Error('partial rejection')
     } catch (error) {
       return { sent, pending: files.length - sent, error: error.name }

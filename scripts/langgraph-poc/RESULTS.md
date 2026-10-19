@@ -1,11 +1,73 @@
 # LangGraph parity findings, 2026-10-16
 
-Standard framework callbacks preserved the tested conversational data and
-nested agent structure through the existing HypAware OTEL collector and local
-SQL cache. A small sender-side disk spool recovered every completed span after
-collector failure and producer exit. Lost acknowledgements caused duplicates.
+The prototype now captures normal HypAware session rows as well as traces.
+It collects project context and offered tool definitions, and prevents duplicate
+messages, usage and traces when completed records are replayed. The earlier
+append-only receiver findings below are retained as historical baselines.
 
-## Current-model follow-up
+## Python bundled-plugin validation
+
+Run ID: `langgraph-production-1792191056289`, using live `gpt-6.1-sol` and
+`gpt-6-luna` through Python LangGraph 1.2.16 and LangChain Core 1.6.12.
+The Python application ran native async nested agents, including one failed
+tool attempt and its successful retry, while the HypAware collector was down.
+After the application exited, a fresh daemon recovered all 11 session rows,
+including four usage-bearing responses. Replaying the same saved events after
+another daemon restart added zero duplicate rows. All seven completed events
+were queued with zero drops. SQL assertions checked parent links, model names,
+structured tool arguments/results, offered tools, working directory and errors.
+Synchronous and native async fixture runs also passed against the real Python
+SDK. Python uses the bundled recorder's existing privacy and durable queue;
+it starts one private Node helper per open callback and closes it at the end.
+
+The sections below describe the earlier OTLP prototype.
+
+## Session mapping and duplicate protection follow-up
+
+Run ID: `langgraph-poc-1792188004432`, using live `gpt-6.1-sol` and
+`gpt-6-luna`. The producer and collector run in separate processes. The
+prototype plugin uses HypAware's existing gateway row writer and part dedupe;
+the bundled generic OTEL collector was not changed.
+
+| Scenario | Unique spans | Session rows | Usage-bearing rows | Duplicates |
+| --- | ---: | ---: | ---: | ---: |
+| OpenAI + Anthropic fixtures | 24 | 10 | 4 | 0 |
+| Live models offline, tool failure, fresh-process recovery | 26 | 11 | 4 | 0 |
+| Live models online | 24 | 10 | 4 | 0 |
+| Lost acknowledgement, crash/restart, committed replay, concurrent delivery | 24 | 10 | 4 | 0 |
+
+SQL readback verified both agents' conversations and parent links, stable
+predecessors and message positions, tool-call arguments and results, the failed
+attempt, and exactly one usage carrier per model response. Cache reads and
+writes are removed from gross input before storing HypAware's net input field.
+
+All five project columns were populated automatically: `cwd`, `repo_root`,
+`git_remote`, `git_branch`, and `head_sha`. These facts are saved on the producer
+at run start and survive delayed replay. Tests also cover non-repository folders,
+missing Git, absent remote, detached HEAD, and credential stripping.
+
+Both adapters supplied full offered tool definitions, including an `unused`
+tool that was never executed. `system_text` was also preserved. Normal session
+rows are queryable with `hyp query sql`; report changes remain deferred.
+
+Deterministic tests cover repeated input history, identical answers from distinct
+model calls, deeper graph parent mapping, multi-part response usage, partial
+write failure, and replay against spooled and committed data. Receiver logs
+confirmed duplicate spans were skipped with zero additional message writes.
+
+Remaining limits: this is still an isolated, synthetic-only plugin, with no
+production attach/privacy controls, checkpoint-resume identity across callback
+instances, opaque external-agent internals, or live Anthropic verification.
+Completed-event transport recovery is tested; recovery of a killed application's
+unfinished work is not. See the README for bounds and the CPU/memory review.
+
+Validation: `node scripts/langgraph-poc/run.mjs --live` and the final fixture
+smoke passed, including `hyp query sql` readback of both tables. All 10 new
+deterministic tests passed. Final `npm test`: 8,122 passed, 4 skipped, no failures.
+CPU/memory review found no unbounded retained state in this bounded harness;
+spool scans and synchronous producer writes remain prototype limitations.
+
+## Earlier current-model follow-up, before session mapping
 
 Run ID: `langgraph-poc-1792182534856`. Live `gpt-6.1-sol` and `gpt-6-luna`
 both passed using the Responses API and low reasoning effort. These models
@@ -73,7 +135,7 @@ not through a live Anthropic service; no Anthropic credential was available.
 - Losing a successful collector acknowledgement duplicated all 24 retried
   spans. Plain SQL aggregation would double-count their usage.
 
-## Actual parity gaps
+## Original parity gaps, before the follow-up above
 
 1. **Transport recovery needs an idempotent receiver or materializer.** This
    experiment proves at-least-once recovery, not exactly-once recording. Stable
@@ -102,7 +164,7 @@ The next production step would be a small source integration with durable,
 idempotent event ingestion and an explicit normalization contract. Adding only
 OTLP protobuf support would not address these semantic and recovery gaps.
 
-## Validation
+## Earlier validation
 
 - Current `node scripts/langgraph-poc/run.mjs --live`: passed with GPT-6.1 Sol
   and GPT-6 Luna through the real daemon, collector, cache, and CLI SQL path,

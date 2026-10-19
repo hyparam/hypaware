@@ -9,7 +9,7 @@ const { StateGraph, MessagesAnnotation, START, END } = requireFixture('@langchai
 const { ToolNode } = requireFixture('@langchain/langgraph/prebuilt')
 const { ChatOpenAI } = requireFixture('@langchain/openai')
 const { ChatAnthropic } = requireFixture('@langchain/anthropic')
-const { HumanMessage } = requireFixture('@langchain/core/messages')
+const { HumanMessage, SystemMessage } = requireFixture('@langchain/core/messages')
 const { tool } = requireFixture('@langchain/core/tools')
 const { z } = requireFixture('zod')
 const [mode, directory, runId, scenario, endpoint] = process.argv.slice(2)
@@ -25,8 +25,8 @@ if (mode === 'flush') {
       server = http.createServer(async (req, res) => {
         const chunks = []
         for await (const chunk of req) chunks.push(chunk)
-        const body = JSON.parse(Buffer.concat(chunks))
-        const anthropic = req.url.startsWith('/v1/messages')
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        const anthropic = req.url?.startsWith('/v1/messages')
         const last = body.messages.at(-1)
         const usedTool = last.role === 'tool' ||
           (Array.isArray(last.content) && last.content.some(c => c.type === 'tool_result'))
@@ -66,10 +66,12 @@ if (mode === 'flush') {
       if (++attempts === 1 && failOnce) throw new Error('synthetic transient failure')
       return String(a + b)
     }, { name: 'add', description: 'Add two numbers', schema: z.object({ a: z.number(), b: z.number() }) })
+    const unused = tool(() => 'unused', { name: 'unused', description: 'Not needed for arithmetic', schema: z.object({}) })
+    const system = new SystemMessage('You are an arithmetic assistant. Use add, then answer with only the number.')
     const outputs = []
     const child = (model, name) => new StateGraph(MessagesAnnotation)
       .addNode('model', async (state, config) => {
-        const result = await model.bindTools([add]).invoke(state.messages, config)
+        const result = await model.bindTools([add, unused]).invoke(state.messages, config)
         outputs.push(message(result))
         return { messages: [result] }
       })
@@ -82,21 +84,26 @@ if (mode === 'flush') {
     const reviewer = child(models[1], 'reviewer-agent')
     const graph = new StateGraph(MessagesAnnotation)
       .addNode('researcher', child(models[0], 'researcher-agent'))
-      .addNode('reviewer', async (state, config) => reviewer.invoke({ messages: [new HumanMessage(
+      .addNode('reviewer', async (state, config) => reviewer.invoke({ messages: [system, new HumanMessage(
         `Another agent answered ${state.messages.at(-1).text}. Independently use the add tool for 19 + 23, then answer with only the number.`
       )] }, config))
       .addEdge(START, 'researcher').addEdge('researcher', 'reviewer').addEdge('reviewer', END)
       .compile({ name: 'supervisor' })
-    const capture = new Capture(directory, runId, scenario, `${runId}:${scenario}`)
-    const result = await graph.invoke({ messages: [new HumanMessage(
+    const production = process.env.HYP_LANGGRAPH_PRODUCTION === '1'
+    /** @type {any} */
+    const capture = production
+      ? (await import('../../hypaware-core/plugins-workspace/langgraph/src/recorder.js')).createHypAwareCallback({ sessionId: `${runId}:${scenario}` })
+      : new Capture(directory, runId, scenario, `${runId}:${scenario}`)
+    const result = await graph.invoke({ messages: [system, new HumanMessage(
       'Use the add tool to calculate 19 + 23, then answer with only the number. If a previous agent has already called it, verify that result and answer only the number.'
-    )] }, { callbacks: [capture], configurable: { thread_id: capture.threadId }, recursionLimit: 12 })
+    )] }, { callbacks: [capture], configurable: { thread_id: capture.sessionId ?? capture.threadId }, recursionLimit: 12 })
     assert.equal(result.messages.at(-1).text.trim(), '42')
     assert.equal(capture.active.size, 0, 'every callback start has an end')
     const expected = { scenario, mode, final: result.messages.at(-1).text,
-      outputs, toolAttempts: attempts, completedSpans: capture.completed }
+      outputs, toolAttempts: attempts, completedSpans: capture.completed, recorder: production ? capture.status() : undefined,
+      projectContext: (await capture.project).context, systemText: system.content }
     fs.writeFileSync(path.join(path.dirname(directory), `${scenario}-expected.json`), JSON.stringify(expected, null, 2))
-    console.log(JSON.stringify({ ...expected, outputs: undefined, delivery: await flush(directory, endpoint) }))
+    console.log(JSON.stringify({ ...expected, outputs: undefined, delivery: production ? { transport: 'local-journal' } : await flush(directory, endpoint) }))
   } finally {
     if (server) await new Promise(resolve => { server.close(resolve); server.closeAllConnections() })
   }

@@ -101,6 +101,7 @@ test('hyp client attach all: a catalog-known client missing from the live regist
       "note: openclaw is a known client but its adapter is not enabled; run 'hyp client attach openclaw' to enable it",
       "note: opencode is a known client but its adapter is not enabled; run 'hyp client attach opencode' to enable it",
       "note: pi is a known client but its adapter is not enabled; run 'hyp client attach pi' to enable it",
+      "note: langgraph is a known client but its adapter is not enabled; run 'hyp client attach langgraph' to enable it",
       "note: ollama is a known client but its adapter is not enabled; run 'hyp client attach ollama' to enable it",
     ])
   })
@@ -109,7 +110,7 @@ test('hyp client attach all: a catalog-known client missing from the live regist
 test('hyp client attach all: the note does not change the exit code, only real attach failures among the live set do', async () => {
   await withTempHome(async (home) => {
     // Only claude and claude-desktop are live; codex, cursor, hermes, ollama, openclaw, opencode,
-    // and pi are known-but-not-enabled. Seven notes, zero live-attach failures, exit
+    // and pi are known-but-not-enabled. Eight notes, zero live-attach failures, exit
     // code still 0.
     const { ctx, stdout, stderr } = makeCtx({ home, registered: ['claude', 'claude-desktop'] })
     const code = await runAttach(['all'], ctx)
@@ -122,6 +123,7 @@ test('hyp client attach all: the note does not change the exit code, only real a
       "note: codex is a known client but its adapter is not enabled; run 'hyp client attach codex' to enable it",
       "note: cursor is a known client but its adapter is not enabled; run 'hyp client attach cursor' to enable it",
       "note: hermes is a known client but its adapter is not enabled; run 'hyp client attach hermes' to enable it",
+      "note: langgraph is a known client but its adapter is not enabled; run 'hyp client attach langgraph' to enable it",
       "note: ollama is a known client but its adapter is not enabled; run 'hyp client attach ollama' to enable it",
       "note: openclaw is a known client but its adapter is not enabled; run 'hyp client attach openclaw' to enable it",
       "note: opencode is a known client but its adapter is not enabled; run 'hyp client attach opencode' to enable it",
