@@ -374,6 +374,8 @@ export async function runQueryOverview(argv, ctx) {
         color: useColor(ctx.stdout, ctx.env),
         showSql,
         withheld: runner.sawWithholding?.() ?? false,
+        // A pipe reports no width; the renderer then lays out for its fixed default.
+        columns: /** @type {{ columns?: number }} */ (ctx.stdout).columns,
       }))
       return 0
     },

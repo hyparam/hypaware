@@ -8,6 +8,8 @@ import process from 'node:process'
 import { coreUsage, parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
+import { isEntryRecording } from '../config/client_recording.js'
+import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { BUILTIN_REMOTES, effectiveDefaultRemote, originOf, sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import {
@@ -30,10 +32,10 @@ import { DURABLE_HINT } from '../commands/local_only.js'
 import { withSpinner } from './spinner.js'
 import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
 import { readAllStdin } from './stdio.js'
-import { isPlainObject } from '../util/json_util.js'
+import { escapeForDisplay, hasDisplayUnsafeChars, isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
+import { isClientAttachable, loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { daemonIncompleteNote } from '../daemon/platform.js'
 
 /**
@@ -69,6 +71,12 @@ export const ATTACH_WAIT_DEFAULT_MS = 3000
  * with no published config, or a slow first pull), and the caller falls back to
  * pointing at `hyp status`.
  *
+ * When every configured client captures without a marker (transcript-mode
+ * Codex, a probe-less client), no poll could ever succeed, so there is no wait:
+ * the answer is `null` and the caller points at `hyp status` without claiming
+ * nothing is captured (#2071). A mixed install still waits for the clients
+ * that can attach.
+ *
  * @param {{
  *   env: NodeJS.ProcessEnv,
  *   homeDir?: string,
@@ -77,11 +85,13 @@ export const ATTACH_WAIT_DEFAULT_MS = 3000
  *   probe?: () => Promise<string[]>,
  *   sleep?: (ms: number) => Promise<void>,
  * }} opts
- * @returns {Promise<string[]>} attached client names (sorted), empty on timeout
+ * @returns {Promise<string[] | null>} attached client names (sorted), empty on timeout, `null` when no configured client writes a marker to wait for
  * @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile the follow-up made auto, not printing a pre-pull guess
  */
 export async function waitForClientAttach({ env, homeDir, timeoutMs = ATTACH_WAIT_DEFAULT_MS, intervalMs = 1000, probe, sleep = defaultSleep }) {
-  const attachProbe = probe ?? (await buildDefaultAttachProbe(env, homeDir))
+  const plan = probe ? { probe, markerless: false } : await buildDefaultAttachProbe(env, homeDir)
+  if (plan.markerless) return null
+  const attachProbe = plan.probe
   const deadline = Date.now() + timeoutMs
   for (;;) {
     /** @type {string[]} */
@@ -105,19 +115,46 @@ export async function waitForClientAttach({ env, homeDir, timeoutMs = ATTACH_WAI
 
 /**
  * Build the production attach probe: discover the (poll-invariant) client
- * descriptors once, then hand back a closure that re-reads their on-disk attach
- * markers on each call. Keeps plugin discovery / catalog build out of the poll
- * loop while the per-poll read stays a marker-only, throw-proof probe.
+ * descriptors and read the config once, then hand back a closure that re-reads
+ * their on-disk attach markers on each call. Keeps plugin discovery / catalog
+ * build and the config read out of the poll loop while the per-poll read stays
+ * a marker-only, throw-proof probe.
+ *
+ * `markerless` is true when at least one configured, recording client has a
+ * descriptor and none of them is attachable in its configured capture mode.
+ * No configured client at all is not markerless: the daemon's first org-config
+ * pull may still enable one, so that install keeps the wait.
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {string} [homeDir]
- * @returns {Promise<() => Promise<string[]>>}
+ * @returns {Promise<{ probe: () => Promise<string[]>, markerless: boolean }>}
  */
 async function buildDefaultAttachProbe(env, homeDir) {
-  const stateDir = readObservabilityEnv(env).stateDir
+  const { stateDir, hypHome } = readObservabilityEnv(env)
   const resolvedHome = homeDir ?? env.HOME ?? process.env.HOME ?? os.homedir()
   const descriptors = await loadClientDescriptors({ stateDir })
-  return () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
+  const probe = () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
+  const layered = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath: resolveConfigPath({ env, hypHome }) }).catch(() => null)
+  // A layer that exists but did not load is no evidence about capture mode,
+  // even when the other layer resolves: keep the wait. An absent layer is normal.
+  if (!layered || layerUnreadable(layered.localLoaded) || layerUnreadable(layered.centralLoaded)) return { probe, markerless: false }
+  const config = layered.effective
+  let configured = 0
+  for (const [clientName, descriptor] of descriptors) {
+    const entry = config?.plugins?.find((p) => p.name === descriptor.plugin)
+    if (!entry || entry.enabled === false || !isEntryRecording(entry)) continue
+    if (isClientAttachable(clientName, descriptor, config)) return { probe, markerless: false }
+    configured++
+  }
+  return { probe, markerless: configured > 0 }
+}
+
+/**
+ * @param {{ ok: boolean, errorKind?: string } | null | undefined} loaded
+ * @returns {boolean}
+ */
+function layerUnreadable(loaded) {
+  return !!loaded && !loaded.ok && loaded.errorKind !== 'config_missing'
 }
 
 /**
@@ -336,7 +373,7 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
     `${FIRST_SYNC_RULE}\n` +
     '  PRIVACY - review before first sync\n' +
     '\n' +
-    `  first sync to the '${serverName}' server is no later than\n` +
+    `  first sync to ${trustNoticeServer(serverName)} is no later than\n` +
     `  ${formatFirstSyncDeadline(deadlineMs)}\n` +
     '  and includes your backfilled history\n' +
     "  (run 'hyp remote list' to see that server's URL)\n" +
@@ -348,6 +385,41 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
     `${FIRST_SYNC_RULE}\n` +
     '\n'
   )
+}
+
+// A `scheme://` prefix: a URL passed where the name goes, which the
+// enrollment notice would then print as an autolinked dead URL (#412, #414).
+const URL_SHAPED_NAME = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//
+
+/**
+ * Why `name` cannot be a new remote target name, or `undefined` when it can.
+ * The name is printed inside the fixed-format enrollment notice, so it may
+ * not hide a line break, terminal control or bidi reordering, whitespace, or
+ * a URL. Anything else stays a name, non-ASCII included (`prodüktion-日本`).
+ *
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+export function remoteNameProblem(name) {
+  if (name.length === 0) return 'must not be empty'
+  if (hasDisplayUnsafeChars(name)) return 'must not contain control or bidirectional formatting characters'
+  if (/\s/.test(name)) return 'must not contain whitespace'
+  if (URL_SHAPED_NAME.test(name)) return 'must be a name, not a URL (the URL is the second argument)'
+  return undefined
+}
+
+/**
+ * How the enrollment notice names its server. A name `remote add` would now
+ * refuse can still arrive from a hand-edited or layered config, and stays
+ * usable for lookup, login and removal; the notice just does not print it,
+ * and the `hyp remote list` pointer beside it still recovers the target.
+ *
+ * @ref LLP 0100#requirements [constrained-by]: R1a - name the server, never its URL
+ * @param {string} name
+ * @returns {string}
+ */
+function trustNoticeServer(name) {
+  return remoteNameProblem(name) === undefined ? `the '${name}' server` : 'your configured server'
 }
 
 /**
@@ -372,6 +444,12 @@ export async function runRemoteAdd(argv, ctx) {
   if (!parsed.ok) return parsed.code
   const name = String(parsed.params.name)
   const url = String(parsed.params.url)
+  // The refusal does not echo the name: it is the hostile value being refused.
+  const nameProblem = remoteNameProblem(name)
+  if (nameProblem !== undefined) {
+    ctx.stderr.write(`hyp remote add: the remote name ${nameProblem}\n`)
+    return 2
+  }
   if (!/^https?:\/\//.test(url)) {
     ctx.stderr.write(`hyp remote add: url must be an http(s) URL (got ${url})\n`)
     return 2
@@ -764,22 +842,19 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   } catch (err) {
     const callbackError = /** @type {any} */ (err)?.callbackError
     ctx.stderr.write(`hyp remote login: ${explainLoginError(callbackError, err)}\n`)
-    // A server-surfaced callback error (org selection, membership) is already
-    // actionable. A local failure - most importantly a timeout, which is what a
-    // headless box hits when the opener silently fails - is not, so point at the
-    // headless escape hatches rather than leaving the user stuck (LLP 0058 D8).
-    if (!callbackError) {
-      ctx.stderr.write("  (on a machine with no browser, pass a static token with --token-file <path> or pipe it on stdin; --no-browser prints the URL to open elsewhere)\n")
-    }
+    // No headless hint follows: the poll lane already printed the URL to open
+    // from any machine before it waited, and a static token cures neither a
+    // server too old for the poll lane nor a pickup lost in transit.
+    // @ref LLP 0543#no-headless-hint [implements]: a poll-lane failure gets its own explanation and no static-token advice
     // The server's own refusal code, carried out as the reason: this is the
     // fact the wizard used to reconstruct by matching explainLoginError's
     // English back out of stderr (LLP 0179#no-prose-control-flow).
-    return { exitCode: 1, reason: loginFailureReason(callbackError) }
+    return { exitCode: 1, reason: loginFailureReason(callbackError, /** @type {any} */ (err)?.kind) }
   }
   // The single-use code is already spent by here, so a write failure (most
   // likely a lock timeout under a concurrent hyp process) is not a login
-  // failure: say the sign-in worked but the store did not, and do not print the
-  // headless hint, which would wrongly imply the browser flow itself failed.
+  // failure: say the sign-in worked but the store did not, without implying
+  // the browser flow itself failed.
   try {
     await writeSession(stateDir, name, session)
   } catch (err) {
@@ -788,11 +863,13 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     return { exitCode: 1, reason: 'store_failed' }
   }
   // The compact lane is the wizard's, whose lines name the server the way the
-  // recap does; the wide lane keeps the target name `hyp remote list` maps.
+  // recap does; the wide lane keeps the target name `hyp remote list` maps,
+  // escaped so a hand-edited name cannot leave the terminal in a state that
+  // carries into the notice below (#414).
   // @ref LLP 0437#server-name [implements]: the wizard's sign-in line reads as HypAware Cloud or the host, never the target key
   ctx.stdout.write(compact
     ? `✓ Signed in to ${serverDisplayName(entry.url)} as org '${session.org}'\n`
-    : `logged in to '${name}' as org '${session.org}'\n`)
+    : `logged in to '${escapeForDisplay(name)}' as org '${session.org}'\n`)
 
   // No gateway credential (server didn't mint one, or --no-forward): query-only
   // login, nothing to forward. --no-forward with a minted gateway discards it
@@ -882,7 +959,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // Revisit if the server root ever becomes a real landing page.
     // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL
     if (!compact) {
-      ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
+      ctx.stdout.write(`forwarding logs to ${trustNoticeServer(name)}\n`)
       ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
     }
     // Print the deadline once, ahead of every exit branch below (--no-daemon,
@@ -946,9 +1023,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // Compact reports nothing: the wizard's recap says what is recorded,
     // and its finish step attaches the clients itself.
     if (!compact) {
-      ctx.stdout.write(attached.length > 0
-        ? `capturing ${attached.join(', ')}\n`
-        : "no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
+      ctx.stdout.write(attached === null
+        ? "Check 'hyp status' for capture activity.\n"
+        : attached.length > 0
+          ? `capturing ${attached.join(', ')}\n`
+          : "no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
     if (!compact) ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }
@@ -1005,11 +1084,18 @@ const LOGIN_ORG_SELECTION_MESSAGE = 'this account has more than one org - re-run
  * OAuth error): retriable is the safe reading, since the alternative tells a
  * user to stop trying over a code we do not understand.
  *
+ * With no callback error, the poller's own typed `kind` names the one local
+ * failure that is not retriable: a server that predates the poll endpoint.
+ * It is read only there, so a server refusal can never be reported as one.
+ *
  * @param {string | undefined} callbackError
+ * @param {string | undefined} [kind] the poller's error kind, when it threw the error
  * @returns {LoginOutcome['reason']}
  * @ref LLP 0179#outcome [implements]: the D7 code the terminal explains, reported rather than re-derived
+ * @ref LLP 0543#typed [implements]: `no_poll_endpoint` comes from the poller's kind, never from `callbackError` or the message
  */
-function loginFailureReason(callbackError) {
+function loginFailureReason(callbackError, kind) {
+  if (!callbackError) return kind === 'no_poll_endpoint' ? 'no_poll_endpoint' : 'login_failed'
   switch (callbackError) {
     case 'no_membership':
       return 'no_membership'

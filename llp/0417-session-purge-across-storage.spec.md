@@ -6,7 +6,7 @@
 **Author:** Kenny
 **Date:** 2026-09-18
 **Related:** LLP 0104, LLP 0253, LLP 0403; server LLP 0003, 0005, 0053, 0140
-**Extended-by:** [LLP 0513](./0513-one-spool-drainer-per-table.design.md) (the same guard, keyed on a table spool); [LLP 0515](./0515-daemon-start-survives-pid-reuse.design.md) (the same guard, keyed on the daemon pid file)
+**Extended-by:** [LLP 0513](./0513-one-spool-drainer-per-table.design.md) (the same guard, keyed on a table spool); [LLP 0515](./0515-daemon-start-survives-pid-reuse.design.md) (the same guard, keyed on the daemon pid file); [LLP 0449](./0449-hermes-mutable-transcripts.spec.md) (the same guard, keyed on a reconcile scope)
 
 ## Request {#request}
 
@@ -257,6 +257,19 @@ copies in partitions with no matching live rows in any managed generation,
 unmanaged legacy tables, native transcripts and derived reports are outside
 this scope. Pre-upgrade position deletes without cleanup journals are not
 retroactively certified. Disabled maintenance postpones cleanup.
+
+The status answer is ephemeral, and the journal lifecycle above is its whole
+evidence. A cleanup id identifies a cache partition, not one purge
+invocation: a later purge of the same partition reuses it, so a retained
+completion bit could falsely certify that later work. `completed` is
+observable only while a valid journal remains and every generation it names
+has been verified absent. The next sweep or a retention eviction removes that
+journal, and the next sweep may run immediately, so no minimum window in which
+`completed` can be read is promised. After that the answer is `unverified`,
+which means certification is unavailable: it is not a failed cleanup and not
+proof that the bytes remain. The purge receipt's `cache_cleanup` entries admit
+the cleanup; they are not a durable deletion certificate. No completion record,
+time-to-live, per-invocation id or inferred completion extends this.
 
 Cost is one streaming full-generation rewrite per affected partition; this is
 more I/O than a subset merge but retires the entire snapshot history. Existing

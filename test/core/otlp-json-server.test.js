@@ -172,6 +172,60 @@ test('GET / answers with the listener name banner', async () => {
   }
 })
 
+// A body with no declared length cannot be refused up front, because the
+// banner is written before its length is known, so it is cut at the drain cap
+// instead of read to EOF (issue #1367). A bodiless probe, the real shape, keeps
+// its connection.
+test('the GET / banner keeps a bodiless probe reusable and cuts an endless chunked body', async () => {
+  const s = await startServer({ name: 'hypaware/otel' })
+  try {
+    const probe = await fetch(`${s.origin}/`)
+    assert.equal(probe.status, 200)
+    assert.notEqual(probe.headers.get('connection'), 'close')
+    await probe.text()
+
+    s.sockets.length = 0
+    const out = await new Promise((resolve) => {
+      const socket = net.connect(s.bound.port, '127.0.0.1')
+      const chunk = Buffer.alloc(16 * 1024, 'x')
+      const frame = `${chunk.length.toString(16)}\r\n`
+      let received = ''
+      let closed = false
+      const timer = setTimeout(() => socket.destroy(), 3000)
+      function pump() {
+        while (!socket.destroyed) {
+          if (!socket.write(frame) || !socket.write(chunk) || !socket.write('\r\n')) {
+            socket.once('drain', pump)
+            return
+          }
+        }
+      }
+      socket.on('connect', () => {
+        socket.write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\ntransfer-encoding: chunked\r\n\r\n')
+        pump()
+      })
+      socket.on('data', (data) => { received += data.toString('utf8') })
+      socket.on('error', () => {})
+      socket.on('close', () => {
+        closed = true
+        clearTimeout(timer)
+        resolve({ received, closed })
+      })
+    })
+    const [served] = s.sockets
+    assert.ok(served, 'the chunked probe opened no server connection to measure')
+    if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+    assert.ok(served.bytesRead < 512 * 1024, `the banner read ${served.bytesRead} bytes of an endless body`)
+    const { received } = /** @type {{ received: string }} */ (out)
+    if (received) {
+      assert.match(received, /^HTTP\/1\.1 200 /)
+      assert.match(received, /\r\nconnection: close\r\n/i)
+    }
+  } finally {
+    await s.close()
+  }
+})
+
 test('each signal route answers with its own empty partialSuccess envelope', async () => {
   const s = await startServer()
   try {
@@ -807,8 +861,11 @@ test('a request target new URL rejects is answered 400, not thrown out of the ha
 // never read still has to be drained for that answer to reach a caller
 // mid-upload. Draining it with a bare `req.resume()` reads to EOF, which hands
 // the length of that read to the sender; the shared `drainRequestBody` bounds
-// it instead (issue #1351).
-for (const refusal of [
+// it instead (issue #1351). The banner and the later refusals answer without
+// touching the request at all, which reads to EOF just the same through
+// Node's `_dump()` fallback (issue #1367).
+/** @type {Array<{ name: string, requestLine: string, host: string, status: number, headers?: Record<string, string> }>} */
+const refusals = [
   {
     name: 'the misdirected-Host 421',
     requestLine: 'POST /v1/logs',
@@ -821,7 +878,27 @@ for (const refusal of [
     host: '127.0.0.1',
     status: 400,
   },
-]) {
+  // A banner probe reads no body, so one declared past the drain cap is
+  // refused rather than answered 200 and reset behind the answer.
+  { name: 'the GET / banner', requestLine: 'GET /', host: '127.0.0.1', status: 413 },
+  { name: 'the method 405', requestLine: 'PUT /v1/logs', host: '127.0.0.1', status: 405 },
+  { name: 'the unknown-route 404', requestLine: 'POST /v1/nope', host: '127.0.0.1', status: 404 },
+  {
+    name: 'the content-type 415',
+    requestLine: 'POST /v1/logs',
+    host: '127.0.0.1',
+    status: 415,
+    headers: { 'content-type': 'text/plain' },
+  },
+  {
+    name: 'the content-encoding 415',
+    requestLine: 'POST /v1/logs',
+    host: '127.0.0.1',
+    status: 415,
+    headers: { 'content-encoding': 'br' },
+  },
+]
+for (const refusal of refusals) {
   test(`${refusal.name} discards an oversized body only up to a cap`, async () => {
     const s = await startServer()
     try {

@@ -1,22 +1,24 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
 
-import { Attr, withSpan } from '../observability/index.js'
+import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { loadConfigFile } from '../config/schema.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { isEntryRecording } from '../config/client_recording.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { DurableBinRequiredError, GlobalInstallError } from './global_install.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
-import { daemonIncompleteNote } from '../daemon/platform.js'
+import { daemonIncompleteNote, platformIsSupported } from '../daemon/platform.js'
 import { ServiceOpError } from '../daemon/service_ops.js'
 import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
-import { materializeClientAssets } from '../runtime/client_assets.js'
+import { CLAUDE_SKILL_RELOAD_HINT, copiedClaudeSkills, materializeClientAssets } from '../runtime/client_assets.js'
+import { loaderActivationKind } from '../runtime/loader.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
@@ -37,7 +39,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, ClientRegistration, ClientRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, ClientPreflight, ClientRegistration, ClientRegistry, CommandActivationOutcome, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
  * @import { restartServiceDaemon as restartServiceDaemonFn, serviceDaemonStatus as serviceDaemonStatusFn } from '../../../src/core/daemon/install.js'
@@ -957,6 +959,57 @@ function preserveOllamaUpstreams(composed, existing, descriptors) {
 }
 
 /**
+ * Setup's client preflight (LLP 0532): ask each picked client's adapter, once
+ * and before anything is written, whether its attach is known to refuse or
+ * to capture less. Each verdict is said once on stderr. The refused clients
+ * are returned so the finale skips their attach; every other client is
+ * untouched. Only an adapter that defines `preflight` is asked, so a run
+ * that picked no such client runs no check at all. A detached client, one
+ * whose owner failed to activate, and a preflight that throws give no verdict.
+ *
+ * @param {{
+ *   clientsPicked: string[],
+ *   config: HypAwareV2Config,
+ *   capabilities: CapabilityRegistry,
+ *   clients?: ClientRegistry,
+ *   activations?: CommandActivationOutcome[],
+ *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ * }} args
+ * @returns {Promise<Set<string>>}
+ */
+export async function preflightPickedClients({ clientsPicked, config, capabilities, clients, activations, stderr }) {
+  /** @type {Set<string>} */
+  const refused = new Set()
+  /** @type {AiGatewayCapability | undefined} */
+  const gateway = clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')
+    ? capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
+    : undefined
+  const asked = clientsPicked
+    .map((client) => ({ client, adapter: clients?.getClient(client) ?? gateway?.getClient(client) }))
+    .filter((entry) => typeof entry.adapter?.preflight === 'function')
+  if (asked.length === 0) return refused
+  const notRecording = await detachedClients(asked.map((entry) => entry.client), config)
+  const failedOwners = failedClientOwners(asked.map((entry) => entry.client), activations)
+  for (const { client, adapter } of asked) {
+    if (notRecording.has(client) || failedOwners.has(client)) continue
+    /** @type {ClientPreflight} */
+    let verdict
+    try {
+      verdict = (await adapter?.preflight?.()) ?? {}
+    } catch {
+      continue
+    }
+    if (verdict.refuse) {
+      stderr.write(`${verdict.refuse}\n`)
+      refused.add(client)
+    } else if (verdict.warn) {
+      stderr.write(`note: ${verdict.warn}\n`)
+    }
+  }
+  return refused
+}
+
+/**
  * The picked clients whose plugin entry says `recording: false` (LLP 0466).
  *
  * @param {string[]} clients
@@ -1298,6 +1351,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
  *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
  *   failedPlugins?: string[],
+ *   activations?: CommandActivationOutcome[],
  *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
@@ -1312,6 +1366,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   checkBoundary?: () => Promise<boolean>,
  *   autoAccept?: boolean,
  *   skipAttachClients?: Set<string>,
+ *   preflightRefused?: Set<string>,
  *   clientLabels?: Map<string, string>,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
  *   daemonService?: {
@@ -1498,8 +1553,15 @@ export async function runPickerFinale(args) {
   /** @param {string} name @returns {ClientRegistration | undefined} */
   const resolveAdapter = (name) => args.clients?.getClient(name) ?? gateway?.getClient(name)
   const anyAdapterPicked = clientsPicked.some((client) => resolveAdapter(client) !== undefined)
+  // A plugin whose `activate()` threw is left in the registry with whatever
+  // it registered before the throw, or with nothing. Neither is "this client
+  // has no adapter by design", so the owner's outcome is read first. A caller
+  // that passed no activations has said nothing about owners: that is
+  // unknown, so the lane neither invents a failure nor records a success
+  // beyond the reading it always had.
+  const failedOwners = failedClientOwners(clientsPicked, args.activations)
 
-  if (clientsPicked.length > 0 && (anyAdapterPicked || gateway)) {
+  if (clientsPicked.length > 0 && (anyAdapterPicked || gateway || failedOwners.size > 0)) {
     // Skipped when no daemon was installed (the join lane restarts only
     // after attach, so no CA can appear before it) and on dry runs; the
     // wait-or-skip decision itself lives in the helper. Also skipped when no
@@ -1526,12 +1588,29 @@ export async function runPickerFinale(args) {
         summary.attach.push({ client, dryRun, ok: true, skipped: true })
         continue
       }
+      const failedOwner = failedOwners.get(client)
+      // Checked before the adapter lookup: a plugin that registered its
+      // adapter and then threw is never attached through.
+      // @ref LLP 0522#decision [implements]: a client whose owner threw is a failed attach, not an adapterless skip
+      if (failedOwner) {
+        reportFailedOwnerAttach({ client, owner: failedOwner, dryRun, stderr, summary })
+        continue
+      }
+      // The preflight already said why and how to retry; attaching would
+      // only repeat the refusal it predicted.
+      // @ref LLP 0532#refusal [implements]: a refused client is not attached, and the rest of the run goes on
+      if (args.preflightRefused?.has(client)) {
+        summary.attach.push({ client, dryRun, ok: false })
+        continue
+      }
       const adapter = resolveAdapter(client)
       if (!adapter) {
         // Not attachable, not failed: `contributes.client` also covers plugins
         // that own skill/agent dirs but deliberately register no runtime
         // adapter (Claude Desktop, LLP 0115#no-attach-on-join). Desktop's
         // scheduled transcript lane needs no attach or configure phase.
+        // That reading holds only for an owner that activated: one that threw
+        // was taken out above.
         // @ref LLP 0180#decision [implements]: an adapterless client contribution skips the attach lane as not applicable
         summary.attach.push({ client, dryRun, ok: true, noAdapter: true })
         continue
@@ -1566,7 +1645,8 @@ export async function runPickerFinale(args) {
           summary.attach.push({ client, dryRun, ok: true })
         } else {
           // @ref LLP 0474#routes [implements]: a probe-less Ollama attach is a next-launch recipe, not a changed running client
-          if (client === 'ollama') {
+          // @ref LLP 0548#onboarding: LangGraph setup must show the application callback recipe
+          if (client === 'ollama' || client === 'langgraph') {
             stdout.write(report)
             summary.attach.push({ client, dryRun, ok: true })
             continue
@@ -1639,6 +1719,9 @@ export async function runPickerFinale(args) {
           stderr,
         })
         for (const line of clientAssetLines(installed, pruned, dryRun, label)) stdout.write(`${line}\n`)
+        // Said here and not again in the scripted run summary, so one setup
+        // prints it once.
+        if (copiedClaudeSkills(installed)) stdout.write(`${CLAUDE_SKILL_RELOAD_HINT}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
@@ -1721,6 +1804,12 @@ export async function runPickerFinale(args) {
   // claim it would. A withheld restart keeps the summary's initial
   // `skipped: true` record, and `daemonInstall.failed` is where the run says
   // why.
+  //
+  // A platform with no service manager has nothing to restart either. A join
+  // that ended `daemon_incomplete` skips the install rather than failing it,
+  // so `installFailed` is false and the restart used to run straight into
+  // `unsupported platform`, printing `daemon restart failed:` under the note
+  // that had just said there is no background service to install (#1382).
   // @ref LLP 0317#install-means-running [constrained-by]: a pid, not "loaded", is what says a daemon is running
   if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
     const serviceOptions = { ...(homeDir ? { homeDir } : {}) }
@@ -1732,8 +1821,21 @@ export async function runPickerFinale(args) {
     // first `daemon/install.js`.
     try {
       const service = args.daemonService ?? await import('../daemon/install.js')
-      const restartable = !installFailed
-        || (await service.serviceDaemonStatus(serviceOptions)).pid !== undefined
+      let restartable = platformIsSupported(process.platform) && !installFailed
+      if (platformIsSupported(process.platform) && installFailed) {
+        const status = await service.serviceDaemonStatus(serviceOptions)
+        restartable = status.pid !== undefined
+        // A probe that could not reach the service manager has no pid to give
+        // whether or not a daemon is serving the old config, and the restart
+        // would drive the same manager that just failed to answer. The restart
+        // stays withheld, and the summary says why rather than reading as "no
+        // daemon to restart" (#1406). No line is printed: the install failure
+        // above already holds this fault's one diagnosis (#1393).
+        // @ref LLP 0545#withheld [implements]: an unreachable service manager is recorded on the summary, not printed
+        if (status.unreachable) {
+          summary.daemonRestart = { skipped: true, dryRun: false, ok: false, withheld: 'service_manager_unreachable' }
+        }
+      }
       if (restartable) {
         await service.restartServiceDaemon(serviceOptions)
         summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
@@ -1820,6 +1922,86 @@ export async function findAttachedNotConfiguredClients({ clientsPicked, config, 
     if (probe.attached) stranded.push(clientName)
   }
   return stranded
+}
+
+/**
+ * Refuse a setup write that would leave a client attached through a proxy
+ * the new config turns off.
+ *
+ * A machine set up before LLP 0262 can still have Claude attached by proxy
+ * (its marker says `mode: "proxy"`), and no setup path composes `proxy_mode`
+ * any more, so a from-scratch re-init under `--force` would quietly turn the
+ * proxy off and capture would stop. The evidence is the client's own attach
+ * marker, read through the probe `hyp status` uses; the config's
+ * `proxy_mode` key proves nothing about what is attached. A refusal writes
+ * nothing, names the client and the commands that fix it, and runs neither.
+ *
+ * Bounded: one settings-file read per client whose probe is a JSON marker
+ * (the only marker that records a mode), and none at all for a fresh install,
+ * a config that keeps the proxy on, or a centrally governed gateway.
+ *
+ * @ref LLP 0524#check [implements]: refuse only when a config exists, the new one turns the proxy off, central does not own the gateway, and a marker says proxy
+ * @ref LLP 0524#unreadable [implements]: a settings file that cannot be read where it matters refuses rather than guesses, without quoting its contents
+ * @param {{
+ *   config: HypAwareV2Config,
+ *   configPath: string,
+ *   env: NodeJS.ProcessEnv,
+ *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ * }} args
+ * @returns {Promise<boolean>} true when the write may proceed
+ */
+export async function preflightLegacyProxyAttach({ config, configPath, env, stderr }) {
+  try {
+    await fs.access(configPath)
+  } catch {
+    return true
+  }
+  const gateway = (config.plugins ?? []).find((entry) => entry.name === GATEWAY_PLUGIN)
+  if (gateway && gateway.enabled !== false && gateway.config?.proxy_mode === true) return true
+  // @ref LLP 0524#central [implements]: a centrally named gateway is not the local write's to change, so there is nothing to refuse
+  if ((await readCentralPluginNames(env)).has(GATEWAY_PLUGIN)) return true
+  const homeDir = env.HOME ?? ''
+  if (!homeDir) return true
+
+  for (const [client, descriptor] of await buildWalkthroughClientDescriptorMap()) {
+    if (descriptor.attachProbe?.format !== 'json' || !descriptor.attachProbe.marker_key) continue
+    const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
+    /** @type {string | undefined} */
+    let reason
+    /** @type {string} */
+    let message = ''
+    if (probe.error) {
+      reason = 'attach_state_unreadable'
+      message =
+        `cannot read ${client}'s settings${probe.settingsPath ? ` (${probe.settingsPath})` : ''} to check ` +
+        `whether ${client} is still attached through the HypAware proxy, which this config turns off. ` +
+        `Nothing was changed. Fix that file, or run 'hyp client detach ${client}', then run setup again.`
+    } else if (probe.mode === 'proxy') {
+      reason = 'legacy_proxy_attachment'
+      message =
+        `${client} is still attached through the HypAware proxy, and this config turns the proxy off, ` +
+        `so ${client} would stop being captured. Nothing was changed. Move ${client} off the proxy ` +
+        `with 'hyp client attach ${client}', or remove the attach with 'hyp client detach ${client}', ` +
+        `then run setup again.`
+    }
+    if (!reason) continue
+    stderr.write(`hyp setup: ${message}\n`)
+    await withSpan(
+      'wizard.pick.write_config',
+      {
+        [Attr.COMPONENT]: 'wizard',
+        [Attr.OPERATION]: 'wizard.pick.write_config',
+        config_path: configPath,
+        status: 'aborted',
+        hyp_reason: reason,
+        hyp_client: client,
+      },
+      async () => {},
+      { component: 'wizard' }
+    )
+    return false
+  }
+  return true
 }
 
 /**
@@ -2056,10 +2238,12 @@ async function runFinaleBackfill(args) {
           )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
-          // Only an import that wrote rows or failed is news; a zero means
-          // there was nothing to do, and the scan counts go to the span.
+          // Only an import that wrote rows, failed, or could not run is news;
+          // a zero means there was nothing to do, and the scan counts go to
+          // the span.
           // @ref LLP 0437#finish [implements]: an import reports only what it imported or a failure
-          if (!entry.ok) {
+          // @ref LLP 0538#note [implements]: an import that could not run says so rather than reading as empty
+          if (!entry.ok || (entry.note && entry.scanned === 0)) {
             stdout.write(`${tag}${label(provider)} import ${describeBackfillResult(entry)}\n`)
           } else if (entry.rowsWritten > 0) {
             const rows = entry.rowsWritten === 1 ? 'row' : 'rows'
@@ -2115,11 +2299,17 @@ async function runFinaleBackfill(args) {
  * about the history on disk and must not be reported as one. It states
  * what the scan found and claims no import outcome.
  *
- * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, dryRun?: boolean }} entry
+ * A run that scanned nothing because the importer could not run at all
+ * (no `opencode` on PATH) carries the provider's note, and says that
+ * instead, dry run or not: "nothing to import" would claim an empty history
+ * nobody read.
+ *
+ * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, dryRun?: boolean, note?: string }} entry
  * @returns {string}
  */
 export function describeBackfillResult(entry) {
   if (!entry.ok) return `failed (scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})`
+  if (entry.note && entry.scanned === 0) return `unavailable: ${entry.note}`
   if (entry.dryRun) return entry.scanned === 0 ? 'nothing to import' : `scanned ${entry.scanned}`
   if (entry.rowsWritten === 0) {
     return entry.scanned === 0 ? 'nothing to import' : `nothing new to import (scanned ${entry.scanned})`
@@ -2284,6 +2474,79 @@ export function orderPickerDescriptors(descriptors) {
   return new Map(ordered.map((d) => [d.id, d]))
 }
 
+
+/**
+ * Map each picked client to the owning plugin whose `activate()` threw, read
+ * from the boot's own activation results: the owner is the plugin whose
+ * manifest contributes that client name. Built once per finale, and only over
+ * the picked names, so the cost is one pass over the activated plugins.
+ *
+ * A client no failed owner claims is absent from the map. That covers a
+ * healthy owner, a caller that passed no activations, and an owner that never
+ * reached activation (dep-graph elimination, profile withholding): none of
+ * those is a thrown `activate()`, and the attach lane keeps its existing
+ * reading for them.
+ *
+ * @param {string[]} clientsPicked
+ * @param {CommandActivationOutcome[] | undefined} activations
+ * @returns {Map<string, { plugin: string, errorKind: string }>}
+ */
+function failedClientOwners(clientsPicked, activations) {
+  /** @type {Map<string, { plugin: string, errorKind: string }>} */
+  const failed = new Map()
+  if (!activations || clientsPicked.length === 0) return failed
+  const picked = new Set(clientsPicked)
+  for (const outcome of activations) {
+    if (outcome.ok) continue
+    const client = outcome.plugin.manifest.contributes?.client?.name
+    if (typeof client !== 'string' || !picked.has(client) || failed.has(client)) continue
+    failed.set(client, {
+      plugin: outcome.plugin.manifest.name,
+      // Printed and logged, so only a kind the loader assigned itself.
+      errorKind: loaderActivationKind(outcome.errorKind),
+    })
+  }
+  return failed
+}
+
+/**
+ * Record and say that a picked client was not attached because its owning
+ * plugin did not activate. The line names the client, the plugin, and the
+ * error kind, then the repair: `hyp status` shows why the plugin failed, and
+ * `hyp client attach` attaches the client once it loads. The thrown message
+ * itself is never printed or logged: it is plugin text and may carry anything.
+ *
+ * @param {{
+ *   client: string,
+ *   owner: { plugin: string, errorKind: string },
+ *   dryRun: boolean,
+ *   stderr: { write(chunk: string): unknown },
+ *   summary: FinaleSummary,
+ * }} args
+ */
+function reportFailedOwnerAttach({ client, owner, dryRun, stderr, summary }) {
+  summary.attach.push({
+    client,
+    dryRun,
+    ok: false,
+    activationFailed: true,
+    plugin: owner.plugin,
+    errorKind: owner.errorKind,
+  })
+  getLogger('walkthrough').warn('walkthrough.attach_owner_not_active', {
+    [Attr.COMPONENT]: 'walkthrough',
+    [Attr.OPERATION]: 'client.attach',
+    [Attr.PLUGIN]: owner.plugin,
+    [Attr.ERROR_KIND]: owner.errorKind,
+    [Attr.STATUS]: 'failed',
+    hyp_client: client,
+    dry_run: dryRun,
+  })
+  stderr.write(
+    `${dryRun ? '(dry-run) ' : ''}attach ${client} failed: plugin ${owner.plugin} did not activate (${owner.errorKind}). ` +
+      `Run 'hyp status' to see why, then 'hyp client attach ${client}' once it loads.\n`
+  )
+}
 /**
  * Derive the finale's client list from the picked rows: a picked source
  * is a client pick iff its row's owning plugin contributes a client, and

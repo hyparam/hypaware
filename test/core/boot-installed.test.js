@@ -570,6 +570,19 @@ test('validateConfig does not flag installed plugin names as plugin_unknown', as
  * @param {string} brokenName
  * @param {unknown} brokenEntry
  */
+/**
+ * The 1-based line of `text` on which the plugins key `key` is written,
+ * found from the text itself so the test does not share the scanner's logic.
+ *
+ * @param {string} text
+ * @param {string} key
+ */
+function lineOfKey(text, key) {
+  const found = text.split('\n').findIndex((l) => l.trimStart().startsWith(`${JSON.stringify(key)}:`))
+  assert.notEqual(found, -1, `key ${JSON.stringify(key)} is in the file`)
+  return found + 1
+}
+
 async function writeHandEditedLock(hypHome, good, brokenName, brokenEntry) {
   const stateDir = path.join(hypHome, 'hypaware')
   await writeFixtureLock(hypHome, [good])
@@ -675,9 +688,12 @@ test('hyp status names the bad lock entry and hyp plugin list still lists the ot
       `plugin-lock.json entry '@third-party/broken' has no usable install_dir,`
         + ` so nothing it installed is running: ${lockPath}`
     )
-    // The repair runs: `removePlugin` falls back to the conventional install
-    // directory when the entry carries none, so it clears the lock row.
-    assert.deepEqual(diag.repair, ['hyp plugin remove @third-party/broken'])
+    // The repair points at the row by line, not by key (issue #2115).
+    const brokenLine = lineOfKey(await fs.readFile(lockPath, 'utf8'), '@third-party/broken')
+    assert.deepEqual(diag.repair, [
+      `open ${lockPath} and remove the entry on line ${brokenLine},`
+        + ' or pass its exact key as one quoted argument to hyp plugin remove',
+    ])
 
     // The commands that used to exit 1 on a bare TypeError.
     const stdout = bufferWriter()
@@ -691,6 +707,103 @@ test('hyp status names the bad lock entry and hyp plugin list still lists the ot
     })
     assert.equal(exitCode, 0)
     assert.match(stdout.text(), /@third-party\/healthy@0\.1\.0/)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The repair line is one an operator may paste into a shell, and a lock key is
+// hand-edited text, so no byte of the key may reach it, not even a sanitized
+// or truncated copy that would name a different row (issue #2115). The key
+// never runs through a shell here: the test only reads the diagnostic.
+test('hyp status repair for a malformed lock row carries no byte of the key and names the row by line', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-hostile-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const hostile = `x'"; touch pwned \`id\` $(id)\n--force${'z'.repeat(400)}`
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      hostile,
+      null
+    )
+    const stateDir = path.join(hypHome, 'hypaware')
+    const result = await discoverInstalledPlugins({ stateDir })
+    assert.deepEqual(result.malformed, [hostile])
+    const hostileLine = lineOfKey(await fs.readFile(lockPath, 'utf8'), hostile)
+    assert.equal(result.malformedLines.get(hostile), hostileLine)
+
+    const report = await collectHypAwareStatus({ env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
+    const diag = report.diagnostics.find((d) => d.kind === 'plugin_lock_entry_invalid')
+    assert.ok(diag, 'the hostile lock entry is reported')
+    assert.equal(diag.repair.length, 1)
+    const [repair] = diag.repair
+    assert.equal(
+      repair,
+      `open ${lockPath} and remove the entry on line ${hostileLine},`
+        + ' or pass its exact key as one quoted argument to hyp plugin remove'
+    )
+    // Nothing of the key in any form: whole, sanitized, or any metacharacter it carries.
+    const fixed = repair.replace(lockPath, '')
+    assert.equal(fixed.includes(hostile), false)
+    assert.equal(fixed.includes('pwned'), false)
+    assert.equal(fixed.includes('zzzz'), false)
+    for (const ch of ["'", '"', ';', '`', '$', '(', '\n', '\r']) {
+      assert.equal(fixed.includes(ch), false, `repair carries ${JSON.stringify(ch)}`)
+    }
+    // The message still identifies the row, bounded and without control bytes.
+    assert.match(diag.message, /^plugin-lock\.json entry 'x'"; touch pwned `id` \$\(id\)/)
+    assert.equal(/[\n\r]/.test(diag.message), false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Object.keys lists integer-like keys first, so a position taken from it named
+// the healthy row when a malformed "42" sat after it in the file, and removing
+// that row left the malformed one in place (#2115 review). The line comes from
+// the file's own text, so it is the malformed row's line whatever the key.
+test('the repair line names the malformed row itself when an integer-like key reorders Object.keys', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-numeric-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const stateDir = path.join(hypHome, 'hypaware')
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      'x"; rm',
+      null
+    )
+    // By hand: JSON.stringify would also write '42' first.
+    const written = await fs.readFile(lockPath, 'utf8')
+    assert.ok(written.endsWith('\n  }\n}'))
+    const text = written.slice(0, -'\n  }\n}'.length) + ',\n    "42": {\n      "version": "0.1.0"\n    }\n  }\n}'
+    await fs.writeFile(lockPath, text)
+    // The premise: '42' is last in the file and first in Object.keys.
+    assert.equal(Object.keys(JSON.parse(text).plugins)[0], '42')
+    assert.ok(lineOfKey(text, '42') > lineOfKey(text, '@third-party/healthy'))
+
+    const result = await discoverInstalledPlugins({ stateDir })
+    assert.deepEqual([...result.malformed].sort(), ['42', 'x"; rm'])
+    for (const key of result.malformed) {
+      assert.equal(result.malformedLines.get(key), lineOfKey(text, key), key)
+    }
+    const report = await collectHypAwareStatus({ env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
+    const repairs = report.diagnostics
+      .filter((d) => d.kind === 'plugin_lock_entry_invalid')
+      .map((d) => d.repair[0])
+      .sort()
+    assert.deepEqual(repairs, [lineOfKey(text, '42'), lineOfKey(text, 'x"; rm')].map((n) =>
+      `open ${lockPath} and remove the entry on line ${n},`
+        + ' or pass its exact key as one quoted argument to hyp plugin remove').sort())
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
@@ -809,7 +922,7 @@ test('hyp plugin remove clears a lock row that is not an object, so the diagnost
 })
 
 // A lock key is a map key, not a validated plugin name, and `hyp status`
-// prints `hyp plugin remove <key>` as the repair for a malformed row, so a
+// used to print `hyp plugin remove <key>` as the repair for a malformed row, so a
 // key containing `..` turned the printed repair into a recursive delete
 // outside `<stateDir>/plugins` (issue #1967). Everything these tests can
 // delete is staged inside their own temp HYP_HOME.

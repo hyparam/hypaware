@@ -343,6 +343,19 @@ export async function runDaemon(opts = {}) {
   writeStatusFile(runtimeStateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
+  // What this process loaded. Read once, at boot: the global root can be
+  // replaced underneath a running daemon, and the updater has to compare
+  // the registry against the code that is actually running, not the code
+  // on disk, or a replaced root reads as "up to date" while the daemon
+  // stays on the old version. Read before the config apply engine is
+  // created, which stamps it on a probation this host could not confirm.
+  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
+  /** @type {string | undefined} */
+  let runningVersion
+  try {
+    runningVersion = readSelfPackageIdentity().version
+  } catch { /* an install mid-replacement; the disk version stands in */ }
+
   // ----- Config apply engine (LLP 0025 / LLP 0031) -----
   // Created before bootKernel so probation expiry is evaluated before
   // any plugin activates: a kernel-killing-but-valid config that
@@ -376,6 +389,7 @@ export async function runDaemon(opts = {}) {
     onConfirmed: () => {
       if (scheduleReconcile) scheduleReconcile('confirm-edge')
     },
+    clientVersion: runningVersion,
   })
   const bootEval = await configControl.evaluateAtBoot()
   if (bootEval.action !== 'none') {
@@ -494,17 +508,6 @@ export async function runDaemon(opts = {}) {
   // config layers.
   // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
   let autoUpdateEnabled = true
-  // What this process loaded. Read once, at boot: the global root can be
-  // replaced underneath a running daemon, and the updater has to compare
-  // the registry against the code that is actually running, not the code
-  // on disk, or a replaced root reads as "up to date" while the daemon
-  // stays on the old version.
-  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
-  /** @type {string | undefined} */
-  let runningVersion
-  try {
-    runningVersion = readSelfPackageIdentity().version
-  } catch { /* an install mid-replacement; the disk version stands in */ }
   const supervised = detectSupervisor(env)
   /**
    * Re-derive the effective flag and re-cache it. Called at boot and
@@ -687,6 +690,13 @@ export async function runDaemon(opts = {}) {
     status.state = 'degraded'
     status.warnings = sinkResult.errors.map((e) =>
       `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: sink '${sanitizeLabel(e.instance) ?? 'unknown'}' (${sanitizeLabel(e.errorKind) ?? 'materialize_failed'}): ${sanitizeLabel(e.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`)
+    // The same signal tells the apply engine this host may be unable to run
+    // the poll that confirms a probation, so its expiry is not a verdict on
+    // the revision.
+    // @ref LLP 0517#unconfirmed [implements]: a sink materialize failure during probation marks it unconfirmable
+    try {
+      configControl.noteSinkMaterializeFailed()
+    } catch { /* best-effort: an unwritable state file leaves the plain expiry */ }
   }
 
   // ----- Sink driver -----
@@ -1032,7 +1042,7 @@ export async function runDaemon(opts = {}) {
     // with the tracer directly instead, so only this one call site's status
     // handling changes and `withSpan` (and everything else that calls it)
     // is untouched.
-    async function runMaintenance() {
+    async function maintenanceTick() {
       const tracer = getTracer('daemon')
       const attrs = buildAttrs({
         [Attr.COMPONENT]: 'daemon',
@@ -1149,16 +1159,24 @@ export async function runDaemon(opts = {}) {
           // (hyparam/hypaware#2363). `withSpan` writes this line for the
           // spans it owns; this tick owns its own, so it writes it here.
           span.setAttribute('status', 'failed')
-          span.setAttribute('error_kind', attrs.error_kind ?? 'unhandled_exception')
+          span.setAttribute('error_kind', 'unhandled_exception')
           throw err
         } finally {
           span.end()
         }
-      }).catch((err) => {
+      })
+    }
+
+    async function runMaintenance() {
+      // `maintenanceTick` is async so a throw in its span prologue arrives
+      // here as a rejection too: `maintenanceInFlight` has no catch of its
+      // own, and an unhandled rejection would end the daemon.
+      await maintenanceTick().catch((err) => {
         // Still reachable: partition discovery, the retired-generation
-        // sweep, and anything else outside the per-partition catch.
+        // sweep, and anything else outside the per-partition catch. Logged
+        // with the kind the span carries, so the line and the span agree.
         const message = err instanceof Error ? err.message : String(err)
-        fileLog.error('daemon.maintenance_failed', { message })
+        fileLog.error('daemon.maintenance_failed', { [Attr.ERROR_KIND]: 'unhandled_exception', message })
       })
       // Retention rides the tail of the same tick, so `maintenanceInFlight`
       // (and with it shutdown, which awaits it) covers a delete in progress.

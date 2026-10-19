@@ -450,6 +450,54 @@ test('serviceDaemonStatus degrades to "not loaded" when the service manager cann
   assert.equal(status.installed, true)
   assert.equal(status.loaded, false)
   assert.equal(status.pid, undefined)
+  assert.equal(status.unreachable, true, 'the degraded answer says the probe never ran (#1406)')
+})
+
+test('serviceDaemonStatus marks a service manager that answered with a failure as unreachable', async () => {
+  // The dead-user-bus shape (#1406): systemctl spawns and exits 1 with "Failed
+  // to connect to bus" rather than throwing, and launchctl answers with an exit
+  // other than 113. Neither is "not loaded" as observed, so both say so; a
+  // unit systemd does not know, and launchd's 113, stay plain not loaded.
+  const unitDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-svc-status-bus-'))
+  await fs.writeFile(path.join(unitDir, 'hypaware.service'), '[Unit]\n')
+  /** @param {{ exitCode: number, stdout: string, stderr: string }} result */
+  const systemctlAnswering = (result) => /** @type {SystemctlAdapter} */ (new Proxy(/** @type {any} */ ({}), {
+    get() {
+      return async () => result
+    },
+  }))
+  const noBus = await serviceDaemonStatus({
+    platform: 'linux',
+    unitDir,
+    systemctl: systemctlAnswering({ exitCode: 1, stdout: '', stderr: 'Failed to connect to bus: No medium found' }),
+  })
+  assert.equal(noBus.loaded, false)
+  assert.equal(noBus.unreachable, true, 'a systemctl that could not reach the bus is not a unit that is not loaded')
+  const unknown = await serviceDaemonStatus({
+    platform: 'linux',
+    unitDir,
+    systemctl: systemctlAnswering({ exitCode: 0, stdout: 'LoadState=not-found\nActiveState=inactive\nMainPID=0\n', stderr: '' }),
+  })
+  assert.equal(unknown.loaded, false)
+  assert.equal('unreachable' in unknown, false, 'systemd answering "not-found" is an observation, not a failed probe')
+
+  const plistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-svc-status-launchd-'))
+  await fs.writeFile(path.join(plistDir, 'com.hyperparam.hypaware.plist'), '<plist/>')
+  /** @param {number} exitCode */
+  const launchctlPrinting = (exitCode) => ({
+    print: async () => ({ exitCode, stdout: '', stderr: '' }),
+    bootstrap: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    bootout: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    kickstart: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+  })
+  const notInDomain = await serviceDaemonStatus({ platform: 'darwin', plistDir, userDomain: 'gui/501', launchctl: launchctlPrinting(113) })
+  assert.equal(notInDomain.loaded, false)
+  assert.equal('unreachable' in notInDomain, false, '113 is launchd saying the service is not in its domain')
+  const failed = await serviceDaemonStatus({ platform: 'darwin', plistDir, userDomain: 'gui/501', launchctl: launchctlPrinting(5) })
+  assert.equal(failed.loaded, false)
+  assert.equal(failed.unreachable, true, 'any other nonzero print is launchctl failing to answer')
+  await fs.rm(unitDir, { recursive: true, force: true })
+  await fs.rm(plistDir, { recursive: true, force: true })
 })
 
 // `ensureFsOp` exists so an EACCES on the plist/unit directory reaches the

@@ -23,7 +23,7 @@ import { createKernelRuntime, pluginRegistryFacades } from '../runtime/activatio
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
-import { activatePlugins } from '../runtime/loader.js'
+import { activatePlugins, loaderActivationKind } from '../runtime/loader.js'
 import { reclaimPluginTempDirs } from '../runtime/paths.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginScopedConfig } from '../config/plugin_scope.js'
@@ -32,11 +32,13 @@ import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
 import { colorizeStderr } from './style.js'
 import { compareStrings } from '../util/compare_strings.js'
+import { setupUnsupportedNote } from '../daemon/platform.js'
+import { booleanFlagValue } from './verb_codec.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { noteCommandTransition, noteInvocation, productAdapters, startInvocationDelivery, withProductInvocation } from '../product_telemetry/client.js'
 
 /**
- * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobSinkConfigInstance, CommandActivationOutcome, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  * @import { MaterializeError } from '../../../src/core/sinks/types.js'
@@ -157,6 +159,27 @@ function sinkPluginExcludedByBootProfile(err, { config, activePlugins, withheldB
 }
 
 /**
+ * The exit code for a setup run on a platform the daemon installer does not
+ * support, after saying so on `stderr`; `undefined` on a supported platform.
+ *
+ * @param {{ write(chunk: string): unknown }} stderr
+ * @param {NodeJS.Platform} [platform]
+ * @returns {number | undefined}
+ */
+function refuseUnsupportedSetupPlatform(stderr, platform = process.platform) {
+  const note = setupUnsupportedNote(platform)
+  if (note === undefined) return undefined
+  getLogger('cmd-dispatch').warn('dispatch.setup_refused', {
+    [Attr.COMPONENT]: 'cmd-dispatch',
+    [Attr.OPERATION]: 'setup.preflight',
+    [Attr.ERROR_KIND]: 'unsupported_platform',
+    platform,
+  })
+  stderr.write(note)
+  return 1
+}
+
+/**
  * Boot the kernel CLI and dispatch `argv` to a registered command.
  *
  * Lifecycle:
@@ -253,6 +276,14 @@ async function dispatchInternal(argv, opts) {
 
   // Past the help and version returns above, an empty argv is the walkthrough.
   if (argv.length === 0) noteInvocation({ command: 'setup', kind: 'execution' })
+  // Setup on a platform with no service manager would sign in, enroll and
+  // write config before the daemon installer refused (#975), so refuse every
+  // setup form here, ahead of the boot and the first network call. A help flag
+  // anywhere in its argv still reaches the setup help below.
+  if ((argv.length === 0 || earlyMatch?.command.name === 'setup') && !earlyMatch?.rest.some(isHelpFlag)) {
+    const refused = refuseUnsupportedSetupPlatform(stderr)
+    if (refused !== undefined) return refused
+  }
   if (earlyMatch?.command.name !== 'version' && !isHelpFlag(earlyMatch?.rest[0])) startInvocationDelivery()
 
   // Boot the kernel so plugin-contributed commands, sources, sinks,
@@ -272,6 +303,13 @@ async function dispatchInternal(argv, opts) {
    * @type {string[]}
    */
   let failedPlugins = []
+  /**
+   * Per-plugin activation outcomes, message withheld. Left undefined when the
+   * caller pre-built the kernel, so a reader sees "unknown" rather than an
+   * empty list it would read as "nothing failed" (issue #596).
+   * @type {CommandActivationOutcome[] | undefined}
+   */
+  let activations
   /** @type {HypAwareV2Config} */
   let activeConfig = { version: 2 }
   const ownsKernel = !opts.kernel
@@ -287,6 +325,7 @@ async function dispatchInternal(argv, opts) {
     kernel = opts.kernel
   } else {
     const bootProfile = decideBootProfile(argv, registry)
+    const preview = isSetupPreview(earlyMatch)
     const boot = await bootKernel({
       hypHome: obsEnv.hypHome,
       mode: 'cli',
@@ -297,6 +336,7 @@ async function dispatchInternal(argv, opts) {
       workspaceDir: opts.workspaceDir,
       tmpRoot: opts.tmpRoot,
       env,
+      preview,
     })
     kernel = boot.runtime
     activePlugins = boot.activePlugins
@@ -305,6 +345,9 @@ async function dispatchInternal(argv, opts) {
     // short never put a plugin there at all
     // (LLP 0219 #incomplete-activation-prunes-nothing).
     failedPlugins = boot.unavailablePlugins
+    activations = boot.activations.map((r) =>
+      r.ok ? { ok: true, plugin: r.plugin } : { ok: false, plugin: r.plugin, errorKind: loaderActivationKind(r.errorKind) }
+    )
     if (failedPlugins.length) noteInvocation({ degraded: true })
     if (boot.config) activeConfig = boot.config
     noteInvocation({ adapters: productAdapters(activeConfig.plugins ?? []) })
@@ -313,7 +356,8 @@ async function dispatchInternal(argv, opts) {
     // `sink_plugin_not_active` warning per configured sink. The daemon's
     // own materialization (src/core/daemon/runtime.js) is untouched, so a
     // sink that genuinely fails to materialize there still surfaces.
-    if (bootProfileActivatesPlugins(bootProfile)) {
+    // A preview boot opens no sink either: creating one makes its directory.
+    if (bootProfileActivatesPlugins(bootProfile) && !preview) {
       sinkPass = { config: boot.config, withheldByProfile: boot.withheldByProfile }
     }
   }
@@ -325,6 +369,22 @@ async function dispatchInternal(argv, opts) {
   // its own failures, so running it on a throw cannot replace the exit code or
   // mask the error that got here, and it still deletes only the temp dirs this
   // boot's own activation contexts recorded.
+  //
+  // A termination signal is the other exit that never reaches that `finally`:
+  // the default disposition kills the process where it stands (issue #2482). One
+  // release, shared, so the signal path and the `finally` can both reach for it:
+  // the first starts the work and the second waits on that same teardown,
+  // rather than returning while sources are still stopping.
+  /** @type {Promise<void> | undefined} */
+  let releasing
+  const release = () => (releasing ??= teardownBootOwnedKernel(kernel))
+  // Only a boot that activated something has anything to release, and gating on
+  // that is what keeps every `{ activate: [] }` command (`hyp daemon run` among
+  // them, which owns its own boot and its own shutdown) on exactly the signal
+  // disposition it has today.
+  const removeSignalTeardown = ownsKernel && kernel.activationContexts.size > 0
+    ? installSignalTeardown(release)
+    : undefined
   try {
     if (sinkPass) {
       const sinkResult = await materializeSinks(kernel, sinkPass.config, {
@@ -508,6 +568,7 @@ async function dispatchInternal(argv, opts) {
       config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner, activePlugins) : activeConfig,
       plugins: activePlugins,
       failedPlugins,
+      activations,
       capabilities: ownerFacades ? ownerFacades.capabilities : kernel.capabilities,
       clients: kernel.clients,
       query: kernel.query,
@@ -633,7 +694,20 @@ async function dispatchInternal(argv, opts) {
       )
     )
   } finally {
-    if (ownsKernel) await teardownBootOwnedKernel(kernel)
+    // The release comes before the handlers do, so a signal landing while it
+    // runs still waits for it instead of taking the default disposition halfway
+    // through. A handler outliving the boot it was there to tear down is the
+    // same class of leak as the temp dirs, so it comes off here and not only on
+    // the signal.
+    if (ownsKernel) await release()
+    removeSignalTeardown?.()
+    // A signal that started a release owns the exit. Returning would hand the
+    // caller its exit code, and `bin/hypaware.js` would `process.exit` with it
+    // before the release finished or the signal was re-raised.
+    if (signalExit) {
+      await signalExit
+      await new Promise(() => {})
+    }
   }
 }
 
@@ -717,6 +791,30 @@ function isInteractiveStream(stream) {
 }
 
 /**
+ * Whether this argv is a setup preview (`hyp setup --dry-run`, any form,
+ * preset included), read the way the codec reads a boolean so
+ * `--dry-run=true` counts and `--dry-run=false` does not. A malformed value
+ * makes it a preview whatever follows: the codec refuses the first bad value,
+ * so the command never runs, and a refused preview should have created
+ * nothing on the way.
+ *
+ * @param {ReturnType<ReturnType<typeof createCommandRegistry>['match']>} matched
+ * @returns {boolean}
+ * @ref LLP 0525#preview-boot [implements]: an explicit setup dry-run boots as a preview
+ */
+function isSetupPreview(matched) {
+  if (matched?.command.name !== 'setup') return false
+  let preview = false
+  for (const token of matched.rest) {
+    if (token !== '--dry-run' && !token.startsWith('--dry-run=')) continue
+    const read = booleanFlagValue('dry-run', token === '--dry-run' ? undefined : token.slice('--dry-run='.length))
+    if (!read.ok) return true
+    preview = read.value
+  }
+  return preview
+}
+
+/**
  * Pick the boot profile based on the resolved semantic command. `hyp setup`
  * (interactive walkthrough or preset) needs bundled defaults plus
  * installed plugins loaded so the picker can list plugin presets before
@@ -751,6 +849,111 @@ export function decideBootProfile(argv, registry) {
 }
 
 /**
+ * Every boot-owned kernel in this process that still wants releasing, in the
+ * order the boots happened. Module-level, and deliberately: the handler decides
+ * whether somebody *else* owns the signal by counting process listeners, so a
+ * second owning dispatch in the same process must not add a second pair. It
+ * would make both handlers read a foreign owner, both defer, and the signal be
+ * swallowed by the two halves of one mechanism - with nothing left to take the
+ * default disposition either, so Ctrl-C would stop working outright. The
+ * wizard's sync step is exactly that shape: `runConfiguredSync` re-enters
+ * `dispatch` without passing its kernel (`src/core/cli/wizard/sync_now.js`),
+ * and goes out of its way to keep the terminal delivering Ctrl-C as a signal.
+ * One pair for the process, one release per boot registered against it.
+ *
+ * @type {Set<() => Promise<void>>}
+ */
+const pendingBootReleases = new Set()
+
+/**
+ * Removes the one installed pair while it is installed, and is `undefined`
+ * whenever it is not: it is also the "is a pair installed?" flag.
+ * @type {(() => void) | undefined}
+ */
+let removeInstalledSignalHandlers
+
+/**
+ * Set once a signal has started releasing the pending boots, and settled after
+ * the re-raise. Every owning dispatch still in its `finally` waits on it rather
+ * than returning into a process that is already on its way out.
+ * @type {Promise<void> | undefined}
+ */
+let signalExit
+
+/**
+ * Release a boot-owned kernel when this process is interrupted, then let the
+ * signal do what it would have done.
+ *
+ * Three other sites install SIGINT/SIGTERM handlers on this same process
+ * (`src/core/daemon/runtime.js`, `src/core/daemon/gateway.js`, and
+ * `hypaware-core/plugins-workspace/github/src/commands.js`), and `hyp daemon
+ * run` is itself dispatched, so a handler installed here can sit *underneath*
+ * one that owns the shutdown. Whenever any other listener for that signal is
+ * present it is the owner and this one does nothing at all: that is what keeps
+ * the daemon's shutdown ordering and the github device-flow cancel intact, and
+ * it gives up nothing, because a process already carrying a listener for that
+ * signal was never going to take the default disposition either - it keeps
+ * running instead, so the post-boot `finally` is still the thing that releases
+ * the boot.
+ *
+ * When this is the only listener the default disposition *was* the exit, so
+ * dropping the listener and re-raising reproduces it: the parent still sees a
+ * signal-terminated child rather than a `process.exit` standing in for one, and
+ * the conventional 128+N status stays the kernel's to report. Dropping both
+ * before the release also makes a second signal the conventional immediate
+ * give-up.
+ *
+ * @param {() => Promise<void>} release
+ * @returns {() => void} deregister this boot's release, and uninstall the
+ *   handlers once no boot is left wanting one
+ */
+function installSignalTeardown(release) {
+  pendingBootReleases.add(release)
+  if (!removeInstalledSignalHandlers) {
+    /** @type {[NodeJS.Signals, () => void][]} */
+    const installed = []
+    for (const signal of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM'])) {
+      const handler = () => {
+        if (process.listenerCount(signal) > 1) return
+        removeInstalledSignalHandlers?.()
+        // Both arms: the releases swallow their own failures today, and a
+        // process stranded mid-signal is not the way to find out that changed.
+        const reraise = () => { process.kill(process.pid, signal) }
+        signalExit = releasePendingBoots().then(reraise, reraise)
+      }
+      installed.push([signal, handler])
+      process.on(signal, handler)
+    }
+    removeInstalledSignalHandlers = () => {
+      removeInstalledSignalHandlers = undefined
+      for (const [signal, handler] of installed) process.removeListener(signal, handler)
+    }
+  }
+  return () => {
+    pendingBootReleases.delete(release)
+    if (pendingBootReleases.size === 0) removeInstalledSignalHandlers?.()
+  }
+}
+
+/**
+ * Release every boot still live in this process, innermost first, one at a
+ * time. Each release is shared with its boot's `finally`, so a boot whose body
+ * returns mid-release waits on the same teardown instead of starting another.
+ *
+ * @returns {Promise<void>}
+ */
+async function releasePendingBoots() {
+  for (const release of [...pendingBootReleases].reverse()) {
+    try {
+      await release()
+    } catch {
+      // Same best-effort contract `teardownBootOwnedKernel` keeps: a boot we
+      // cannot release is a leak, not a reason to strand the signal.
+    }
+  }
+}
+
+/**
  * Release what this dispatch's own kernel boot acquired, in the order it has
  * to come off: the listeners some plugins start during activation, then the
  * per-boot scratch directories activation created.
@@ -759,9 +962,12 @@ export function decideBootProfile(argv, registry) {
  * listening keeps the Node process alive after it has printed its result.
  * The temp dirs after, because that is where `encodePartition` stages a sink's
  * in-flight blob (`src/core/sinks/encoder.js`, read by `@hypaware/local-fs`
- * and `@hypaware/s3`): every call site runs once the command body has
- * resolved, so an export the body drove has already written its destination
- * file and taken its last byte out of the scratch dir (issue #2465).
+ * and `@hypaware/s3`): the return and throw call sites run once the command
+ * body has resolved, so an export the body drove has already written its
+ * destination file and taken its last byte out of the scratch dir (issue
+ * #2465). The signal call site is the one that does not wait for the body, and
+ * does not have to: the re-raise is already ending the process, so a staged
+ * blob nothing will go on to read is exactly what there is to reclaim.
  *
  * Injected kernels belong to callers and are intentionally not cleaned
  * up here; smokes and daemon internals manage their own source
@@ -773,9 +979,10 @@ async function teardownBootOwnedKernel(kernel) {
   try {
     await kernel.sources.stopAll()
   } catch {
-    // Source cleanup is best-effort; command result rendering has
-    // already completed, and individual source stop failures are not
-    // actionable from the dispatcher layer.
+    // Source cleanup is best-effort and must never throw: teardown runs after
+    // a successful command and on the throw path alike, and a failure here
+    // would replace that outcome (or mask the original error) with its own.
+    // Individual source stop failures are not actionable from the dispatcher.
   }
   try {
     // The activation contexts are the only record of where this boot's temp dirs
@@ -787,9 +994,10 @@ async function teardownBootOwnedKernel(kernel) {
       Array.from(kernel.activationContexts.values(), (ctx) => ctx.paths.tempDir)
     )
   } catch {
-    // Same best-effort contract as source cleanup above: teardown runs after
-    // the command result is already computed, so a scratch dir we cannot
-    // resolve or remove is a leak, not something the dispatcher can act on.
+    // Same best-effort contract as source cleanup above: a throw here would
+    // stand in for the command's own success or failure, so a scratch dir we
+    // cannot resolve or remove is a leak, not something the dispatcher can
+    // act on.
   }
 }
 

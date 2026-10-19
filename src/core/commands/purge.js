@@ -245,7 +245,10 @@ export async function runPurge(argv, ctx) {
       spoolFilesRemoved: swept.filesRemoved,
       ...(target.kind === 'session' ? { local: { status: localIncomplete ? 'incomplete' : 'completed',
         containment: localIncomplete ? 'incomplete' : 'completed', physical_cleanup: { status: summary.cacheCleanup?.length ? 'incomplete' : 'not_implemented' },
-        cache_cleanup: (summary.cacheCleanup ?? []).map(job_id => ({ job_id, scope: 'cache_generations', status: 'pending' })),
+        // `job_scope` is the server receipt's disclosure (hypaware-server LLP
+        // 0437): a cleanup id hashes the partition, so the job is shared by
+        // every purge of that partition rather than owned by this session.
+        cache_cleanup: (summary.cacheCleanup ?? []).map(job_id => ({ job_id, scope: 'cache_generations', job_scope: 'cache_partition', status: 'pending' })),
         retained: ['historical_snapshots', 'original_data_and_metadata_files', 'search_sidecars', 'derived_copies_without_session_lineage', 'native_transcripts_and_backups'],
         ...localErrorField } } : localIncomplete ? { local: { status: 'incomplete', ...localErrorField } } : {}),
       ...(remotes.size ? { remotes: Object.fromEntries(remoteResults) } : {}),

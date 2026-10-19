@@ -80,6 +80,7 @@ export type PickerSource =
   | 'claude-desktop'
   | 'openclaw'
   | 'ollama'
+  | 'langgraph'
   | 'hermes'
   | 'raw-anthropic'
   | 'raw-openai'
@@ -208,6 +209,8 @@ export interface BackfillFinaleResult {
   scanned: number
   rowsWritten: number
   skipped: number
+  /** Why the import could not run, when the provider said so. */
+  note?: string
 }
 
 /**
@@ -264,17 +267,35 @@ export interface FinaleSummary {
    * already reported it attached (team pathway). `noAdapter` marks a client
    * contribution with no registered runtime adapter (Claude Desktop's
    * deliberate no-attach-on-join posture): not applicable to the attach
-   * lane, so `ok: true` and the run summary prints nothing for it.
+   * lane, so `ok: true` and the run summary prints nothing for it. That
+   * reading holds only when the owning plugin activated: `activationFailed`
+   * marks a client whose owner's `activate()` threw, recorded `ok: false`
+   * with the owner's `plugin` name and its safe `errorKind` label, and never
+   * attached even when the owner registered an adapter before throwing
+   * (issue #596).
    */
-  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean; notRecording?: boolean }[]
+  attach: {
+    client: string
+    dryRun: boolean
+    ok: boolean
+    skipped?: boolean
+    noAdapter?: boolean
+    notRecording?: boolean
+    activationFailed?: boolean
+    plugin?: string
+    errorKind?: string
+  }[]
   skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   /**
    * `skipped` is "the restart did not run": the caller asked for no daemon or
    * no restart, or the install above failed, which leaves nothing to restart.
    * `daemonInstall.failed` is where a run says it was the latter.
+   * `withheld` is set when the install failed and the daemon probe could not
+   * reach the service manager, so whether a daemon was left running on the
+   * old config is unknown (LLP 0545).
    */
-  daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
+  daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean; withheld?: 'service_manager_unreachable' }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]
   /**
@@ -315,7 +336,7 @@ export interface InitFlags {
   dryRun: boolean
   github?: boolean
   noBackfill?: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'ollama')[]
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'ollama' | 'langgraph')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number

@@ -1968,6 +1968,152 @@ test('a cwd-scoped ignore still drops the turn outright (#1189 keeps the gate)',
   assert.equal(projection, USAGE_POLICY_DROP)
 })
 
+// ---------------------------------------------------------------------
+// The stored turn-metadata header names only what the row may (#2636)
+//
+// The gateway stores the request headers on every row as
+// `attributes.gateway.request_headers`, and `x-codex-turn-metadata` carries the
+// whole `workspaces` map. The six enrichment fields above already apply LLP
+// 0506's rule; the stored header applies the same rule to every key, after the
+// projector has read the metadata.
+//
+// @ref LLP 0506#decision [tests]
+// ---------------------------------------------------------------------
+
+/**
+ * Drive one exchange through the real gateway dispatcher, capturing every log
+ * line either side emits.
+ *
+ * @param {ReturnType<typeof createCodexExchangeProjector>} projector
+ * @param {Record<string, unknown>} overrides
+ */
+async function gatewayRows(projector, overrides) {
+  /** @type {unknown[]} */
+  const logged = []
+  const log = {
+    debug: (/** @type {unknown[]} */ ...args) => { logged.push(args) },
+    info: (/** @type {unknown[]} */ ...args) => { logged.push(args) },
+    warn: (/** @type {unknown[]} */ ...args) => { logged.push(args) },
+    error: (/** @type {unknown[]} */ ...args) => { logged.push(args) },
+  }
+  const dispatcher = createAiGatewayMessageProjector({ gatewayId: 'gw-test', log, projectors: [{ ...projector, _seq: 0 }] })
+  const rows = /** @type {any[]} */ (await dispatcher.projectExchange(exchange(overrides)))
+  return { rows, logged }
+}
+
+/** @param {any} row */
+function storedTurnMetadata(row) {
+  return row.attributes.gateway.request_headers['x-codex-turn-metadata']
+}
+
+test('the stored header keeps the covering workspace byte-exact and drops the ignored one (#2636)', async () => {
+  const clean = {
+    associated_remote_urls: { origin: 'https://github.com/acme/clean.git' },
+    latest_git_commit_hash: 'feedface',
+    has_changes: false,
+  }
+  const secret = {
+    associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+    latest_git_commit_hash: 'deadbeef',
+  }
+  for (const order of ['secret-first', 'clean-first']) {
+    const workspaces = order === 'secret-first'
+      ? { '/work/ignored/secret-proj': secret, '/work/clean': clean }
+      : { '/work/clean': clean, '/work/ignored/secret-proj': secret }
+    const metadata = { session_id: 'session-2636', thread_id: 'thread-2636', workspaces, turn_id: 'turn-1' }
+    const { rows, logged } = await gatewayRows(createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') }), {
+      path: '/v1/responses',
+      provider: 'openai',
+      request_headers: JSON.stringify({
+        'user-agent': 'codex_cli_rs/0.50.0',
+        'x-codex-turn-metadata': JSON.stringify(metadata),
+      }),
+      request_body: JSON.stringify({ model: 'gpt-5-codex', metadata: { cwd: '/work/clean/sub' }, input: 'go' }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    })
+    assert.ok(rows.length > 0, `${order}: the clean turn records`)
+    for (const row of rows) {
+      assert.equal(
+        storedTurnMetadata(row),
+        JSON.stringify({ ...metadata, workspaces: { '/work/clean': clean } }),
+        `${order}: only the covering entry remains, byte-exact, with every other field intact`,
+      )
+      assert.equal(row.attributes.gateway.request_headers['user-agent'], 'codex_cli_rs/0.50.0', order)
+    }
+    assert.ok(!JSON.stringify(rows).includes('SECRET'), `${order}: no row carries the ignored remote`)
+    assert.ok(!JSON.stringify(rows).includes('deadbeef'), `${order}: nor its commit`)
+    assert.ok(!JSON.stringify(rows).includes('/work/ignored'), `${order}: nor its path`)
+    const telemetry = JSON.stringify(logged)
+    assert.ok(!telemetry.includes('SECRET') && !telemetry.includes('/work/ignored'), `${order}: no log line carries it either`)
+  }
+})
+
+test('the stored header drops a workspace that does not cover the cwd (#2636)', async () => {
+  const other = { associated_remote_urls: { origin: 'https://github.com/acme/other.git' } }
+  const { rows } = await gatewayRows(createCodexExchangeProjector({ resolver: governsNothingResolver() }), {
+    path: '/v1/responses',
+    provider: 'openai',
+    request_headers: JSON.stringify({
+      'X-Codex-Turn-Metadata': JSON.stringify({ thread_id: 'thread-2636b', workspaces: { '/work/other': other } }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', metadata: { cwd: '/work/clean/sub' }, input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  })
+  assert.ok(rows.length > 0)
+  for (const row of rows) {
+    assert.equal(
+      row.attributes.gateway.request_headers['X-Codex-Turn-Metadata'],
+      JSON.stringify({ thread_id: 'thread-2636b', workspaces: {} }),
+      'the header name is matched case-insensitively and the non-covering entry is gone',
+    )
+  }
+  assert.ok(!JSON.stringify(rows).includes('acme/other'))
+})
+
+test('a turn whose every workspace may stay stores its headers untouched (#2636)', () => {
+  const headers = JSON.stringify({
+    'x-codex-turn-metadata': JSON.stringify({
+      thread_id: 'thread-2636c',
+      workspaces: {
+        '/work': { associated_remote_urls: { origin: 'https://github.com/acme/mono.git' } },
+        '/work/clean': { associated_remote_urls: { origin: 'https://github.com/acme/clean.git' } },
+      },
+    }),
+  })
+  const input = apiKeyTurn('/work/clean/sub', {})
+  input.request_headers = headers
+  const projection = createCodexExchangeProjector({ resolver: governsNothingResolver() }).project(input, context())
+  assert.ok(projection && projection !== USAGE_POLICY_DROP)
+  assert.equal(input.request_headers, headers, 'both nested keys cover the cwd, so nothing is rewritten')
+})
+
+test('a subscription turn with no cwd of its own keeps only the key it ran under (#2636)', () => {
+  // No in-band cwd and no rollout: the first key is substituted as the cwd
+  // (LLP 0083#workspace-key-ranks-last), so it covers itself and stays; an
+  // unrelated second key does not.
+  const input = exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-2636d',
+        workspaces: {
+          '/work/first': { latest_git_commit_hash: 'aaaa' },
+          '/work/second': { latest_git_commit_hash: 'bbbb' },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  })
+  const projection = /** @type {any} */ (createCodexExchangeProjector({ resolver: governsNothingResolver() }).project(input, context()))
+  assert.equal(projection.cwd, '/work/first')
+  assert.deepEqual(
+    JSON.parse(JSON.parse(input.request_headers)['x-codex-turn-metadata']).workspaces,
+    { '/work/first': { latest_git_commit_hash: 'aaaa' } },
+  )
+})
+
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({

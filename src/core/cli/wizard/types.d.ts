@@ -770,6 +770,13 @@ export interface WizardOutputGuard {
    */
   checkpoint(): Promise<boolean>
   /**
+   * Settle both streams' pending writes (bounded), so a failure either one
+   * has not reported yet reaches the guard's listener before `detach`. For
+   * a run that ends on its first write, such as the unsupported-platform
+   * refusal (#975).
+   */
+  settle(): Promise<void>
+  /**
    * Remove the guard's `error` listeners from the caller's streams. The
    * run owns them only while it is running; call this when it ends,
    * however it ends.
@@ -864,6 +871,11 @@ export interface RunInitWizardOptions {
    * the spawn seam. Production callers pass none.
    */
   suggestSkill?: Partial<RunWizardSuggestSkillOptions>
+  /**
+   * Whether a recorded client can start `hyp report generate` (tests).
+   * Production callers pass none, and the finale's results decide.
+   */
+  reportGenerateAvailable?: boolean
   /** GitHub offer seam for tests. Login uses ctx.commands.run. */
   github?: Pick<RunWizardGithubOptions, 'confirm'>
   /** Phase overrides (tests). */

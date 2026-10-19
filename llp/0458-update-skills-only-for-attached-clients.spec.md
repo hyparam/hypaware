@@ -6,6 +6,7 @@
 **Author:** Brendan / Codex
 **Date:** 2026-09-30
 **Extends:** LLP 0457 #update-installs
+**Extended-by:** LLP 0534 (status names ledger clients this selection leaves out); LLP 0535 (a rollback onto an older package does not run skills install --attached)
 **Related:** LLP 0138, LLP 0045
 
 ## Request {#request}

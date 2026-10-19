@@ -9,7 +9,7 @@ ways to connect:
   `hyp` installed and uses your own sign-in. No token is involved.
 - **Remote:** the client connects over HTTPS to your team's server at
   `/v1/mcp` and sends an agent token. Use it for cloud agents, CI jobs, and
-  any client that has no `hyp` on its machine.
+  any client that has no `hyp` on its host.
 
 > **Tip:** At your own computer, use the local setup, even to reach your
 > team's history: `hyp mcp serve --remote` uses the session you already

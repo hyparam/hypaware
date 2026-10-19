@@ -177,6 +177,30 @@ export interface SinkDiagnosticRecord {
   sequence: bigint
 }
 
+/**
+ * One sink instance's durable set of datasets its destination refused to
+ * register (LLP 0537). Each method rejects when its write fails, and a later
+ * call retries the write.
+ */
+export interface HeldDatasetStore {
+  /**
+   * Read the snapshot once, dropping holds for another destination or for a
+   * name not in `keep`. Resolves to the reason when the snapshot could not be
+   * read: the record then stays as it is until every name in `keep` is held,
+   * cleared or passed to `resolve`.
+   */
+  load(keep: ReadonlySet<string>): Promise<string | undefined>
+  /** Datasets known to hold nothing without asking the destination (no local rows). */
+  resolve(names: Iterable<string>): Promise<void>
+  /** Record that the destination refused `name`. */
+  hold(name: string): Promise<void>
+  /** Record that `name` no longer needs a hold. */
+  clear(name: string): Promise<void>
+}
+
+/** What `hyp status` reads back: the current holds, or why it could not tell. */
+export type HeldDatasetsRead = { datasets: string[] } | { unreadable: string }
+
 export interface TickOptions {
   /** Undefined progress starts a destination; subsequent events are acknowledged deltas. */
   onProgress?: (instance: string, progress?: ExportProgress) => void
@@ -189,6 +213,18 @@ export interface TickOptions {
   source?: 'daemon' | 'manual'
 }
 
+/**
+ * What one sink run's partition discovery found for one dataset. `failed`:
+ * discovery threw before any of it was kept. `partial`: it threw after some
+ * was (the post-flush re-discovery). An empty dataset is `complete` with 0.
+ */
+export interface SinkDatasetDiscovery {
+  dataset: string
+  /** Partitions kept from this dataset and handed to the sink. */
+  partitions: number
+  discovery: 'complete' | 'partial' | 'failed'
+}
+
 export interface TickReport {
   sinks: Array<{
     instance: string
@@ -196,6 +232,8 @@ export interface TickReport {
     partitionsExported: number
     bytesWritten: number
     error?: string
+    /** Per-dataset discovery for this run; absent when the run never discovered. */
+    datasets?: SinkDatasetDiscovery[]
   }>
   /**
    * Present when the whole tick was skipped: an enrolling login's first-sync

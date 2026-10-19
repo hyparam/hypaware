@@ -45,7 +45,10 @@ const PLUGIN_VERSION = '1.0.0'
  */
 export async function activate(ctx) {
   const baseDir = resolveExportsBaseDir({ pluginConfig: ctx.config, env: ctx.env })
-  await fs.mkdir(baseDir, { recursive: true })
+  // The blob store tolerates a missing base dir, so a preview boot can leave
+  // the user's exports root uncreated; a real boot still makes it here.
+  // @ref LLP 0525#preview-boot [implements]: a preview activation creates nothing on disk
+  if (!ctx.preview) await fs.mkdir(baseDir, { recursive: true })
   const blobStore = createLocalFsBlobStore({ baseDir })
   ctx.provideCapability('hypaware.blob-store', PLUGIN_VERSION, blobStore)
 

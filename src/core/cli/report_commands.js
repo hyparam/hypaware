@@ -27,7 +27,7 @@ import { isTty } from './stdio.js'
 import { PromptCancelledError, select } from './tui/index.js'
 import { isPromptBackError, isPromptCancelledError } from './tui/runtime.js'
 import { buildWalkthroughClientDescriptorMap, resolveHypHome } from './walkthrough.js'
-import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
+import { launchClient, reportSkillLaunchers, resolveLaunchers } from './wizard/first_ask.js'
 import { PICK_DEADLINE_NOTICE, armPickDeadline, askableClients, attachHint } from '../commands/ask.js'
 import { escapeForDisplay } from '../util/json_util.js'
 
@@ -70,19 +70,56 @@ const esc = (value) => escapeForDisplay(String(value))
  * @returns {Promise<{ client: string | number } | { cancelled: true } | { timedOut: true }>}
  */
 async function pickClient(ask, ctx, spec, deadlineMs) {
+  try {
+    const outcome = await askBounded(ask, ctx, spec, deadlineMs)
+    return 'timedOut' in outcome ? outcome : { client: outcome.value }
+  } catch (err) {
+    if (isPromptCancelledError(err) || isPromptBackError(err)) return { cancelled: true }
+    throw err
+  }
+}
+
+/**
+ * One prompt under its own deadline: a fresh controller per display, so a
+ * keypress on one picker never lifts the next one's, and a picker shown
+ * again starts its clock over. Every other way the prompt settles (a pick,
+ * a cancel, a back) is the caller's to read.
+ *
+ * @param {typeof select} ask
+ * @param {CommandRunContext} ctx
+ * @param {Parameters<typeof select>[0]} spec
+ * @param {number} [deadlineMs]
+ * @returns {Promise<{ value: string | number } | { timedOut: true }>}
+ */
+async function askBounded(ask, ctx, spec, deadlineMs) {
   const controller = new AbortController()
   const disarm = armPickDeadline(ctx.stdin, controller, deadlineMs)
   try {
-    return { client: await ask({ ...spec, signal: controller.signal }) }
+    return { value: await ask({ ...spec, signal: controller.signal }) }
   } catch (err) {
     // The abort settles the prompt as an escape does, so which one happened
     // is the controller's to answer, not the error's.
     if (controller.signal.aborted) return { timedOut: true }
-    if (isPromptCancelledError(err) || isPromptBackError(err)) return { cancelled: true }
     throw err
   } finally {
     disarm()
   }
+}
+
+/**
+ * A report or recommendation picker nobody answered. Unlike the client
+ * picker there is nothing to fall through to: the command starts an agent
+ * that edits the repository, so a pick nobody made would begin work on a
+ * target nobody chose. The run ends as one that cannot prompt does, told
+ * how to name the recommendation, and nothing is started.
+ *
+ * @ref LLP 0459#decision [implements]: an unanswered listing picker is a usage error, exit 2, never a pick
+ * @param {CommandRunContext} ctx
+ * @returns {number}
+ */
+function unansweredListing(ctx) {
+  ctx.stderr.write("hyp report fix: no answer at the picker - nothing started.\nusage: hyp report fix <id> [--org <org>] [--remote <target>]\n  the id comes from 'hyp report list'\n")
+  return 2
 }
 
 /**
@@ -125,18 +162,7 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
     const clients = await askableClients(ctx, deps.collectStatus ? { collectStatus: deps.collectStatus } : {})
     const descriptors = await buildWalkthroughClientDescriptorMap()
     const candidates = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
-    const launchers = []
-    for (const launcher of candidates) {
-      const descriptor = descriptors.get(launcher.client)
-      if (!descriptor) continue
-      const skill = path.join(home, descriptor.skillDir, 'hypaware-report', 'SKILL.md')
-      try {
-        await fs.access(skill)
-        launchers.push({ launcher, skill })
-      } catch {
-        // Only offer clients that can read the report workflow.
-      }
-    }
+    const launchers = await reportSkillLaunchers({ launchers: candidates, descriptors, homeDir: home })
     span.setAttribute('launcher_count', launchers.length)
     if (launchers.length === 0) {
       span.setAttribute('error_kind', 'no-launcher')
@@ -252,11 +278,28 @@ export async function runReportSave(argv, ctx) {
       ctx.stderr.write(`hyp report save: folder name must match ${SAVED_NAME_RE.source} (got '${esc(name)}'); rename it, e.g. hypaware-report-<from>-to-<to>\n`)
       return 2
     }
+    // A move through a link would unlink the pages inside its target, leave
+    // the link behind, and name the slot after the link; a move of the folder
+    // the shell stands in strands that shell in a deleted directory. Both are
+    // refused, --keep included, before anything is read or created.
+    // @ref LLP 0518#refusals [implements]: save refuses a symlinked source and a source holding the cwd
+    if ((await fs.lstat(abs)).isSymbolicLink()) {
+      span.setAttribute('error_kind', 'symlink')
+      ctx.stderr.write(`hyp report save: ${esc(source)} is a symbolic link; a move would empty its target and leave the link. Save the folder it points to\n`)
+      return 2
+    }
+    const cwd = ctx.cwd ?? process.cwd()
     const root = reportsStoreRoot(ctx)
     // The store's own members are already saved; refuse early rather than
     // copying a folder onto a sibling of itself. Realpath on both ends so a
     // symlinked HYP_HOME compares equal to its target.
-    const [realRoot, realAbs] = await Promise.all([fs.realpath(root).catch(() => root), fs.realpath(abs).catch(() => abs)])
+    const [realRoot, realAbs, realCwd] = await Promise.all([fs.realpath(root).catch(() => root), fs.realpath(abs).catch(() => abs), fs.realpath(cwd).catch(() => cwd)])
+    const fromSource = path.relative(realAbs, realCwd)
+    if (fromSource === '' || (!fromSource.startsWith('..') && !path.isAbsolute(fromSource))) {
+      span.setAttribute('error_kind', 'contains-cwd')
+      ctx.stderr.write(`hyp report save: ${esc(source)} holds the current directory; a move would delete the directory you are in. Run it from the folder's parent: hyp report save ${shellWord(name)}\n`)
+      return 2
+    }
     if (path.dirname(realAbs) === realRoot) {
       span.setAttribute('error_kind', 'already-saved')
       ctx.stderr.write(`hyp report save: ${esc(name)} is already in the store (${esc(root)}); 'hyp report list --local' shows it\n`)
@@ -276,23 +319,49 @@ export async function runReportSave(argv, ctx) {
       ctx.stderr.write(`hyp report save: ${err instanceof Error ? err.message : String(err)}\n`)
       return 2
     }
+    // The pages land in a hidden folder inside the store, on the same
+    // filesystem, and only a complete copy is renamed over the slot. A copy
+    // that fails midway (a full disk) leaves no slot for `list` or `publish`
+    // to find, and its cleanup unlinks only the pages this copy started.
+    // @ref LLP 0519#staging [implements]: copy into a dot folder in the store, rename it over the claimed slot once every page landed
     /** @type {string} */
-    let dest
+    let staging
     try {
       await fs.mkdir(root, { recursive: true })
-      dest = await claimStoreSlot(root, name)
+      staging = await fs.mkdtemp(path.join(root, '.saving-'))
     } catch (err) {
       span.setAttribute('error_kind', 'store')
       ctx.stderr.write(`hyp report save: could not create the store under ${esc(root)}: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
     }
+    /** @type {string[]} */
+    const started = []
     try {
       for (const page of pages) {
-        await fs.copyFile(path.join(abs, page), path.join(dest, page), fs.constants.COPYFILE_EXCL)
+        started.push(page)
+        await fs.copyFile(path.join(abs, page), path.join(staging, page), fs.constants.COPYFILE_EXCL)
       }
     } catch (err) {
       span.setAttribute('error_kind', 'copy')
-      ctx.stderr.write(`hyp report save: could not copy into ${esc(dest)}: ${err instanceof Error ? err.message : String(err)}; the source is untouched\n`)
+      ctx.stderr.write(`hyp report save: could not copy ${esc(source)} into the store: ${err instanceof Error ? err.message : String(err)}; the source is untouched and nothing was saved${await discardStaging(staging, started)}\n`)
+      return 1
+    }
+    /** @type {string} */
+    let dest
+    try {
+      dest = await claimStoreSlot(root, name)
+    } catch (err) {
+      span.setAttribute('error_kind', 'store')
+      ctx.stderr.write(`hyp report save: could not claim a folder in ${esc(root)}: ${err instanceof Error ? err.message : String(err)}; the source is untouched and nothing was saved${await discardStaging(staging, pages)}\n`)
+      return 1
+    }
+    try {
+      // POSIX rename replaces the empty directory this save just claimed.
+      await fs.rename(staging, dest)
+    } catch (err) {
+      await fs.rmdir(dest).catch(() => {})
+      span.setAttribute('error_kind', 'store')
+      ctx.stderr.write(`hyp report save: could not move the copy into ${esc(dest)}: ${err instanceof Error ? err.message : String(err)}; the source is untouched and nothing was saved${await discardStaging(staging, pages)}\n`)
       return 1
     }
     const savedName = path.basename(dest)
@@ -704,7 +773,7 @@ export async function runReportList(argv, ctx) {
   }
   for (const r of reports) {
     const title = typeof r.title === 'string' && r.title ? `\t${esc(r.title)}` : ''
-    ctx.stdout.write(`  ${esc(r.publishedAt)}\t${esc(r.kind)}/${esc(r.period)}\t${esc(r.id)}\t${esc(r.bytes)} bytes${title}\n`)
+    ctx.stdout.write(`  ${esc(r.publishedAt)}\t${esc(r.kind)}/${esc(r.period)}\t${esc(r.id)}\t${esc(r.bytes)} bytes${title}${coverageNotice(r)}\n`)
     // The server mints one id per `recommendation-<slug>` page and lists them
     // on the record, in page order, so a report's recommendations read
     // beneath it without fetching the report; the id is the token a caller
@@ -724,6 +793,35 @@ export async function runReportList(argv, ctx) {
   }
   if (inventory) writeLocalSection(ctx, inventory, { standalone: false })
   return 0
+}
+
+/**
+ * The optional notice cell for a listed report the server recorded as
+ * incomplete: `coverage.covered` of `coverage.slices` analyzed,
+ * `coverage.unenumerated` days the survey could not inventory (outside the
+ * slice count, so never added to it), and `truncated` when generation was cut
+ * short. Each field is read on its own and only a well-formed value speaks:
+ * absent coverage means the report was not surveyed, not that it is
+ * complete or incomplete, so an absent or malformed field adds nothing.
+ *
+ * @param {any} r a report record as the server lists it
+ * @returns {string}
+ */
+function coverageNotice(r) {
+  /** @type {string[]} */
+  const parts = []
+  const coverage = r?.coverage
+  if (coverage && typeof coverage === 'object') {
+    const { slices, covered, unenumerated } = coverage
+    if (Number.isSafeInteger(slices) && Number.isSafeInteger(covered) && covered >= 0 && covered < slices) {
+      parts.push(`${covered} of ${slices} slices analyzed`)
+    }
+    if (Number.isSafeInteger(unenumerated) && unenumerated > 0) {
+      parts.push(`${unenumerated} ${unenumerated === 1 ? 'day' : 'days'} not inventoried`)
+    }
+  }
+  if (r?.truncated === true) parts.push('generation cut short')
+  return parts.length > 0 ? `\tincomplete: ${parts.join('; ')}` : ''
 }
 
 /**
@@ -1026,7 +1124,9 @@ export async function runReportFix(argv, ctx, deps = {}) {
       /** @type {string | number} */
       let pickedReport
       try {
-        pickedReport = await ask({ box: true, title: 'Which report?', options: reportOptions, default: reportCursor, ...io })
+        const outcome = await askBounded(ask, ctx, { box: true, title: 'Which report?', options: reportOptions, default: reportCursor, ...io }, deps.pickDeadlineMs)
+        if ('timedOut' in outcome) return unansweredListing(ctx)
+        pickedReport = outcome.value
       } catch (err) {
         if (err instanceof PromptCancelledError || isPromptBackError(err) || (err instanceof Error && err.name === 'PromptCancelledError')) {
           ctx.stdout.write('Nothing started.\n')
@@ -1040,7 +1140,9 @@ export async function runReportFix(argv, ctx, deps = {}) {
       /** @type {string | number} */
       let picked
       try {
-        picked = await ask({ box: true, title: 'Which recommendation should be fixed?', options: group.rows, allowBack: true, ...io })
+        const outcome = await askBounded(ask, ctx, { box: true, title: 'Which recommendation should be fixed?', options: group.rows, allowBack: true, ...io }, deps.pickDeadlineMs)
+        if ('timedOut' in outcome) return unansweredListing(ctx)
+        picked = outcome.value
       } catch (err) {
         if (isPromptBackError(err)) continue
         if (err instanceof PromptCancelledError || (err instanceof Error && err.name === 'PromptCancelledError')) {
@@ -1916,6 +2018,30 @@ async function claimStoreSlot(root, name) {
     }
   }
   throw new Error(`${STORE_SLOT_LIMIT} folders already share the name '${name}'`)
+}
+
+/**
+ * Remove a staging folder a failed save left: unlink only the named pages,
+ * absent ones included (a copy that failed before creating its file), then a
+ * plain `rmdir`. Never recursive. Returns '' when the folder is gone, else a
+ * clause naming the hidden folder that is left.
+ *
+ * @param {string} staging
+ * @param {string[]} pages
+ * @returns {Promise<string>}
+ */
+async function discardStaging(staging, pages) {
+  try {
+    for (const page of pages) {
+      await fs.unlink(path.join(staging, page)).catch((err) => {
+        if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
+      })
+    }
+    await fs.rmdir(staging)
+    return ''
+  } catch (err) {
+    return `; a hidden partial copy is left at ${esc(staging)} (${err instanceof Error ? err.message : String(err)})`
+  }
 }
 
 /**

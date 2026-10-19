@@ -9,6 +9,7 @@ import path from 'node:path'
 import { classifyLoginFailure, defaultRunLogin, runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { guardWizardOutput } from '../../../../src/core/cli/wizard/output_guard.js'
 import { withSpinner } from '../../../../src/core/cli/spinner.js'
+import { TracerProvider } from '../../../../src/core/observability/runtime.js'
 
 /**
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
@@ -16,7 +17,7 @@ import { withSpinner } from '../../../../src/core/cli/spinner.js'
  */
 
 // The wizard join phase (LLP 0135 #join, LLP 0134 #login-lane). A thin
-// narration wrapper around `runRemoteLogin`: it classifies a failed login
+// narration wrapper around `remoteLogin`: it classifies a failed login
 // into the fork-returning taxonomy (LLP 0129 #failed-join-returns-to-fork),
 // checks once for an applied org config, and locks the picker rows
 // the central layer owns.
@@ -102,6 +103,13 @@ test('classifyLoginFailure: org_selection_required (multi-org account) -> failed
   assert.equal(classifyLoginFailure({ reason: 'org_selection_required' }), 'failed')
 })
 
+// A server too old for the poll lane fails the same way on every retry until
+// it is upgraded, so the fork must not re-offer the join as if it might pass.
+// @ref LLP 0543#failed [tests]:
+test('classifyLoginFailure: no_poll_endpoint (a stale server) -> failed', () => {
+  assert.equal(classifyLoginFailure({ reason: 'no_poll_endpoint' }), 'failed')
+})
+
 test('classifyLoginFailure: retriable reasons -> abandoned', () => {
   for (const reason of /** @type {const} */ (['login_failed', 'denied', 'store_failed', 'seed_failed', 'enroll_failed'])) {
     assert.equal(classifyLoginFailure({ reason }), 'abandoned', reason)
@@ -139,6 +147,7 @@ test('classifyLoginFailure: every login outcome reason has a deliberate answer',
     no_membership: 'failed',
     org_not_permitted: 'failed',
     org_selection_required: 'failed',
+    no_poll_endpoint: 'failed',
     denied: 'abandoned',
     login_failed: 'abandoned',
     store_failed: 'abandoned',
@@ -174,6 +183,64 @@ test('runWizardJoin: a transient login failure returns abandoned', async () => {
   })
   const out = await runWizardJoin(opts)
   assert.equal(out.status, 'abandoned')
+})
+
+test('runWizardJoin: a stale server returns failed and carries its reason to the fork', async () => {
+  const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
+  const opts = joinOpts(cat, {
+    runLogin: async () => ({ exitCode: 1, reason: 'no_poll_endpoint', stderr: 'hyp remote login: this server does not support poll login yet\n' }),
+  })
+  const out = await runWizardJoin(opts)
+  assert.equal(out.status, 'failed')
+  assert.equal(out.reason, 'no_poll_endpoint')
+})
+
+/**
+ * Collect the spans exported while `fn` runs, then put the global tracer
+ * provider slot back (the `span-error-kind-telemetry.test.js` pattern).
+ *
+ * @param {() => Promise<unknown>} fn
+ */
+async function captureSpans(fn) {
+  /** @type {any[]} */
+  const spans = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{
+      exportBatch: (/** @type {any[]} */ batch) => {
+        for (const s of batch) spans.push({ name: s.name, attributes: { ...s.attributes } })
+      },
+    }],
+  })
+  provider.register()
+  try {
+    await fn()
+  } finally {
+    await provider.shutdown()
+  }
+  return spans
+}
+
+// The wizard.join span names the fault it saw: a stale server is neither a
+// rejection nor an abandonment, and the other kinds are unchanged.
+// @ref LLP 0543#telemetry [tests]:
+test('runWizardJoin: the wizard.join span error_kind names the actual fault', async () => {
+  const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
+  /** @type {Array<[LoginOutcomeReason, string]>} */
+  const cases = [
+    ['no_poll_endpoint', 'no_poll_endpoint'],
+    ['no_membership', 'login_rejected'],
+    ['login_failed', 'login_abandoned'],
+    ['denied', 'login_abandoned'],
+  ]
+  for (const [reason, kind] of cases) {
+    const spans = await captureSpans(() => runWizardJoin(joinOpts(cat, {
+      runLogin: async () => ({ exitCode: 1, reason, stderr: '' }),
+    })))
+    const join = spans.find((s) => s.name === 'wizard.join')
+    assert.ok(join, `a wizard.join span for ${reason}`)
+    assert.equal(join.attributes.error_kind, kind, reason)
+  }
 })
 
 // --- runWizardJoin: enrolled, but the daemon install did not finish ---

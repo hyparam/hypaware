@@ -322,12 +322,15 @@ test('Hermes edits, rewinds and compaction reconcile real local cache rows', asy
     .run('merged', JSON.stringify([call('c1'), call('c2')]), 'merged reasoning')
   const priorMark = { ...runner.watermark['native-session-uuid'] }
   const reconcile = storage.reconcileRows
+  const reconcileBatch = storage.reconcileRowsBatch
   storage.reconcileRows = async () => { throw new Error('injected write failure') }
+  storage.reconcileRowsBatch = async () => { throw new Error('injected write failure') }
   await runHermesPollTick(runner, ctx)
   assert.match(runner.lastError ?? '', /injected write failure/)
   assert.deepEqual(runner.watermark['native-session-uuid'], priorMark, 'failed writes never advance the snapshot')
   assert.equal((await read()).length, 2)
   storage.reconcileRows = reconcile
+  storage.reconcileRowsBatch = reconcileBatch
   await poll()
   let rows = await read()
   assert.equal(rows.length, 4)

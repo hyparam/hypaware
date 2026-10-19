@@ -23,9 +23,10 @@ function delay(ms) {
  * never by the break.
  *
  * @param {string} lockPath
+ * @param {number} staleMs
  * @returns {Promise<void>}
  */
-async function breakLockIfStale(lockPath) {
+async function breakLockIfStale(lockPath, staleMs) {
   /** @type {Stats} */
   let st
   try {
@@ -35,7 +36,7 @@ async function breakLockIfStale(lockPath) {
   }
   // A holder within its budget is alive (or recently so): wait it out. Only an
   // age past the bounded-hold ceiling marks it dead and breakable.
-  if (Date.now() - st.mtimeMs > LOCK_STALE_MS) await fs.rm(lockPath, { force: true })
+  if (Date.now() - st.mtimeMs > staleMs) await fs.rm(lockPath, { force: true })
 }
 
 /**
@@ -44,16 +45,24 @@ async function breakLockIfStale(lockPath) {
  * committing after network work: age-based crash recovery permits a double
  * holder if a process is suspended. Reuses the remote credential protocol.
  *
+ * `onWait` runs once, the first time the lock is found held, so a caller can
+ * say it is waiting instead of hanging silently. `staleMs` overrides the break
+ * age for a test that has to watch a dead holder's lock break without waiting
+ * out the production minute.
+ *
  * @template T
  * @param {string} lockPath
  * @param {() => Promise<T>} fn
+ * @param {{ onWait?: () => void, staleMs?: number }} [opts]
  * @returns {Promise<T>}
  */
 // @ref LLP 0065#d1 [implements]: grant by O_EXCL, break by age, release by nonce
-export async function withFileLock(lockPath, fn) {
+export async function withFileLock(lockPath, fn, opts = {}) {
+  const staleMs = opts.staleMs ?? LOCK_STALE_MS
   await fs.mkdir(path.dirname(lockPath), { recursive: true })
   const nonce = crypto.randomUUID()
-  const deadline = Date.now() + LOCK_STALE_MS * 2
+  const deadline = Date.now() + staleMs * 2
+  let waited = false
   for (;;) {
     try {
       const handle = await fs.open(lockPath, 'wx', 0o600)
@@ -70,9 +79,13 @@ export async function withFileLock(lockPath, fn) {
       break
     } catch (err) {
       if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
-      await breakLockIfStale(lockPath)
+      if (!waited) {
+        waited = true
+        opts.onWait?.()
+      }
+      await breakLockIfStale(lockPath, staleMs)
       if (Date.now() > deadline) {
-        throw new Error('timed out acquiring the file lock')
+        throw new Error(`timed out acquiring the file lock ${lockPath}`)
       }
       await delay(25)
     }

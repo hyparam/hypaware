@@ -79,6 +79,16 @@ async function* runBackfill(deps) {
         status: 'ok',
         reason: 'opencode_cli_absent',
       })
+      // Still ok, but not the same fact as an empty history: the setup and
+      // `hyp backfill` output say the import could not run and how to retry.
+      yield /** @type {BackfillEvent} */ ({
+        type: 'event',
+        event: 'import_unavailable',
+        attributes: {
+          reason: 'opencode_cli_absent',
+          note: 'opencode was not found on PATH, so its history was not imported; live capture is unaffected. After fixing PATH, run `hyp backfill opencode`.',
+        },
+      })
       return
     }
     // OpenCode 1.18.22 returns before JSON formatting when its list is empty.

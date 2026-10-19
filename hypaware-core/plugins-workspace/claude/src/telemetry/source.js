@@ -677,7 +677,8 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
 
         // What the usage index held before projection claims anything out of
         // it, so a failed write can put back what it took (see the catch
-        // below). A copy of one Map of small objects, per POST.
+        // below). A copy of one Map of small objects, per POST, dropped as
+        // soon as projection returns.
         const usageBeforeProjection = new Map(usageByRequestId)
 
         // The same records the policy gate decided on, so the cwd a row is
@@ -690,6 +691,17 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           sessionBodyFacts,
         })
         span.setAttribute('session_count', projections.length)
+
+        // Projection is synchronous, so the entries missing now are exactly
+        // the ones this batch took. Pin them before the first awaited write:
+        // another POST can claim entries while this one waits, and a restore
+        // from the whole snapshot would put those back for a second claim.
+        /** @type {Map<string, Record<string, unknown>>} */
+        const consumedUsage = new Map()
+        for (const [requestId, usage] of usageBeforeProjection) {
+          if (!usageByRequestId.has(requestId)) consumedUsage.set(requestId, usage)
+        }
+        usageBeforeProjection.clear()
 
         let rowsWritten = 0
         let rowsSkipped = 0
@@ -714,9 +726,10 @@ function makeReceiveHandler({ ctx, deps, state, usageByRequestId, sessionBodyFac
           // exactly the batch that already failed once. Put back only what this
           // batch consumed: entries it newly remembered are left alone, so an
           // `api_request` whose response has not arrived yet still waits here,
-          // and the restore re-applies the index cap, which the snapshot would
-          // otherwise reopen for as long as the outage lasts.
-          restoreUnclaimedUsage(usageByRequestId, usageBeforeProjection)
+          // entries an overlapping POST claimed during the write stay claimed,
+          // and the restore re-applies the index cap, which the restored
+          // evictions would otherwise reopen for as long as the outage lasts.
+          restoreUnclaimedUsage(usageByRequestId, consumedUsage)
           state.lastError = err instanceof Error ? err.message : String(err)
           span.setAttribute('error_kind', 'dataset_write')
           span.setAttribute('row_count', rowsWritten)

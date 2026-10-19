@@ -33,6 +33,8 @@ import {
   LOCAL_INSTALL_RETENTION_DAYS,
   defaultConfirmSelectPromptFactory,
   defaultPickerDetect,
+  preflightLegacyProxyAttach,
+  preflightPickedClients,
   runPickerFinale,
   visiblePickerDescriptors,
   writeAttachedNotConfiguredReminder,
@@ -41,10 +43,10 @@ import {
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
 import { ensureDurableBin } from '../global_install.js'
-import { platformIsSupported } from '../../daemon/platform.js'
+import { platformIsSupported, setupUnsupportedNote } from '../../daemon/platform.js'
 import { friendlyClientLabel } from '../../commands/ask.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { anyClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
+import { anyClientLaunchable, recordedReportClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -123,6 +125,16 @@ export async function runInitWizard(opts) {
  * @returns {Promise<InitWizardResult>}
  */
 async function runGuardedInitWizard(opts, guard) {
+  // Dispatch refuses an unsupported platform before the boot (#975); this
+  // covers a direct call, before any lane can sign in, enroll or write. The
+  // refusal is the run's only write, so it settles before the guard detaches.
+  // @ref LLP 0341#absorb [constrained-by]: a stream error never surfaces uncaught, including one reported after the write returned
+  const unsupported = setupUnsupportedNote(/** @type {NodeJS.Platform} */ (opts.platform ?? process.platform))
+  if (unsupported !== undefined) {
+    opts.stderr.write(unsupported)
+    await guard.settle()
+    return { exitCode: 1 }
+  }
   const log = getLogger('wizard')
   const interactive = !opts.picks
   const catalog = opts.catalog ?? (await loadWizardCatalog())
@@ -810,6 +822,21 @@ async function runGuardedInitWizard(opts, guard) {
   // lanes above, other than returning, assigns `picked` first.
   if (!picked) throw new Error('hyp setup: internal error: the pick lane did not run')
 
+  // The selection is final and nothing is written yet, so a client whose
+  // attach is known to refuse is said here, not after the config lands. Only
+  // a run that attaches asks, and only the picked clients that define a
+  // preflight are asked.
+  // @ref LLP 0532#boundary [implements]: the earliest point the picked set is settled, ahead of the recap and every write
+  const preflightRefused = opts.finale
+    ? await preflightPickedClients({
+      clientsPicked: picked.clientsPicked,
+      config: picked.config,
+      capabilities: opts.capabilities,
+      ...(opts.ctx.clients ? { clients: opts.ctx.clients } : {}),
+      ...(opts.ctx.activations ? { activations: opts.ctx.activations } : {}),
+      stderr: opts.stderr,
+    })
+    : undefined
 
   // Every question lane has run; commit the composed config to disk before
   // the acting phases (configure and the finale both read/edit the file).
@@ -829,6 +856,18 @@ async function runGuardedInitWizard(opts, guard) {
   // saying it cancels the run before anything is written.
   recap.print(opts.stdout)
   if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
+  // Ahead of the folder-ask write as well as the config, so a refused run
+  // leaves nothing behind; a dry run refuses the same way the real run would.
+  // @ref LLP 0524#refusal [implements]: one refusal and exit 1 in every wizard mode, before any write
+  if (picked.configPending && !(await preflightLegacyProxyAttach({
+    config: picked.config,
+    configPath: picked.configPath,
+    env: opts.env,
+    stderr: opts.stderr,
+  }))) {
+    if (joined) await narrateEnrolledAbort(opts)
+    return { exitCode: 1, ...(pathway ? { pathway } : {}) }
+  }
   if (folderAskPending && folderAsk) {
     await commitWizardFolderAsk({ env: opts.env, stderr: opts.stderr, mode: folderAsk })
   }
@@ -891,6 +930,7 @@ async function runGuardedInitWizard(opts, guard) {
       joinedAlready: joined !== undefined,
       daemonIncomplete,
       daemonBin,
+      ...(preflightRefused?.size ? { preflightRefused } : {}),
       // The finale is one step made of several acts, and the backfill
       // consent question sits behind three of them (install, attach,
       // asset copy), each narrating first. The boundary above cannot
@@ -995,6 +1035,14 @@ async function runGuardedInitWizard(opts, guard) {
   // @ref LLP 0100#requirements [implements]: R1 - a path that skips the offer keeps the narration's release verb and skill hint
   const nothingRecorded = firstLookResult?.shown === false && firstLookResult.reason === 'empty'
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
+  // One pointer to the report workflow, only where a client this run left
+  // recorded can actually start it. It goes ahead of the privacy close and
+  // the closing offers, whose yes can hand the terminal to a child, because
+  // nothing of setup's should follow that.
+  if (offerFollows && (opts.reportGenerateAvailable
+    ?? await recordedReportClientLaunchable(finaleSummary, opts.env))) {
+    opts.stdout.write('\nTo draft a report from your recorded sessions, run `hyp report generate`.\n')
+  }
   if (offerFollows) {
     opts.stdout.write(privacyReviewStatement({
       skillClients: (finaleSummary?.skillsInstalled ?? [])
@@ -1090,8 +1138,13 @@ async function runGuardedInitWizard(opts, guard) {
     sync_now: syncNow ? (syncNow.asked && syncNow.released ? 'released' : syncNow.reason) : 'skipped',
   })
 
+  // A picked client whose owning plugin did not activate was never attached.
+  // The lane warned and carried on with the healthy ones; the exit code is
+  // what tells a scripted setup that one did not land (issue #596). Ordinary
+  // attach refusals keep the warn-and-continue exit they always had.
+  const clientNotAttached = finaleSummary?.attach.some((a) => a.activationFailed === true) === true
   return {
-    exitCode: cancelled ? 130 : 0,
+    exitCode: cancelled ? 130 : clientNotAttached ? 1 : 0,
     ...(pathway ? { pathway } : {}),
     ...(cancelled ? { cancelled: true } : {}),
     configPath: picked.configPath,
@@ -1146,14 +1199,22 @@ export function firstLookHadRows(result) {
  * (`org_selection_required`) is definitive for the wizard - the bare
  * login it wraps cannot pass `--org` - so the fix is the manual login,
  * after which re-running `hyp init` re-enters as an enrolled machine.
+ * A server too old for the poll login lane (`no_poll_endpoint`) is
+ * definitive too, but no admin grant cures it, so it gets its own sentence
+ * rather than the access one.
  *
  * @ref LLP 0179#no-prose-control-flow [implements]: the multi-org branch reads the lane's reason code, not its sentence
+ * @ref LLP 0543#sentence [implements]: the stale server names the upgrade, never membership or access
  * @param {RunInitWizardOptions} opts
  * @param {WizardJoinResult} join
  */
 function printJoinFailure(opts, join) {
   if (join.status !== 'failed') {
     opts.stderr.write('Sign-in did not complete. You can try again, or set up locally for now.\n')
+    return
+  }
+  if (join.reason === 'no_poll_endpoint') {
+    opts.stderr.write('Joining failed: this server needs an upgrade before it supports browser sign-in. Set up locally for now, or try again once the server is upgraded.\n')
     return
   }
   if (join.reason === 'org_selection_required') {
@@ -1210,13 +1271,14 @@ async function resolveWizardDaemonBin(opts, interactive) {
  *   joinedAlready: boolean,
  *   daemonIncomplete: boolean,
  *   daemonBin?: string,
+ *   preflightRefused?: Set<string>,
  *   checkBoundary: () => Promise<boolean>,
  *   autoAccept?: boolean,
  *   clientLabels?: Map<string, string>,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, autoAccept, clientLabels }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, preflightRefused, checkBoundary, autoAccept, clientLabels }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   if (daemonBin !== undefined) finaleActions.binPath = daemonBin
   /** @type {Set<string> | undefined} */
@@ -1268,6 +1330,9 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         // A boot with a broken plugin contributes a partial asset set. The
         // finale still copies it; it must not read the hole as a retirement.
         ...(opts.ctx.failedPlugins?.length ? { failedPlugins: opts.ctx.failedPlugins } : {}),
+        // Which owners threw, so a picked client whose plugin failed to
+        // activate reads as not attached, not as adapterless (issue #596).
+        ...(opts.ctx.activations ? { activations: opts.ctx.activations } : {}),
         config: picked.config,
         configPath: picked.configPath,
         env: opts.env,
@@ -1282,6 +1347,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         checkBoundary,
         ...(autoAccept ? { autoAccept } : {}),
         ...(skipAttachClients ? { skipAttachClients } : {}),
+        ...(preflightRefused ? { preflightRefused } : {}),
         ...(clientLabels ? { clientLabels } : {}),
       }),
     { component: 'wizard' }

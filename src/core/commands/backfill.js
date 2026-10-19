@@ -22,6 +22,8 @@ import { loadClientDescriptors } from '../daemon/status.js'
  * landing rows in the exact same per-source Iceberg tables.
  */
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
+// Bound on a provider's `import_unavailable` note carried into the output.
+const MAX_NOTE_LENGTH = 240
 
 /**
  * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
@@ -211,7 +213,7 @@ export async function runBackfillList(argv, ctx) {
  *   devRunId?: string,
  *   sweep?: boolean,
  * }} args
- * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string }>}
+ * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string, note?: string }>}
  */
 export async function runBackfillProvider(args) {
   const { ctx, provider: providerName, dryRun } = args
@@ -236,6 +238,7 @@ export async function runBackfillProvider(args) {
     rowsWritten: result.rows_written,
     skipped: result.rows_skipped,
     ...(result.error_kind ? { errorKind: result.error_kind } : {}),
+    ...(result.note ? { note: result.note } : {}),
   }
 }
 
@@ -380,6 +383,12 @@ async function runProvider(args) {
         isPluginDetached: owners.isPluginDetached,
       })
 
+      // The step in flight when the loop throws, so a materializer or storage
+      // write that throws is traced to itself and not to the provider's
+      // iterator (issue #2262). Read off the loop rather than tagged onto the
+      // thrown value, which may be a primitive or frozen. The run still aborts.
+      /** @type {'provider_run_failed' | 'materialize_failed' | 'write_failed'} */
+      let failingStep = 'provider_run_failed'
       try {
         for await (const yielded of provider.run(runCtx)) {
           if (isEvent(yielded)) {
@@ -434,6 +443,7 @@ async function runProvider(args) {
             continue
           }
 
+          failingStep = 'materialize_failed'
           const rows = await materializeItem({
             materializer,
             item: yielded,
@@ -444,11 +454,13 @@ async function runProvider(args) {
             runToken,
             sweep,
           })
+          failingStep = 'provider_run_failed'
           if (!Array.isArray(rows) || (rows.length === 0 && !yielded.reconcile)) {
             result.rows_skipped += 1
             continue
           }
           result.sessions_seen += 1
+          failingStep = 'write_failed'
           const written = await writeRows({
             rows,
             dataset: yielded.dataset,
@@ -458,6 +470,7 @@ async function runProvider(args) {
             ctx,
             log,
           })
+          failingStep = 'provider_run_failed'
           result.rows_written += written.rowsWritten
           if (written.status === 'failed') {
             markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`, 'dataset_not_registered')
@@ -465,11 +478,11 @@ async function runProvider(args) {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        markProviderFailed(result, message, 'provider_run_failed')
+        markProviderFailed(result, message, failingStep)
         log.error('backfill.provider_error', {
           [Attr.COMPONENT]: 'backfill',
           provider: provider.name,
-          error_kind: 'provider_run_failed',
+          error_kind: failingStep,
           error: message,
         })
       }
@@ -711,6 +724,10 @@ function handleEvent(args) {
       ...(event.attributes ?? {}),
     })
     return
+  }
+  // @ref LLP 0538#note [implements]: the first note only, capped, so a provider cannot grow the result
+  if (event.event === 'import_unavailable' && typeof event.attributes?.note === 'string') {
+    result.note ??= event.attributes.note.slice(0, MAX_NOTE_LENGTH)
   }
   log.info(`backfill.event.${event.event}`, {
     [Attr.COMPONENT]: 'backfill',
@@ -1064,6 +1081,7 @@ function renderRunResults(args) {
             rows_written: r.rows_written,
             rows_skipped: r.rows_skipped,
             ...(r.error ? { error: r.error } : {}),
+            ...(r.note ? { note: r.note } : {}),
           })),
         },
         null,
@@ -1077,6 +1095,7 @@ function renderRunResults(args) {
     stdout.write(`  ${r.provider}  [${r.status}]\n`)
     stdout.write(`    items_seen=${r.items_seen}  sessions=${r.sessions_seen}  rows_written=${r.rows_written}  rows_skipped=${r.rows_skipped}\n`)
     if (r.error) stdout.write(`    error: ${r.error}\n`)
+    if (r.note) stdout.write(`    note: ${r.note}\n`)
   }
 }
 

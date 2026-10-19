@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-03
 **Related:** LLP 0177 (the issue this resolves), LLP 0169 (OpenClaw attach surface), LLP 0174 (manual-path sibling; its non-goal), LLP 0170 (sweep consent stance), LLP 0130 (manifest-sourced picker), LLP 0011 (init finale), LLP 0135 (wizard orchestration), LLP 0115 (Claude Desktop is not an attach-on-join client)
-**Extended-by:** [LLP 0185](./0185-unpicked-client-stays-attached.decision.md) (the finale still only attaches; a re-run that leaves a previously attached client unpicked now names it and the detach that clears it), [LLP 0391](./0391-the-finale-states-results-not-plans.decision.md) (the finale prints no disclosure line; the sweep is disclosed on the picker row this decision already named as the consent)
+**Extended-by:** [LLP 0185](./0185-unpicked-client-stays-attached.decision.md) (the finale still only attaches; a re-run that leaves a previously attached client unpicked now names it and the detach that clears it), [LLP 0391](./0391-the-finale-states-results-not-plans.decision.md) (the finale prints no disclosure line; the sweep is disclosed on the picker row this decision already named as the consent), [LLP 0522](./0522-a-failed-owner-is-not-an-adapterless-client.decision.md) (#decision's noAdapter reading holds only for an owner that activated; a client whose owner threw is a failed attach)
 
 > Picking OpenClaw in `hyp init` enables the adapter and then drops it
 > from the finale: no attach, no import, a `client_attach_missing` limbo

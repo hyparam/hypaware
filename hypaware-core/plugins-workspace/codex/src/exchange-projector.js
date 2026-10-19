@@ -206,6 +206,12 @@ export function createCodexExchangeProjector(opts = {}) {
         return USAGE_POLICY_DROP
       }
 
+      // The turn metadata has been read (into `codexContext`), so the copy the
+      // gateway stores as `attributes.gateway.request_headers` is cut down to the
+      // workspaces this row may name. Done here, before any decline below, so a
+      // later projector in the walk never sees the raw header either.
+      input.request_headers = redactTurnMetadataWorkspaces(input.request_headers, cwd, resolver)
+
       const responseBody = parseMaybeJson(input.response_body)
       const streamEvents = Array.isArray(input.stream_events) ? input.stream_events : []
       const baseInstructions = resolveBaseInstructions(reqBody,
@@ -1193,6 +1199,59 @@ function codexRepoEnrichment(workspaces, cwd, resolver) {
     head_sha: readStringKey(workspaceInfo, 'latest_git_commit_hash'),
     has_changes: typeof workspaceInfo?.has_changes === 'boolean' ? workspaceInfo.has_changes : undefined,
   }
+}
+
+/**
+ * The recorded request headers with every `x-codex-turn-metadata` `workspaces`
+ * entry removed that does not cover `cwd` or that the shared matcher classifies
+ * `ignore`: the same two tests `codexRepoEnrichment` applies to the one key it
+ * enriches from, applied to every key, so the stored header names no tree the
+ * row's own repository fields could not (#2636). Kept entries, and every other
+ * header and metadata field, are carried through unchanged. Returns the input
+ * string itself when nothing is removed, so an ordinary turn re-serializes
+ * nothing.
+ *
+ * @ref LLP 0506#decision [implements]: a workspace key is row evidence only when it covers the cwd and is not ignored
+ * @param {string | null} headersJson
+ * @param {string | undefined} cwd
+ * @param {UsagePolicyResolver} resolver
+ * @returns {string | null}
+ */
+function redactTurnMetadataWorkspaces(headersJson, cwd, resolver) {
+  const headers = parseMaybeJson(headersJson ?? undefined)
+  if (!isPlainObject(headers)) return headersJson
+  let changed = false
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() !== X_CODEX_TURN_METADATA) continue
+    if (typeof value === 'string') {
+      const redacted = redactWorkspacesJson(value, cwd, resolver)
+      if (redacted !== value) { headers[name] = redacted; changed = true }
+    } else if (Array.isArray(value)) {
+      const redacted = value.map((entry) => typeof entry === 'string' ? redactWorkspacesJson(entry, cwd, resolver) : entry)
+      if (redacted.some((entry, i) => entry !== value[i])) { headers[name] = redacted; changed = true }
+    }
+  }
+  return changed ? JSON.stringify(headers) : headersJson
+}
+
+/**
+ * @param {string} metadataJson
+ * @param {string | undefined} cwd
+ * @param {UsagePolicyResolver} resolver
+ */
+function redactWorkspacesJson(metadataJson, cwd, resolver) {
+  const metadata = parseMaybeJson(metadataJson)
+  if (!isPlainObject(metadata) || !isPlainObject(metadata.workspaces)) return metadataJson
+  /** @type {Record<string, unknown>} */
+  const kept = {}
+  let removed = false
+  for (const [key, info] of Object.entries(metadata.workspaces)) {
+    if (key.length > 0 && cwd && workspaceCoversCwd(key, cwd) && resolver.resolve(key).class !== 'ignore') kept[key] = info
+    else removed = true
+  }
+  if (!removed) return metadataJson
+  metadata.workspaces = kept
+  return JSON.stringify(metadata)
 }
 
 // ---------------------------------------------------------------------

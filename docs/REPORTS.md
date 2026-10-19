@@ -95,3 +95,6 @@ hyp report fix hyprec-0123456789abcdef
 Over MCP, the `fix_recommendation` prompt does the same: the agent reads the
 recommendation with `get_recommendation` and marks it applied with
 `set_recommendation_status`, the tool for `hyp report mark`.
+
+If a later report finds the same problem again, a recommendation marked
+applied goes back to open, with the newer recommendation named as the reason.

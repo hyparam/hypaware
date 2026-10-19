@@ -2,13 +2,14 @@
 
 import path from 'node:path'
 
+import { createHeldDatasetStore } from '../../../src/core/sinks/held_datasets.js'
 import { createInstanceWatermarkStore, instanceWatermarkStateDir } from '../../../src/core/sinks/incremental.js'
 
 import { validateCentralConfig } from './src/config.js'
 import { createConfigPullLoop } from './src/config_client.js'
 import { IdentityClient } from './src/identity_client.js'
 import { createDatasetRolloutStore } from './src/rollout.js'
-import { createForwardSink, initializeOpenDatasetRollouts } from './src/sink.js'
+import { createForwardSink, eligibleOpenDatasetNames, initializeOpenDatasetRollouts, openDatasetsWithoutPartitions } from './src/sink.js'
 
 /**
  * @import { PluginActivationContext, SinkCreateContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -80,6 +81,25 @@ export async function activate(ctx) {
       // @ref LLP 0307#rollout-instant [implements]: initialize dataset rollout state before scheduled exports can observe a first partition
       await initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log: sinkCtx.log })
 
+      // Datasets this destination refused to register, kept on disk so
+      // `hyp status` can say their rows stay local. An unreadable record is not
+      // fatal: status keeps reporting it until every dataset with local rows
+      // has registered or been held again, and only then is it rewritten.
+      const instanceStateDir = instanceWatermarkStateDir(sinkCtx.paths.stateDir, sinkCtx.name)
+      const held = createHeldDatasetStore({ stateDir: instanceStateDir, destination: config.url })
+      try {
+        const unreadable = await held.load(eligibleOpenDatasetNames(query))
+        if (unreadable) {
+          sinkCtx.log.warn('central.forward.held_state_unreadable', { hyp_sink_instance: sinkCtx.name, reason: unreadable })
+          await held.resolve(await openDatasetsWithoutPartitions(query, storage))
+        }
+      } catch (err) {
+        sinkCtx.log.warn('central.forward.held_state_unavailable', {
+          hyp_sink_instance: sinkCtx.name,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+
       const sink = createForwardSink({
         config,
         identityClient,
@@ -87,7 +107,8 @@ export async function activate(ctx) {
         storage,
         watermarks,
         rollouts,
-        receiptsDir: path.join(instanceWatermarkStateDir(sinkCtx.paths.stateDir, sinkCtx.name), 'receipts'),
+        receiptsDir: path.join(instanceStateDir, 'receipts'),
+        held,
         log: sinkCtx.log,
       })
 

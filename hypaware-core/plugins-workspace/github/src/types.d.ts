@@ -200,7 +200,7 @@ export interface GithubRuntime {
   /** Undefined on activation: catch up existing rows once, then skip idle ticks. */
   projectionNeeded?: boolean
   /** Test seam; production defaults to the real fetch client. */
-  clientFactory?: () => GithubClient
+  clientFactory?: (opts?: { signal?: AbortSignal }) => GithubClient
   /** Test seam; production uses the fixed whole-tick request limit. */
   captureRequestLimit?: number
 }

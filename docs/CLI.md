@@ -11,7 +11,7 @@ For the syntax and behavior of every command, see the
 - macOS with `launchd`, or Linux with a `systemd` user service, for the
   persistent background service. A container or CI host without one can run
   `hyp daemon run` in the foreground instead; see
-  [CI and headless deployment](TEAM_SETUP.md#ci-and-headless-deployment).
+  [CI and headless deployment](integrations/ci-and-headless.md).
 - An interactive terminal for the guided setup.
 
 ## Install HypAware
@@ -24,8 +24,8 @@ hyp setup
 ```
 
 Select **Sync to the cloud** to store your recordings on HypAware Cloud or
-choose **Local only** to keep recordings on your machine. To change this later,
-see [connect a machine](TEAM_SETUP.md#connect-a-machine).
+choose **Local only** to keep recordings on your host. To change this later,
+see [connect a host](TEAM_SETUP.md#connect-a-host).
 
 Setup then asks which AI clients to record, installs the background service,
 connects the clients you selected, and imports their supported session history.
@@ -43,10 +43,11 @@ hyp setup --yes \
     --retention-days 90
 ```
 
-`--dry-run` reports what would be written and writes no configuration. It is
-not a whole-run preview: in a guided run the enrollment choice and the folder
-and sync-scope settings are applied before the flag takes effect. If a
-configuration already exists, add `--force` to replace it.
+`--dry-run` previews an unattended setup: it reports what would be written and
+writes no configuration. The flag always runs setup non-interactively, so name
+the choices to preview with `--yes`, `--source`, `--client`, or `--from-file`;
+on its own it stops with "no sources selected". The guided setup has no
+preview. If a configuration already exists, add `--force` to replace it.
 HypAware backs up the existing configuration before replacement.
 
 ## Check the installation
@@ -85,7 +86,7 @@ attention, with guidance to help resolve problems. For capture checks, see
 The daemon keeps capture and scheduled sync running after you close the terminal.
 Setup installs it as a per-user service. On macOS, its LaunchAgent runs while
 you are logged in. On Linux, its systemd user service requires user-session
-support; see [headless deployment](TEAM_SETUP.md#long-lived-headless-machines)
+support; see [headless deployment](integrations/ci-and-headless.md#long-lived-headless-hosts)
 for hosts that must keep running after logout.
 
 ```sh
@@ -105,7 +106,7 @@ hyp setup
 ```
 
 Select **Reconfigure** in the menu. HypAware preserves a centrally managed
-configuration layer and changes only the choices this machine owns.
+configuration layer and changes only the choices this host owns.
 
 For unattended replacements and configuration files, see
 [repeatable configuration](CONFIGURATION.md#make-a-repeatable-setup).
@@ -163,7 +164,7 @@ detached, replacing `<client>` with its name, such as `claude` or `codex`.
 ## Uninstall
 
 ```sh
-hyp leave                  # if this machine is enrolled in Cloud
+hyp leave                  # if this host is enrolled in Cloud
 hyp daemon uninstall
 npm uninstall -g hypaware
 ```

@@ -22,7 +22,7 @@ import { createActionReconciler } from '../../src/core/config/action_reconciler.
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
-import { clientAssetStateRoot, digestClientAsset } from '../../src/core/runtime/client_asset_ledger.js'
+import { clientAssetStateRoot, digestClientAsset, inspectClientAsset } from '../../src/core/runtime/client_asset_ledger.js'
 import { materializeClientAssets, removeClientAssets } from '../../src/core/runtime/client_assets.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
@@ -446,6 +446,11 @@ test('a retired asset that cannot be read is named and kept on the books', async
     t.skip('needs an unreadable directory, which a root-owned run cannot produce')
     return
   }
+  assert.deepEqual(
+    await inspectClientAsset(retired),
+    { missing: false, errno: 'EACCES' },
+    'the read failure below dest keeps its errno, so the report can say why'
+  )
 
   const second = await installWith({ env, skills: [{ name: 'hypaware-query', sourceDir: keptSource }] })
 
@@ -733,7 +738,7 @@ test('a recorded destination whose basename begins with ".." is refused, not rea
  * malicious marker and a user's files.
  * @ref LLP 0226#only-direct-children [tests]:
  */
-test('removeClientAssets refuses a basename beginning with ".." on posix and win32 alike', async () => {
+test('removeClientAssets refuses a basename beginning with ".."', async () => {
   const { home } = await makeHome()
   const skillsDir = path.join(home, '.claude', 'skills')
   const stash = path.join(skillsDir, '..stash')

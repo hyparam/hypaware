@@ -264,7 +264,13 @@ function byteRange(value, size) {
   const start = first ?? Math.max(0, size - /** @type {number} */ (last))
   const end = first === undefined ? size - 1 : Math.min(last ?? size - 1, size - 1)
   if (start >= size || end < start || size === 0) {
-    throw Object.assign(new Error('local-fs blob-store: unsatisfiable byte range'), { code: 'InvalidRange' })
+    // `blob_range_unsatisfiable` is the token the s3 provider gives a 416,
+    // so a ranged reader branches on one kind across both. `code` stays for
+    // callers that already match the S3 error name.
+    throw Object.assign(new Error('local-fs blob-store: unsatisfiable byte range'), {
+      code: 'InvalidRange',
+      errorKind: 'blob_range_unsatisfiable',
+    })
   }
   return { start, end }
 }

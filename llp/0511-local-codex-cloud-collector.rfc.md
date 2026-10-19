@@ -25,8 +25,8 @@ unchanged rows. No durable cursor can advance past a failed write. There is no l
 
 ## Onboarding {#onboarding}
 
-The manifest contributes two independent rows: **Codex Cloud (experimental)**
-and **ChatGPT Work (experimental)**. On first setup, detecting Codex seeds the
+The manifest contributes two independent rows: **Codex Cloud (beta)**
+and **ChatGPT Work (beta)**. On first setup, detecting Codex seeds the
 Codex Cloud row, so the express Record everything choice includes it and names
 it. Work combines `codex_work_web` and `codex_work_mobile`, has no detection
 seed, and requires an explicit Customize selection. Existing selections remain

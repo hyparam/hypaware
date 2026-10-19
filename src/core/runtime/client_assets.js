@@ -82,6 +82,27 @@ function outsideConsent(record) {
 }
 
 /**
+ * The recovery line after a run that copied Claude Code skills. Claude Code
+ * picks up edits to a skill it already knows during a session, but a skills
+ * directory it did not have at session start needs `/reload-skills`, so the
+ * line is conditional advice rather than a mandatory restart (#394). Codex
+ * and subagents get no line: their reload behavior is not established.
+ */
+export const CLAUDE_SKILL_RELOAD_HINT = 'If the skills are not visible, run /reload-skills in Claude Code, or start a new session.'
+
+/**
+ * Whether a materialization actually copied a Claude Code skill: a planned
+ * dry-run copy, an agent, another client's copy, and a failed or withheld copy
+ * (never in `installed`) all earn no {@link CLAUDE_SKILL_RELOAD_HINT}.
+ *
+ * @param {ClientAssetInstall[]} installed
+ * @returns {boolean}
+ */
+export function copiedClaudeSkills(installed) {
+  return installed.some((a) => a.kind === 'skill' && a.client === 'claude' && !a.dryRun)
+}
+
+/**
  * Copy every registered skill and agent that targets one of `clients` into that
  * client's asset directories, replacing any existing copy (idempotent). A
  * client under a consent (`CONSENTED_SKILLS`) replaces only a copy the ledger
@@ -731,7 +752,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
     return { carried: record, removed: false, removal }
   }
 
-  const { digest, missing } = await inspectClientAsset(dest)
+  const { digest, missing, errno } = await inspectClientAsset(dest)
   // Already gone (removed by hand, or by an earlier pass whose ledger write
   // lost the race). Nothing to report and nothing left to record.
   if (missing) return { carried: undefined, removed: false }
@@ -749,7 +770,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
   if (!digest) {
     stderr?.write(
       `warning: ${label} ${kind} '${name}' at ${dest} could not be read to check whether the bytes are ` +
-        'still ours; left in place - check its permissions\n'
+        'still ours; left in place - check its permissions, or whether something else is writing to it\n'
     )
     getLogger('client-assets').warn('client_assets.prune_withheld', {
       [Attr.COMPONENT]: 'client-assets',
@@ -757,6 +778,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
       hyp_client: client,
       [Attr.STATUS]: 'ok',
       [Attr.ERROR_KIND]: 'digest_unreadable',
+      hyp_errno: errno,
       detail: dest,
     })
     return { carried: record, removed: false, removal }

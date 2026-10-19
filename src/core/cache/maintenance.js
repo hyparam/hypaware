@@ -162,15 +162,20 @@ const MAX_INPLACE_COMPACT_ROUNDS = 8
  * it. So a tick that commits as many snapshots as retention keeps hands
  * the next tick's expiry a metadata list holding nothing but this tick's
  * own commits, and a reader that opened the table before the tick loses
- * the snapshot it is reading out from under it. Spending strictly fewer
- * than `min_snapshots_to_keep` keeps at least one older snapshot alive
- * across every tick, so the window a reader gets is never shorter than a
- * maintenance interval regardless of how the two knobs are set.
+ * the snapshot it is reading out from under it. For
+ * `min_snapshots_to_keep >= 2` the cap is strictly fewer than retention
+ * keeps, so at least one pre-tick snapshot survives the tick's expiry by
+ * count. That is a count guarantee only: no minimum reader interval is
+ * promised, whatever the knobs are set to.
  *
- * Floor of one: a config that retains nothing has no window to protect,
- * and a cap of zero would stall compaction outright rather than slow it.
+ * Floor of one: a cap of zero would stall compaction outright rather than
+ * slow it. At `min_snapshots_to_keep` of 1 (or 0) the floor meets or
+ * exceeds retention, so no pre-tick snapshot is kept by count; one
+ * survives only if `max_snapshot_age_hours` still covers it. That is the
+ * one-snapshot window the config asked for.
  *
- * @ref LLP 0312#round-cap-under-retention [implements]: one tick may never spend the whole retention window.
+ * @ref LLP 0312#round-cap-under-retention [implements]: above the floor, one tick never spends the whole retention window.
+ * @ref LLP 0540#round-cap-floor-boundary: the invariant holds only above the floor; keep <= 1 keeps no pre-tick snapshot by count.
  * @param {MaintenanceConfig} cfg
  * @returns {number}
  */
@@ -184,6 +189,13 @@ export function inPlaceRoundCap(cfg) {
  * metadata versions no longer die with their directory; without a trim
  * they accumulate one per commit forever. The kept window is for
  * debugging a recent commit; nothing reads versions behind the hint.
+ *
+ * Not a fixed bound on the directory: versions past this count still go
+ * through the {@link ORPHAN_GRACE_MS} guard, so the retained set is this
+ * many plus every older version written within the grace window, which
+ * grows with commit rate.
+ *
+ * @ref LLP 0540#metadata-retained-set: the newest 20 plus younger protected versions, not a fixed 20 files.
  */
 const METADATA_VERSIONS_KEPT = 20
 
@@ -473,7 +485,16 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   // something to reclaim. Everything else this function does needs a
   // table that reads; the sweep's staging pass does not.
   // @ref LLP 0316#staged-writes-are-reclaimed [implements]: the leak's only reclaimer must not be gated on a published metadata version.
-  if (!tableExists(liveDir)) return await sweepLiveGeneration(r, cursor, opts)
+  if (!tableExists(liveDir)) {
+    const swept = await sweepLiveGeneration(r, cursor, opts)
+    // A forced rewrite of a generation the cursor says holds rows, whose
+    // metadata is gone or cannot be listed, is the same refusal as the
+    // locked check below, said out loud rather than skipped (#1023).
+    if (opts.force && !opts.dryRun && layout.kind === 'source-table' && cursor.rowCount > 0) {
+      throw compactionMetadataRefusal(layout.liveDir, 'its table metadata is missing or cannot be listed')
+    }
+    return swept
+  }
 
   // Live counts from the current snapshot's summary where the table keeps
   // one, not from the directory. In-place compaction (LLP 0310) leaves
@@ -727,7 +748,8 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // generation rewrite every tick, forever, and with no schema in
             // hand the replacement generation is written with no partition
             // spec at all. Defer instead, and let a tick that can read the
-            // metadata do it; `--force` still rewrites.
+            // metadata do it. `--force` skips the deferral but not the
+            // refusal below, so a forced tick fails the partition instead.
             if (!opts.force && lockedRepartitionDue && declaration && !targetLayout) {
               repartitionDeferred = true
               // Deferring the migration must not also stop the partition
@@ -746,6 +768,23 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
               }
               return null
             }
+            // A published source table's replacement must keep the schema,
+            // partition spec and sort order its metadata records. Without
+            // all three `compactGeneration` would infer columns from the
+            // rows, or drop the spec or sort, and publish a generation the
+            // next declaration-carrying append rejects (#1023). `--force`
+            // overrides the dueness heuristics, not this. Nothing has been
+            // reserved or written yet, so the live generation and its cursor
+            // stay as they were and a tick that can read the metadata
+            // rewrites it. The legacy epoch layout is exempt: its lack of a
+            // spec is established by the layout, not inferred from a failed
+            // read.
+            // @ref LLP 0220#walk-survives-a-partition [constrained-by]: the refusal fails this partition, and the walk moves on.
+            // @ref LLP 0530#forced-rewrite [implements]: --force overrides dueness, never the metadata the replacement must keep.
+            if (lockedLayout.kind === 'source-table') {
+              const missing = missingCompactionMetadata(lockedTableInfo)
+              if (missing) throw compactionMetadataRefusal(lockedLayout.liveDir, missing)
+            }
             repartitionApplied = targetLayout !== undefined
             return compactGeneration(r.path, lockedLayout, cfg, settle, lockedTableInfo, targetLayout)
           })
@@ -763,7 +802,11 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           // `tryReadCursorSync`, because this write is destructive and a
           // cursor that cannot be read back must not be replaced by the
           // epoch-0 default `readCursorSync` would synthesize.
-          if (verdictStale) {
+          // A metadata refusal is the exception: it ran before anything was
+          // reserved, and the partition's cursor stays byte-identical so the
+          // tick after the metadata recovers rewrites it (#1023). Retrying it
+          // each tick costs one metadata read, and the walk survives it.
+          if (verdictStale && errorKindOf(err) !== 'compaction_metadata_unavailable') {
             // Best-effort: a cursor write that fails must not displace the
             // rewrite failure that is the actual diagnosis (a decode error
             // masked by an ENOSPC on the stamp sends the operator after the
@@ -1013,6 +1056,8 @@ async function expireSnapshots(tableDir, cfg, opts) {
  * own bound now ({@link METADATA_VERSIONS_KEPT} plus the unreferenced-file
  * sweep, both of which run every tick regardless of dueness), so the
  * trigger is left to the legacy epoch layout, where a rewrite clears it.
+ * That bound follows commit rate rather than a fixed count: versions
+ * younger than the orphan grace window survive the trim too.
  * `--force` still routes a source table to the generation-swap writer.
  *
  * @ref LLP 0312#metadata-dueness [implements]: a dueness condition routine compaction cannot clear is not routine dueness.
@@ -1087,8 +1132,9 @@ async function liveTableStats(tableDir) {
  * rewrite share: the current schema and partition spec (carried into the
  * replacement generation), the declared default sort order, and the raw
  * metadata for snapshot inspection. Loaded once per compaction-due
- * partition; null when the metadata is unreadable, in which case the
- * rewrite falls back to inferring the schema from scanned rows.
+ * partition; null when the metadata is unreadable, in which case a
+ * source-table rewrite is refused and only the legacy epoch layout falls
+ * back to inferring the schema from scanned rows.
  *
  * @param {string} tableDir
  * @returns {Promise<{
@@ -1112,6 +1158,45 @@ async function loadCompactionTableInfo(tableDir) {
   } catch {
     return null
   }
+}
+
+/**
+ * Why `tableInfo` cannot carry the table's schema, partition spec and sort
+ * order into a replacement generation, or null when it can. The ids must
+ * resolve exactly: the readers' fallback to the last entry would publish a
+ * layout the table never recorded as current.
+ *
+ * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} tableInfo
+ * @returns {string | null}
+ */
+function missingCompactionMetadata(tableInfo) {
+  if (!tableInfo) return 'its table metadata is unreadable'
+  const { metadata } = tableInfo
+  if (!tableInfo.schemaColumns || !metadata.schemas?.some((s) => s['schema-id'] === metadata['current-schema-id'])) {
+    return 'its table metadata records no current schema'
+  }
+  if (!metadata['partition-specs']?.some((s) => s['spec-id'] === metadata['default-spec-id'])) {
+    return 'its table metadata records no current partition spec'
+  }
+  const sortOrderId = metadata['default-sort-order-id']
+  if (sortOrderId !== undefined) {
+    const order = metadata['sort-orders']?.find((o) => o['order-id'] === sortOrderId)
+    if (!order) return 'its table metadata records no current sort order'
+    if (order.fields.length > 0 && !tableInfo.sortColumns) return 'its table metadata records a sort order the rewrite cannot carry'
+  }
+  return null
+}
+
+/**
+ * @param {string} liveDir
+ * @param {string} reason
+ * @returns {Error}
+ */
+function compactionMetadataRefusal(liveDir, reason) {
+  return Object.assign(
+    new Error(`refusing to rewrite ${liveDir}: ${reason}, so the replacement could not keep the recorded schema, partition spec and sort order`),
+    { errorKind: 'compaction_metadata_unavailable' }
+  )
 }
 
 /**
@@ -1839,7 +1924,10 @@ function inPlaceVerdictCursor(cursor, liveDataFiles) {
  * top: nothing younger than {@link ORPHAN_GRACE_MS} is touched (a
  * concurrent append stages its files before its commit references them),
  * and metadata versions keep their newest {@link METADATA_VERSIONS_KEPT}
- * regardless. A data file's grep sidecar dies with it.
+ * regardless. Surplus metadata versions pass through the same grace
+ * guard, so a version younger than the grace window survives even past
+ * the newest {@link METADATA_VERSIONS_KEPT}. A data file's grep sidecar
+ * dies with it.
  *
  * Metadata staging names a crashed publish left behind are reclaimed here
  * too, in a pass that runs BEFORE the referenced-set walk: nothing

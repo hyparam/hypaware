@@ -8,9 +8,13 @@ import { NO_FETCH_MESSAGE, trimSlash } from './identity_client.js'
  * `/login/start` URL and *pulls* the outcome from the server instead of
  * listening for a loopback redirect: the flight parks when the browser opens
  * the start URL, the callback holds the one-time code (or the D7 refusal) on
- * the flight, and `GET /login/poll?state=` hands it over exactly once. This
- * replaced the ephemeral 127.0.0.1 receiver, whose redirect only delivered
- * when the browser and the CLI shared a loopback interface (broken over SSH).
+ * the flight, and `GET /login/poll?state=` hands it over. A pickup the client
+ * loses (a dropped connection, a body read that fails) is recovered by the
+ * server re-serving the settled outcome on the next poll, until the code is
+ * redeemed or the flight's original expiry passes, so the poller needs no
+ * acknowledgment of its own. This replaced the ephemeral 127.0.0.1 receiver,
+ * whose redirect only delivered when the browser and the CLI shared a
+ * loopback interface (broken over SSH).
  *
  * Exposes the same `{ waitForCode, close }` seam the loopback receiver did,
  * so `loginWithBrowser` swaps delivery mechanisms without changing shape.
@@ -30,6 +34,9 @@ const POLL_REQUEST_TIMEOUT_MS = 10 * 1000
 // LLP 0342#d4), so an unreadable hint must not mean no backoff at all.
 const RATE_LIMITED_BACKOFF_MS = 10 * 1000
 const CLOSED_MESSAGE = 'login poller closed before a code arrived'
+// The CLI never received a code, so the guidance is conditional: it must not
+// claim the sign-in or setup worked, only say what to do in either case.
+const TIMEOUT_MESSAGE = 'timed out waiting for the browser login to complete - finish any steps left in the browser, then retry the sign-in; if the browser already said setup succeeded, continue with that setup instead of starting it over'
 
 /**
  * @param {number} ms
@@ -44,7 +51,10 @@ function defaultSleep(ms) {
  * `/login/poll` until the flight settles: it resolves `{ code }` on
  * `status: complete`, rejects with a `callbackError`-carrying error on
  * `status: failed` (the D7 code the redirect's `error=` used to carry), and
- * rejects on timeout or on a server that predates the poll endpoint.
+ * rejects on timeout or on a server that predates the poll endpoint. Every
+ * rejection it makes itself carries a `kind` naming which (the D7 code,
+ * `no_poll_endpoint`, or `timeout`), so a caller branches on a code, never on
+ * the message.
  *
  * `unknown_state` is NOT terminal: the flight parks only when the browser
  * opens the start URL, so every poll before the user clicks legitimately
@@ -72,7 +82,8 @@ function defaultSleep(ms) {
  *   sleep?: (ms: number) => Promise<void>,
  * }} args
  * @returns {{ waitForCode: () => Promise<{ code: string }>, close: () => void }}
- * @ref LLP 0342#d3 [implements]: 2s cadence, 5-minute budget, single delivery consumed on pickup; the token exchange downstream is untouched
+ * @ref LLP 0342#d3 [implements]: 2s cadence, 5-minute budget; the token exchange downstream is untouched
+ * @ref LLP 0543#pickup [constrained-by]: a lost pickup is recovered by the server re-serving the settled outcome, so a failed body read stays transient and the next poll collects it
  * @ref LLP 0342#d4 [constrained-by]: `state` is all the poll URL carries; PKCE at redemption, not a second poll secret, is what makes that safe
  */
 export function startLoginPoller({
@@ -106,7 +117,7 @@ export function startLoginPoller({
       [Attr.ERROR_KIND]: kind,
       smoke_step: 'login_poll',
     })
-    const err = new Error(message)
+    const err = Object.assign(new Error(message), { kind })
     if (callbackError) Object.assign(err, { callbackError })
     return err
   }
@@ -143,7 +154,9 @@ export function startLoginPoller({
         } catch {
           // A network error, a hung request we aborted, or an unparseable body
           // is transient: keep polling to the deadline rather than failing a
-          // login the human may be mid-completing in the browser.
+          // login the human may be mid-completing in the browser. That holds
+          // for a settled response lost mid-body too: the server serves it
+          // again on the next poll.
           body = undefined
         } finally {
           clearTimeout(timer)
@@ -180,6 +193,9 @@ export function startLoginPoller({
             // page, or its own JSON `{"message":"Not Found"}`, during a
             // rolling deploy - which is transient and must not end a login the
             // human may be mid-completing.
+            // The `kind` is the channel the caller reads, not `callbackError`:
+            // this is no server refusal, and no English is matched for it.
+            // @ref LLP 0543#typed [implements]: the stale server travels as its own typed kind
             throw fail('this server does not support poll login yet - upgrade hypaware-server', 'no_poll_endpoint')
           }
           if (response.status === 429) {
@@ -197,7 +213,7 @@ export function startLoginPoller({
 
         const remaining = deadline - Date.now()
         if (remaining <= 0) {
-          throw fail('timed out waiting for the browser login to complete', 'timeout')
+          throw fail(TIMEOUT_MESSAGE, 'timeout')
         }
         // Floor at 1ms so a non-positive intervalMs (test seam) cannot
         // busy-spin; cap at the remaining budget so we never oversleep it.

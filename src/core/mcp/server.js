@@ -2,6 +2,7 @@
 
 import { Attr, getLogger } from '../observability/index.js'
 import { jsonReplacer } from '../query/format.js'
+import { UNDECLARED_SCHEMA_NOTE } from '../query/schema.js'
 import { toJsonSchema, validateToolArguments } from '../cli/verb_codec.js'
 import { verbAuthClass, verbExposure } from '../registry/verbs.js'
 import { buildInstructions } from './instructions.js'
@@ -220,10 +221,15 @@ export function createMcpServer(opts) {
         return undefined
       }
       named = name
+      // The resource body stays `{ dataset, columns }`; an empty declaration
+      // is qualified here, in the slot the entry already has.
+      const declared = dataset.schema.columns.length > 0
       return {
         uri: datasetSchemaUri(name),
         name: `${name} schema`,
-        description: `Column schema for the ${name} dataset`,
+        description: declared
+          ? `Column schema for the ${name} dataset`
+          : `Column schema for the ${name} dataset: ${UNDECLARED_SCHEMA_NOTE}`,
         mimeType: 'application/json',
       }
     } catch (err) {

@@ -270,6 +270,7 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'daemon_heartbeat_stale'
   | 'daemon_exited_abnormally'
+  | 'daemon_boot_failed'
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
@@ -280,6 +281,7 @@ export type StatusDiagnosticKind =
   | 'gateway_upstreams_dropped'
   | 'recent_errors'
   | 'sink_export_failing'
+  | 'sink_dataset_unsupported'
   | 'sink_materialize_failed'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
@@ -463,7 +465,15 @@ export interface CaptureHealthReport {
   plugin: string
   /** The listener source's snapshot name in status.json, or null when no daemon recorded one. */
   source: string | null
-  /** Last telemetry event the listener saw, or null when none is recorded. */
+  /**
+   * Last telemetry event the listener saw, or null when none is recorded.
+   *
+   * For a client that captures by transcript sweep and writes no marker
+   * (default-mode Codex), there is no listener: this is the
+   * `message_created_at` of the newest row its sweep landed in the cache, and
+   * `state` is `ok` when one exists and `unknown` when none does
+   * (LLP 0546#newest-partition).
+   */
   lastEventAt: string | null
   /**
    * The newest transcript activity the probe could establish, or null when
@@ -489,9 +499,11 @@ export interface CaptureHealthReport {
   /**
    * Milliseconds of activity past the capture baseline (0 when none).
    *
-   * Under `state: 'unknown'` this is still the filesystem's unconfirmed
-   * suspicion, which is all it ever was: it is `state`, not this number,
-   * that says whether anything stands behind it.
+   * Under `state: 'unknown'` this is the filesystem's unconfirmed suspicion
+   * when the confirmation read found no turn, and the gap to the turn it did
+   * find when that turn sat inside the threshold but a later one could not
+   * be ruled out. Either way it is `state`, not this number, that says
+   * whether anything stands behind it.
    */
   gapMs: number
   /**
@@ -758,6 +770,13 @@ export interface HypAwareStatusReport {
    * version, cached auto_update flag, provenance, and the last probe.
    */
   selfUpdate: { line: string | null, json: Record<string, unknown> }
+  /**
+   * Informational notice naming clients whose ledger-recorded managed skills
+   * or agents update-time installation does not cover (LLP 0534). Null when
+   * there are none or the plugin catalog could not be read. Never a
+   * diagnostic, so it moves neither `overall` nor the headline.
+   */
+  assetCoverage?: string | null
 }
 
 export interface CollectStatusOptions {
@@ -777,13 +796,15 @@ export interface CollectStatusOptions {
   /** Absolute path to the daemon binary the installer recorded. */
   binPath?: string
   isLaunchAgentInstalled?: (opts: { label?: string; plistDir?: string; homeDir?: string }) => boolean
-  launchAgentStatus?: (opts: { label?: string; launchctl?: LaunchctlAdapter; userDomain?: string; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
+  launchAgentStatus?: (opts: { label?: string; launchctl?: LaunchctlAdapter; userDomain?: string; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number; unreachable?: boolean }>
   isSystemdUnitInstalled?: (opts: { label?: string; unitDir?: string; homeDir?: string }) => boolean
-  systemdUnitStatus?: (opts: { label?: string; systemctl?: SystemctlAdapter; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
+  systemdUnitStatus?: (opts: { label?: string; systemctl?: SystemctlAdapter; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number; unreachable?: boolean }>
   /** Keychain trust probe (tests, and any caller that must not shell out). */
   isCaTrusted?: (args: { certPath: string }) => Promise<boolean>
   /** Launchd user-environment probe (tests, and any caller that must not shell out). */
   isLaunchdEnvSet?: () => Promise<boolean>
+  /** Boot-time probe as epoch ms, `undefined` when unknown (tests). Defaults to the platform's boot clock. */
+  bootTimeMs?: () => number | undefined
 }
 
 export interface SystemctlResult {
@@ -1033,6 +1054,12 @@ export interface RunDaemonOptions {
    * the run still reports green.
    */
   installSignalHandlers?: boolean
+  /**
+   * The caller relaunches this run when it ends with 75 (LLP 0529), so a stop
+   * past its deadline kills the processing child and lets the stop finish
+   * instead of exiting, exiting only one deadline later if it still has not.
+   */
+  relaunchesOnRestart?: boolean
   /** Whether the runtime reports foreground mode (default true). */
   foreground?: boolean
   /** Temp directory root for sink materialization scratch files. */
@@ -1044,6 +1071,15 @@ export interface RunDaemonOptions {
    * `hyp backfill` subprocess.
    */
   actionReconciler?: ActionReconciler
+}
+
+/**
+ * The process holding a port the daemon could not bind (issue #137): a pid
+ * and an executable name, never a command line.
+ */
+export interface PortOwner {
+  pid: number
+  executable?: string
 }
 
 export interface DaemonLogger {

@@ -67,4 +67,9 @@ export interface BackfillProviderResult {
   error?: string
   /** Which step produced `error`, for the run's `provider_finish` span. */
   error_kind?: string
+  /**
+   * The first `import_unavailable` note the provider yielded, capped in
+   * length: why an ok run with nothing scanned could not import at all.
+   */
+  note?: string
 }

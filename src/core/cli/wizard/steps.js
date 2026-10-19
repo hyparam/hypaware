@@ -30,7 +30,7 @@ export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ 
  *    closing report, not a decision, so it renders without a counter
  *    rather than inflating the total with a step nobody answers.
  * 2. **The join lane counts once**, however many prompts happen inside it.
- *    It delegates to `runRemoteLogin`, which can ask for an org, so its
+ *    It delegates to `remoteLogin`, which can ask for an org, so its
  *    internal prompt count is not knowable at fork resolution. Counting the
  *    lane instead of its prompts is what makes the total fixed from the
  *    moment the pathway is committed.

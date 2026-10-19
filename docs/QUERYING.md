@@ -5,8 +5,8 @@ start a question with `hyp ask` or ask the client you already have open to use
 HypAware. Search and SQL commands are also available below. To generate or share
 a report, see [reports](REPORTS.md).
 
-Queries use this machine's recordings by default. To search recordings in
-HypAware Cloud, including other machines and your team, tell your agent to use
+Queries use this host's recordings by default. To search recordings in
+HypAware Cloud, including other hosts and your team, tell your agent to use
 `--remote` on its query commands. This uses your default remote target;
 `--remote <target>` selects another. See [remote access](TEAM_SETUP.md#manage-remote-access)
 to configure a target and sign in.
@@ -43,7 +43,7 @@ which one to use.
 
 ## See what is available
 
-<!-- agent: Use HypAware to tell me what is recorded on this machine: which datasets, how fresh, and a summary of models, tokens, and tools. Over MCP, read the datasets with query_sql. -->
+<!-- agent: Use HypAware to tell me what is recorded on this host: which datasets, how fresh, and a summary of models, tokens, and tools. Over MCP, read the datasets with query_sql. -->
 ```sh
 hyp cache status
 hyp query overview
@@ -55,14 +55,14 @@ What HypAware has recorded
 ────────────────────────────────────────
 Input is prompt sent fresh; cached is prompt served from (or written to) the cache.
 Output is what the model generated. Input + cached is the whole prompt.
-Token bars split ▒ input from █ output; cache is excluded.
+Share bars split ▒ input from █ output; cache is excluded.
 
 Which providers and models you use, by volume
 
-  provider   model                       input      cached   output  by input+output
-  anthropic  claude-opus-5-5            25,252  64,078,478  263,270  ▒▒████████████████
-  openai     gpt-6.1-sol                61,926     612,992    1,284  ▒▒▒█
-  anthropic  claude-haiku-5-5           20,423           0    1,273  █
+  provider   model              input      cached   output  share
+  anthropic  claude-opus-5-5   25,252  64,078,478  263,270  ▒▒████████████████
+  openai     gpt-6.1-sol       61,926     612,992    1,284  ▒▒▒█
+  anthropic  claude-haiku-5-5  20,423           0    1,273  █
 ```
 
 Over MCP, read the same datasets with `query_sql`.
@@ -120,6 +120,12 @@ hyp query sql "select message_index, part_index, role, part_type, content_text, 
   order by message_index, part_index
   limit 100" --format json
 ```
+
+A `session_id` filter alone can read every day of the cache, because the cache
+is partitioned by `date`. If you know the days the session ran, add
+`and date >= 'FIRST_DAY' and date <= 'LAST_DAY'` so only those days are read.
+Cover every day: a session can cross midnight, and rows outside the range are
+silently left out.
 
 To inspect that session's tool calls:
 
@@ -259,7 +265,7 @@ leads, not proof of what was decided. Check incomplete results and later
 relevant sessions before concluding whether a decision still stands.
 
 Team retrieval needs no replicated graph or additional client plugin. The
-server maintains the graph. This machine's own capture graph remains available
+server maintains the graph. This host's own capture graph remains available
 for local activity questions. If remote graph data is unavailable, use remote
 message searches and disclose that coverage limit.
 

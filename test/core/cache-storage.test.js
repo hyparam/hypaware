@@ -16,6 +16,7 @@ import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
 import { createLocalIcebergIO } from '../../src/core/cache/iceberg/resolver.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { DEFAULT_SPOOL_BYTES_THRESHOLD, SPOOL_DIR } from '../../src/core/cache/spool.js'
+import { Attr } from '../../src/core/observability/index.js'
 import { withLogRecords } from '../helpers/log_records.js'
 
 /**
@@ -631,12 +632,26 @@ test('snapshot reconciliation commits and retires past a corrupt cursor the scop
   assert.equal(result, 1, 'the scope still commits its snapshot')
   // The operator is told which partition went unswept, beside the cursor
   // read's own refusal naming why it could not be read.
-  const skip = records.find(record => record.body === 'cache.retirement_skipped')
+  // Both records answer the standard dataset filter and carry only the
+  // logger's own component (hyparam/hypaware#2334).
+  const forDataset = records.filter(record => record.attributes[Attr.DATASET] === 'messages')
+  const skip = forDataset.find(record => record.body === 'cache.retirement_skipped')
   assert(skip, 'the skipped partition is recorded, not passed over in silence')
   assert.equal(skip.attributes.partition_dir, foreign)
   assert.equal(skip.attributes.error_kind, 'cursor_unreadable')
   assert.equal(skip.attributes.status, 'degraded')
-  assert.equal(records.find(r => r.body === 'cache.snapshot_reconciled')?.attributes.retirement_skipped, 1)
+  assert.equal(skip.attributes[Attr.OPERATION], 'cache.reconcile')
+  assert.equal(skip.attributes.client_name, SNAPSHOT_SCOPE.where.client_name)
+  const done = forDataset.find(record => record.body === 'cache.snapshot_reconciled')
+  assert(done, 'the reconcile summary is found by the standard dataset attribute')
+  assert.equal(done.attributes.retirement_skipped, 1)
+  assert.equal(done.attributes.rows_written, 1)
+  assert.equal(done.attributes.status, 'ok')
+  for (const record of [skip, done]) {
+    assert.equal(record.attributes[Attr.COMPONENT], 'cache')
+    assert.equal(record.attributes.component, undefined, 'no redundant plain component')
+    assert.equal(record.attributes.dataset, undefined, 'no plain dataset beside hyp_dataset')
+  }
   // The damaged partition is left exactly as the operator has to find it.
   assert.equal(await fs.readFile(foreignCursor, 'utf8'), '{ this is not a cursor')
   assert.deepEqual(await read(), ['new'],

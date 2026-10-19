@@ -10,7 +10,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
-import { materializeClientAssets } from '../runtime/client_assets.js'
+import { CLAUDE_SKILL_RELOAD_HINT, copiedClaudeSkills, materializeClientAssets } from '../runtime/client_assets.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
@@ -25,12 +25,14 @@ import {
   readClientActionStatus,
   readInstalledAssets,
   rearmRefusedActionMarker,
+  withClientActionLock,
 } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { enableClientAdapter } from '../config/client_enable.js'
 import { enableGatewayProxyMode } from '../config/gateway_proxy_enable.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { loaderActivationKind } from '../runtime/loader.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeAttachedClients, probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { askYesNo } from '../cli/confirm.js'
@@ -55,6 +57,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { AiGatewayCapability, ClientRegistry, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
+ * @import { classifyInactiveState } from '../../../src/core/cli/dispatch.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
  * @import { ClientEnableResult, ClientRecordingWriteResult, DetachFromDiskResult } from '../../../src/core/config/types.js'
@@ -203,12 +206,13 @@ async function runClientLifecycle(action, argv, ctx) {
     // A refused client is still attached and may still route through the
     // proxy, so the CA and its trust stay with it.
     if (parsed.purge && !parsed.dryRun && refused) {
-      if (!parsed.json) ctx.stderr.write('Skipped --purge: a client that could not be detached may still use the local CA.\n')
+      ctx.stderr.write('Skipped --purge: a client that could not be detached may still use the local CA.\n')
     } else if (parsed.purge && !parsed.dryRun) {
       const purged = await purgeProxyTrustResidue({ ctx })
-      if (!parsed.json) {
-        for (const line of purged.lines) ctx.stdout.write(`${line}\n`)
-      }
+      // Under --json, stdout is the per-client NDJSON, so the purge lines
+      // (diagnostics, not data) go to stderr rather than being dropped.
+      const out = parsed.json ? ctx.stderr : ctx.stdout
+      for (const line of purged.lines) out.write(`${line}\n`)
     }
     return exitCode
   }
@@ -530,14 +534,30 @@ async function runClientLifecycle(action, argv, ctx) {
             // @ref LLP 0086#already-attached-validates-the-live-port [implements]: the already-attached branch compares recorded vs live port; a stale-port marker re-attaches
             // @ref LLP 0262#migration [implements]: a proxy-attached Claude is stale even when its gateway port is current
             const livePort = portFromEndpoint(liveEndpoint)
-            const modeCurrent = name !== 'claude' || liveEndpoint === undefined || probe.mode === 'otel'
-            const markerFormatCurrent = liveEndpoint === undefined || probe.markerFormatStale !== true
-            const alreadyCurrent =
-              probe.attached === true &&
-              modeCurrent &&
-              markerFormatCurrent &&
+            /** @param {typeof probe} p */
+            const isCurrent = (p) =>
+              p.attached === true &&
+              (name !== 'claude' || liveEndpoint === undefined || p.mode === 'otel') &&
+              (liveEndpoint === undefined || p.markerFormatStale !== true) &&
               (liveEndpoint === undefined ||
-                (probe.port !== undefined && probe.port === livePort))
+                (p.port !== undefined && p.port === livePort))
+            let alreadyCurrent = isCurrent(probe)
+            // The probe above ran without the key lock, so a detach or a
+            // reconcile reverse may have undone the settings while this
+            // process waited for it. Re-probe under the lock, and re-arm only
+            // if the client is still current; otherwise fall through to a real
+            // attach (or the no-endpoint give-up) instead of reporting an
+            // attach that is no longer on disk (#224).
+            // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
+            // @ref LLP 0523#two-locks [implements]: the already-current exit decides and re-arms under the key lock
+            if (alreadyCurrent && descriptor) {
+              alreadyCurrent = await withAttachKeyLock({ name, ctx }, async () => {
+                const recheck = await probeClientAttachFromDescriptor({ descriptor, homeDir, env: ctx.env })
+                if (!isCurrent(recheck)) return false
+                await rearmRefusedAttachMarker({ name, ctx, dryRun: false })
+                return true
+              })
+            }
             if (alreadyCurrent) {
               getLogger('cmd-attach').info('client.attach.daemon_managed', {
                 [Attr.COMPONENT]: 'cmd-attach',
@@ -596,9 +616,10 @@ async function runClientLifecycle(action, argv, ctx) {
               // after exactly the explicit re-run the user reached for, until
               // some later release bumps the re-arm generation past it (LLP
               // 0364). The re-arm cannot fail the other way round, since it
-              // logs and swallows its own marker error.
-              // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
-              rearmRefusedAttachMarker({ name, ctx, dryRun: false })
+              // logs and swallows its own marker error (only a key lock it
+              // cannot get within the bounded wait fails it, before any write).
+              // (The re-arm itself ran above, under the key lock that decided
+              // this exit.)
               if (await resumeRecording({ name, ctx, parsed }) === 'central_managed') exitCode = 1
               // The settings are already wired, but attach means settings *and*
               // assets, and this branch is the one an operator on a
@@ -666,15 +687,23 @@ async function runClientLifecycle(action, argv, ctx) {
           }
         }
       }
-      await client.attach({
-        endpoint,
-        config: {},
-        stdout: ctx.stdout,
-        stderr: ctx.stderr,
-        dryRun: parsed.dryRun,
-        json: parsed.json,
-      })
-      rearmRefusedAttachMarker({ name, ctx, dryRun: parsed.dryRun === true })
+      const attachAndRearm = async () => {
+        await client.attach({
+          endpoint,
+          config: {},
+          stdout: ctx.stdout,
+          stderr: ctx.stderr,
+          dryRun: parsed.dryRun,
+          json: parsed.json,
+        })
+        await rearmRefusedAttachMarker({ name, ctx, dryRun: parsed.dryRun === true })
+      }
+      // The settings write and the re-arm run under the client's key lock, so
+      // a reconcile reversing this key waits for them rather than interleaving
+      // with them. A dry run writes nothing, so it takes no lock.
+      // @ref LLP 0523#two-locks [implements]: an explicit attach holds the key lock across its settings write and re-arm
+      if (parsed.dryRun === true) await attachAndRearm()
+      else await withAttachKeyLock({ name, ctx }, attachAndRearm)
       if (await resumeRecording({ name, ctx, parsed }) === 'central_managed') exitCode = 1
       // Attach wires a client into HypAware, and its registered skills and
       // subagents are part of that wiring: manual attach skipping them was the
@@ -729,7 +758,7 @@ async function runClientLifecycle(action, argv, ctx) {
  * `rearmRefusedActionMarker` beside the store it rewrites.
  *
  * Best-effort: a marker-store I/O failure must never fail the attach that just
- * succeeded.
+ * succeeded. The caller holds the key's {@link withAttachKeyLock}.
  *
  * A function rather than an inline block because attach has two success
  * exits, the freshly-wired one and the daemon-managed already-current one, and
@@ -737,12 +766,12 @@ async function runClientLifecycle(action, argv, ctx) {
  *
  * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp client attach re-arms a refused marker, and only that; the reconciler never re-arms one on its own
  * @param {{ name: string, ctx: CommandRunContext, dryRun: boolean }} args
- * @returns {void}
+ * @returns {Promise<void>}
  */
-function rearmRefusedAttachMarker({ name, ctx, dryRun }) {
+async function rearmRefusedAttachMarker({ name, ctx, dryRun }) {
   if (dryRun) return
   try {
-    rearmRefusedActionMarker({
+    await rearmRefusedActionMarker({
       stateRoot: readObservabilityEnv(ctx.env).stateDir,
       kind: 'attach',
       requestKey: name,
@@ -754,6 +783,39 @@ function rearmRefusedAttachMarker({ name, ctx, dryRun }) {
       detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
     })
   }
+}
+
+/**
+ * Run `fn` holding the attach key lock for client `name`, the lock the daemon's
+ * reconciler holds around its own attach and reverse of the same key. A wait
+ * is said out loud on stderr (stdout may be a `--json` payload), and is
+ * bounded: a lock left by a killed `hyp` breaks once it ages past the stale
+ * age, and a live holder past twice that fails the command with the lock path.
+ *
+ * @template T
+ * @param {{ name: string, ctx: CommandRunContext }} args
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ * @ref LLP 0523#bounded-wait [implements]: the CLI says it is waiting, and a dead holder costs a bounded wait
+ */
+export async function withAttachKeyLock({ name, ctx }, fn) {
+  return withClientActionLock(
+    {
+      stateRoot: readObservabilityEnv(ctx.env).stateDir,
+      kind: 'attach',
+      requestKey: name,
+      onWait: () => {
+        ctx.stderr.write(`waiting for another hyp process working on client '${name}'...\n`)
+        getLogger('cmd-attach').warn('client.action_lock.wait', {
+          [Attr.COMPONENT]: 'cmd-attach',
+          [Attr.OPERATION]: 'client_action.lock',
+          hyp_client: name,
+          status: 'waiting',
+        })
+      },
+    },
+    fn
+  )
 }
 
 /**
@@ -769,6 +831,11 @@ function rearmRefusedAttachMarker({ name, ctx, dryRun }) {
  * names the plugin disabled, and LLP 0031's additive merge drops any local
  * entry with that name, so telling the user to edit their config would be a
  * lie).
+ *
+ * The message names one blocking plugin from the adapter's dependency closure
+ * (LLP 0531): a disabled, unresolved, or absent dependency, a plugin that
+ * failed to activate, or a config that could not be read, each with its own
+ * repair. The codes stay the two above.
  *
  * Reads the static bundled+installed catalog, never the live gateway registry:
  * this runs precisely when the registry cannot answer, either because the
@@ -803,40 +870,179 @@ async function resolveAttachEnablementState({ name, ctx }) {
   const configPath = ctx.env.HYP_CONFIG
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(obsEnv.hypHome)
-  /** @type {'absent' | 'disabled-local' | 'disabled-central'} */
-  let inactive = 'absent'
+  const rerun = `then re-run 'hyp client attach ${name}'`
+  /** @type {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> | undefined} */
+  let layered
+  /** @type {typeof classifyInactiveState | undefined} */
+  let classify
   try {
-    const { classifyInactiveState } = await import('../cli/dispatch.js')
-    const layered = await resolveLayeredConfigFromDisk({
+    classify = (await import('../cli/dispatch.js')).classifyInactiveState
+    layered = await resolveLayeredConfigFromDisk({
       stateRoot: obsEnv.stateDir,
       configPath,
       knownPlugins: catalog.pluginMetadata,
       knownDatasets: catalog.knownDatasets,
     })
-    inactive = classifyInactiveState(layered, descriptor.plugin)
-  } catch {
-    // An unreadable/invalid config layer cannot prove the central layer
-    // disabled anything, and the adapter is demonstrably not live: report the
-    // fixable state, whose remedy ('hyp init') repairs a broken config too.
+  } catch { /* classified as unreadable below */ }
+  // A missing file is a real state (nothing enabled there); a layer that
+  // exists but cannot be read cannot prove what it enables or disables.
+  const unreadable = [layered?.localLoaded, layered?.centralLoaded]
+    .find((loaded) => loaded && !loaded.ok && loaded.errorKind !== 'config_missing')
+  if (!layered || !classify || unreadable) {
+    // @ref LLP 0531#unreadable [implements]: no owner is invented for a
+    // config that could not be read
+    const unreadablePath = unreadable && !unreadable.ok ? unreadable.configPath : configPath
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message:
+        `the ${name} adapter is not active, and its enablement cannot be classified because ` +
+        `${unreadablePath} could not be read; run 'hyp config validate' for why, ${rerun}`,
+    }
   }
 
-  if (inactive === 'disabled-central') {
+  const picker = catalog.pickerDescriptors.get(name)
+  const seeds = [descriptor.plugin, ...(picker ? resolveSingleSourceEnablement(picker).pluginNames : [])]
+  const effectivePlugins = layered.effective?.plugins ?? []
+  const enabled = new Set(effectivePlugins.filter((p) => p.enabled !== false).map((p) => p.name))
+  const { closure, unresolved } = attachDependencyClosure({ seeds, catalog, enabled })
+  const classifyState = classify
+  const layeredConfig = layered
+  /** @param {string} plugin */
+  const stateOf = (plugin) =>
+    enabled.has(plugin) ? 'enabled' : classifyState(layeredConfig, plugin)
+
+  // @ref LLP 0531#one-blocker [implements]: exactly one blocking plugin,
+  // the most binding state first, then closure order (the adapter leads)
+  const central = closure.find((plugin) => stateOf(plugin) === 'disabled-central')
+  if (central) {
     return {
       state: 'disabled_central',
       errorKind: 'adapter_disabled_central',
-      message:
-        `the ${name} adapter is disabled by your central config; ` +
-        `a local config cannot override the central-managed setting`,
+      message: central === descriptor.plugin
+        ? `the ${name} adapter is disabled by your central config; ` +
+          `a local config cannot override the central-managed setting`
+        : `the ${name} adapter needs ${central}, which is disabled by your central config; ` +
+          `a local config cannot override the central-managed setting`,
     }
   }
+  const local = closure.find((plugin) => stateOf(plugin) === 'disabled-local')
+  if (local) {
+    const subject = local === descriptor.plugin
+      ? `the ${name} adapter's plugin ${local} is disabled`
+      : `the ${name} adapter needs ${local}, which is disabled`
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message:
+        `${subject} in ${configPath}; set "enabled": true on its plugins[] entry ` +
+        `and run 'hyp daemon restart', ${rerun}`,
+    }
+  }
+  const missing = unresolved[0]
+  if (missing) {
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message: missing.kind === 'plugin'
+        ? `the ${name} adapter needs ${missing.name}, which is not installed on this machine; ` +
+          `install it with 'hyp plugin install ${missing.name}', ${rerun}`
+        : `the ${name} adapter needs the ${missing.name} capability, which no installed plugin ` +
+          `provides; install a plugin that provides it (see 'hyp plugin list'), ${rerun}`,
+    }
+  }
+  const absent = closure.find((plugin) => stateOf(plugin) === 'absent')
+  if (absent) {
+    const subject = absent === descriptor.plugin
+      ? `the ${name} adapter is not enabled on this install`
+      : `the ${name} adapter needs ${absent}, which is not enabled on this install`
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message:
+        `${subject}; enable it with 'hyp setup', ` +
+        `or add ${absent} to ${configPath} and run 'hyp daemon restart', ${rerun}`,
+    }
+  }
+
+  // Every plugin the adapter needs is configured and enabled, so the config
+  // is not the problem: this run could not activate one of them.
+  // @ref LLP 0531#not-live [implements]: name the plugin that failed and the
+  // loader's safe kind, never its thrown message
+  const failed = (ctx.activations ?? []).find((outcome) => !outcome.ok && closure.includes(outcome.plugin.name))
+  if (failed) {
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message:
+        `the ${name} adapter is enabled, but ${failed.plugin.name} failed to activate this run ` +
+        `(${loaderActivationKind(failed.errorKind)}); run 'hyp status' for why, ${rerun}`,
+    }
+  }
+  const live = new Set((ctx.plugins ?? []).map((plugin) => plugin.name))
+  const inactive = closure.find((plugin) => ctx.failedPlugins?.includes(plugin)) ??
+    closure.find((plugin) => !live.has(plugin)) ??
+    descriptor.plugin
   return {
     state: 'not_enabled',
     errorKind: 'adapter_not_enabled',
     message:
-      `the ${name} adapter is not enabled on this install; enable it with 'hyp setup', ` +
-      `or add ${descriptor.plugin} to ${configPath} and run 'hyp daemon restart', ` +
-      `then re-run 'hyp client attach ${name}'`,
+      `the ${name} adapter is enabled, but ${inactive} is not active this run; ` +
+      `run 'hyp status' for why, ${rerun}`,
   }
+}
+
+/**
+ * The plugins `seeds` need, in breadth-first order from the seeds:
+ * `requires.plugins` by name, and `requires` capabilities through a catalog
+ * provider, preferring one the effective config already enables (the same
+ * two edges the boot closure in `../cli/dispatch.js` follows). The catalog is finite and every name is
+ * visited once, so a dependency cycle terminates; a name the catalog does not
+ * know, or a capability nothing provides, is returned in `unresolved` instead
+ * of being walked.
+ *
+ * @param {{ seeds: string[], catalog: PluginCatalog, enabled: Set<string> }} args
+ * @returns {{ closure: string[], unresolved: { kind: 'plugin' | 'capability', name: string }[] }}
+ */
+function attachDependencyClosure({ seeds, catalog, enabled }) {
+  /** @type {Map<string, string[]>} */
+  const providers = new Map()
+  for (const [plugin, meta] of catalog.pluginMetadata) {
+    for (const cap of Object.keys(meta.provides ?? {})) {
+      const list = providers.get(cap)
+      if (list) list.push(plugin)
+      else providers.set(cap, [plugin])
+    }
+  }
+  /** @type {string[]} */
+  const closure = []
+  /** @type {{ kind: 'plugin' | 'capability', name: string }[]} */
+  const unresolved = []
+  const seen = new Set()
+  const missingCaps = new Set()
+  const queue = [...seeds]
+  for (let i = 0; i < queue.length; i++) {
+    const current = queue[i]
+    if (seen.has(current)) continue
+    seen.add(current)
+    const meta = catalog.pluginMetadata.get(current)
+    if (!meta) {
+      unresolved.push({ kind: 'plugin', name: current })
+      continue
+    }
+    closure.push(current)
+    queue.push(...(catalog.plugins.get(current)?.requiresPlugins ?? []))
+    for (const cap of Object.keys(meta.requires ?? {})) {
+      const candidates = providers.get(cap)
+      if (candidates) {
+        queue.push(candidates.find((plugin) => enabled.has(plugin)) ?? candidates[0])
+      } else if (!missingCaps.has(cap)) {
+        missingCaps.add(cap)
+        unresolved.push({ kind: 'capability', name: cap })
+      }
+    }
+  }
+  return { closure, unresolved }
 }
 
 /**
@@ -1539,134 +1745,148 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
         return
       }
       try {
-        const result = await detachClientFromDisk({
-          descriptor,
-          homeDir,
-          env: ctx.env,
-        })
-        const restored = result.changed === true
-        span.setAttribute('status', 'ok')
-        span.setAttribute('restored', restored)
-        if (restored) {
-          getLogger('cmd-detach').info('client.detach.write', {
-            hyp_client: name,
-            hyp_plugin: descriptor.plugin,
-            settings_path: result.settingsPath,
-            changed: true,
-          })
-        }
-        if (!quiet) writeCoreDetachOutput({ ctx, name, json, quietNoop, recordingSwitch, result })
-        const stateRoot = readObservabilityEnv(ctx.env).stateDir
-
-        // Retract the attach marker so the CLI undo and the marker store stay in
-        // sync, mirroring the reconciler's reverse() after its own disk undo,
-        // including reverse()'s probe-less exception. `changed:false` is
-        // overloaded: for a probe-HAVING descriptor it means "settings already
-        // clean" (safe to clear a stale marker over them); for a probe-LESS
-        // descriptor it means "cannot reverse, no probe to replay" (#212). In
-        // that probe-less case reverse() KEEPS the marker (records a failed
-        // reverse) rather than orphaning the settings attach() wrote, so we gate
-        // on `attachProbe` and do the same: only a probe-having client
-        // (changed:true OR already-clean) has its marker cleared; a probe-less
-        // one keeps it. Without this retraction a manual detach reverses the
-        // settings but leaves an orphaned `done` attach marker, and the next
-        // `hyp join`'s forward gap short-circuits on it and never re-attaches the
-        // client (#217). Best-effort: a marker we cannot retract is a status
-        // blemish, not a detach failure (the settings undo already landed).
-        // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
-        //
-        // The skills and subagents an org-driven attach installed come off its
-        // marker, and the retraction below clears that marker, so they have to
-        // be read and removed first: a detach that dropped the marker without
-        // them would strand the files with nothing left on disk naming them.
-        // Removal is marker-driven, never registry-driven, so a user's own
-        // `hyp attach` / `hyp skills install` copy (which records no marker)
-        // survives. Gated on the same `attachProbe` the retraction is: a
-        // probe-less client keeps its marker, and the reconciler's reverse()
-        // likewise refuses to touch assets it cannot un-wire the settings for.
-        // @ref LLP 0107#reversal [implements]: detach removes the assets the org
-        //   installed, exactly as it reverses the settings edits
-        //
-        // A removal that failed and one that was refused are not the same
-        // outcome, so they do not share a resolution. An I/O failure may
-        // succeed next run: keep the marker, fail the command, say so. A
-        // containment refusal is deterministic - the recorded path and the
-        // client's directories are both fixed - so it re-refuses forever, and
-        // keeping the marker for it would make the undo permanently
-        // unfinishable while leaving a `done` marker whose settings effect is
-        // already reversed, the stale marker that blocks a later re-attach
-        // (#217). Refusals print the paths and let the marker go, the same
-        // degradation `hyp leave` already makes when the plugin is gone and
-        // there are no directories to bound a delete.
-        // @ref LLP 0138#refusal-is-not-failure [implements]: keep the marker
-        //   for a removal that can still succeed; name what it leaves when not
-        let assetFailure = ''
-        if (descriptor.attachProbe) {
-          const marker = readClientActionStatus({ stateRoot }).byKind.attach?.[name]
-          const installedAssets = readInstalledAssets(marker)
-          if (installedAssets.length > 0) {
-            const { removed, failed } = await removeClientAssets(
-              installedAssets,
-              clientAssetBaseDirs(descriptor, homeDir)
-            )
-            if (removed.length > 0 && !json && !quiet) {
-              ctx.stdout.write(`  Removed ${removed.length} org-installed asset(s)\n`)
-            }
-            const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
-            if (failed.some((f) => f.retryable)) {
-              assetFailure =
-                `detached '${name}', but ${failed.length} installed asset(s) could not be removed: ${detail}` +
-                ' - kept the attach marker so a re-run can retry them'
-            } else if (failed.length > 0) {
-              // stderr, and unconditionally: this is the last moment these
-              // paths are named anywhere, and under --json stdout is the
-              // machine payload alone.
-              ctx.stderr.write(
-                `warning: ${failed.length} recorded asset(s) refused and left in place - remove them by hand:\n`
-              )
-              for (const f of failed) ctx.stderr.write(`  ${f.dest} (${f.reason})\n`)
-            }
-          }
-        }
-        // A probe-less client has no marker, so the block above never runs for
-        // it. Where its asset directories are its own (Hermes), the install
-        // ledger is the record instead: it removes only the paths HypAware wrote
-        // whose bytes are still ours, and leaves everything else in the
-        // directory. A shared directory (Claude Desktop shares `.claude/skills`
-        // with Claude) keeps the LLP 0107 behaviour and is left alone.
-        // @ref LLP 0494#skills [implements]: detach removes only the marker-owned skill directories
-        if (!descriptor.attachProbe) {
-          const owned = await removeOwnedClientAssets({
-            client: name,
-            descriptors: await buildClientDescriptorMap(ctx),
+        // The settings undo, the asset removal and the marker retraction run
+        // under this client's key lock, the same lock the reconciler holds
+        // around its attach and reverse, so a pass that read the marker before
+        // this detach cannot re-commit it after (#224).
+        // @ref LLP 0523#two-locks [implements]: detach holds the key lock across the disk undo and the marker clear
+        return await withAttachKeyLock({ name, ctx }, async () => {
+          const result = await detachClientFromDisk({
+            descriptor,
             homeDir,
-            stateRoot: clientAssetStateRoot(ctx.env, homeDir),
-            skills: ctx.skills,
-            agents: ctx.agents,
-            stderr: ctx.stderr,
+            env: ctx.env,
           })
-          if (owned && owned.removed.length > 0 && !json && !quiet) {
-            ctx.stdout.write(`  Removed ${owned.removed.length} installed skill(s)\n`)
-          }
-        }
-        if (descriptor.attachProbe && assetFailure.length === 0) {
-          try {
-            clearClientActionMarker({
-              stateRoot,
-              kind: 'attach',
-              requestKey: name,
-            })
-          } catch (markerErr) {
-            getLogger('cmd-detach').warn('client.detach.marker_retract_failed', {
+          const restored = result.changed === true
+          span.setAttribute('status', 'ok')
+          span.setAttribute('restored', restored)
+          if (restored) {
+            getLogger('cmd-detach').info('client.detach.write', {
               hyp_client: name,
               hyp_plugin: descriptor.plugin,
-              error_kind: 'marker_retract_failed',
-              detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
+              settings_path: result.settingsPath,
+              changed: true,
             })
           }
-        }
-        if (assetFailure.length > 0) throw new Error(assetFailure)
-        return result
+          if (!quiet) writeCoreDetachOutput({ ctx, name, json, quietNoop, recordingSwitch, result })
+          const stateRoot = readObservabilityEnv(ctx.env).stateDir
+
+          // Retract the attach marker so the CLI undo and the marker store stay in
+          // sync, mirroring the reconciler's reverse() after its own disk undo,
+          // including reverse()'s probe-less exception. `changed:false` is
+          // overloaded: for a probe-HAVING descriptor it means "settings already
+          // clean" (safe to clear a stale marker over them); for a probe-LESS
+          // descriptor it means "cannot reverse, no probe to replay" (#212). In
+          // that probe-less case reverse() KEEPS the marker (records a failed
+          // reverse) rather than orphaning the settings attach() wrote, so we gate
+          // on `attachProbe` and do the same: only a probe-having client
+          // (changed:true OR already-clean) has its marker cleared; a probe-less
+          // one keeps it. Without this retraction a manual detach reverses the
+          // settings but leaves an orphaned `done` attach marker, and the next
+          // `hyp join`'s forward gap short-circuits on it and never re-attaches the
+          // client (#217). A marker we cannot retract fails the detach: the
+          // settings undo landed, but the stale `done` marker it leaves is that
+          // same #217 block, so the command must not report a clean detach.
+          // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
+          //
+          // The skills and subagents an org-driven attach installed come off its
+          // marker, and the retraction below clears that marker, so they have to
+          // be read and removed first: a detach that dropped the marker without
+          // them would strand the files with nothing left on disk naming them.
+          // Removal is marker-driven, never registry-driven, so a user's own
+          // `hyp attach` / `hyp skills install` copy (which records no marker)
+          // survives. Gated on the same `attachProbe` the retraction is: a
+          // probe-less client keeps its marker, and the reconciler's reverse()
+          // likewise refuses to touch assets it cannot un-wire the settings for.
+          // @ref LLP 0107#reversal [implements]: detach removes the assets the org
+          //   installed, exactly as it reverses the settings edits
+          //
+          // A removal that failed and one that was refused are not the same
+          // outcome, so they do not share a resolution. An I/O failure may
+          // succeed next run: keep the marker, fail the command, say so. A
+          // containment refusal is deterministic - the recorded path and the
+          // client's directories are both fixed - so it re-refuses forever, and
+          // keeping the marker for it would make the undo permanently
+          // unfinishable while leaving a `done` marker whose settings effect is
+          // already reversed, the stale marker that blocks a later re-attach
+          // (#217). Refusals print the paths and let the marker go, the same
+          // degradation `hyp leave` already makes when the plugin is gone and
+          // there are no directories to bound a delete.
+          // @ref LLP 0138#refusal-is-not-failure [implements]: keep the marker
+          //   for a removal that can still succeed; name what it leaves when not
+          let assetFailure = ''
+          if (descriptor.attachProbe) {
+            const marker = readClientActionStatus({ stateRoot }).byKind.attach?.[name]
+            const installedAssets = readInstalledAssets(marker)
+            if (installedAssets.length > 0) {
+              const { removed, failed } = await removeClientAssets(
+                installedAssets,
+                clientAssetBaseDirs(descriptor, homeDir)
+              )
+              if (removed.length > 0 && !json && !quiet) {
+                ctx.stdout.write(`  Removed ${removed.length} org-installed asset(s)\n`)
+              }
+              const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
+              if (failed.some((f) => f.retryable)) {
+                assetFailure =
+                  `detached '${name}', but ${failed.length} installed asset(s) could not be removed: ${detail}` +
+                  ' - kept the attach marker so a re-run can retry them'
+              } else if (failed.length > 0) {
+                // stderr, and unconditionally: this is the last moment these
+                // paths are named anywhere, and under --json stdout is the
+                // machine payload alone.
+                ctx.stderr.write(
+                  `warning: ${failed.length} recorded asset(s) refused and left in place - remove them by hand:\n`
+                )
+                for (const f of failed) ctx.stderr.write(`  ${f.dest} (${f.reason})\n`)
+              }
+            }
+          }
+          // A probe-less client has no marker, so the block above never runs for
+          // it. Where its asset directories are its own (Hermes), the install
+          // ledger is the record instead: it removes only the paths HypAware wrote
+          // whose bytes are still ours, and leaves everything else in the
+          // directory. A shared directory (Claude Desktop shares `.claude/skills`
+          // with Claude) keeps the LLP 0107 behaviour and is left alone.
+          // @ref LLP 0494#skills [implements]: detach removes only the marker-owned skill directories
+          if (!descriptor.attachProbe) {
+            const owned = await removeOwnedClientAssets({
+              client: name,
+              descriptors: await buildClientDescriptorMap(ctx),
+              homeDir,
+              stateRoot: clientAssetStateRoot(ctx.env, homeDir),
+              skills: ctx.skills,
+              agents: ctx.agents,
+              stderr: ctx.stderr,
+            })
+            if (owned && owned.removed.length > 0 && !json && !quiet) {
+              ctx.stdout.write(`  Removed ${owned.removed.length} installed skill(s)\n`)
+            }
+          }
+          if (descriptor.attachProbe && assetFailure.length === 0) {
+            try {
+              await clearClientActionMarker({
+                stateRoot,
+                kind: 'attach',
+                requestKey: name,
+              })
+            } catch (markerErr) {
+              const detail = markerErr instanceof Error ? markerErr.message : String(markerErr)
+              getLogger('cmd-detach').warn('client.detach.marker_retract_failed', {
+                hyp_client: name,
+                hyp_plugin: descriptor.plugin,
+                error_kind: 'marker_retract_failed',
+                detail,
+              })
+              // @ref LLP 0523#detach-reports-the-marker [implements]: a marker that survives its own undo fails the detach
+              throw new Error(
+                `detached '${name}', but its attach marker could not be cleared: ${detail}` +
+                ` - re-run the detach to retry, or a later attach may be skipped`
+              )
+            }
+          }
+          if (assetFailure.length > 0) throw new Error(assetFailure)
+          return result
+        })
       } catch (err) {
         span.setAttribute('status', 'failed')
         span.setAttribute('restored', false)
@@ -2539,6 +2759,7 @@ export async function runSkillsInstall(argv, ctx) {
   const skillCount = installed.filter((a) => a.kind === 'skill').length
   const agentCount = installed.length - skillCount
   ctx.stdout.write(`installed ${skillCount} skill copy(ies), ${agentCount} agent copy(ies)\n`)
+  if (copiedClaudeSkills(installed)) ctx.stdout.write(`${CLAUDE_SKILL_RELOAD_HINT}\n`)
   return 0
 }
 

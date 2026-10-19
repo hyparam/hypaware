@@ -28,6 +28,7 @@ import {
 import { parseControlFlags } from '../../src/core/cli/verb_codec.js'
 import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../src/core/cli/tui/index.js'
+import { resolveLaunchers } from '../../src/core/cli/wizard/first_ask.js'
 import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 /* ---------- endpoint derivation ---------- */
@@ -465,6 +466,55 @@ test('list prints each report\'s recommendations, by id, state and page, under i
     '      hyprec-fedcba9876543210\trecommendation-tenant-check',
     '  2026-07-13T10:00:00.000Z\tusage-review/2026-W28\trpt-a\t900 bytes',
   ])
+})
+
+// The server records coverage and truncation on the report record itself
+// (`coverage.slices`, `coverage.covered`, `coverage.unenumerated`,
+// `truncated`), so the grouped listing marks an incomplete report from the
+// one list request, and absent or malformed metadata claims nothing.
+test('list marks incomplete coverage, blind days and truncation on the report line, from the one list request', async (t) => {
+  const base = { kind: 'usage-review', period: '2026-W29', bytes: 1, publishedAt: 'T' }
+  const reports = [
+    { ...base, id: 'r-cov', title: 'A', coverage: { slices: 5, covered: 3 } },
+    { ...base, id: 'r-blind', title: 'B', coverage: { slices: 4, covered: 4, unenumerated: 2 } },
+    { ...base, id: 'r-one', coverage: { slices: 4, covered: 4, unenumerated: 1 } },
+    { ...base, id: 'r-trunc', title: 'C', truncated: true },
+    { ...base, id: 'r-all', title: 'D', coverage: { slices: 5, covered: 0, unenumerated: 3 }, truncated: true },
+    { ...base, id: 'r-full', title: 'E', coverage: { slices: 5, covered: 5 } },
+    { ...base, id: 'r-legacy', title: 'F' },
+    { ...base, id: 'r-bad', title: 'G', coverage: { slices: 3, covered: 5, unenumerated: -1 }, truncated: 'yes' },
+    { ...base, id: 'r-nan', title: 'H', coverage: { slices: '5', covered: 2.5, unenumerated: 1.5 } },
+    { ...base, id: 'r-null', title: 'I', coverage: null, truncated: false },
+    {
+      ...base, id: 'r-rec', title: 'J', coverage: { slices: 2, covered: 1 },
+      recommendations: [{ id: 'hyprec-0123456789abcdef', page: 'recommendation-x', title: 'Do X', status: { state: 'open' } }],
+    },
+  ]
+  const { calls } = stubServer(t, () => ({ status: 200, json: { reports } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList([], ctx), 0)
+  assert.equal(calls.length, 1)
+  const lines = out.join('').split('\n').filter(Boolean)
+  assert.deepEqual(lines, [
+    '  T\tusage-review/2026-W29\tr-cov\t1 bytes\tA\tincomplete: 3 of 5 slices analyzed',
+    '  T\tusage-review/2026-W29\tr-blind\t1 bytes\tB\tincomplete: 2 days not inventoried',
+    '  T\tusage-review/2026-W29\tr-one\t1 bytes\tincomplete: 1 day not inventoried',
+    '  T\tusage-review/2026-W29\tr-trunc\t1 bytes\tC\tincomplete: generation cut short',
+    '  T\tusage-review/2026-W29\tr-all\t1 bytes\tD\tincomplete: 0 of 5 slices analyzed; 3 days not inventoried; generation cut short',
+    '  T\tusage-review/2026-W29\tr-full\t1 bytes\tE',
+    '  T\tusage-review/2026-W29\tr-legacy\t1 bytes\tF',
+    '  T\tusage-review/2026-W29\tr-bad\t1 bytes\tG',
+    '  T\tusage-review/2026-W29\tr-nan\t1 bytes\tH',
+    '  T\tusage-review/2026-W29\tr-null\t1 bytes\tI',
+    '  T\tusage-review/2026-W29\tr-rec\t1 bytes\tJ\tincomplete: 1 of 2 slices analyzed',
+    '      hyprec-0123456789abcdef\t[open]\trecommendation-x\tDo X',
+  ])
+
+  // --json is the records as the server sent them, coverage included.
+  const json = ctxWith()
+  assert.equal(await runReportList(['--json'], json.ctx), 0)
+  assert.equal(calls.length, 2)
+  assert.equal(json.out.join(''), JSON.stringify(reports, null, 2) + '\n')
 })
 
 // @ref LLP 0516#listing-status [tests]: both listings display only explicit server states
@@ -1547,6 +1597,157 @@ test('fix: a real keypress still lifts the deadline for good', { timeout: 5000 }
   assert.equal(launches[0].launcher.client, 'codex', 'the deadline must not outlive a real keypress')
 })
 
+/* ---------- the listing pickers' deadline (#2400) ---------- */
+
+// With no id, `hyp report fix` asks which report and then which of its
+// recommendations, behind the same tty gate the client picker sits behind
+// and with the same blindness to a terminal nobody is at. These two have no
+// pick to fall through to (the command starts an agent that edits the
+// repository), so an unanswered one ends the run as one that cannot prompt
+// does: a usage error naming the id form and the listing, exit 2, nothing
+// started. Each displayed picker carries its own deadline.
+// @ref LLP 0459#decision [tests]: an unanswered listing picker is exit 2 with the usage line, per picker, never a pick
+
+/** @param {string} text */
+function assertUnanswered(text) {
+  assert.match(text, /no answer at the picker - nothing started\./)
+  assert.match(text, /usage: hyp report fix <id>/)
+  assert.match(text, /'hyp report list'/)
+}
+
+test('fix: an allocated tty nobody answers at the report picker exits 2 with the usage line and starts nothing', { timeout: 5000 }, async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const { deps, launches } = fixDeps()
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([], ctx, deps), 2)
+  assertUnanswered(err.join(''))
+  assert.match(stdout.text(), /Which report\?/)
+  assert.doesNotMatch(stdout.text(), /Which recommendation|Nothing started|Starting/)
+  assert.equal(launches.length, 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports'], 'no page is fetched')
+})
+
+test('fix: a report picked by key, then silence at the recommendation picker, exits 2: the first keypress lifts only its own picker', { timeout: 5000 }, async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = keyedTtyIn([{ str: '\r', key: { sequence: '\r', name: 'return' } }])
+  const { deps, launches } = fixDeps()
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([], ctx, deps), 2)
+  assertUnanswered(err.join(''))
+  assert.match(stdout.text(), /Which recommendation should be fixed\?/)
+  assert.equal(launches.length, 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports'])
+})
+
+test('fix: a first keypress on each listing picker lifts its deadline, so a slow reader still picks', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  // Each enter lands well past the 300ms deadline; the down before it is
+  // what keeps the picker up. The second down is a fresh keypress for the
+  // recommendation picker's fresh deadline.
+  ctx.stdin = keyedTtyIn([
+    { key: { sequence: '\x1b[B', name: 'down' } },
+    { after: 700, str: '\r', key: { sequence: '\r', name: 'return' } },
+    { after: 800, key: { sequence: '\x1b[B', name: 'down' } },
+    { after: 1400, str: '\r', key: { sequence: '\r', name: 'return' } },
+  ])
+  const { deps, launches } = fixDeps()
+  delete deps.select
+  deps.pickDeadlineMs = 300
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.equal(err.join(''), '')
+  assert.equal(launches.length, 1)
+  assert.match(launches[0].prompt, new RegExp('`hyp report get ' + REC + '`'))
+})
+
+test('fix: each listing picker gets its own deadline, back starts a fresh one, and cancel still exits 0', async (t) => {
+  stubFixServer(t)
+  /** @type {AbortSignal[]} */
+  const signals = []
+  /** @param {any} spec */
+  const silent = (spec) => new Promise((resolve, reject) => {
+    spec.signal.addEventListener('abort', () => reject(new PromptCancelledError()), { once: true })
+  })
+  // Report picked, back out of its recommendations, then nobody answers the
+  // report picker shown again.
+  {
+    const { ctx, err } = ctxWith()
+    ctx.stdin.isTTY = true
+    ctx.stdout.isTTY = true
+    const script = [
+      (/** @type {any} */ spec) => spec.options[0].value,
+      () => { throw new PromptBackRequestedError() },
+      silent,
+    ]
+    const { deps, launches, prompts } = fixDeps({ pick: async (spec) => { signals.push(spec.signal); return script.shift()?.(spec) } })
+    deps.pickDeadlineMs = 50
+    assert.equal(await runReportFix([], ctx, deps), 2)
+    assertUnanswered(err.join(''))
+    assert.deepEqual(prompts.map((p) => p.title), ['Which report?', 'Which recommendation should be fixed?', 'Which report?'])
+    assert.equal(new Set(signals).size, 3, 'a controller per display')
+    assert.deepEqual(signals.map((s) => s.aborted), [false, false, true], 'only the unanswered display expired')
+    assert.equal(launches.length, 0)
+  }
+  // An explicit cancel at the recommendation picker is still a decline.
+  {
+    const { ctx, out, err } = ctxWith()
+    ctx.stdin.isTTY = true
+    ctx.stdout.isTTY = true
+    const script = [
+      (/** @type {any} */ spec) => spec.options[0].value,
+      () => { throw new PromptCancelledError() },
+    ]
+    const { deps, launches } = fixDeps({ pick: async (spec) => script.shift()?.(spec) })
+    deps.pickDeadlineMs = 50
+    assert.equal(await runReportFix([], ctx, deps), 0)
+    assert.match(out.join(''), /Nothing started/)
+    assert.equal(err.join(''), '')
+    assert.equal(launches.length, 0)
+  }
+})
+
+test('fix: a run whose stdin is not a terminal is the usage error it was, with no picker and no listing fetch', async (t) => {
+  const { calls } = stubFixServer(t)
+  for (const env of [{}, { HYP_NO_TUI: '1' }]) {
+    const { ctx, err } = ctxWith(env)
+    // stdout is a terminal; stdin is piped (or the TUI is vetoed).
+    ctx.stdout.isTTY = true
+    if (env.HYP_NO_TUI) ctx.stdin.isTTY = true
+    const { deps, prompts } = fixDeps()
+    deps.pickDeadlineMs = 50
+    assert.equal(await runReportFix([], ctx, deps), 2)
+    assert.match(err.join(''), /usage: hyp report fix <id>/)
+    assert.match(err.join(''), /run on a terminal to pick one from a list instead/)
+    assert.doesNotMatch(err.join(''), /no answer at the picker/)
+    assert.equal(prompts.length, 0)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('fix: an explicit id on an unattended tty never meets a listing picker and starts the fix', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  ctx.stdout = ttyOut()
+  ctx.stdin = silentTtyIn()
+  const { deps, launches } = fixDeps()
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.equal(err.join(''), '')
+  assert.equal(launches.length, 1)
+})
+
 test('fix with nothing launchable exits 1 with a runnable attach hint, before fetching the page', async (t) => {
   const { calls } = stubFixServer(t)
   const { ctx, err } = ctxWith()
@@ -2393,6 +2594,100 @@ test('save refuses a folder that is already in the store', async (t) => {
   assert.deepEqual(await fs.readdir(store), [name])
 })
 
+// @ref LLP 0518#refusals [tests]: a link is refused, so its target's pages are never unlinked
+test('save refuses a symlinked folder and leaves the link, its target, and the store untouched', async (t) => {
+  const { ctx, err, draft, cwd, hypHome } = await storeFixture(t)
+  const link = path.join(cwd, 'hypaware-report-linked')
+  await fs.symlink(draft, link)
+  for (const argv of [[link], [link, '--keep']]) {
+    err.length = 0
+    assert.equal(await runReportSave(argv, ctx), 2)
+    assert.match(err.join(''), /is a symbolic link; a move would empty its target and leave the link/)
+  }
+  assert.ok((await fs.lstat(link)).isSymbolicLink())
+  assert.deepEqual((await fs.readdir(draft)).sort(), ['report.md', 'usage.md'])
+  await assert.rejects(fs.stat(path.join(hypHome, 'reports')), { code: 'ENOENT' })
+})
+
+// @ref LLP 0518#refusals [tests]: a source holding the cwd is refused, so the shell is never left in a deleted directory
+test('save refuses . and any folder holding the cwd, and leaves the draft and store untouched', async (t) => {
+  const { ctx, err, draft, name, hypHome } = await storeFixture(t)
+  const inner = path.join(draft, 'notes')
+  await fs.mkdir(inner)
+  for (const [where, source] of [[draft, '.'], [draft, draft], [inner, '..']]) {
+    ctx.cwd = where
+    err.length = 0
+    assert.equal(await runReportSave([source], ctx), 2)
+    assert.match(err.join(''), new RegExp(`holds the current directory; .*Run it from the folder's parent: hyp report save ${name.replaceAll('.', '\\.')}\n`))
+  }
+  assert.deepEqual((await fs.readdir(draft)).sort(), ['notes', 'report.md', 'usage.md'])
+  await assert.rejects(fs.stat(path.join(hypHome, 'reports')), { code: 'ENOENT' })
+})
+
+// @ref LLP 0518#refusals [tests]: the refusals do not reach a plain folder saved from its parent
+test('a plain folder named from its parent still saves after the link and cwd checks', async (t) => {
+  const { ctx, draft, name, store } = await storeFixture(t)
+  assert.equal(await runReportSave([name], ctx), 0)
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
+  await assert.rejects(fs.stat(draft), { code: 'ENOENT' })
+})
+
+test('save that runs out of space mid-copy leaves no slot, nothing to list or publish, and the draft intact', async (t) => {
+  const pages = { 'report.md': '# Brief\n', 'usage.md': '# Usage\n', 'work.md': '# Work\n' }
+  const { ctx, err, out, draft, name, store } = await storeFixture(t, { pages })
+  // Fault injection: the third page writes a partial file, then the disk is
+  // full. Before LLP 0519 the first two pages sat in a visible slot of that
+  // name, which `list --local` showed and `publish <name>` sent.
+  const original = fs.copyFile
+  let copies = 0
+  t.after(() => { fs.copyFile = original })
+  fs.copyFile = /** @type {any} */ (async (/** @type {string} */ src, /** @type {string} */ dest, /** @type {number | undefined} */ mode) => {
+    if (++copies === 3) {
+      await fs.writeFile(dest, '# Wo')
+      throw Object.assign(new Error('ENOSPC: no space left on device, copyfile'), { code: 'ENOSPC' })
+    }
+    return original(src, dest, mode)
+  })
+  assert.equal(await runReportSave([draft], ctx), 1)
+  assert.match(err.join(''), /could not copy .* into the store: ENOSPC: no space left on device, copyfile; the source is untouched and nothing was saved\n$/)
+  assert.doesNotMatch(err.join(''), /hidden partial copy/)
+  assert.deepEqual(await fs.readdir(store), [])
+  assert.deepEqual((await fs.readdir(draft)).sort(), Object.keys(pages))
+  for (const [page, text] of Object.entries(pages)) assert.equal(await fs.readFile(path.join(draft, page), 'utf8'), text)
+
+  out.length = 0
+  assert.equal(await runReportList(['--local'], ctx), 0)
+  assert.doesNotMatch(out.join(''), new RegExp(name))
+  // From a directory with no draft of that name, so the bare name can only
+  // resolve to the store.
+  ctx.cwd = path.dirname(store)
+  const { calls } = stubServer(t, () => ({ status: 201, json: {} }))
+  assert.equal(await runReportPublish([name, '--kind', 'k', '--period', 'p'], ctx), 2)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /no saved report of that name/)
+
+  // With space again, the retry takes the name itself, not `-2`.
+  fs.copyFile = original
+  out.length = 0
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.deepEqual(await fs.readdir(store), [name])
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), Object.keys(pages))
+})
+
+test('save names a hidden partial copy it could not remove', async (t) => {
+  const { ctx, err, draft, store } = await storeFixture(t)
+  const copy = fs.copyFile
+  const rmdir = fs.rmdir
+  t.after(() => { fs.copyFile = copy; fs.rmdir = rmdir })
+  fs.copyFile = /** @type {any} */ (async () => { throw Object.assign(new Error('ENOSPC: no space left on device, copyfile'), { code: 'ENOSPC' }) })
+  fs.rmdir = /** @type {any} */ (async () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }) })
+  assert.equal(await runReportSave([draft], ctx), 1)
+  const [left] = await fs.readdir(store)
+  assert.match(left, /^\.saving-/)
+  assert.match(err.join(''), new RegExp(`nothing was saved; a hidden partial copy is left at ${path.join(store, left).replaceAll('.', '\\.')} \\(EBUSY`))
+  assert.deepEqual(await fs.readdir(path.join(store, left)), [])
+})
+
 test('save leaves a draft folder in place when a file appeared during the move, and names it', async (t) => {
   const { ctx, out, draft, name, store } = await storeFixture(t)
   // Validation ran against a clean folder; the stray file lands after. The
@@ -2688,4 +2983,118 @@ test('generate tells the client to finish with hyp report save', async (t) => {
   const { deps, launches } = fixDeps()
   assert.equal(await runReportGenerate([], ctx, deps), 0)
   assert.match(launches[0].prompt, /'hyp report save <that directory>'/)
+})
+
+test('report generate help names the shipped skill\'s draft folder and says publishing is explicit', async () => {
+  const { createCommandRegistry } = await import('../../src/core/registry/commands.js')
+  const { registerCoreCommands } = await import('../../src/core/cli/core_commands.js')
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  const help = String(registry.get('report generate')?.help ?? '').replace(/\s+/g, ' ')
+  assert.match(help, /drafts \.\/hypaware-report-<from>-to-<to>\/ here, appending -2, -3, etc\. if it exists/)
+  assert.match(help, /Publishing requires an explicit request\./)
+  assert.match(help, /'hyp report save', which moves the folder into \$HYP_HOME\/reports\./)
+  // The help and the reference say what every shipped copy of the skill does.
+  const root = path.resolve(import.meta.dirname, '../..')
+  for (const copy of [
+    'hypaware-core/skills/hypaware-report/SKILL.md',
+    'hypaware-core/plugins-workspace/claude/skills/hypaware-report/SKILL.md',
+    'hypaware-core/plugins-workspace/codex/skills/hypaware-report/SKILL.md',
+  ]) {
+    const skill = (await fs.readFile(path.join(root, copy), 'utf8')).replace(/\s+/g, ' ')
+    assert.match(skill, /Draft in `\.\/hypaware-report-<from>-to-<to>\/` or the requested destination\. Append `-2`, `-3`, etc\. if it exists/, copy)
+  }
+  const reference = (await fs.readFile(path.join(root, 'docs/CLI_REFERENCE.md'), 'utf8')).replace(/\s+/g, ' ')
+  assert.match(reference, /The skill drafts `\.\/hypaware-report-<from>-to-<to>\/report\.md` and linked pages, using `-2`, `-3`, etc\. if the folder already exists/)
+})
+
+/* ---------- one launcher order for every command (#671) ---------- */
+
+// The default is the first client in ascending id order, compared by code
+// unit, and the picker offers that same order so its deadline fallback is
+// the same default. Mixed case and non-ASCII ids, scrambled, so neither the
+// input order nor a locale compare can pass for it.
+const MIXED_IDS = ['émile', 'zeta', 'Zulu', 'beta', 'Émile', 'alpha']
+const MIXED_ORDER = ['Zulu', 'alpha', 'beta', 'zeta', 'Émile', 'émile']
+
+/**
+ * The real `resolveLaunchers` over fixture clients. Their descriptors go
+ * into the map the command built, because `hyp report generate` reads each
+ * one's skill path off that same map afterwards.
+ *
+ * @param {any} deps
+ */
+function withMixedClients(deps) {
+  deps.resolveLaunchers = async (/** @type {any} */ args) => {
+    for (const id of MIXED_IDS) {
+      args.descriptors.set(id, { plugin: `@test/${id}`, name: id, skillDir: `.${id}/skills`, launch: { bin: `bin-${id}`, args: ['{prompt}'], label: `Label ${id}` } })
+    }
+    return resolveLaunchers({ ...args, clients: MIXED_IDS, resolve: async (bin) => `/test-owned/${bin}` })
+  }
+  return deps
+}
+
+/** @param {string} home */
+async function mixedReportSkills(home) {
+  for (const id of MIXED_IDS) {
+    const dir = path.join(home, `.${id}`, 'skills', 'hypaware-report')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'SKILL.md'), '# Report skill\n')
+  }
+}
+
+test('generate: the default and the picker share ascending client-id order', { timeout: 5000 }, async (t) => {
+  const { ctx, home } = await generateFixture(t)
+  await mixedReportSkills(home)
+  // A run that cannot prompt takes the first.
+  const piped = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, withMixedClients(piped.deps)), 0)
+  assert.equal(piped.launches[0].launcher.client, MIXED_ORDER[0])
+
+  // A terminal is offered the same order.
+  ctx.stdout = ttyOut()
+  ctx.stdin = silentTtyIn()
+  const picked = fixDeps({ pick: async () => 'émile' })
+  assert.equal(await runReportGenerate([], ctx, withMixedClients(picked.deps)), 0)
+  assert.deepEqual(picked.prompts[0].options.map((/** @type {any} */ o) => o.value), MIXED_ORDER)
+  assert.equal(picked.launches[0].launcher.client, 'émile')
+
+  // An unanswered picker falls back to that same first.
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const idle = fixDeps()
+  delete idle.deps.select
+  idle.deps.pickDeadlineMs = 50
+  assert.equal(await runReportGenerate([], ctx, withMixedClients(idle.deps)), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(idle.launches[0].launcher.client, MIXED_ORDER[0])
+})
+
+test('fix: the default and the picker share ascending client-id order', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  // A run that cannot prompt takes the first.
+  const { ctx } = ctxWith()
+  const piped = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, withMixedClients(piped.deps)), 0)
+  assert.equal(piped.launches[0].launcher.client, MIXED_ORDER[0])
+
+  // A terminal is offered the same order.
+  ctx.stdout = ttyOut()
+  ctx.stdin = silentTtyIn()
+  const picked = fixDeps({ pick: async () => 'émile' })
+  assert.equal(await runReportFix([REC], ctx, withMixedClients(picked.deps)), 0)
+  assert.deepEqual(picked.prompts[0].options.map((/** @type {any} */ o) => o.value), MIXED_ORDER)
+  assert.equal(picked.launches[0].launcher.client, 'émile')
+
+  // An unanswered picker falls back to that same first.
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const idle = fixDeps()
+  delete idle.deps.select
+  idle.deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, withMixedClients(idle.deps)), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(idle.launches[0].launcher.client, MIXED_ORDER[0])
 })

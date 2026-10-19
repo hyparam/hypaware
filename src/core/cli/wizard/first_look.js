@@ -263,6 +263,8 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
           title: FIRST_LOOK_TITLE,
           color,
           footer: false,
+          // Read off the real stream: the counting wrapper has no width.
+          columns: /** @type {{ columns?: number }} */ (target).columns,
           withheld,
         }))
         if (expired) {

@@ -12,6 +12,7 @@ import { createOutbox } from './outbox.js'
 import { createDelivery } from './delivery.js'
 import { effectivePolicy, productRoot } from './policy.js'
 import { COMMANDS } from './contract.js'
+import { isHelpFlag } from '../cli/group_help.js'
 
 /** @type {AsyncLocalStorage<{invocation: {command:string,kind:string,degraded:boolean,records:Record<string,any>[],startDelivery:()=>void,setAdapters:(adapters:string[])=>void}, depth:number}>} */
 const invocationContext = new AsyncLocalStorage()
@@ -56,7 +57,10 @@ export async function withProductInvocation(
       { invocation: current.invocation, depth: current.depth + 1 },
       run
     )
-    if (current.depth > 0 && current.invocation.records.length < 16) {
+    // A nested help render (setup routing a non-leading --help back through
+    // the central interception) shows help and changes nothing, so it is not
+    // a setup step.
+    if (current.depth > 0 && !isHelpFlag(argv[1]) && current.invocation.records.length < 16) {
       const name = argv[0]
       const step =
         name === 'attach' || name === 'client attach'

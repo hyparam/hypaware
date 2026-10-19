@@ -4,7 +4,7 @@
 
 HypAware serves MCP in two places:
 
-- `hyp mcp serve`, over stdio, for an agent on your machine. It lists the tools core and your active plugins register.
+- `hyp mcp serve`, over stdio, for an agent on your host. It lists the tools core and your active plugins register.
 - hypaware-server's `/v1/mcp`, over HTTP, for an agent with a member session or an agent token. What it lists depends on the credential.
 
 Every tool below has a CLI command that does the same thing. Each tool's `tools/list` entry carries its title, description, input schema and hints, as shown here.
@@ -61,7 +61,7 @@ Grep stored ai_gateway_messages: case-insensitive substring or regex, served fro
 | `chain_id` | string | no |  | `--chain-id` | Only this chain (matches agent_id or conversation_id) |
 | `from` | string | no |  | `--from` | Earliest day, YYYY-MM-DD (page older results by narrowing to) |
 | `to` | string | no |  | `--to` | Latest day, YYYY-MM-DD |
-| `limit` | integer, at least 1 | no | `50` | `--limit` | Max hits (default 50, max 1000) |
+| `limit` | integer, 1 to 1000 | no | `50` | `--limit` | Max hits (default 50, max 1000) |
 | `include-local-only` | boolean | no |  | `--include-local-only` | Include local-only rows even when this context is synced. If this session is itself captured, their content enters the transcript and can be forwarded. Local search only; a server enforces its own visibility |
 
 ### `query_sql`

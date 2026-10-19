@@ -63,10 +63,10 @@ export function validateCloudThreads(threads) {
  */
 export function registerCloudCommands(ctx, codexHome, deps = {}) {
   const stateDir = ctx.paths.stateDir
-  ctx.commands.registerGroup?.({ name: 'codex-cloud', summary: 'Manage experimental local collection of Codex cloud chats' })
+  ctx.commands.registerGroup?.({ name: 'codex-cloud', summary: 'Manage beta local collection of Codex cloud chats' })
   ctx.commands.register({
     name: 'codex-cloud connect',
-    summary: 'Connect cloud chats to the existing local ChatGPT login (experimental)',
+    summary: 'Connect cloud chats to the existing local ChatGPT login (beta)',
     usage: 'hyp codex-cloud connect (<thread-id>... | --all [--from-now]) [--origins <origin,...>]',
     async run(argv, command) {
       let parsed
@@ -87,7 +87,7 @@ export function registerCloudCommands(ctx, codexHome, deps = {}) {
           ...(values['from-now'] ? { since: new Date().toISOString() } : {}) }
         : { version: 1, accountHash: auth.accountHash, threads, origins }
       await atomicWriteJson(cloudConnectionPath(stateDir), connection, { mode: 0o600, dirMode: 0o700 })
-      command.stdout.write(`Experimental Codex Cloud collection connected: ${all ? 'automatic discovery' : `${threads.length} cloud chat(s)`} for ${origins.join(', ')}. This replaces the previous selection. Run hyp backfill codex-cloud to import now; the daemon checks every five minutes. Imported records follow your existing export settings.\n`)
+      command.stdout.write(`Beta Codex Cloud collection connected: ${all ? 'automatic discovery' : `${threads.length} cloud chat(s)`} for ${origins.join(', ')}. This replaces the previous selection. Run hyp backfill codex-cloud to import now; the daemon checks every five minutes. Imported records follow your existing export settings.\n`)
       return 0
     },
   })

@@ -254,7 +254,7 @@ export function renderClientStatusText(rows, stdout) {
       const events = row.capture_health.last_event_at ?? 'none'
       const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
       // `unknown` is the bounded confirmation read declining to answer, and
-      // the line says so rather than picking a side (LLP 0257 #status-and-health).
+      // the line says so rather than picking a side (LLP 0536 #rendering).
       const gap = row.capture_health.state === 'gap'
         ? ' [capture gap]'
         : row.capture_health.state === 'unknown' ? ' [capture unconfirmed]' : ''
@@ -266,6 +266,25 @@ export function renderClientStatusText(rows, stdout) {
       stdout.write(`    recent: ${entry.entrypoint}, ${entry.rows} row${entry.rows === 1 ? '' : 's'}, ${entry.last_seen}\n`)
     }
   }
+}
+
+/**
+ * The automatic Codex migrations (the scheduled sweep and the reconciler's
+ * attach) record their restart requirement only in the daemon log, and no
+ * persisted field says whether one ran or whether Codex was running at the
+ * time. So the note is conditional and shows for every recording
+ * transcript-mode Codex, which is the one row that is attach n/a with a
+ * probe declared.
+ * @ref LLP 0429#migration: running Codex clients must restart to reload their provider configuration
+ */
+const CODEX_RESTART_NOTE = 'If Codex was running when capture mode changed, restart it to use the new mode.'
+
+/**
+ * @param {HypAwareStatusReport['clients'][number] | undefined} client
+ * @returns {boolean}
+ */
+function needsCodexRestartNote(client) {
+  return client?.name === 'codex' && client.configured && client.recording !== false && client.attachable === false
 }
 
 /**
@@ -332,6 +351,7 @@ export function renderStatusSummary({ report, stdout }) {
     : sharingUnknown ? 'Unknown (organization config could not be read)' : 'No organization sync'}\n`)
   renderSharingNotices(report, stdout)
   if (report.selfUpdate?.line) stdout.write(`  ${printable(report.selfUpdate.line, MAX_ERROR_CHARS)}\n`)
+  if (report.assetCoverage) stdout.write(`  ${printable(report.assetCoverage, MAX_ERROR_CHARS)}\n`)
   for (const s of report.sources) {
     const line = sourceSummaryLine(s)
     if (line) stdout.write(`  ${line}\n`)
@@ -369,6 +389,7 @@ export function renderStatusSummary({ report, stdout }) {
   for (const name of notRecording) {
     stdout.write(`\n  To record ${printable(name)} again: hyp client attach ${printable(name)}\n`)
   }
+  if (needsCodexRestartNote(clients.get('codex'))) stdout.write(`\n  ${CODEX_RESTART_NOTE}\n`)
 
   const ollama = report.clients.find(c => c.name === 'ollama')
   if (ollama?.capture) renderOllamaCapture(ollama.capture, stdout, '  ')
@@ -927,6 +948,9 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.selfUpdate?.line) {
     stdout.write(`  ${report.selfUpdate.line}\n`)
   }
+  if (report.assetCoverage) {
+    stdout.write(`  ${printable(report.assetCoverage, MAX_ERROR_CHARS)}\n`)
+  }
 
   renderStatusAttention(report, stdout)
 
@@ -1024,6 +1048,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
       if (c.configured && c.recording === false) stdout.write(`        to record it again: hyp client attach ${c.name}\n`)
+      if (needsCodexRestartNote(c)) stdout.write(`        ${CODEX_RESTART_NOTE}\n`)
       // The probe's error is not this build's prose: a settings file that is
       // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
       // an excerpt of the file back. The client wrote that file, so it is
@@ -1102,15 +1127,26 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
     section('capture health')
     for (const c of report.captureHealth) {
+      const tag = c.state === 'gap'
+        ? '  [telemetry may be interrupted]'
+        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
+      // A marker-less client captures by transcript sweep, not telemetry: its
+      // entry's one timestamp is the newest cached row, and it has no
+      // transcript-activity comparison to show.
+      // @ref LLP 0546#newest-partition: the transcript lane's entry carries the newest cached row
+      if (report.clients.some((r) => r.name === c.client && !r.attachable)) {
+        const rows = c.lastEventAt !== null
+          ? `last captured row ${formatEntrypointAge(c.lastEventAt)}`
+          : 'no captured rows yet'
+        stdout.write(`    - ${c.client}  ${rows}${tag}\n`)
+        continue
+      }
       const events = c.lastEventAt !== null
         ? `last event ${formatEntrypointAge(c.lastEventAt)}`
         : 'no events yet'
       const transcripts = c.lastTranscriptActivityAt !== null
         ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
         : 'no transcript activity'
-      const tag = c.state === 'gap'
-        ? '  [telemetry may be interrupted]'
-        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
     const namedFailures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)

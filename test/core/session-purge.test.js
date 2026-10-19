@@ -593,9 +593,33 @@ test('an aborted session purge names the cleanup jobs it had already queued', as
   assert.equal(receipt.local.status, 'incomplete')
   assert.deepEqual(
     [...receipt.local.cache_cleanup].sort((/** @type {any} */ a, /** @type {any} */ b) => a.job_id.localeCompare(b.job_id)),
-    journals.map(job_id => ({ job_id, scope: 'cache_generations', status: 'pending' })),
+    journals.map(job_id => ({ job_id, scope: 'cache_generations', job_scope: 'cache_partition', status: 'pending' })),
     'the receipt names the cleanup journals that are on disk')
   assert.equal(receipt.local.physical_cleanup.status, 'incomplete', 'queued cleanup is incomplete, not unimplemented')
+})
+
+// The server receipt discloses `job_scope: 'cache_partition'` on each cache
+// cleanup reference (#2534): the id hashes the partition, so the job is shared
+// by every purge of that partition, not owned by this session.
+test('a completed session purge discloses each queued cleanup job as partition-scoped', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-cleanup-scope-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { storage, ctx, output, error } = fixture(root)
+  for (const source of ['a', 'b']) {
+    await storage.appendRowsToPartition('events', [`source=${source}`], columns, [
+      { session_id: 'delete', body: `secret ${source}` }, { session_id: 'keep', body: `neighbor ${source}` },
+    ])
+  }
+  await storage.flushAll({ force: true })
+
+  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 0, error())
+  const journals = (await fs.readdir(path.join(storage.cacheRoot, '.purge-cleanup'))).map(name => name.replace(/\.json$/, '')).sort()
+  assert.equal(journals.length, 2)
+  const receipt = JSON.parse(output())
+  assert.equal(receipt.local.status, 'completed')
+  assert.deepEqual(
+    [...receipt.local.cache_cleanup].sort((/** @type {any} */ a, /** @type {any} */ b) => a.job_id.localeCompare(b.job_id)),
+    journals.map(job_id => ({ job_id, scope: 'cache_generations', job_scope: 'cache_partition', status: 'pending' })))
 })
 
 // A thrown value's display string is not evidence that nothing was thrown:

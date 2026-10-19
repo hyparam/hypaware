@@ -59,6 +59,41 @@ test('a partial trailing block stays buffered until its terminator arrives', () 
   assert.equal(parser.buffer, '')
 })
 
+test('a lone CR ends a line, and two of them end a block', () => {
+  assert.deepEqual(feedWhole('data: 1\r\r'), [{ event: 'message', data: '1' }])
+  assert.deepEqual(feedWhole('data: 1\rdata: 2\n\n'), [{ event: 'message', data: '1\n2' }])
+  assert.deepEqual(feedWhole('event: a\rdata: 1\r\rdata: 2\r\r').map((e) => [e.event, e.data]), [
+    ['a', '1'],
+    ['message', '2'],
+  ])
+})
+
+test('a terminator split across a feed boundary after a long partial block dispatches once', () => {
+  // The resume offset is the risk here: the next feed starts its search 3
+  // chars before the old end, so every terminator must still be seen when
+  // the boundary falls inside it, and none may be seen twice.
+  for (const term of ['\n\n', '\r\r', '\r\n\r\n']) {
+    const body = `data: ${'x'.repeat(40)}${term}data: 2${term}`
+    const whole = feedWhole(body)
+    assert.equal(whole.length, 2)
+    for (let cut = 1; cut < body.length; cut++) {
+      const parser = new SseParser()
+      const got = []
+      for (const piece of [body.slice(0, cut), body.slice(cut)]) {
+        got.push(...parser.feed(piece))
+        assert.ok(
+          parser.scanFrom >= 0 && parser.scanFrom <= parser.buffer.length,
+          `scanFrom ${parser.scanFrom} outside a ${parser.buffer.length} char buffer`,
+        )
+      }
+      assert.deepEqual(got, whole, JSON.stringify({ term, cut }))
+      // Everything was consumed, so the next search starts at the front.
+      assert.equal(parser.buffer, '')
+      assert.equal(parser.scanFrom, 0)
+    }
+  }
+})
+
 /**
  * An SSE body of `count` small delta events, the shape a provider streams.
  * @param {number} count
@@ -73,7 +108,8 @@ function sseBody(count) {
 /**
  * Characters `run` walks past, counted by wrapping `String.prototype.indexOf`
  * for the duration of the call. Every scan the parser performs goes through
- * it: the newline walk in `findSeparator` and the field split in `parseBlock`.
+ * it: the LF and CR walks in `findSeparator` and the field split in
+ * `parseBlock`.
  * The wrapper is restored even if `run` throws.
  *
  * @param {() => void} run
@@ -114,26 +150,67 @@ test('a whole-body feed scans the body once, not once per event', () => {
     events = new SseParser().feed(body)
   })
   assert.equal(events.length, 20000)
+  // One pass per walk: the LF walk covers the body, and the CR walk finds no
+  // CR and covers it once more, so about 2x.
   assert.ok(
-    scanned < body.length * 2,
-    `scanned ${scanned} chars of a ${body.length} char body; one pass is about 1x, the two-probe search about 10000x`,
+    scanned < body.length * 3,
+    `scanned ${scanned} chars of a ${body.length} char body; one pass per walk is about 2x, the two-probe search about 10000x`,
   )
 })
 
+test('a newline-dense stream with no blank line is scanned once across chunks', () => {
+  // No terminator ever arrives, so the whole stream stays buffered. Resuming
+  // each feed's search from 0 walked that buffer again per chunk: 64 chunks
+  // here cost about 33x the body. The persistent offset holds it to one pass
+  // per walk, whichever line ending the stream uses.
+  for (const eol of ['\n', '\r']) {
+    const body = `data: x${eol}`.repeat(32768)
+    const parser = new SseParser()
+    const scanned = scannedChars(() => {
+      for (let i = 0; i < body.length; i += 4096) assert.deepEqual(parser.feed(body.slice(i, i + 4096)), [])
+    })
+    assert.equal(parser.buffer, body)
+    assert.ok(
+      scanned < body.length * 3,
+      `${JSON.stringify(eol)} stream: scanned ${scanned} chars of a ${body.length} char body`,
+    )
+  }
+})
+
+test('a feed reassigns the buffer a bounded number of times, not once per event', () => {
+  // The scan guard above counts characters walked, so it cannot see a
+  // return to slicing the buffer after every event: that keeps the scan
+  // linear and copies the remainder per event. Count the assignments: one
+  // append and one final slice.
+  const parser = new SseParser()
+  let value = parser.buffer
+  let sets = 0
+  Object.defineProperty(parser, 'buffer', {
+    get: () => value,
+    set: (v) => {
+      value = v
+      sets++
+    },
+  })
+  assert.equal(parser.feed(sseBody(200)).length, 200)
+  assert.ok(sets <= 2, `buffer reassigned ${sets} times for 200 events`)
+})
+
 /**
- * The terminator search this replaced: two probes per event, each over the
- * whole remaining buffer. Kept here as the oracle for the parity check.
+ * The terminator search the walk replaced, one probe per terminator over the
+ * whole remaining buffer, with the earliest start winning. Kept here as the
+ * oracle for the parity check.
  * @param {string} buf
  * @returns {{ idx: number, len: number } | -1}
  */
 function findSeparatorOriginal(buf) {
-  const a = buf.indexOf('\n\n')
-  const b = buf.indexOf('\r\n\r\n')
-  if (a === -1 && b === -1) return -1
-  if (a === -1) return { idx: b, len: 4 }
-  if (b === -1) return { idx: a, len: 2 }
-  if (a < b) return { idx: a, len: 2 }
-  return { idx: b, len: 4 }
+  /** @type {{ idx: number, len: number } | -1} */
+  let best = -1
+  for (const term of ['\n\n', '\r\r', '\r\n\r\n']) {
+    const idx = buf.indexOf(term)
+    if (idx !== -1 && (best === -1 || idx < best.idx)) best = { idx, len: term.length }
+  }
+  return best
 }
 
 /** @param {string} text */
@@ -149,7 +226,7 @@ function blocksOriginal(text) {
   return { blocks: out, rest: buf }
 }
 
-test('chunked feeds consume the same bytes the two-probe scan consumed', () => {
+test('chunked feeds consume the same bytes the probe scan consumed', () => {
   // Random soups of the bytes that matter (CR, LF, text), whole and chunked.
   // Parity is on the split, so the oracle compares raw blocks, not parsed
   // events; a block that is only CRs or empty is still a block to both.
@@ -185,15 +262,16 @@ test('chunked feeds consume the same bytes the two-probe scan consumed', () => {
   }
 })
 
-test('the single-pass scan splits blocks exactly where the two-probe scan did', () => {
+test('the single-pass scan splits blocks exactly where the probe scan did', () => {
   // The parity that matters is the split *point*, not the byte count: an
-  // off-by-one in the CRLF branch (`{ idx: i, len: 3 }`) consumes exactly as
+  // off-by-one in the CRLF branch (`{ idx: cr + 1, len: 3 }`) consumes exactly as
   // many bytes and leaves the same remainder, yet hands `parseBlock` a block
   // with a stray \r glued to its first field name. So compare the returned
   // offset and length directly, and do it exhaustively rather than randomly:
   // every string over {CR, LF, text} up to length 8, at every resume offset.
-  // That covers the overlaps the two terminators can form - \r\n\n, \n\r\n,
-  // \r\r\n\n, \n\n\r\n - and a trailing \r with no room to complete.
+  // That covers the overlaps the three terminators can form - \r\n\n,
+  // \n\r\n, \r\r\n, \r\n\r\r, \n\n\r\n - and a trailing \r with no room
+  // to complete.
   const alphabet = ['\r', '\n', 'x']
   let checked = 0
   /** @param {string} buf */
@@ -205,7 +283,7 @@ test('the single-pass scan splits blocks exactly where the two-probe scan did', 
       const want = tail === -1 ? -1 : { idx: tail.idx + from, len: tail.len }
       assert.deepEqual(findSeparator(buf, from), want, JSON.stringify({ buf, from }))
       // `from` defaults to 0, so the one-argument call the old signature took
-      // must still find CRLF terminators rather than report none.
+      // must still find every terminator rather than report none.
       if (from === 0) assert.deepEqual(findSeparator(buf), want, JSON.stringify({ buf }))
       checked++
     }
