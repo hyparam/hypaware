@@ -22,12 +22,19 @@ invoke_agent inputs own submitted user turns; chat outputs own assistant/tool
 calls and one per-response usage carrier; execute_tool owns tool results. Root
 aggregate usage and duplicate assistant output are omitted. Repeated full model
 input history is never projected or fetched. Repeated identical submissions have
-different span IDs. OTEL parent span IDs remain correlation metadata, not invented
-message chronology. No UI content lane or raw OTEL payload is persisted.
+different span IDs. An exact duplicate pair of user inputs inside a single SDK
+turn span is one submitted occurrence; mixed input histories remain withheld.
+Native output parts are preserved as emitted, including SDK repetitions: no
+text-equality heuristic deletes potentially intentional output. OTEL parent span
+IDs remain correlation metadata, not invented message chronology. No UI content
+lane or raw OTEL payload is persisted.
 
 Input tokens are gross-minus-cache-read-minus-cache-create, matching Local's
-released `prompt_tokens` source. Reasoning is a subset of output. Native SDK
-field fidelity still needs disposable installed-client verification. A terminal
+released `prompt_tokens` source. SDK cache_read/cache_write input-token attributes
+supply the cache counters when the native cached_tokens column is absent.
+Reasoning is a subset of output. Installed VS Code 1.139.1 / Copilot 0.67.0
+Local and Agent Host payloads have been checked in a disposable local profile;
+other installed versions still need qualification. A terminal
 span without output can own an explicit empty accounting/error observation.
 
 ## Ownership {#ownership}
@@ -39,9 +46,13 @@ not import draft text or reconstruct conversation content. Workspace-file roots,
 remote URIs, conflicting bindings and observed cwd changes are incomplete.
 
 Agent Host's synthetic session span maps the native conversation ID to its host
-session URI, then to agentSessionData/session.db. Require exactly one local
-copilot.workingDirectories root, and compatible copilot.workingDirectory. Peer
-chat URIs and sessions with turn_workspace_transition records are withheld:
+session URI, then to agentSessionData/session.db. When native discovery also
+emits an SDK-ID alias, admit only a matching default-chat pair: the alias's
+peerChatBacking must name the host's exact default chat, and the host's
+defaultChatProviderData.sdkSessionId must name the SDK conversation. A third
+link or conflicting binding remains ambiguous. Require exactly one local
+copilot.workingDirectories root, and compatible copilot.workingDirectory. Other
+peer chat URIs and sessions with turn_workspace_transition records are withheld:
 there is no proven trace/span-to-transition mapping. Require the SDK
 session.start.data.context.cwd to match current provider metadata as well. Only
 the bounded initial event line is parsed, never the full native history. A
@@ -139,7 +150,12 @@ made about hidden reasoning. Output projection is capped at 2048 parts/span.
 Synthetic schema-v1 fixtures for Local and Agent Host must exercise actual SQLite
 WAL and source-to-query/export, identities, repeated prompts, one-carrier usage,
 replay, late parents, replacement, malformed/capped inputs, privacy and detach.
-Installed editor/extension pairing and SDK payload fidelity remain unverified.
+Disposable installed-client checks on VS Code 1.139.1 / Copilot Chat 0.67.0
+exercise Local and Agent Host marker replies, file-tool calls/results, native
+cache counters, and duplicate-free replay. Agent Host default-chat alias
+bindings and repeated root inputs are regression-fixtured. The SDK repeats some
+native output parts; these remain visible instead of being silently deduplicated.
+Other editor/SDK pairings and the broader coverage gaps below remain unqualified.
 No paid calls or private installed history are needed for the hermetic gate.
 
 Child/subagent sessions require their own admitted metadata binding. Parent span

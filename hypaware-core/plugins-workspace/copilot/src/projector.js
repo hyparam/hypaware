@@ -33,7 +33,9 @@ export function projectSpan(span, attrs, sessionId, cwd, harness) {
     // Root inputs carry the submitted turn. Never reproduce the chat span's
     // repeated model history, nor the root's duplicate assistant/usage totals.
     const input = parsed(attrs['gen_ai.input.messages'])
-    if (Array.isArray(input) && input.length === 1 && input[0]?.role === 'user') {
+    // The SDK can repeat the same submitted input inside one turn span.
+    // Collapse only that observed pair, never separate spans or mixed history.
+    if (Array.isArray(input) && input[0]?.role === 'user' && (input.length === 1 || (harness === 'agent-host' && input.length === 2 && JSON.stringify(input[0]) === JSON.stringify(input[1])))) {
       const parts = input[0].parts
       if (Array.isArray(parts)) {
         if (parts.length > 2048) throw new Error('part_count_limit')
@@ -88,8 +90,8 @@ export function projectSpan(span, attrs, sessionId, cwd, harness) {
     }
     /** @type {JsonObject} */
     const usage = {}
-    const read = finite(span.cached_tokens)
-    const created = attrs['gen_ai.usage.cache_creation.input_tokens'] === undefined ? undefined : finite(Number(attrs['gen_ai.usage.cache_creation.input_tokens']))
+    const read = finite(span.cached_tokens) ?? finite(Number(attrs['gen_ai.usage.cache_read.input_tokens']))
+    const created = finite(Number(attrs['gen_ai.usage.cache_creation.input_tokens'] ?? attrs['gen_ai.usage.cache_write.input_tokens']))
     if (finite(span.input_tokens) !== undefined) usage.input_tokens = Math.max(0, (span.input_tokens ?? 0) - (read ?? 0) - (created ?? 0))
     if (finite(span.output_tokens) !== undefined) usage.output_tokens = span.output_tokens ?? 0
     if (read !== undefined) usage.cache_read_tokens = read

@@ -70,6 +70,7 @@ for (const harness of ['local', 'agent-host']) test(`${harness}: WAL source proj
     assert.equal(usage.reduce((n, u) => n + u.input_tokens, 0), 30)
     assert.equal(usage.reduce((n, u) => n + u.output_tokens, 0), 6)
     assert.equal(usage.reduce((n, u) => n + u.cache_read_tokens, 0), 10)
+    assert.equal(usage.reduce((n, u) => n + (u.cache_write_tokens ?? 0), 0), harness === 'agent-host' ? 4 : 0)
     assert.ok(first.rows.some(r => r.tool_call_id === 'call-1' && r.part_type === 'tool_result' && r.content_text === 'fixture contents'))
     assert.deepEqual(first.rows.find(r => r.tool_call_id === 'call-1' && r.part_type === 'tool_call')?.tool_args, { filePath: path.join(f.cwd, 'fixture.txt') })
     assert.ok(!JSON.stringify(first.rows).includes('duplicated model history'))
@@ -333,5 +334,52 @@ test('Agent Host current cwd cannot relabel history without a matching initial S
     const events = path.join(f.env.COPILOT_HOME, 'session-state', 'session-agent-host', 'events.jsonl')
     await fs.writeFile(events, JSON.stringify({ type: 'session.start', data: {} }) + '\n')
     assert.ok((await f.scan()).events.some(e => e.attributes?.error_kind === 'ownership_initial_context_missing'))
+  } finally { await f.cleanup() }
+})
+
+test('Agent Host SDK aliases require matching forward and reverse default-chat bindings', async () => {
+  const f = await setup('agent-host')
+  let alias
+  try {
+    const owner = 'copilotcli:/host-session-agent-host'
+    const chat = 'ahp-chat://default/' + Buffer.from(owner).toString('base64url')
+    const dir = path.join(f.root, 'agentSessionData', 'session-agent-host')
+    await fs.mkdir(dir, { recursive: true })
+    const { DatabaseSync } = await import('node:sqlite')
+    alias = new DatabaseSync(path.join(dir, 'session.db'))
+    alias.exec('CREATE TABLE session_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    alias.prepare('INSERT INTO session_metadata VALUES (?, ?)').run('peerChatBacking', chat)
+    const binding = f.metadata.prepare('INSERT OR REPLACE INTO session_metadata VALUES (?, ?)')
+    binding.run('defaultChatProviderData', JSON.stringify({ sdkSessionId: 'session-agent-host' }))
+    f.insert({ span_id: 'sdk-link', name: 'vscode.agent_host.session' }, { 'vscode.agent_host.session.uri': 'copilotcli:/session-agent-host' })
+    assert.equal((await f.scan()).rows.length, 6)
+    const manual = { ...f.ctx, sweep: false }
+    alias.prepare('UPDATE session_metadata SET value = ?').run('ahp-chat://default/unrelated')
+    assert.equal((await f.scan(manual)).rows.length, 0)
+    alias.prepare('UPDATE session_metadata SET value = ?').run(chat)
+    binding.run('defaultChatProviderData', JSON.stringify({ sdkSessionId: 'unrelated' }))
+    assert.equal((await f.scan(manual)).rows.length, 0)
+    binding.run('defaultChatProviderData', JSON.stringify({ sdkSessionId: 'session-agent-host' }))
+    assert.equal((await f.scan(manual)).rows.length, 6)
+    f.insert({ span_id: 'third-link', name: 'vscode.agent_host.session' }, { 'vscode.agent_host.session.uri': 'copilotcli:/unrelated' })
+    assert.equal((await f.scan(manual)).rows.length, 0)
+  } finally {
+    alias?.close()
+    await f.cleanup()
+  }
+})
+
+test('only an exact SDK input pair collapses within a turn, mixed histories stay unclaimed', async () => {
+  const f = await setup('agent-host')
+  try {
+    const span = retainedSpans(f.db).find(s => s.span_id === 'invoke-0')
+    assert.ok(span)
+    const attrs = readAttributes(f.db, span)
+    assert.equal(projectSpan(span, attrs, 'session-agent-host', f.cwd, 'agent-host').messages.length, 1)
+    assert.equal(projectSpan(span, attrs, 'session-agent-host', f.cwd, 'local').messages.length, 0)
+    const input = JSON.parse(attrs['gen_ai.input.messages'])
+    input[1].parts[0].content = 'A different earlier prompt'
+    attrs['gen_ai.input.messages'] = JSON.stringify(input)
+    assert.equal(projectSpan(span, attrs, 'session-agent-host', f.cwd, 'agent-host').messages.length, 0)
   } finally { await f.cleanup() }
 })

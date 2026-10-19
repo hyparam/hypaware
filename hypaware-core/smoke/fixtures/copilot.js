@@ -74,13 +74,14 @@ export async function copilotFixture({ root, cwd, id, harness, now = Date.now(),
   if (!local) insert({ span_id: 'host-link' }, { 'vscode.agent_host.session.uri': 'copilotcli:/host-' + id })
   for (let i = 0; i < 2; i++) {
     insert({ span_id: 'invoke-' + i, operation_name: 'invoke_agent', input_tokens: 999, output_tokens: 999, start_time_ms: now + i * 100 }, {
-      'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'Repeat this prompt' }] }],
+      'gen_ai.input.messages': Array.from({ length: local ? 1 : 2 }, () => ({ role: 'user', parts: [{ type: 'text', content: 'Repeat this prompt' }] })),
       'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'duplicate aggregate' }] }],
     })
-    insert({ span_id: 'chat-' + i, parent_span_id: 'invoke-' + i, operation_name: 'chat', start_time_ms: now + i * 100, input_tokens: 20, output_tokens: 3, cached_tokens: 5 }, {
+    insert({ span_id: 'chat-' + i, parent_span_id: 'invoke-' + i, operation_name: 'chat', start_time_ms: now + i * 100, input_tokens: local ? 20 : 22, output_tokens: 3, cached_tokens: local ? 5 : null }, {
       'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'duplicated model history must not be fetched' }] }],
       'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Repeated answer' }, ...(i === 0 ? [{ type: 'tool_call', id: 'call-1', name: 'read_file', arguments: local ? JSON.stringify({ filePath: path.join(cwd, 'fixture.txt') }) : { filePath: path.join(cwd, 'fixture.txt') } }] : [])] }],
       'gen_ai.response.id': 'response-' + i,
+      ...(!local ? { 'gen_ai.usage.cache_read.input_tokens': '5', 'gen_ai.usage.cache_write.input_tokens': '2' } : {}),
     })
   }
   insert({ span_id: 'tool-1', operation_name: 'execute_tool', parent_span_id: 'chat-0', tool_name: 'read_file', tool_call_id: 'call-1' }, { 'gen_ai.tool.call.arguments': JSON.stringify({ filePath: path.join(cwd, 'fixture.txt') }), 'gen_ai.tool.call.result': 'fixture contents' })

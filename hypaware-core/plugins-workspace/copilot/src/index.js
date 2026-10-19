@@ -44,7 +44,7 @@ export async function activate(ctx) {
       let stopped = false
       return {
         async stop() { stopped = true },
-        async status() { return { state: stopped ? 'stopped' : health.incomplete || !health.last_scan ? 'degraded' : 'ready', message: 'Local single-root DB capture via scheduled recovery. Reload VS Code after attach. Live editor fidelity unverified.', details: { ...health } } },
+        async status() { return { state: stopped ? 'stopped' : health.incomplete || !health.last_scan ? 'degraded' : 'ready', message: 'Local single-root DB capture via scheduled recovery. Reload VS Code after attach.', details: { ...health } } },
       }
     },
   })

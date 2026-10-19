@@ -118,7 +118,7 @@ export function retainedSpans(db, limit = 16384) {
 export function readAttributes(db, span) {
   const keys = ['gen_ai.response.id', 'copilot_chat.parent_chat_session_id']
   if (span.operation_name === 'invoke_agent') keys.push('gen_ai.input.messages')
-  if (span.operation_name === 'chat') keys.push('gen_ai.system_instructions', 'gen_ai.tool.definitions', 'copilot_chat.reasoning_content', 'gen_ai.output.messages', 'gen_ai.usage.cache_creation.input_tokens', 'gen_ai.usage.reasoning.output_tokens', 'gen_ai.response.finish_reasons')
+  if (span.operation_name === 'chat') keys.push('gen_ai.system_instructions', 'gen_ai.tool.definitions', 'copilot_chat.reasoning_content', 'gen_ai.output.messages', 'gen_ai.usage.cache_creation.input_tokens', 'gen_ai.usage.cache_read.input_tokens', 'gen_ai.usage.cache_write.input_tokens', 'gen_ai.usage.reasoning.output_tokens', 'gen_ai.response.finish_reasons')
   if (span.operation_name === 'execute_tool') keys.push('gen_ai.tool.call.arguments', 'gen_ai.tool.call.result')
   const placeholders = keys.map(() => '?').join(',')
   // A short read transaction keeps the size check and content fetch on the
@@ -192,17 +192,37 @@ export function createOwnershipResolver(env = process.env) {
       if (store.harness === 'agent-host') {
         // The synthetic host span links the SDK conversation to host storage.
         // Do not assume their IDs match, particularly for resumed/peer chats.
-        const links = db.prepare(`SELECT DISTINCT substr(a.value, 1, 8193) AS value FROM spans s JOIN span_attributes a ON a.span_id = s.span_id WHERE s.conversation_id = ? AND s.name = 'vscode.agent_host.session' AND a.key = 'vscode.agent_host.session.uri' LIMIT 2`).all(id)
-        if (links.length !== 1) throw new Error('ownership_missing')
-        const uri = new URL(String(links[0].value))
-        if (!['copilotcli:', 'ahp-session:'].includes(uri.protocol) || uri.host || uri.search || uri.hash) throw new Error('ownership_remote')
-        const key = decodeURIComponent(uri.pathname.slice(1))
-        if (!/^[a-zA-Z0-9_.-]{1,256}$/.test(key) || ['.', '..'].includes(key)) throw new Error('ownership_identity')
-        const metadata = openDatabase(path.join(store.root, 'agentSessionData', key, 'session.db'))
+        const links = db.prepare(`SELECT DISTINCT substr(a.value, 1, 8193) AS value FROM spans s JOIN span_attributes a ON a.span_id = s.span_id WHERE s.conversation_id = ? AND s.name = 'vscode.agent_host.session' AND a.key = 'vscode.agent_host.session.uri' LIMIT 3`).all(id)
+        if (!links.length || links.length > 2) throw new Error('ownership_missing')
+        const identities = links.map(link => {
+          const uri = new URL(String(link.value))
+          if (!['copilotcli:', 'ahp-session:'].includes(uri.protocol) || uri.host || uri.search || uri.hash) throw new Error('ownership_remote')
+          const key = decodeURIComponent(uri.pathname.slice(1))
+          if (!/^[a-zA-Z0-9_.-]{1,256}$/.test(key) || ['.', '..'].includes(key)) throw new Error('ownership_identity')
+          return { uri, key }
+        })
+        let owner = identities[0]
+        let hasAlias = false
+        // @ref LLP 0549#ownership: SDK aliases require forward and reverse default-chat bindings
+        if (identities.length === 2) {
+          const alias = identities.find(value => value.key === id)
+          const host = identities.find(value => value !== alias)
+          if (!alias || !host) throw new Error('ownership_missing')
+          const peer = openDatabase(path.join(store.root, 'agentSessionData', alias.key, 'session.db'))
+          try {
+            const backing = peer.prepare("SELECT substr(value, 1, 8193) AS value FROM session_metadata WHERE key = 'peerChatBacking'").get()?.value
+            const chat = 'ahp-chat://default/' + Buffer.from(host.uri.toString()).toString('base64url')
+            if (backing !== chat) throw new Error('ownership_ambiguous')
+          } finally { peer.close() }
+          owner = host
+          hasAlias = true
+        }
+        const metadata = openDatabase(path.join(store.root, 'agentSessionData', owner.key, 'session.db'))
         try {
-          const rows = metadata.prepare("SELECT key, substr(value, 1, 8193) AS value FROM session_metadata WHERE key IN ('copilot.workingDirectory', 'copilot.workingDirectories')").all()
+          const rows = metadata.prepare("SELECT key, substr(value, 1, 8193) AS value FROM session_metadata WHERE key IN ('copilot.workingDirectory', 'copilot.workingDirectories', 'defaultChatProviderData')").all()
           if (rows.some(row => String(row.value).length > 8192)) throw new Error('metadata_size_limit')
           const values = Object.fromEntries(rows.map(r => [String(r.key), r.value]))
+          if ((hasAlias || values.defaultChatProviderData !== undefined) && JSON.parse(String(values.defaultChatProviderData ?? '{}')).sdkSessionId !== id) throw new Error('ownership_ambiguous')
           const roots = values['copilot.workingDirectories'] ? JSON.parse(String(values['copilot.workingDirectories'])) : [values['copilot.workingDirectory']]
           if (!Array.isArray(roots) || roots.length !== 1) throw new Error('ownership_multiroot')
           // Transitions do not carry a trace/span mapping. Never relabel old
