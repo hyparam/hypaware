@@ -1177,6 +1177,42 @@ test('organization startup and persisted backoff do not read queue payloads', as
   assert.equal(queueReads, 0, 'backoff must survive new senders without queue reads')
 })
 
+test('persisted backoff defers expiry only until the daemon five-minute flush', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  const policy = enroll(root)
+  assert(policy.binding)
+  const expired = NOW - 8 * 86400000
+  createOutbox(root, { now: () => expired }).append(batch(expired), policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  const stale = queue.entries()[0].id
+  queue.saveDelivery({ binding: policy.binding, next_at: NOW + 86400000 })
+  const delivery = createDelivery(root, {
+    now: () => NOW,
+    fetchFn: async () => { throw new Error('backoff must prevent requests') }
+  })
+  await delivery.drain()
+  delivery.close()
+  assert(
+    queue.entries().some((e) => e.id === stale),
+    'the gated drain leaves the expired slot during backoff'
+  )
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  let now = NOW
+  const client = createProductClient({ env, role: 'daemon', now: () => now })
+  t.after(() => client.close())
+  now += 300000
+  t.mock.timers.tick(30000)
+  assert(now < NOW + 86400000, 'the flush ran inside the backoff window')
+  assert.equal(
+    queue.entries().some((e) => e.id === stale),
+    false,
+    'the ungated daemon flush removes the expired slot'
+  )
+})
+
 test('eligible delivery scans once and sends the oldest surviving batch', async (t) => {
   const root = temp(t)
   const policy = enroll(root)
