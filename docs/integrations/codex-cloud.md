@@ -1,8 +1,8 @@
-# Experimental hosted Codex and Work collector
+# Codex Cloud and ChatGPT Work
 
 HypAware can discover and import selected categories of hosted chats from a local collector,
 using the existing local ChatGPT login. It does not need a browser extension
-or an agent to export history. **This integration is experimental:** it uses
+or an agent to export history. **This integration is in beta:** it uses
 an observed hosted interface that may change. Hosted collection is a separate choice from local Codex recording.
 The Codex desktop app is not required; the collector uses the Codex CLI and
 runs while the collector computer and HypAware daemon are running.
@@ -34,10 +34,10 @@ The collector checks the effective Codex credential-store setting and rejects `k
 
 `hyp setup` offers two hosted choices:
 
-- **Codex Cloud (experimental)** is a separate row from local **Codex**.
+- **Codex Cloud (beta)** is a separate row from local **Codex**.
   On first setup it is checked when Codex is detected and included in
   **Record everything** (or **Record and sync everything**).
-- **ChatGPT Work (experimental)** bundles Work web and Work mobile. It starts
+- **ChatGPT Work (beta)** bundles Work web and Work mobile. It starts
   unchecked and is only added through **Customize**.
 
 Choosing either hosted row enables its collector without enabling local Codex
@@ -56,8 +56,8 @@ Earlier builds ran hosted collection inside the `@hypaware/codex` plugin and
 kept its grant at `~/.hyp/hypaware/plugins/@hypaware/codex/cloud-connection.json`
 (under `$HYP_HOME` when set). The collector now lives in `@hypaware/codex-cloud`,
 which reads only its own grant, so after upgrading hosted collection stops until
-you choose it again. Rerun setup and select **Codex Cloud (experimental)**,
-**ChatGPT Work (experimental)** or both:
+you choose it again. Rerun setup and select **Codex Cloud (beta)**,
+**ChatGPT Work (beta)** or both:
 
 ```sh
 hyp setup
@@ -192,4 +192,4 @@ Linux service behavior, natural token expiry, simultaneous refresh by separate
 Codex processes and managed-workspace accounts remain unverified. Token counts
 are unavailable from the persisted history responses tested so far.
 
-Design: [LLP 0511](../llp/0511-local-codex-cloud-collector.rfc.md).
+Design: [LLP 0511](../../llp/0511-local-codex-cloud-collector.rfc.md).

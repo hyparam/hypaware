@@ -41,7 +41,7 @@ This reference identifies each plugin-owned family:
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
-- `codex-cloud ...`: `@hypaware/codex-cloud` (experimental).
+- `codex-cloud ...`: `@hypaware/codex-cloud` (beta).
 - `client claude-account ...`: `@hypaware/claude-account`.
 - `client claude-desktop ...`: `@hypaware/claude-desktop`.
 - `graph ...` and `query graph neighbors`: `@hypaware/context-graph`.
@@ -1122,7 +1122,7 @@ desktop directories.
 hyp client claude-desktop install-helper
 ```
 
-## Experimental Codex Cloud collection
+## Codex Cloud collection (beta)
 
 In attended setup, Codex Cloud is a separate row included in Record everything
 when Codex is detected on first setup. ChatGPT Work bundles web and mobile and
@@ -1149,8 +1149,8 @@ immediately; an active daemon sweeps every five minutes. Imported records follow
 existing export settings. `status` prints the grant scope without credentials.
 `disconnect` stops future imports without deleting previous records.
 
-The hosted interface is experimental and may change. Keyring and API-key logins
-are unsupported. See [requirements, limits and troubleshooting](CODEX-CLOUD.md).
+This integration is in beta: the hosted interface may change. Keyring and API-key logins
+are unsupported. See [requirements, limits and troubleshooting](integrations/codex-cloud.md).
 
 ## Import past client history
 
@@ -1238,8 +1238,7 @@ still imports on demand. Detach only when you want to stop capture as well.
 ## Collect GitHub activity
 
 Plugin: `@hypaware/github`. Capture writes structural repository activity to
-`github_events` and projects it into the activity graph. See
-[clients and history](CLIENTS.md#collect-github-activity) for the workflow.
+`github_events` and projects it into the activity graph. See the [GitHub integration](integrations/github.md) for the workflow.
 
 ### `hyp github login`
 
@@ -1295,7 +1294,7 @@ full historical import. Capture or projection failures return `1`.
 
 <!-- @ref LLP 0474#setup [explains]: setup checks readiness and prints routes without loading a model; verify needs a fresh saved request and response -->
 Plugin: `@hypaware/ollama`, added when you choose **Ollama** in `hyp setup`.
-See [clients and history](CLIENTS.md#record-ollama) for the workflow.
+See the [Ollama integration](integrations/ollama.md) for the workflow.
 
 ### `hyp ollama setup`
 
@@ -1983,7 +1982,7 @@ warning, and the recipe go to standard error, so `hyp remote mint > ci.token`
 stores exactly the secret.
 
 For the complete join, capture, and flush workflow, see
-[CI and headless deployment](TEAM_SETUP.md#ci-and-headless-deployment).
+[CI and headless deployment](integrations/ci-and-headless.md).
 
 With `--scope query`, it mints a personal agent token instead, for a headless
 agent or CI job that queries and publishes as you. The token reads your

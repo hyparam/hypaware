@@ -76,7 +76,7 @@ export function createCodexCloudProvider(opts, deps = {}) {
   const attempted = new Map()
   return {
     name: 'codex-cloud', plugin: '@hypaware/codex-cloud', datasets: [AI_GATEWAY_MESSAGES_DATASET],
-    summary: 'Import connected Codex cloud chats using the local ChatGPT login (experimental)',
+    summary: 'Import connected Codex cloud chats using the local ChatGPT login (beta)',
     sweep: { cron: '*/5 * * * *' },
     async *run(ctx) {
       const connection = await readCloudConnection(opts.stateDir)

@@ -11,7 +11,7 @@ For the syntax and behavior of every command, see the
 - macOS with `launchd`, or Linux with a `systemd` user service, for the
   persistent background service. A container or CI host without one can run
   `hyp daemon run` in the foreground instead; see
-  [CI and headless deployment](TEAM_SETUP.md#ci-and-headless-deployment).
+  [CI and headless deployment](integrations/ci-and-headless.md).
 - An interactive terminal for the guided setup.
 
 ## Install HypAware
@@ -86,7 +86,7 @@ attention, with guidance to help resolve problems. For capture checks, see
 The daemon keeps capture and scheduled sync running after you close the terminal.
 Setup installs it as a per-user service. On macOS, its LaunchAgent runs while
 you are logged in. On Linux, its systemd user service requires user-session
-support; see [headless deployment](TEAM_SETUP.md#long-lived-headless-hosts)
+support; see [headless deployment](integrations/ci-and-headless.md#long-lived-headless-hosts)
 for hosts that must keep running after logout.
 
 ```sh
