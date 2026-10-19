@@ -1344,3 +1344,6 @@ function controlRequest(args) {
     req.end()
   })
 }
+
+// Shared syntax for an endpoint-free recorder using the same session commands.
+export { parseArgv as parseSessionArgv }

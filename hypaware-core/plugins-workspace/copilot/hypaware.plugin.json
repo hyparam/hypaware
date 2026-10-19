@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/copilot",
+  "version": "1.0.0",
+  "description": "VS Code Copilot completed-span recording for Local and Agent Host harnesses. Local single-root workspaces only; native seven-day/100-conversation retention applies.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22.13",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_state"
+  ],
+  "contributes": {
+    "client": {
+      "name": "copilot",
+      "attach_probe": {
+        "format": "json",
+        "settings_file": ".copilot/hypaware.json",
+        "marker_key": "_hypaware"
+      },
+      "skill_dir": ".copilot/skills"
+    },
+    "picker": [
+      {
+        "name": "copilot",
+        "label": "VS Code GitHub Copilot",
+        "summary": "Records completed chat/model/tool spans from both VS Code Copilot harnesses in local single-folder workspaces. Reload required. Native history retention applies.",
+        "detect": {
+          "settings_file": ".vscode"
+        },
+        "compose": {
+          "plugin": {
+            "name": "@hypaware/copilot"
+          }
+        }
+      }
+    ],
+    "sources": [
+      {
+        "name": "copilot"
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "copilot",
+        "summary": "VS Code user_data_dirs and attach/backfill policy."
+      }
+    ],
+    "commands": [
+      {
+        "name": "session ignore",
+        "summary": "Persistently stop recording an AI session",
+        "category": "capture-movement",
+        "audience": "everyday"
+      },
+      {
+        "name": "session unignore",
+        "summary": "Resume recording an AI session",
+        "category": "capture-movement",
+        "audience": "everyday"
+      },
+      {
+        "name": "session status",
+        "summary": "Report recording exclusion",
+        "category": "capture-movement",
+        "audience": "everyday"
+      }
+    ]
+  }
+}

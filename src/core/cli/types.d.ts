@@ -75,6 +75,7 @@ export type PickerSource =
   | 'chatgpt-work'
   | 'opencode'
   | 'cursor'
+  | 'copilot'
   | 'pi'
   | 'claude-desktop'
   | 'openclaw'
@@ -335,7 +336,7 @@ export interface InitFlags {
   dryRun: boolean
   github?: boolean
   noBackfill?: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'ollama' | 'langgraph')[]
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'ollama' | 'langgraph')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number

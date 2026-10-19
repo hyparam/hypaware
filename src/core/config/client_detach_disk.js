@@ -13,6 +13,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject, redactUrlUserinfo } from '../util/json_util.js'
 import { prepareDetach } from './codex_toml.js'
+import { restoreSettingsFiles } from './jsonc_settings.js'
 import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 
 // Bump when an on-disk Claude marker must be rewritten for Claude Code to
@@ -269,7 +270,7 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
   // report only the last one, hiding the earlier keys we left in place.
   // @ref LLP 0045#never-clobber-a-user-edit-report-every-override-not-just-the-last [implements]: accumulate the per-key notices, join them into the one `warning` field
   /** @type {string[]} */
-  const warnings = []
+  const warnings = await restoreSettingsFiles(managed.settings_files)
 
   if (isPlainObject(value.env)) {
     const envObj = /** @type {Record<string, unknown>} */ (value.env)
