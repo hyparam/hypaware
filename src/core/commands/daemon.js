@@ -263,9 +263,17 @@ export async function runDaemonStatus(argv, ctx) {
   if (sources.length === 0) {
     ctx.stdout.write('    (none)\n')
   } else {
+    // The rule `hyp status` applies to the same file (#1410): a `started`
+    // left by a daemon that is gone, or by one whose pid the OS reissued, is
+    // a record, and `stopped` is what that source is now. `failed` claims
+    // nothing about now and stays as written. Text only: the `--json` copy
+    // above is the file's, byte for byte.
+    // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
+    const snapshotIsLive = running && snapshotIsThisProcess
     for (const source of sources) {
       const error = printable(source.error, MAX_ERROR_CHARS)
-      ctx.stdout.write(`    - ${printable(source.name)} (${printable(source.plugin)}): ${printable(source.state)}${error ? ' - ' + error : ''}\n`)
+      const state = snapshotIsLive || source.state !== 'started' ? source.state : 'stopped'
+      ctx.stdout.write(`    - ${printable(source.name)} (${printable(source.plugin)}): ${printable(state)}${error ? ' - ' + error : ''}\n`)
     }
   }
   ctx.stdout.write('  sinks:\n')
