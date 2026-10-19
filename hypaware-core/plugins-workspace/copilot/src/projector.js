@@ -1,4 +1,6 @@
 // @ts-check
+import { isDeepStrictEqual } from 'node:util'
+import { canonicalJson } from '../../../../src/core/util/json_util.js'
 
 /** @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../hypaware-plugin-kernel-types.js' */
 /** @import { CopilotSpan } from '../../../../hypaware-core/plugins-workspace/copilot/src/types.js' */
@@ -68,17 +70,26 @@ export function projectSpan(span, attrs, sessionId, cwd, harness) {
     if (separateReasoning && !(output ?? []).some(message => message?.parts?.some(part => part?.type === 'reasoning'))) add('assistant', [{ type: 'thinking', thinking: separateReasoning }], 'reasoning')
     let i = 0
     let selectedParts = 0
+    const toolCalls = new Map()
     for (const message of output ?? []) {
       if (message?.role !== 'assistant' || !Array.isArray(message.parts)) throw new Error('output_schema')
       if (message.parts.length > 2048) throw new Error('part_count_limit')
       const content = []
-      for (const part of message.parts) {
-        if (part?.type === 'text' && typeof part.content === 'string') content.push({ type: 'text', text: part.content })
-        else if (part?.type === 'reasoning' && typeof part.content === 'string') content.push({ type: 'thinking', thinking: part.content })
-        else if (part?.type === 'tool_call' && typeof part.id === 'string' && typeof part.name === 'string') content.push({ type: 'tool_use', id: part.id, name: part.name, input: typeof part.arguments === 'string' ? parsed(part.arguments) : part.arguments ?? {} })
-        else throw new Error('output_part_schema')
+      for (const [partIndex, part] of message.parts.entries()) {
+        // Keep native offsets so filtering does not change later parts' replay identities.
+        const partId = `${identity}:output:${i}#${partIndex}`
+        if (part?.type === 'text' && typeof part.content === 'string') content.push({ type: 'text', text: part.content, part_id: partId })
+        else if (part?.type === 'reasoning' && typeof part.content === 'string') content.push({ type: 'thinking', thinking: part.content, part_id: partId })
+        else if (part?.type === 'tool_call' && typeof part.id === 'string' && typeof part.name === 'string') {
+          const input = typeof part.arguments === 'string' ? parsed(part.arguments) : part.arguments ?? {}
+          // @ref LLP 0549#identity: deduplicate only matching call identities and arguments within this response
+          const key = part.id && part.name ? canonicalJson([part.id, part.name, input]) : undefined
+          if (key !== undefined && toolCalls.has(key) && isDeepStrictEqual(toolCalls.get(key), input)) continue
+          if (key !== undefined && !toolCalls.has(key)) toolCalls.set(key, input)
+          content.push({ type: 'tool_use', id: part.id, name: part.name, input, part_id: partId })
+        } else throw new Error('output_part_schema')
       }
-      selectedParts += content.length
+      selectedParts += message.parts.length
       if (selectedParts > 2048) throw new Error('part_count_limit')
       if (content.length) {
         add('assistant', content, 'output:' + i)

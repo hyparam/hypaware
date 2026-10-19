@@ -383,3 +383,43 @@ test('only an exact SDK input pair collapses within a turn, mixed histories stay
     assert.equal(projectSpan(span, attrs, 'session-agent-host', f.cwd, 'agent-host').messages.length, 0)
   } finally { await f.cleanup() }
 })
+
+for (const harness of ['local', 'agent-host']) test(`${harness}: identical tool calls collapse per response without changing text, reasoning or surviving identities`, async () => {
+  const f = await setup(harness)
+  try {
+    const input = { filePath: path.join(f.cwd, 'fixture.txt'), range: { start: 1, end: 2 } }
+    const call = { type: 'tool_call', id: 'call-1', name: 'read_file', arguments: input }
+    const special = { ...call, id: 'special', arguments: { ...input, ...JSON.parse('{"__proto__":{"marker":"one"}}') } }
+    const output = [
+      { role: 'assistant', parts: [
+        { type: 'text', content: 'repeat' }, { type: 'text', content: 'repeat' },
+        { type: 'reasoning', content: 'reason' }, { type: 'reasoning', content: 'reason' },
+        call, { ...call, arguments: JSON.stringify({ range: { end: 2, start: 1 }, filePath: input.filePath }) },
+        { type: 'text', content: 'repeat' }, { type: 'reasoning', content: 'reason' },
+        { ...call, arguments: { ...input, range: { start: 1, end: 3 } } },
+        { ...call, name: 'view' }, { ...call, id: 'call-2' },
+        { ...call, id: '' }, { ...call, id: '' },
+        special, { ...special, arguments: { ...input, ...JSON.parse('{"__proto__":{"marker":"two"}}') } },
+      ] },
+      { role: 'assistant', parts: [call, { type: 'text', content: 'repeat' }, special] },
+    ]
+    f.db.prepare('INSERT OR REPLACE INTO span_attributes VALUES (?, ?, ?)').run('chat-0', 'gen_ai.output.messages', JSON.stringify(output))
+    const first = await f.scan()
+    const calls = first.rows.filter(r => r.part_type === 'tool_call')
+    assert.equal(calls.length, 8)
+    assert.equal(calls.filter(r => r.tool_call_id === 'call-1').length, 3)
+    const text = first.rows.filter(r => r.content_text === 'repeat')
+    const reasoning = first.rows.filter(r => r.part_type === 'reasoning' && r.content_text === 'reason')
+    const prefix = `copilot:session-${harness}:trace-session-${harness}:chat-0:output:`
+    assert.deepEqual(text.map(r => r.part_id), ['0#0', '0#1', '0#6', '1#1'].map(s => prefix + s))
+    assert.deepEqual(reasoning.map(r => r.part_id), ['0#2', '0#3', '0#7'].map(s => prefix + s))
+    assert.equal(calls[0].part_id, prefix + '0#4')
+    assert.equal(calls[1].part_id, prefix + '0#8')
+    assert.equal(first.rows.filter(r => /** @type {any} */ (r.attributes)?.usage).length, 2)
+    f.insert({ span_id: 'another-response', operation_name: 'chat' }, { 'gen_ai.output.messages': output })
+    const next = await f.scan()
+    assert.equal(next.rows.filter(r => r.part_type === 'tool_call').length, 8)
+    assert.ok(next.rows.every(r => !first.rows.some(previous => previous.part_id === r.part_id)))
+    assert.equal((await f.scan()).rows.length, 0)
+  } finally { await f.cleanup() }
+})

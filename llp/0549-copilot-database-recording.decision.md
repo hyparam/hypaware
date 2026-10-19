@@ -24,10 +24,14 @@ aggregate usage and duplicate assistant output are omitted. Repeated full model
 input history is never projected or fetched. Repeated identical submissions have
 different span IDs. An exact duplicate pair of user inputs inside a single SDK
 turn span is one submitted occurrence; mixed input histories remain withheld.
-Native output parts are preserved as emitted, including SDK repetitions: no
-text-equality heuristic deletes potentially intentional output. OTEL parent span
-IDs remain correlation metadata, not invented message chronology. No UI content
-lane or raw OTEL payload is persisted.
+Within one chat response span, tool calls with the same non-empty call ID,
+tool name and structurally equal decoded arguments collapse to their first
+occurrence. Conflicting calls and calls lacking identity remain separate.
+Surviving part IDs retain their native offsets for replay stability; separate
+response spans remain independent. Text and reasoning parts are preserved as
+emitted, including repetitions: no text-equality heuristic deletes potentially
+intentional output. OTEL parent span IDs remain correlation metadata, not
+invented message chronology. No UI content lane or raw OTEL payload is persisted.
 
 Input tokens are gross-minus-cache-read-minus-cache-create, matching Local's
 released `prompt_tokens` source. SDK cache_read/cache_write input-token attributes
@@ -154,7 +158,8 @@ Disposable installed-client checks on VS Code 1.139.1 / Copilot Chat 0.67.0
 exercise Local and Agent Host marker replies, file-tool calls/results, native
 cache counters, and duplicate-free replay. Agent Host default-chat alias
 bindings and repeated root inputs are regression-fixtured. The SDK repeats some
-native output parts; these remain visible instead of being silently deduplicated.
+native output parts; identical tool calls normalize by identity as above, while
+text and reasoning repetitions remain visible.
 Other editor/SDK pairings and the broader coverage gaps below remain unqualified.
 No paid calls or private installed history are needed for the hermetic gate.
 
