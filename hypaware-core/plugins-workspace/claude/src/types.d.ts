@@ -360,6 +360,14 @@ export interface ClaudeAttachChanged {
    * earlier run.
    */
   warnings?: string[]
+  /**
+   * One notice per per-signal OTLP key (in the settings `env` block or the
+   * attach's own environment) that outranks what `otel` mode wrote (LLP 0271).
+   * Held apart from `warnings` because nothing was repaired: a caller that
+   * counts `warnings` as malformed-block repairs must not count these.
+   * Omitted when there is nothing to report.
+   */
+  overrideWarnings?: string[]
 }
 
 export type ClaudeAttachResult = ClaudeAttachChanged | { changed: false }

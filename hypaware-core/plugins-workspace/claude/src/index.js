@@ -16,7 +16,14 @@ import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawa
 import { booleanFlagValue } from '../../../../src/core/cli/verb_codec.js'
 import { presetUnhonoredArgError } from '../../../../src/core/cli/command_args.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
-import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
+import {
+  MODE_OTEL,
+  MODE_PROXY,
+  attach,
+  defaultSettingsPath,
+  preflightOtelAttach,
+  previewOverrideWarnings,
+} from './settings.js'
 import { claudeVersionPreflight, resolveClaudeCodeVersion } from './claude_version.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
@@ -216,6 +223,13 @@ export async function activate(ctx) {
             const claudeVersion = await resolveClaudeCodeVersion(ctx.env)
             preflightOtelAttach({ claudeVersion, telemetryPort, spoolDir })
             if (attachCtx.dryRun) {
+              // The override check is a pure read, so the plan can name the
+              // leftover export the real attach would warn about.
+              // @ref LLP 0271#attach-reads-the-process-environment [implements]
+              const overrideWarnings = await previewOverrideWarnings({
+                settingsPath,
+                processEnv: ctx.env,
+              })
               span.setAttribute('status', 'ok')
               span.setAttribute('restored', false)
               writeAttachOutput(attachCtx, {
@@ -229,6 +243,7 @@ export async function activate(ctx) {
                 mode: MODE_OTEL,
                 telemetryPort,
                 spoolDir,
+                warnings: overrideWarnings,
               })
               return
             }
@@ -294,12 +309,15 @@ export async function activate(ctx) {
             const malformedWarnings = result.changed && result.warnings !== undefined
               ? [...result.warnings]
               : []
-            // The spool warning rides the same user-facing list but is counted
-            // apart: `malformed_blocks_repaired` names one specific repair, and
-            // folding an unrelated warning into it would make the count lie.
-            const warnings = spoolWarning === undefined
-              ? [...malformedWarnings]
-              : [...malformedWarnings, spoolWarning]
+            // The per-signal override and spool warnings ride the same
+            // user-facing list but are counted apart: `malformed_blocks_repaired`
+            // names one specific repair, and folding an unrelated warning into
+            // it would make the count lie.
+            const warnings = [
+              ...malformedWarnings,
+              ...(result.changed ? result.overrideWarnings ?? [] : []),
+              ...(spoolWarning === undefined ? [] : [spoolWarning]),
+            ]
             // Nothing else will ever mention an ephemeral hook path: the hook
             // exits 0 and says nothing once its command is gone, so the first
             // symptom is columns that stopped arriving. Pushed onto a copy, so
@@ -945,6 +963,9 @@ function writeAttachOutput(attachCtx, fields) {
         ? `  Would set ${managedKey} to the local telemetry listener\n`
         : `  Would set ${managedKey} to the local gateway endpoint\n`
     )
+    for (const warning of fields.warnings ?? []) {
+      attachCtx.stdout.write(`  ! ${warning}\n`)
+    }
     return
   }
   attachCtx.stdout.write(`✓ Claude Code attached (${fields.settingsPath})\n`)
