@@ -67,11 +67,3 @@ test('Reports has an agent marker for hyp report list', () => {
   assert.equal(listing.length, 1, 'REPORTS.md needs one agent marker above a block that is hyp report list')
   assert.match(listing[0][1], /\blist_recommendations\b/)
 })
-
-// @ref LLP 0494#docs-paths [tests]: the MCP lines stand alone; no page links the MCP pages
-test('no docs page links MCP.md or MCP_REFERENCE.md', async () => {
-  for (const { page, text } of await docsPages()) {
-    if (page === 'MCP.md' || page === 'MCP_REFERENCE.md') continue
-    assert.ok(!/\(\.?\/?MCP(_REFERENCE)?\.md[)#]/.test(text), `docs/${page} links an MCP page`)
-  }
-})

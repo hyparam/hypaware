@@ -252,14 +252,13 @@ test('the page names the mint, the token\'s reach, and the mark tool as live', (
   assert.doesNotMatch(PAGE, /upcoming server release/)
 })
 
-// @ref LLP 0494#docs-order [tests]: gate step 1, no published page links MCP.md before the README row lands
-test('no published docs page links MCP.md yet', async () => {
-  const docsDir = path.join(REPO_ROOT, 'docs')
-  for (const name of await fs.readdir(docsDir)) {
-    if (!name.endsWith('.md') || name === 'MCP.md') continue
-    const text = await fs.readFile(path.join(docsDir, name), 'utf8')
-    assert.ok(!/\(\.?\/?MCP\.md[)#]/.test(text), `docs/${name} links MCP.md`)
-  }
+// @ref LLP 0494#docs-order [tests]: the README rows publish both MCP pages; the site builds only pages docs/README.md links
+test('docs/README.md links MCP.md and MCP_REFERENCE.md', () => {
+  const index = readFileSync(path.join(REPO_ROOT, 'docs', 'README.md'), 'utf8')
+  assert.match(index, /^\| \[MCP\]\(MCP\.md\) \|/m, 'docs/README.md needs a table row for MCP.md')
+  assert.match(index, /^\| \[MCP reference\]\(MCP_REFERENCE\.md\) \|/m, 'docs/README.md needs a table row for MCP_REFERENCE.md')
+  const quickstart = index.split(/^## Quickstart$/m)[1].split(/^## /m)[0]
+  assert.match(quickstart, /\]\(MCP\.md\)/, 'the Quickstart links MCP.md')
 })
 
 /**

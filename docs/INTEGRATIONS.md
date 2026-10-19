@@ -72,7 +72,7 @@ agents it collects from your machine through the login you already have.
 
 | Integration | Status | Runs on | What it does | Setup |
 | --- | --- | --- | --- | --- |
-| [MCP clients](QUERYING.md#connect-an-mcp-client) | Supported | Your machine | `hyp mcp serve` gives any MCP client your recorded history over stdio | `hyp mcp serve` |
+| [MCP clients](MCP.md) | Supported | Your machine | `hyp mcp serve` gives any MCP client your recorded history over stdio | `hyp mcp serve` |
 | [Exports](CONFIGURATION.md#choose-an-export-destination) | Supported | Your machine | Scheduled Parquet exports under `<HYP_HOME>/exports`, or a custom sink such as Amazon S3 | `--export local-parquet` |
 
 ## Request an integration
