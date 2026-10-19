@@ -26,6 +26,12 @@ package contents and recipes; the sandbox service-manager shims do not prove
 real launchd or systemd installation. Local SDK validation ran on macOS;
 the required SDK CI job runs on Linux. No release was published.
 
+Local checks on the merged base: 19 focused JavaScript/Python tests, typecheck,
+package dry run, LLP number validation and five hermetic smoke flows passed.
+The full suite passed 8,803 tests, skipped seven and failed the existing Hermes
+catch-up test with `64 !== 133`. Running that test alone against master
+`4d138b97a` reproduced the identical failure; no Hermes files changed here.
+
 CPU and memory review: no unbounded retained queue or per-token serialization
 was found. Disk is bounded to 256 events of 512 KiB; reads allocate only the
 event size plus one byte. The source drains at most 32 events per one-second

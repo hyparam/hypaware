@@ -53,9 +53,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      HYP_LANGGRAPH_POC_DEPS: ${{ runner.temp }}/langgraph-js
-      HYP_LANGGRAPH_PYTHON: ${{ runner.temp }}/langgraph-python/bin/python
-      TMPDIR: ${{ runner.temp }}
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@v6
@@ -67,6 +64,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Configure isolated SDK paths
+        run: |
+          echo "HYP_LANGGRAPH_POC_DEPS=$RUNNER_TEMP/langgraph-js" >> "$GITHUB_ENV"
+          echo "HYP_LANGGRAPH_PYTHON=$RUNNER_TEMP/langgraph-python/bin/python" >> "$GITHUB_ENV"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - run: npm i
       - name: Install isolated SDK test dependencies
         run: |
