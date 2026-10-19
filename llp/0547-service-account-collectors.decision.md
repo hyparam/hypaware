@@ -107,7 +107,7 @@ interface KeptServiceToken {
   central_url: string     // the join URL, canonicalized as sameCentral does
   fingerprint: string     // fingerprintToken(secret), checked on read
   written_at: string      // ISO
-  stopped_code?: string   // set by D3's stop, cleared only by a new join
+  stopped_code?: string   // set by D3's stop; binds to this record's secret and URL; a new join drops it
 }
 ```
 
@@ -126,12 +126,32 @@ interface KeptServiceToken {
   the default `<stateRoot>/plugins/@hypaware/central/identity.json` when
   none is named. No config key is added.
 - **Order inside `hyp join`.** The kept record is written first, then the
-  seed. A failed record write aborts the join before the seed is touched,
-  so the previous enrollment and its record are unchanged. A failed seed
-  write after it leaves a record bound to the new URL while the config
-  still names the old one; D3's binding rule means neither secret reaches
-  the other server, the old identity keeps working, and re-running the
-  join completes it.
+  seed. A failed seed write after it leaves a record bound to the new URL
+  while the config still names the old one; D3's binding rule means
+  neither secret reaches the other server, the old identity keeps
+  working, and re-running the join completes it.
+- <a id="write-failure"></a>**A failed record write is classified by
+  re-reading it.** `atomicWriteJson` can reject before the rename (temp
+  create, write, sync, chmod or the rename itself: the target is
+  untouched) or after it (opening or syncing the directory: the new record
+  is already visible, its durability uncertain). The caller cannot tell
+  which from the error, so on any rejection it re-reads the target once:
+  - **the new record is visible** (it parses and its `fingerprint`,
+    `central_url` and, for D3's stop rewrite, `stopped_code` equal what
+    was written): treated as written. `hyp join` goes on to the seed and
+    prints that the record's sync failed, with "re-run `hyp join` if this
+    host crashes before the next start"; D3 treats the stop as persisted.
+  - **the old record, or no record, is visible:** a failure before
+    publication. `hyp join` exits 1 before the seed; the previous
+    enrollment and its record are unchanged. D3 keeps the stop in memory.
+  - **the target is unreadable:** `hyp join` exits 1 before the seed, and
+    D3's activation refuses with no request (row 0) until a re-join.
+  - In none of these does the caller retry the write in a loop, write the
+    seed for a destination the visible record does not name, or send
+    anything to the old destination. If a crash later undoes an
+    uncertain rename, the old record comes back bound to its own URL and
+    fingerprint, so D3 treats it as unrelated to the new seed and never
+    sends its secret to the new server.
 - Seed retirement is unchanged: the seed still goes after the first apply,
   and the served config still carries no token.
 - The prefix is a routing hint, not trust: the server decides what the
@@ -164,25 +184,51 @@ interface KeptServiceToken {
   leave` the daemon is already uninstalled by step 4, so a leftover record
   is never read; the re-run removes it.
 
-### D3: The central sink recovers from the kept record only at its own destination {#rebootstrap}
+### D3: The central sink checks the record at activation and recovers only at its own destination {#rebootstrap}
 
 The kept record is a **second source, never mixed with the first.**
 `IdentityClient` keeps today's `bootstrapToken` (the configured
 `identity.bootstrap_token`, present only while a fresh join's seed is
 live) and its exact path: `mintChanged` and its fingerprint check still
-decide a re-join. The kept secret is a separate field, read only when
-recovery is needed. It is never assigned to `bootstrapToken` and never
-reaches `mintChanged`, so the URL-changed branch of `mintChanged` can
-never send it.
+decide a re-join. The kept secret is a separate field. It is never
+assigned to `bootstrapToken` and never reaches `mintChanged`, so the
+URL-changed branch of `mintChanged` can never send it. Its secret is used
+only for recovery; its stop is checked on every activation.
+
+<a id="activation-stop"></a>**Activation reads the record first.** Each
+`acquire()` (once per `IdentityClient`, at sink start and after a config
+reload rebuilds the sink, the same point that reads `identity.json`
+today) reads the kept record before it reads `identity.json` or sends
+anything, and keeps the result in memory for the life of the client.
+A stop in the record **applies to a credential** when the record has
+`stopped_code` and the credential is the one the record names:
+
+| Credential about to be used | The stop applies when |
+| --- | --- |
+| configured `bootstrapToken` (a retained seed) | `fingerprintToken(bootstrapToken) === kept.fingerprint` and `sameCentral(kept.central_url, centralUrl)` |
+| persisted identity (fresh or stale) | `persisted.bootstrap_token_fp === kept.fingerprint`, `sameCentral(kept.central_url, persisted.central_url)`, and `persisted.origin !== 'login'` |
+| the kept secret (recovery) | always (it is the record's own secret) |
+
+A record whose fingerprint or destination differs is **unrelated**: its
+stop does not touch a different seed, a login or CI identity, or an
+identity another secret enrolled, and its secret is not used.
 
 `acquire()` decides in this order; the first matching row wins:
 
-| State | Action | Requests |
-| --- | --- | --- |
-| configured `bootstrapToken` set | today's path, unchanged (`mintChanged` then the URL-mismatch refusal) | as today |
-| persisted identity, `!sameCentral(persisted.central_url, centralUrl)` | today's URL-mismatch refusal, unchanged; the kept record is not read | 0 |
-| persisted identity, same destination | load, or refresh when stale | as today |
-| no persisted identity | read the kept record; if `sameCentral(kept.central_url, centralUrl)` and no `stopped_code`, `bootstrap()` once with it; otherwise refuse | 1 or 0 |
+| # | State | Action | Requests |
+| --- | --- | --- | --- |
+| 0 | record unreadable (below) | refuse, `service_token_unreadable` | 0 |
+| 1 | configured `bootstrapToken` set, stop applies to it | refuse, `ServiceCredentialStopped` with the stored code | 0 |
+| 2 | configured `bootstrapToken` set | today's path, unchanged (`mintChanged` then the URL-mismatch refusal) | as today |
+| 3 | persisted identity, `!sameCentral(persisted.central_url, centralUrl)` | today's URL-mismatch refusal, unchanged | 0 |
+| 4 | persisted identity, same destination, stop applies to it | refuse, `ServiceCredentialStopped` with the stored code | 0 |
+| 5 | persisted identity, same destination | load, or refresh when stale | as today |
+| 6 | no persisted identity, record same destination, no `stopped_code` | `bootstrap()` once with the kept secret | 1 |
+| 7 | no persisted identity, otherwise | refuse (stopped, other destination, or no record) | 0 |
+
+Rows 1 and 4 are what make the stop hold across restarts: a fresh cached
+JWT (row 4) and a seed still configured after a refused bootstrap (row 1)
+are both checked before any request.
 
 `refresh()` answered `401` recovers from the kept record only when all of
 these hold, otherwise it takes the ordinary error path:
@@ -209,23 +255,40 @@ these hold, otherwise it takes the ordinary error path:
 - **Unreadable record.** Any read error other than `ENOENT` (`EACCES`,
   `EISDIR`, `EIO`), bad JSON, an unknown `version`, a missing field, a
   secret that fails the `hsa_` shape, or a `fingerprint` that does not
-  match the secret: no request, `error_kind: 'service_token_unreadable'`,
+  match the secret: no request on any path (row 0, since an unreadable
+  record could hold a stop), `error_kind: 'service_token_unreadable'`,
   and `hyp status` shows `stopped: service token file unreadable` with the
   path and the remedy "run `hyp join` again". The contents are never
-  logged or printed. `ENOENT` means no record: no recovery, the ordinary
-  error path.
+  logged or printed. `ENOENT` means no record: no stop and no recovery.
 - **Revoked or disabled stops, and stays stopped.** A `403` with
   `error: 'service_token_revoked'` or `'service_account_disabled'` from
   bootstrap, refresh or upload raises a `ServiceCredentialStopped` error
-  carrying that code. The client then rewrites the kept record with
-  `stopped_code` set (same atomic `0600` write), so the stop holds across
-  daemon restarts and config reloads: no further bootstrap, refresh or
-  upload request for that sink until a new `hyp join` replaces the record.
-  If that rewrite fails, the stop still holds in memory for the process
-  and the failure is logged with `error_kind`. Revocation and disable are
-  permanent on the server (0620), so a stored stop is never wrong. Rows
-  already captured stay in the local spool under its existing bounds;
-  nothing is dropped by the stop itself.
+  carrying that code, and the client stops sending for that sink at once.
+  When the refused credential is the one the record names (the table
+  above), the client rewrites the record with `stopped_code` set (same
+  atomic `0600` write), so rows 1 and 4 refuse after a restart or reload.
+  Revocation and disable are permanent on the server (0620), so a stored
+  stop is never wrong. Rows already captured stay in the local spool under
+  its existing bounds; nothing is dropped by the stop itself.
+- **A stop held only in memory.** If the rewrite fails (and the re-read in
+  #write-failure does not show the stop), or no record names the refused
+  credential (a seed written by hand, not by `hyp join`), the stop holds
+  for the life of the process and the failure is logged with
+  `error_kind: 'service_stop_not_persisted'`. After a restart such a
+  sink sends at most one request before the server refuses it again and
+  the stop is retried. This is the disclosed difference from a persisted
+  stop.
+- **A deliberate new join replaces the stop.** `hyp join` with an `hsa_`
+  secret always writes a fresh record with no `stopped_code`, whatever the
+  old record held:
+  - a **new secret** gets a new fingerprint and enrolls normally;
+  - the **same secret** is allowed one bootstrap per join (the operator's
+    explicit retry); a still-revoked secret is refused again and the stop
+    is written again. No local refusal at join, so a stop written in error
+    is never permanent.
+  - A non-`hsa_` join or a login enrollment retires the record
+    (#secret-file), which removes the stop with it; the new enrollment is
+    unrelated to it.
 - The sink handles `401` today (`sink.js` upload and refresh paths) and has
   no `403` branch; this adds the one branch above and nothing for other
   `403` bodies, which keep today's behavior.
@@ -234,9 +297,11 @@ these hold, otherwise it takes the ordinary error path:
   with the remedy "create a new token in HypAware and run `hyp join`
   again".
 
-Bounded cost: the steady path never reads the record. One small file read
-per recovery, one bootstrap per lost or expired identity, zero requests
-after a stop or a destination refusal, and one file rewrite per stop.
+Bounded cost: one small file read per activation (sink start or rebuild),
+beside the `identity.json` read activation already does; nothing per
+upload or per refresh. One bootstrap per lost or expired identity, zero
+requests after a persisted stop or a destination refusal, at most one per
+activation after a stop held only in memory, and one file rewrite per stop.
 
 ### D4: `hyp remote login --token-file` stores an `hsa_` secret as `kind: 'service'` {#remote-login}
 
@@ -313,16 +378,39 @@ sending a long-lived secret on every request.
   or the login identity is written, and a forced refresh `401` afterwards
   makes no bootstrap with the old secret. A failing unlink (`EACCES` via an
   fs seam) exits 1 with nothing else written.
-- **Failed replacement.** `hyp join` with a new `hsa_` secret where the
-  record write fails: exit 1, old record and seed unchanged. Where the seed
-  write fails after the record: the old identity still loads, and neither
-  secret reaches the other URL.
-- **Permanent refusal.** `403 service_token_revoked` from bootstrap,
-  refresh and upload each: no further request in the poll window, the
-  record carries `stopped_code`, and a daemon restart with the same record
-  makes zero requests. A new `hyp join` clears it.
+- **Failed replacement (#write-failure), against the real
+  `atomicWriteJson` with an fs seam.** A failure before the rename (temp
+  write `EIO`, rename `EXDEV`): exit 1, old record and seed unchanged. A
+  directory-sync `EIO` after the rename: the new record is visible, the
+  join continues to the seed and prints the sync warning, and no request
+  reaches the old URL. An unreadable target after the failure: exit 1,
+  then activation makes zero requests. Each case repeated for D3's stop
+  rewrite (visible stop treated as persisted; invisible stop held in
+  memory). Where the seed write fails after the record: the old identity
+  still loads, and neither secret reaches the other URL. A crash model that
+  restores the old record after an uncertain rename: no request carries
+  the old secret to the new URL.
+- **Permanent refusal (#activation-stop).** `403 service_token_revoked`
+  from bootstrap, refresh and upload each: no further request in the poll
+  window and the record carries `stopped_code`. Then restart (a new
+  `IdentityClient` over the same files) with each of: a fresh
+  `identity.json` for that record, a stale one, none, and a configured
+  seed with the same secret: zero requests in every case.
+- **Unrelated-record controls.** A stopped record with a different
+  fingerprint or destination does not stop: a fresh identity another
+  secret enrolled (loads), a login identity (loads), a configured seed
+  with a different secret (bootstraps once).
+- **New join after a stop.** Same secret: the record is rewritten without
+  `stopped_code`, exactly one bootstrap, a second `403` stops and persists
+  again. New secret: one bootstrap with the new secret, the old one never
+  sent. A non-`hsa_` join: the record and its stop are gone, the new
+  enrollment proceeds.
+- **Stop held in memory.** Inject a stop-rewrite failure with no visible
+  record: no further request in that process; after a restart, at most one
+  request before the stop is reached again.
 - **Unreadable record.** `EACCES`, `EISDIR`, bad JSON, unknown version,
-  bad shape and fingerprint mismatch each give zero requests,
+  bad shape and fingerprint mismatch each give zero requests at
+  activation, including with a fresh `identity.json` beside it,
   `service_token_unreadable`, and output that does not contain the secret.
 - **Private creation.** In a disposable `HOME` and `HYP_HOME` under umask
   `022`, with a fake token and a fake central, run D1's commands with
