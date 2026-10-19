@@ -14,6 +14,7 @@ import { attachLangGraph, LANGGRAPH_MARKER } from '../../hypaware-core/plugins-w
 import { createPolicy } from '../../hypaware-core/plugins-workspace/langgraph/src/policy.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { publish, pendingSlots, readSlot, journalPath, encodeEvent, SLOT_COUNT } from '../../hypaware-core/plugins-workspace/langgraph/src/journal.js'
+import { startLangGraphSource } from '../../hypaware-core/plugins-workspace/langgraph/src/listener.js'
 import { SessionProjection } from '../../hypaware-core/plugins-workspace/langgraph/src/projection.js'
 import { validateLangGraphConfig } from '../../hypaware-core/plugins-workspace/langgraph/src/config.js'
 
@@ -105,6 +106,56 @@ test('an unreadable folder fails closed instead of reading as having no .hypigno
   }
   await fs.unlink(path.join(locked, '.hypignore'))
   assert.equal(policy.allows('s', locked), true)
+})
+
+test('producer and collector both refuse an unreadable folder and a session ignored under an unchanged signature', async t => {
+  if (process.getuid?.() === 0) return t.skip('root reads through directory permissions')
+  const { env, home, stateDir } = await fixture(t)
+  const directory = journalPath(stateDir)
+  const ignores = new SessionIgnoreSet(stateDir)
+  ignores.add('other')
+  const locked = path.join(home, 'locked')
+  await fs.mkdir(locked)
+  await fs.writeFile(path.join(locked, '.hypignore'), 'ignore\n')
+  let calls = 0
+  const emit = async callback => {
+    const id = String(calls++)
+    await callback.handleToolStart({ id: ['tool'] }, '{}', id, undefined, [], {}, 'tool', id)
+    await callback.handleToolEnd('done', id)
+  }
+  const allowed = createHypAwareCallback({ env, cwd: home, sessionId: 's' })
+  const unreadable = createHypAwareCallback({ env, cwd: locked, sessionId: 'b' })
+  await emit(allowed)
+  const projection = await readSlot(directory, (await pendingSlots(directory))[0])
+  const source = /** @type {any} */ (await startLangGraphSource(/** @type {any} */ ({ env, config: { listen_port: 0 },
+    storage: { cacheTablePath: (/** @type {string} */ d) => d, async appendRows() {} },
+    log: { info() {}, warn() {}, error() {} } })))
+  const drained = async () => {
+    for (let i = 0; i < 50 && (await pendingSlots(directory)).length; i++) await new Promise(r => setTimeout(r, 100))
+    return (await source.status()).details
+  }
+  try {
+    assert.equal((await drained()).rows_written > 0, true)
+    // Rapid atomic marker writes can leave ino, mtime and ctime unchanged.
+    const frozen = fsSync.statSync(ignores.directory)
+    const statSync = fsSync.statSync
+    t.mock.method(fsSync, 'statSync', (file, ...rest) => file === ignores.directory ? frozen : statSync(file, ...rest))
+    ignores.add('s')
+    await emit(allowed)
+    assert.equal(allowed.status().queued, 1, 'producer sees the new session ignore')
+    await publish(directory, { version: 1, projection })
+    await fs.chmod(locked, 0o000)
+    try {
+      await emit(unreadable)
+      assert.equal(unreadable.status().queued, 0, 'producer fails closed on the unreadable folder')
+      await publish(directory, { version: 1, projection: { ...projection, session_id: 'b', cwd: locked } })
+      assert.equal((await drained()).policy_drops, 2, 'collector drops both journaled events')
+    } finally {
+      await fs.chmod(locked, 0o700)
+    }
+  } finally {
+    await source.stop()
+  }
 })
 
 test('journal bounds bytes and capacity across concurrent producers; published events survive a new reader', async t => {
