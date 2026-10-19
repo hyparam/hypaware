@@ -10,6 +10,9 @@ import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
+import { deleteMatchingRows, listLiveDataFiles } from '../../src/core/cache/iceberg/store.js'
+import { resolveIcebergDir } from '../../src/core/cache/storage.js'
+import { cacheTablePath } from '../../src/core/cache/paths.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
@@ -19,7 +22,7 @@ import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-worksp
  * no gateway entrypoint. Its capture-health line is the one signal that can
  * say it works, and it reads the newest row the sweep landed (issue #2069).
  *
- * @ref LLP 0546#newest-partition [tests]: a row found is ok, none is unknown, and only the newest date partition is read
+ * @ref LLP 0546#newest-partition [tests]: a row found is ok, none is unknown, and only the newest date partition, data and deletes, is read
  */
 
 /** @type {ColumnSpec[]} */
@@ -134,5 +137,67 @@ test('gateway-mode codex gets no transcript-lane capture-health line', async () 
     ])
     const { report } = await collect({ capture_mode: 'gateway' })
     assert.equal(report.captureHealth.find((/** @type {any} */ c) => c.client === 'codex'), undefined)
+  })
+})
+
+/**
+ * @param {string} cacheRoot
+ */
+function codexTableDir(cacheRoot) {
+  return resolveIcebergDir(cacheTablePath(cacheRoot, 'ai_gateway_messages', ['source=codex']))
+}
+
+/**
+ * Every file under `dir` whose name ends with `suffix`.
+ *
+ * @param {string} dir
+ * @param {string} suffix
+ * @returns {Promise<string[]>}
+ */
+async function filesEndingWith(dir, suffix) {
+  const entries = await fs.readdir(dir, { recursive: true })
+  return entries.filter((name) => name.endsWith(suffix)).map((name) => path.join(dir, name))
+}
+
+test('an older partition\'s delete history is neither read nor needed', async () => {
+  await withHome(async ({ cacheRoot, collect }) => {
+    await appendCodexRows(cacheRoot, [
+      { session_id: 'old', client_name: 'codex', message_created_at: '2026-08-16T09:00:00Z', date: '2026-08-16' },
+    ])
+    await appendCodexRows(cacheRoot, [
+      { session_id: 'new', client_name: 'codex', message_created_at: '2026-08-17T09:00:00Z', date: '2026-08-17' },
+    ])
+    const tableDir = codexTableDir(cacheRoot)
+    await deleteMatchingRows(tableDir, (row) => row.session_id === 'old', { columns: ['session_id'] })
+    const deletes = await filesEndingWith(tableDir, '.puffin')
+    assert.equal(deletes.length, 1, 'the older day carries one committed delete')
+    // Gone from disk: a read that still fetched it would fail and say unknown.
+    await fs.rm(deletes[0])
+    const { report } = await collect({})
+    const entry = report.captureHealth.find((/** @type {any} */ c) => c.client === 'codex')
+    assert.equal(entry.state, 'ok')
+    assert.equal(entry.lastEventAt, '2026-08-17T09:00:00.000Z')
+    const files = await listLiveDataFiles(tableDir, { newestBy: 'date' })
+    assert.deepEqual(files.map((f) => f.partition.date), ['2026-08-17'])
+  })
+})
+
+test('committed deletes in the newest partition are enforced', async () => {
+  await withHome(async ({ cacheRoot, collect }) => {
+    await appendCodexRows(cacheRoot, [
+      { session_id: 'keep', client_name: 'codex', message_created_at: '2026-08-17T08:00:00Z', date: '2026-08-17' },
+      { session_id: 'drop', client_name: 'codex', message_created_at: '2026-08-17T10:00:00Z', date: '2026-08-17' },
+    ])
+    const tableDir = codexTableDir(cacheRoot)
+    await deleteMatchingRows(tableDir, (row) => row.session_id === 'drop', { columns: ['session_id'] })
+    const first = await collect({})
+    const entry = first.report.captureHealth.find((/** @type {any} */ c) => c.client === 'codex')
+    assert.equal(entry.state, 'ok')
+    assert.equal(entry.lastEventAt, '2026-08-17T08:00:00.000Z', 'the deleted newer row is not reported')
+    await deleteMatchingRows(tableDir, () => true, { columns: ['session_id'] })
+    const second = await collect({})
+    const after = second.report.captureHealth.find((/** @type {any} */ c) => c.client === 'codex')
+    assert.equal(after.state, 'unknown', 'deleted rows never confirm capture')
+    assert.equal(after.lastEventAt, null)
   })
 })

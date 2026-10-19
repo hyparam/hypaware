@@ -37,10 +37,13 @@ persisted field for it was ruled out.
 **When a configured client writes no marker, `hyp status` reads the
 `message_created_at` of the newest row in that client's `ai_gateway_messages`
 source table, and reports it on the client's capture-health line.** The read
-is bounded: table metadata names the live data files and their `date`
-partitions, and only the newest partition's one timestamp column is scanned.
-`date` is the UTC day of `message_created_at`, so an older partition cannot
-hold a newer row.
+is bounded by the newest `date` partition. One metadata load and the table's
+manifests name the live data files and their partitions. Only the delete files
+that apply to the newest partition's files are read, and only that
+partition's one timestamp column is decoded, one row group at a time, with its
+committed delete positions skipped. Older partitions' data and delete history
+are never opened. `date` is the UTC day of `message_created_at`, so an older
+partition cannot hold a newer row.
 
 - A row found is `state: 'ok'` with `lastEventAt` set to its timestamp.
 - No row, a missing table, or a read that fails is `state: 'unknown'`
@@ -65,7 +68,10 @@ claim about the cache.
 - Rows still in the spool are not counted, so a turn the sweep just captured
   shows up after its flush.
 - Only a timestamp is read, so purged sessions are not filtered beyond the
-  committed delete positions the scan already applies. A newest partition whose
+  newest partition's committed delete positions, which the read applies. A newest partition whose
   rows are all deleted reads `unknown`, never a false `ok`.
-- `hyp status` pays one metadata load and one single-column partition scan for
-  each marker-less configured client, which today is Codex alone.
+- `hyp status` pays one metadata load, the manifest walk, and one
+  single-column read of the newest partition (its data and its deletes) for
+  each marker-less configured client, which today is Codex alone. Manifest
+  work grows with the table's file count; delete history outside the newest
+  day adds nothing.

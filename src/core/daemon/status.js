@@ -21,7 +21,9 @@ import {
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 import { cacheTablePath } from '../cache/paths.js'
 import { resolveIcebergDir } from '../cache/storage.js'
-import { listLiveDataFiles, scanRowsFromTable } from '../cache/iceberg/store.js'
+import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet'
+import { urlToPath } from '../cache/iceberg/resolver.js'
+import { listLiveDataFiles, physicalProjection } from '../cache/iceberg/store.js'
 import { AI_GATEWAY_MESSAGES_DATASET } from '../backfill/scan_util.js'
 import { discoverSpoolTables, QUERY_FLUSH_FAILURE_COOLDOWN_MS, readFlushFailure } from '../cache/spool.js'
 import { resolveLayeredConfig } from '../config/merge.js'
@@ -3586,9 +3588,12 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
  * The newest `message_created_at` among a client's cached
  * `ai_gateway_messages` rows, or null when it has none.
  *
- * Bounded by the newest date partition: table metadata names the partitions,
- * and only that one partition's timestamp column is read. `date` is the UTC
- * day of `message_created_at`, so no older partition can hold a newer row.
+ * Bounded by the newest date partition: one metadata load and the manifests
+ * name the files, only that partition's delete data is read, and only its
+ * timestamp column is decoded, one row group at a time. `date` is the UTC day
+ * of `message_created_at`, so no older partition can hold a newer row. A raw
+ * parquet read applies no deletes, so committed delete positions are skipped
+ * here.
  *
  * @param {string} cacheRoot
  * @param {string} clientName
@@ -3596,18 +3601,23 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
  */
 async function newestCachedClientRowAt(cacheRoot, clientName) {
   const tableDir = resolveIcebergDir(cacheTablePath(cacheRoot, AI_GATEWAY_MESSAGES_DATASET, [`source=${clientName}`]))
-  /** @type {string | undefined} */
-  let newestDate
-  for (const file of await listLiveDataFiles(tableDir)) {
-    const date = file.partition.date
-    if (typeof date === 'string' && (newestDate === undefined || date > newestDate)) newestDate = date
-  }
-  if (newestDate === undefined) return null
   let newestMs = -Infinity
-  for await (const row of scanRowsFromTable(tableDir, ['message_created_at'], { whereIn: { date: [newestDate] } })) {
-    const value = row.message_created_at
-    const ms = value instanceof Date ? value.getTime() : typeof value === 'string' ? Date.parse(value) : NaN
-    if (ms > newestMs) newestMs = ms
+  for (const file of await listLiveDataFiles(tableDir, { newestBy: 'date' })) {
+    const source = await asyncBufferFromFile(urlToPath(file.filePath))
+    const { metadata, columns } = await physicalProjection(source, ['message_created_at'])
+    if (columns.length === 0) continue
+    let start = 0
+    for (const group of metadata.row_groups) {
+      const end = start + Number(group.num_rows)
+      const rows = await parquetReadObjects({ file: source, metadata, columns, rowStart: start, rowEnd: end })
+      for (let i = 0; i < rows.length; i++) {
+        if (file.deletedPositions?.has(BigInt(start + i))) continue
+        const value = rows[i].message_created_at
+        const ms = value instanceof Date ? value.getTime() : typeof value === 'string' ? Date.parse(value) : NaN
+        if (ms > newestMs) newestMs = ms
+      }
+      start = end
+    }
   }
   return Number.isFinite(newestMs) ? new Date(newestMs).toISOString() : null
 }

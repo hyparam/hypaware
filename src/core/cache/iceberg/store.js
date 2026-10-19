@@ -539,9 +539,12 @@ async function* scanFileForMatchingRows(filePath, resolver, predicate, columns, 
  * @param {TableMetadata} metadata
  * @param {Resolver} resolver
  * @param {Map<string, { entry: ManifestEntry }>} dataFileMap
+ * @param {boolean} [narrowed] the map is a selection, not the whole table:
+ *   fetch only the delete files that apply to one of its files, so delete
+ *   history outside the selection is neither read nor held
  * @returns {Promise<Map<string, Set<bigint>>>}
  */
-async function loadDeletedPositions(metadata, resolver, dataFileMap) {
+async function loadDeletedPositions(metadata, resolver, dataFileMap, narrowed = false) {
   const snapshotId = metadata['current-snapshot-id']
   const snapshot = metadata.snapshots?.find((s) => String(s['snapshot-id']) === String(snapshotId))
   if (!snapshot?.['manifest-list']) return new Map()
@@ -557,8 +560,11 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
       deleteEntries.push(entry)
     }
   }))
-  if (deleteEntries.length === 0) return new Map()
-  const { positionDeletesMap } = await fetchDeleteMaps(deleteEntries, resolver)
+  const fetched = narrowed
+    ? deleteEntries.filter((deleteEntry) => appliesToAnyDataFile(deleteEntry, dataFileMap, metadata))
+    : deleteEntries
+  if (fetched.length === 0) return new Map()
+  const { positionDeletesMap } = await fetchDeleteMaps(fetched, resolver)
   /** @type {Map<string, Set<bigint>>} */
   const out = new Map()
   for (const [filePath, groups] of positionDeletesMap) {
@@ -573,6 +579,29 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
     if (set.size > 0) out.set(filePath, set)
   }
   return out
+}
+
+/**
+ * Does a position delete apply to any file in `dataFileMap`? A deletion
+ * vector names its one data file; a position delete file is matched by
+ * partition and sequence number, the same test the caller applies after the
+ * fetch, so the filter never drops a delete the caller would have kept.
+ *
+ * @param {ManifestEntry} deleteEntry
+ * @param {Map<string, { entry: ManifestEntry }>} dataFileMap
+ * @param {TableMetadata} metadata
+ * @returns {boolean}
+ */
+function appliesToAnyDataFile(deleteEntry, dataFileMap, metadata) {
+  const referenced = deleteEntry.data_file.referenced_data_file
+  if (referenced) {
+    const found = dataFileMap.get(referenced)
+    return found !== undefined && deleteFileAppliesToDataEntry(found.entry, deleteEntry, metadata, 'position')
+  }
+  for (const { entry } of dataFileMap.values()) {
+    if (deleteFileAppliesToDataEntry(entry, deleteEntry, metadata, 'position')) return true
+  }
+  return false
 }
 
 /**
@@ -594,19 +623,37 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * `hyp query sql` fails loudly; grep search must not answer zero where SQL
  * raises.
  *
+ * `opts.newestBy` names an identity-partition column and keeps only the
+ * files whose value for it is the greatest (string comparison), so a reader
+ * that wants just the newest day pays manifest enumeration for the table but
+ * reads and holds delete data for that day alone.
+ *
  * @param {string} tablePath
+ * @param {{ newestBy?: string }} [opts]
  * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, sizeBytes: number, deletedPositions: Set<bigint> | undefined }[]>}
  * @ref LLP 0302#purge-by-position [implements]: the file walk needs the committed delete positions, because a raw parquet read applies none
  */
-export async function listLiveDataFiles(tablePath) {
+export async function listLiveDataFiles(tablePath, opts) {
   if (!tableExists(tablePath)) return []
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return []
   const dataFileMap = await findDataFileEntries(metadata, resolver)
+  const key = opts?.newestBy
+  if (key !== undefined) {
+    /** @type {string | undefined} */
+    let newest
+    for (const { partition } of dataFileMap.values()) {
+      const value = partition[key]
+      if (typeof value === 'string' && (newest === undefined || value > newest)) newest = value
+    }
+    for (const [filePath, { partition }] of dataFileMap) {
+      if (newest === undefined || partition[key] !== newest) dataFileMap.delete(filePath)
+    }
+  }
   if (dataFileMap.size === 0) return []
-  const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
+  const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap, key !== undefined)
   /** @type {{ filePath: string, partition: Record<string, unknown>, sizeBytes: number, deletedPositions: Set<bigint> | undefined }[]} */
   const out = []
   for (const [filePath, { partition, entry }] of dataFileMap) {
