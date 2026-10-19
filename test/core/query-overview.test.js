@@ -1108,6 +1108,26 @@ test('renderOverview escapes captured columns and keeps its own colour', () => {
   }
 })
 
+test('renderOverview clips a captured label before escaping it, so no escape is cut in half', () => {
+  // Escaping first would let the clip land inside `\u001b` and print a
+  // fragment such as `\u00…` (#766). Sliding the ESC across the clip point
+  // puts the boundary at every offset of its escape.
+  for (const columns of [100, 40]) {
+    for (let n = 20; n <= 34; n++) {
+      const label = 'm'.repeat(n) + '\u001b' + 'zzzz'
+      const out = renderOverview({
+        providerRows: [{ provider: 'p', model: label, input_tokens: 1, cached_tokens: 1, output_tokens: 1 }],
+        dailyRows: [],
+        toolRows: [{ tool_name: label, calls: 1, sessions: 1 }],
+        columns,
+      })
+      assert.equal(out.includes('\u001b'), false, `${columns}/${n}: raw ESC`)
+      // Every backslash printed starts a whole four-digit escape.
+      assert.equal(/\\(?!u[0-9a-f]{4})/.test(out), false, `${columns}/${n}: ${JSON.stringify(out)}`)
+    }
+  }
+})
+
 // #410: the block fits the width of the stream it is written to. Counts are
 // exact at every width; only labels and bars give ground, and a table that
 // cannot fit stacks its rows instead of overflowing.
