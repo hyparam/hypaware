@@ -126,8 +126,17 @@ test('a daemon that died before it finished booting is not reported healthy', as
   leaveSnapshot(stateRoot, 'starting')
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
-  assert.notEqual(report.overall, 'healthy')
-  assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')?.severity, 'error')
+  assert.equal(report.overall, 'degraded')
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')
+  assert.ok(diag)
+  assert.equal(diag.severity, 'error')
+  assert.deepEqual(diag.repair, ['hyp daemon restart'])
+  // Issue #1418: a daemon that never reached service was owed no shutdown, and
+  // the snapshot carries no cause, so the sentence says where the run stopped
+  // and names none.
+  assert.match(diag.message, /recorded 'starting' and never recorded reaching service - the daemon exited before it finished starting/)
+  assert.doesNotMatch(diag.message, /exited without shutting down/)
+  assert.doesNotMatch(diag.message, /failed boot/, 'no recorded failure to name')
 })
 
 // The over-fixing guard, and the whole reason the live facts are not enough.

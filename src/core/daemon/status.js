@@ -1799,6 +1799,12 @@ export async function collectHypAwareStatus(opts = {}) {
     const recordedBootFailure = bootFailed
       ? 'recorded a failed boot - the daemon never finished starting'
       : null
+    // `starting` is the same never-served ending with no record of why (issue
+    // #1418): a boot that threw, an OOM kill and a `kill -9` mid-boot all
+    // leave it, so this says where the run stopped and names no cause.
+    const recordedNeverServed = daemon.state === 'starting'
+      ? "recorded 'starting' and never recorded reaching service - the daemon exited before it finished starting"
+      : null
     const recordedWhileServing = `recorded '${daemon.state}' rather than a completed stop`
       + ' - the daemon exited without shutting down'
     diagnostics.push({
@@ -1808,7 +1814,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // kill, a fault, and a `kill -9`, and naming one of those is a wrong
       // diagnosis rather than an unknown one.
       message: `the ${artifact} is still loaded but no daemon process is running,`
-        + ` and the last status snapshot ${stalledStop ?? recordedBootFailure ?? recordedWhileServing},`
+        + ` and the last status snapshot ${stalledStop ?? recordedBootFailure ?? recordedNeverServed ?? recordedWhileServing},`
         + ' and nothing is being captured',
       // Unlike the unloaded case above, the service manager is holding the
       // unit, so the restart path reaches it.
