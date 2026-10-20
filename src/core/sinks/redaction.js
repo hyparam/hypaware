@@ -146,23 +146,26 @@ export function createRowRedactor(config = {}, customOnly = false) {
       toolPaths.delete(key)
     }
 
-    /** @param {unknown} value @param {boolean} hide @param {number} depth @param {string} [field] @param {boolean} [preserve] @returns {any} */
-    function visit(value, hide, depth, field = '', preserve = false) {
+    // `mode` narrows what a hidden file's content may keep: a top-level
+    // identity column is kept verbatim, and only the row's own tool_args may
+    // keep its path keys. The same names nested in masked content are content.
+    /** @param {unknown} value @param {boolean} hide @param {number} depth @param {'preserve' | 'args' | 'path'} [mode] @returns {any} */
+    function visit(value, hide, depth, mode) {
       if (++nodes > MAX_NODES || depth > 64) throw new Error('export redaction row exceeds traversal budget')
       if (typeof value === 'string') {
         bytes += value.length * 2
         if (bytes > MAX_BYTES) throw new Error('export redaction row exceeds text budget')
-        if (preserve) return value
+        if (mode === 'preserve') return value
         if (/^\s*[{[]/.test(value)) {
           try {
             const parsed = JSON.parse(value)
-            const changed = visit(parsed, hide, depth + 1)
+            const changed = visit(parsed, hide, depth + 1, mode === 'args' ? 'args' : undefined)
             return changed === parsed ? value : JSON.stringify(changed)
           } catch (error) {
             if (error instanceof Error && error.message.startsWith('export redaction')) throw error
           }
         }
-        if (hide && !PATH_KEYS.has(field) && !isExportIdentityColumn(field)) return MASK
+        if (hide && mode !== 'path') return MASK
         let result = value
         if (!customOnly) {
           result = privateKeys(result)
@@ -173,18 +176,27 @@ export function createRowRedactor(config = {}, customOnly = false) {
         return result
       }
       if (!value || typeof value !== 'object' || ArrayBuffer.isView(value)) return value
+      // Refuse an over-wide array before walking it, and walk without
+      // materializing an entries array, so the budget bounds memory too.
+      if (Array.isArray(value) && nodes + value.length > MAX_NODES) throw new Error('export redaction row exceeds traversal budget')
       const local = objectValue(value)
       const input = local && objectValue(local.input ?? local.arguments ?? local.args)
       if (!customOnly && [local, input].some(object => object && [...PATH_KEYS].some(key => typeof object[key] === 'string' && sensitiveFile(/** @type {string} */ (object[key]))))) hide = true
       let copy
-      for (const [key, child] of Object.entries(value)) {
-        const keep = preserve || (depth === 0 && isExportIdentityColumn(key))
-        const changed = visit(child, hide || (!customOnly && CREDENTIAL_KEYS.test(key)), depth + 1, key, keep)
+      /** @param {string | number} key @param {unknown} child */
+      const step = (key, child) => {
+        const childMode = mode === 'preserve' || (depth === 0 && typeof key === 'string' && isExportIdentityColumn(key)) ? 'preserve'
+          : depth === 0 && key === 'tool_args' ? 'args'
+            : mode === 'args' && typeof key === 'string' && PATH_KEYS.has(key) ? 'path'
+              : undefined
+        const changed = visit(child, hide || (!customOnly && typeof key === 'string' && CREDENTIAL_KEYS.test(key)), depth + 1, childMode)
         if (changed !== child) {
           copy ??= Array.isArray(value) ? value.slice() : { ...value }
           copy[key] = changed
         }
       }
+      if (Array.isArray(value)) for (let i = 0; i < value.length; i++) step(i, value[i])
+      else for (const key in value) if (Object.hasOwn(value, key)) step(key, value[key])
       return copy ?? value
     }
     return /** @type {T} */ (visit(row, mask, 0))

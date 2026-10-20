@@ -5,7 +5,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { createExportRedactor, createRowRedactor } from '../../src/core/sinks/redaction.js'
 import { parseConfigShape, defaultConfigPath } from '../../src/core/config/schema.js'
-import { mergeConfigLayers } from '../../src/core/config/merge.js'
+import { mergeConfigLayers, resolveLayeredConfig } from '../../src/core/config/merge.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { activate as activateLocalFs } from '../../hypaware-core/plugins-workspace/local-fs/src/index.js'
+import { activate as activateParquet } from '../../hypaware-core/plugins-workspace/format-parquet/src/index.js'
+import { createHook } from 'node:async_hooks'
 import { bootKernel } from '../../src/core/runtime/boot.js'
 import { openIncrementalRows } from '../../src/core/sinks/incremental.js'
 import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
@@ -107,6 +112,78 @@ test('central and local regexes add together instead of replacing central protec
   const local = { version: /** @type {const} */ (2), redaction: { custom_patterns: [{ pattern: 'local-secret' }] } }
   assert.deepEqual(mergeConfigLayers(central, local).effective.redaction?.custom_patterns, [...central.redaction.custom_patterns, ...local.redaction.custom_patterns])
   assert.deepEqual(mergeConfigLayers(central, { version: 2, redaction: {} }).effective.redaction, central.redaction)
+})
+
+test('a sensitive file keeps only its row identity and argument path, not look-alike keys in its content', () => {
+  const redact = createRowRedactor()
+  for (const body of ['{"model":"bespoke-secret","id":"other-secret","text":"hidden"}', '{"file":"bespoke-secret","path":"other-secret","text":"hidden"}']) {
+    const row = { session_id: 's', tool_call_id: 'c', tool_name: 'Read', part_type: 'tool_result', tool_args: { path: '.env' }, content_text: body, raw_frame: { content: body, model: 'raw-secret' } }
+    const out = redact(row)
+    for (const value of [out.content_text, out.raw_frame.content, out.raw_frame.model]) {
+      assert.equal(/secret|hidden/.test(value), false)
+    }
+    assert.equal(out.session_id, 's')
+    assert.equal(out.tool_call_id, 'c')
+    assert.deepEqual(out.tool_args, { path: '.env' })
+  }
+})
+
+test('the traversal budget refuses an over-wide container before walking it', () => {
+  const row = { raw_frame: Array(1_000_000).fill(null) }
+  const before = process.memoryUsage().heapUsed
+  assert.throws(() => createRowRedactor()(row), /traversal budget/)
+  assert.ok(process.memoryUsage().heapUsed - before < 32 * 1024 * 1024)
+})
+
+test('joined boot keeps both layers\' custom patterns through the add-back merge', async t => {
+  const central = { version: /** @type {const} */ (2), redaction: { custom_patterns: [{ pattern: 'org-private' }] } }
+  const local = { version: /** @type {const} */ (2), plugins: [{ name: 'local-plugin' }], sinks: { mine: { plugin: 'local-plugin' } }, redaction: { custom_patterns: [{ pattern: 'local-private' }] } }
+  const resolved = resolveLayeredConfig({ central, local: /** @type {any} */ (local), validate: () => [] })
+  assert.deepEqual(resolved.effective.redaction?.custom_patterns, [{ pattern: 'org-private' }, { pattern: 'local-private' }])
+  assert.deepEqual(resolved.effective.sinks, local.sinks)
+
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-redaction-joined-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [], redaction: local.redaction }))
+  const seed = centralSeedPath(path.join(hypHome, 'hypaware'))
+  await fs.mkdir(path.dirname(seed), { recursive: true })
+  await fs.writeFile(seed, JSON.stringify({ version: 2, plugins: [], redaction: central.redaction }))
+  const boot = await bootKernel({ hypHome, env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }, bootProfile: { activate: [] } })
+  const storage = boot.runtime.storage
+  const table = storage.cacheTablePath('ai_gateway_messages', ['source=unknown'])
+  const columns = ['id', 'content_text', 'cwd'].map(name => ({ name, type: /** @type {const} */ ('STRING'), nullable: true }))
+  await storage.appendRows(table, columns, [{ id: '1', content_text: 'org-private local-private', cwd: '/work' }])
+  await storage.flushTable(table, { reason: 'manual' })
+  const exported = await Array.fromAsync(storage.readRowsSince(table, {}))
+  assert.equal(exported[0].row?.content_text, `${MASK} ${MASK}`)
+})
+
+test('a blob export whose encoder fails before reading rows still stops the redaction worker', async t => {
+  const workers = new Set()
+  const hook = createHook({ init(id, type) { if (type === 'WORKER') workers.add(id) }, destroy(id) { workers.delete(id) } }).enable()
+  t.after(() => hook.disable())
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-redaction-worker-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot: path.join(dir, 'cache'), redaction: { custom_patterns: [{ pattern: 'company-private' }] } })
+  const table = storage.cacheTablePath('logs', ['source=unknown'])
+  await storage.appendRows(table, [{ name: 'body', type: 'STRING', nullable: true }, { name: 'cwd', type: 'STRING', nullable: true }], [{ body: 'company-private', cwd: '/work' }])
+  await storage.flushTable(table, { reason: 'manual' })
+  const log = { info() {}, debug() {}, warn() {}, error() {} }
+  /** @type {any} */
+  let encoder
+  /** @type {any} */
+  let registration
+  await activateParquet(/** @type {any} */ ({ config: {}, log, provideCapability(_name, _version, value) { encoder = value } }))
+  // An unknown dataset leaves the encoder without columns, so it throws before draining rows.
+  await activateLocalFs(/** @type {any} */ ({ config: { exports_dir: path.join(dir, 'exports') }, env: { HYP_HOME: dir }, log, query: { getDataset() { return undefined } }, storage, provideCapability() {}, sinks: { register(x) { registration = x } } }))
+  const sink = await registration.create({ name: 'local', config: { dir: path.join(dir, 'dest') }, encoder, log, paths: { stateDir: path.join(dir, 'state'), tempDir: path.join(dir, 'tmp') } })
+  for (let i = 0; i < 3; i++) {
+    const result = await sink.exportBatch({ batchId: `b${i}`, partitions: [{ dataset: 'logs', tablePath: table, partition: {} }] })
+    assert.equal(result.status, 'partial')
+  }
+  await sink.close()
+  for (let i = 0; i < 50 && workers.size > 0; i++) await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(workers.size, 0)
 })
 
 test('booted config reaches every export reader, preserves local data and watermarks, and cannot be bypassed by projection', async t => {
