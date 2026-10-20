@@ -17,7 +17,9 @@ import path from 'node:path'
 
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
-import { deleteMatchingRows, readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { dataSourceForTable, deleteMatchingRows, readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
+import { fileCatalog, icebergRewriteManifests } from 'icebird'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -245,6 +247,51 @@ test('the sweep releases superseded files once no retained snapshot references t
     assert.equal(remaining.length, 4, 'exactly the live merged files survive')
     const rows = await readRowsFromTable(liveTableDir(dir))
     assert.equal(rows.length, 12, 'the sweep never touches what the table still references')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// icebird reads a source's data manifests on its first scan. A source built
+// before a tick must still scan after the sweep releases the manifests it was
+// built over, while every data file it selects stays live.
+test('a source built before the sweep still scans the manifests the sweep released', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-inplace-held-'))
+  try {
+    await seedFragmented(cacheRoot, 4, 3)
+    const tableDir = liveTableDir(partitionDir(cacheRoot))
+    const held = await dataSourceForTable(tableDir)
+    assert.ok(held, 'fixture invariant: the table has a snapshot')
+
+    // Supersede the manifests and nothing else: every data file stays
+    // referenced, so only metadata can go missing under the held source.
+    const { resolver, lister } = await createLocalIcebergIO()
+    await icebergRewriteManifests({
+      catalog: fileCatalog({ resolver, lister, conditionalCommits: true }),
+      tableUrl: tableUrlForDir(tableDir),
+      resolver,
+    })
+    const metadataDir = path.join(tableDir, 'metadata')
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    const before = await fs.readdir(metadataDir)
+    for (const name of before) await fs.utimes(path.join(metadataDir, name), stale, stale)
+    const dataBefore = (await dataFilesOnDisk(path.dirname(tableDir))).length
+
+    await maintainCache({
+      cacheRoot,
+      expireOnly: true,
+      config: { min_snapshots_to_keep: 0, max_snapshot_age_hours: 0 },
+    })
+    const after = new Set(await fs.readdir(metadataDir))
+    assert.ok(
+      before.some((name) => name.endsWith('.avro') && !after.has(name)),
+      'fixture invariant: the sweep released manifests the held source was built over'
+    )
+    assert.equal((await dataFilesOnDisk(path.dirname(tableDir))).length, dataBefore, 'and no data file')
+
+    let scanned = 0
+    for await (const _row of held.scan({ columns: ['id'] }).rows()) scanned++
+    assert.equal(scanned, 12, 'the held source reads every row it was built over')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
