@@ -1,7 +1,7 @@
 # LLP 0499: HypAware MCP, Phase 2 distribution design
 
 **Type:** Design
-**Status:** Draft
+**Status:** Active
 **Systems:** MCP, Plugins, Docs
 **Author:** HypForge designer
 **Date:** 2026-10-15
@@ -27,6 +27,9 @@ LLP 0494#cli-mint, #skills, #docs-mcp, #docs-order; hypaware-server LLP
 > Revision 4 folds the plan actionability check (P1: the staging push
 > scope matches LLP 0500#t2; P2: the moved repo's `validate.yml` run is a
 > verification row; the GitHub draft's no-mark variant).
+> Active 2026-10-20: Phase 2's human checks are recorded in
+> [LLP 0500#v1-results](./0500-hypaware-mcp-phase-2.plan.md#v1-results);
+> Cursor's human proof is deferred there by Hernan.
 
 ## Summary {#summary}
 
