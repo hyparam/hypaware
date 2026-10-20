@@ -80,6 +80,8 @@ and proposes specific fixes with evidence:
 hyp report generate "Cover last week and focus on repeated debugging work"
 ```
 
+We recommend Fable or Astra for the best report quality.
+
 Read the report locally or publish it to make it appear in your team's
 [HypAware Cloud dashboard](https://app.hypaware.ai/).
 See [reports](./docs/REPORTS.md) for generation and publishing.
