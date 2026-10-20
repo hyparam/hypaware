@@ -582,6 +582,7 @@ async function commitDataFiles({
       manifestLength: BigInt(manifestWriter.offset),
       partitionSpecId: partitionSpec['spec-id'],
       partitions: buildPartitionSummaries(dataFiles.map((f) => f.partition), schema, partitionSpec),
+      dataFilePartitions: dataFiles.map((f) => f.partition),
       addedDataFilesCount: dataFiles.length,
       addedRowCount: dataFiles.reduce((sum, f) => sum + f.record_count, 0n),
       addedFilesSize: dataFiles.reduce((sum, f) => sum + f.file_size_in_bytes, 0n),

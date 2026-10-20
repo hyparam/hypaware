@@ -132,6 +132,7 @@ function rewriteStatement(statement, registry, ctes, outer) {
     rewriteCompoundOrderBy(statement, registry, ctes, outer)
     return
   }
+  if (statement.type === 'show tables') return
   rewriteSelect(statement, registry, ctes, outer)
 }
 
@@ -429,6 +430,7 @@ function inferColumns(statement, registry, ctes) {
       isTimestamp: column.isTimestamp && right[index].isTimestamp,
     }))
   }
+  if (statement.type === 'show tables') return undefined
   /** @type {{ keys: string[], columns: InferredColumn[] }[]} */
   const relations = []
   for (const relation of selectRelations(statement)) {
