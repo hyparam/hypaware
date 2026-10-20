@@ -29,6 +29,7 @@ import { fileCatalogCommit } from 'icebird/src/write/commit.js'
 // reuse of the same icebird write internals (LLP 0104 rewrite mechanics).
 import { deleteFileAppliesToDataEntry } from 'icebird/src/delete.js'
 import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
+import { icebergManifestList } from 'icebird/src/manifest.js'
 import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
@@ -912,7 +913,57 @@ export async function dataSourceForTable(tablePath) {
   const url = tableUrlForDir(tablePath)
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return null
-  return icebergDataSource({ tableUrl: url, metadata, resolver, lister })
+  const pinned = await pinSnapshotManifests(resolver, metadata)
+  return icebergDataSource({ tableUrl: url, metadata, resolver: pinned, lister })
+}
+
+/**
+ * A resolver that serves the current snapshot's manifest list and data
+ * manifests from bytes read now, and delegates every other path.
+ *
+ * icebird reads a source's data manifests on its first scan, not when the
+ * source is built. Snapshot retention is the only reader-safety window the
+ * cache has, and it promises no minimum reader interval, so expiry can
+ * release the snapshot a source just pinned and the sweep then unlinks a
+ * manifest the source has yet to read: the scan fails with ENOENT while every
+ * data file it selects is still live. Reading the bytes up front gives the
+ * source its manifests from construction, as icebird did before 0.9, and
+ * keeps its lazy decode and manifest pruning. The cost is the raw manifest
+ * bytes for the source's lifetime, smaller than the decoded entries the old
+ * eager read held.
+ *
+ * @ref LLP 0310#unreferenced-sweep [constrained-by]: retention is the reader window, so a source must own its manifests before the next sweep
+ * @param {Resolver} resolver
+ * @param {TableMetadata} metadata
+ * @returns {Promise<Resolver>}
+ */
+async function pinSnapshotManifests(resolver, metadata) {
+  /** @type {Map<string, AsyncBuffer>} */
+  const pinned = new Map()
+  /**
+   * @param {string} url
+   * @param {number} [byteLength]
+   */
+  async function pin(url, byteLength) {
+    const file = await resolver.reader(url, byteLength)
+    const bytes = await file.slice(0, file.byteLength)
+    pinned.set(url, { byteLength: bytes.byteLength, slice: (start, end) => bytes.slice(start, end) })
+  }
+  /** @type {Resolver} */
+  const pinning = {
+    ...resolver,
+    reader(url, byteLength) {
+      return pinned.get(url) ?? resolver.reader(url, byteLength)
+    },
+  }
+  const current = String(metadata['current-snapshot-id'])
+  const listUrl = metadata.snapshots?.find((s) => String(s['snapshot-id']) === current)?.['manifest-list']
+  if (listUrl) await pin(listUrl)
+  const { manifests } = await icebergManifestList({ metadata, resolver: pinning })
+  await Promise.all(manifests
+    .filter((m) => (m.content ?? 0) === 0)
+    .map((m) => pin(m.manifest_path, Number.isFinite(Number(m.manifest_length)) ? Number(m.manifest_length) : undefined)))
+  return pinning
 }
 
 /**
