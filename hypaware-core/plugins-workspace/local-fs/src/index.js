@@ -140,15 +140,20 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
             })
             continue
           }
-          const blob = await encodePartition(encoder, partition, {
-            log: sinkCtx.log,
-            tempDir: sinkCtx.paths.tempDir,
-            columns,
-            rows: reader.rows,
-            clusterColumns: clusterColumnsForDataset(query, partition.dataset),
-            sinkInstance: sinkCtx.name,
-            plugin: PLUGIN_NAME,
-          })
+          let blob
+          try {
+            blob = await encodePartition(encoder, partition, {
+              log: sinkCtx.log,
+              tempDir: sinkCtx.paths.tempDir,
+              columns,
+              rows: reader.rows,
+              clusterColumns: clusterColumnsForDataset(query, partition.dataset),
+              sinkInstance: sinkCtx.name,
+              plugin: PLUGIN_NAME,
+            })
+          } finally {
+            await reader.close()
+          }
           // Embed [sinceSeq, lastSeq] so a crash-retry re-writes the same file
           // (idempotent overwrite): the blob sink's server-ledger stand-in.
           const filename = withSeqRangeFilename(blob.filename, reader.sinceSeq, reader.lastAfter.seq)

@@ -824,6 +824,12 @@ export interface HypAwareV2Config {
    * local when both layers set it.
    */
   auto_update?: boolean
+  /** Built-in export redaction is always applied; custom patterns add to it. */
+  redaction?: ExportRedactionConfig
+}
+
+export interface ExportRedactionConfig {
+  custom_patterns?: Array<{ pattern: string, flags?: string }>
 }
 
 /** Legacy alias retained only while the project rename completes. */

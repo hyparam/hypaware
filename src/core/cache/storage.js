@@ -26,12 +26,13 @@ import { claimReconcileScope as claimReconcileScopeImpl, reconcileCacheRows, rec
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
+import { createExportRedactor, isExportIdentityColumn } from '../sinks/redaction.js'
 
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 /**
- * @import { ScannableDataSource, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ExportRedactionConfig, ScannableDataSource, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'
@@ -104,11 +105,12 @@ export function resolveIcebergDir(tablePath) {
  *   getSettleHook?: (dataset: string) => ((rows: Record<string, unknown>[], ctx: { storage: ExtendedQueryStorageService }) => Promise<Record<string, unknown>[]>) | undefined,
  *   usagePolicyResolver?: UsagePolicyResolver,
  *   sourceWithholdResolver?: SourceWithholdResolver,
+ *   redaction?: ExportRedactionConfig,
  * }} args
  * @returns {ExtendedQueryStorageService}
  * @ref LLP 0013#write-path-and-query [implements]: kernel-owned cache write path; every source row lands here
  */
-export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver }) {
+export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver, redaction }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
   const sessionPurges = createSessionPurgeStore(cacheRoot)
@@ -436,6 +438,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const since = continuationToSeq(opts.since)
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
       const projected = opts.columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      const needsRedaction = projected === undefined || projected.some(column => !isExportIdentityColumn(column))
       // @ref LLP 0070#enforce [constrained-by]: withholding must not depend on
       // the caller's projection. The filter reads each row's own `cwd`; a
       // `columns` projection that omits `cwd` would leave the projected row
@@ -480,6 +483,11 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (forceEntrypoint) scanColumns.push(/** @type {string} */ (entrypointColumn))
       }
       if (scanColumns) scanColumns = [...new Set([...scanColumns, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])]
+      // File-output masking needs the tool identity and arguments even when a
+      // sink asks only for content_text. Project again after redaction.
+      if (needsRedaction && scanColumns && dataset === 'ai_gateway_messages') {
+        scanColumns = [...new Set([...scanColumns, 'part_type', 'tool_name', 'tool_call_id', 'tool_result_for', 'tool_args', 'conversation_id'])]
+      }
       // Running high-water of REAL (non-null) seqs seen so far, seeded with the
       // incoming watermark. `after` is this monotonic max, so a null-seq legacy
       // row never advances the watermark and progress never regresses even when
@@ -492,47 +500,47 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       let droppedUnattributedRowCount = 0
       let purgedRowCount = 0
       let scanned = 0
-      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
-        if (scanned++ % 1024 === 0) sessionPurges.refresh()
-        const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
-        if (seq !== null && seq > high) high = seq
-        for (const f of INTERNAL_FIELDS) delete row[f]
-        /** @type {SinkContinuation} */
-        const after = { v: 1, seq: high.toString() }
-        if (sessionPurges.has(row)) {
-          purgedRowCount += 1
-          yield { after, dropped: true }
-          continue
+      const redactor = createExportRedactor(redaction)
+      try {
+        for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
+          if (scanned++ % 1024 === 0) sessionPurges.refresh()
+          const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
+          if (seq !== null && seq > high) high = seq
+          for (const f of INTERNAL_FIELDS) delete row[f]
+          /** @type {SinkContinuation} */
+          const after = { v: 1, seq: high.toString() }
+          if (sessionPurges.has(row)) {
+            purgedRowCount += 1
+            yield { after, dropped: true }
+            continue
+          }
+          // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
+          // A corrupt/unreadable list makes `resolve` throw; we let it propagate
+          // so the partition read fails and the sink's per-partition retry leaves
+          // the watermark untouched (LLP 0080 #fail-safe), never a silent skip.
+          if (withholdDataset) {
+            droppedRowCount += 1
+            droppedSourceRowCount += 1
+            yield { after, dropped: true }
+            continue
+          }
+          const withheld = rowWithholdReason(row, dataset, attributionColumn, entrypointColumn)
+          if (withheld !== undefined) {
+            droppedRowCount += 1
+            if (withheld === 'cwd') droppedCwdHashes.add(hashCwd(/** @type {string} */ (row.cwd)))
+            else droppedSourceRowCount += 1
+            if (withheld === 'unattributed') droppedUnattributedRowCount += 1
+            yield { after, dropped: true }
+            continue
+          }
+          // Keep forced context through redaction, then honor the sink's
+          // projection so none of those extra columns reaches its payload.
+          // @ref LLP 0503#export-seam [implements]: redact copies after withholding and before any sink sees content; local query reads remain unchanged
+          const redacted = needsRedaction ? await redactor.redact(row) : row
+          yield { row: projected ? projectRow(redacted, projected) : redacted, after }
         }
-        // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
-        // A corrupt/unreadable list makes `resolve` throw; we let it propagate
-        // so the partition read fails and the sink's per-partition retry leaves
-        // the watermark untouched (LLP 0080 #fail-safe), never a silent skip.
-        if (withholdDataset) {
-          droppedRowCount += 1
-          droppedSourceRowCount += 1
-          yield { after, dropped: true }
-          continue
-        }
-        const withheld = rowWithholdReason(row, dataset, attributionColumn, entrypointColumn)
-        if (withheld !== undefined) {
-          droppedRowCount += 1
-          if (withheld === 'cwd') droppedCwdHashes.add(hashCwd(/** @type {string} */ (row.cwd)))
-          else droppedSourceRowCount += 1
-          if (withheld === 'unattributed') droppedUnattributedRowCount += 1
-          yield { after, dropped: true }
-          continue
-        }
-        // We forced `cwd`/the attribution column/the entrypoint column in for
-        // the filters only; don't leak any of them into a payload the caller's
-        // projection didn't ask for.
-        if (forceCwd) delete row.cwd
-        if (forceAttribution) delete row[/** @type {string} */ (attributionColumn)]
-        if (forceEntrypoint) delete row[/** @type {string} */ (entrypointColumn)]
-        if (projected) for (const key of ['session_id', 'org', 'node_id', 'src_id', 'dst_id']) {
-          if (!projected.includes(key)) delete row[key]
-        }
-        yield { row, after }
+      } finally {
+        await redactor.close()
       }
       // Per-partition aggregate on the export read; cwds are hashed, never raw
       // paths in dev telemetry (LLP 0080 #telemetry). Emitted only when the scan

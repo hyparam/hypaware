@@ -42,6 +42,11 @@ export interface IncrementalRowReader {
    * watermark to this only after the blob is durably PUT.
    */
   readonly lastAfter: SinkContinuation
+  /**
+   * Release the underlying scan. Safe after a full drain; required when the
+   * encoder fails before draining `rows`, or the scan's resources stay live.
+   */
+  close(): Promise<void>
 }
 
 /**

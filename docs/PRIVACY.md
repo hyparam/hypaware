@@ -272,14 +272,47 @@ the targeted ones: a spooled body has not been read yet, so nothing about it
 says which directory or session it belongs to, and leaving it would let the
 next batch write back rows you just deleted.
 
+## Automatic export redaction
+
+Cloud forwarding and file exports mask recognizable credentials and known
+sensitive file-tool contents. Local cache data and local queries keep the
+original content. Existing directory and session withholding applies first.
+Configure [additional regex patterns](CONFIGURATION.md#redact-exported-content)
+for your organization's secret formats.
+
+Built-ins recognize common AI and GitHub keys, AWS access-key IDs, Slack tokens,
+bearer tokens, credential-bearing database URLs, private keys, named credential
+fields, and plaintext password/API-key assignments. They also mask file-tool
+payloads for `.env` variants, private-key files, common credential stores and
+shell configuration/history. Template files such as `.env.example` do not
+trigger full-file masking, though credential patterns still apply.
+
+File masking uses recorded tool arguments and call/result links. A named file
+read whose path cannot be established within the current export scan has its
+output masked conservatively. This can remove ordinary read output, especially
+when its call was exported on an earlier tick. Arbitrary shell commands are
+not parsed to infer which files they read.
+
+Masking also scans nested attributes and raw-frame string values. It preserves
+top-level row identities, directory attribution, timestamps, and numeric usage.
+Object keys and binary values are not scanned; encoded data and image content
+are not decoded. Uncommon secret formats may remain unless a custom pattern covers them. Automatic
+masking does not replace directory exclusions or privacy review.
+
+Custom patterns run in an isolated worker with one row at a time and a
+one-second matching deadline. Exceeding that deadline or the per-row traversal
+budget fails export instead of sending an unscanned row. The budget is depth
+64, 100000 visited values and 16 MiB of UTF-16 string bytes per row.
+Adding a rule affects subsequent exports; it does not recall earlier copies.
+
 ## Review before the first Cloud sync
 
 Before sharing recordings, review captured directories with the
 `hypaware-privacy` skill in Claude Code or Codex. It checks this host's local
 cache, samples recordings, and proposes directory markings and deletions for
-your confirmation. A review cannot guarantee it will find every secret, and it
-does not automatically redact all recorded content. You can run it at any time,
-even without Cloud enrollment.
+your confirmation. A review cannot guarantee it will find every secret. Export
+redaction covers recognized patterns; recorded local content stays intact.
+You can run the review at any time, even without Cloud enrollment.
 
 <!-- agent: Run the hypaware-privacy skill: review what this host has recorded, sample it, and propose which folders to mark local-only or ignore before anything syncs. Do not delete anything without asking me. -->
 ```sh

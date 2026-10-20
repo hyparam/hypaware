@@ -21,7 +21,7 @@ import { isSafeContributionName } from './contribution_names.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, CommandGroupRegistration, CommandRegistration, CommandRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SinkRegistry, SkillContribution, SkillRegistry, SourceContribution, SourceRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, CommandGroupRegistration, CommandRegistration, CommandRegistry, ConfigControlFacade, ExportRedactionConfig, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SinkRegistry, SkillContribution, SkillRegistry, SourceContribution, SourceRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
@@ -52,6 +52,7 @@ import { compareStrings } from '../util/compare_strings.js'
  *   cacheRoot?: string,
  *   configControl?: ConfigControlFacade,
  *   sourceWithholdResolver?: SourceWithholdResolver,
+ *   redaction?: ExportRedactionConfig,
  * }} [opts]
  * @returns {KernelRuntime}
  * @ref LLP 0003#intrinsic-not-plugin-provided [implements]: query + storage are wired in as intrinsic services, not plugin contributions
@@ -63,6 +64,7 @@ export function createKernelRuntime(opts = {}) {
     cacheRoot,
     getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
     getSettleHook: (dataset) => query.getDataset(dataset)?.settleBatch,
+    redaction: opts.redaction,
     // @ref LLP 0070#enforce [implements]: every kernel boot enforces `local-only`
     // at the shared export read. The resolver's second source is the
     // machine-local list under `<stateDir>/usage-policy/`, and `cacheRoot` is
