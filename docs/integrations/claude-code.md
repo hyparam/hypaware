@@ -8,6 +8,10 @@ Code's transcripts. Subagents and agent teams are recorded as part of the
 sessions that start them, and transcripts from Claude Agent SDK runs that use
 the Claude Code CLI are imported too.
 
+For Anthropic-managed cloud sessions, use the
+[Claude Code Cloud recipe](claude-code-cloud.md), tested with HypAware 1.42.0.
+It installs capture before Claude launches and adds cloud lifecycle hooks.
+
 ## What is recorded
 
 - Prompts, responses, tool calls and their decisions, tokens, and cost, from

@@ -20,7 +20,9 @@ in general.
 
 **Runs on** is where the agent or tool itself runs. HypAware runs on a host you
 control: install it next to an agent on a server or CI runner, and for cloud
-agents it collects from your machine through the login you already have.
+agents the collection route depends on the provider. Codex Cloud uses your
+existing local login; the tested Claude Code Cloud recipe runs the
+collector inside the cloud environment.
 
 ## Coding agents
 
@@ -35,6 +37,10 @@ agents it collects from your machine through the login you already have.
 | [Pi](integrations/pi.md) | Supported | Your machine | A managed Pi extension sends completed entries, plus session recovery every five minutes | Yes | `pi` |
 
 ## Cloud agents
+
+For Anthropic-managed sessions, see the
+[Claude Code Cloud recipe](integrations/claude-code-cloud.md), tested with
+HypAware 1.42.0. It includes setup, session startup, and upload after replies.
 
 | Integration | Status | Runs on | How HypAware records it | Backfill | Setup id |
 | --- | --- | --- | --- | --- | --- |
