@@ -1,7 +1,7 @@
 # LLP 0500: HypAware MCP, Phase 2 (distribution) - Plan
 
 **Type:** Plan
-**Status:** Draft
+**Status:** Active
 **Systems:** MCP, Plugins, Docs
 **Author:** HypForge designer
 **Date:** 2026-10-15
@@ -19,6 +19,8 @@ plan, whose R1, T6, T7 and T10 the gates below name); hypaware-server LLP
 > The plan actionability check's two folds are in: T2's push
 > authorization is one ref, fast-forward only (P1), and V1 records
 > `validate.yml` on the moved repo (P2), with its four advisories.
+> Active 2026-10-20: V1 is recorded in #v1-results; it passes with row 2
+> (Cursor) deferred by Hernan.
 
 @ref LLP 0499 [implements]: the distribution design this plan builds
 
@@ -287,6 +289,25 @@ change to that wording is a human's.
 The designer records each result, and on a pass moves LLP 0499 and this
 plan to Active. A failure is fixed from evidence and the same check
 repeated.
+
+### V1 results {#v1-results}
+
+Recorded 2026-10-20 from Hernan's results, relayed by the mayor in the
+HypAware MCP thread at 19:58Z. The mayor checked the registry, npm, DNS
+and CI the same minute. The pin is hypaware `1.43.0`.
+
+| Row | Result | Evidence |
+| --- | --- | --- |
+| 1. Claude Code | Met | `marketplace add` and `install` from `hyparam/hypaware-plugin` worked, and Claude Code showed the plugin's server Connected with a 1-day agent token, through the plugin's own header. `query_sql` over `/v1/mcp` with that token returned results. Hernan: "Claude itself didn't make the call (the claude CLI on my Mac is signed out after an account move). Test tokens revoked." The row asks for a `query_sql` call with a real agent token, and that ran. A call made by the model in a Claude Code session was not shown. It is rerun in the OAuth form under HYP-143 (hyparam/hypaware-server#1579, item 3). |
+| 2. Cursor | Deferred by Hernan | "Cursor Marketplace is outside Phase 2". Neither the team admin's Import from Repo nor the individual's `~/.cursor/mcp.json` call ran. Until a person runs row 2's steps, the Cursor claim in LLP 0499#verification rests on CI step 2 and on row 3's `-a cursor` skills install. The public marketplace was already out of scope (LLP 0499#out-of-scope). |
+| 3. Skills | Met | `npx skills add hyparam/hypaware-plugin -a cursor`. |
+| 4. npm | Met | `hypaware@1.43.0` `mcpName` is `ai.hypaware/hypaware`. |
+| 5. Registry and DNS | Met | `ai.hypaware/hypaware` `1.43.0` is active in the registry; the `v=MCPv1; k=ed25519` TXT record is live on `hypaware.ai`. |
+| 6. GitHub | Met | Hernan sent the request on 2026-10-19. |
+| 7. CI | Met | `validate` green on the moved repo's `main` at the staging head `63548670` (run 39214576340) and at the current head `10a4883` (run 39444448717). `10a4883` only drops the README's self-hosted section. |
+
+V1 passes with row 2 deferred by its decision owner, so LLP 0499 and this
+plan move to Active. Nothing they decided changes.
 
 ## Risks and rollout {#rollout}
 
