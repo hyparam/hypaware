@@ -222,10 +222,12 @@ test('the installed plugin reads the session through the SDK route contract and 
     hooks.event({ event: { type: 'message.part.updated', properties: { part: { sessionID: 'ses_1', id: 'part_1' } } } })
     await waitFor(() => received.length === 1)
 
-    assert.deepEqual(calls, [
+    assert.deepEqual(calls.map(([name, args]) => [name, { path: args.path }]), [
       ['get', { path: { id: 'ses_1' } }],
       ['messages', { path: { id: 'ses_1' } }],
     ])
+    assert.equal(calls[0][1].signal, calls[1][1].signal)
+    assert.ok(calls[0][1].signal instanceof AbortSignal)
     assert.equal(received[0].url, '/snapshot')
     assert.equal(received[0].body.session.id, 'ses_1')
     assert.equal(received[0].body.trigger, 'message.part.updated')
@@ -235,8 +237,9 @@ test('the installed plugin reads the session through the SDK route contract and 
     // missing cwd rather than a failed read.
     client.session.get = async () => ({ error: { name: 'UnknownError' }, request: {}, response: {} })
     hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
-    await new Promise((resolve) => setTimeout(resolve, 150))
+    await new Promise((resolve) => setTimeout(resolve, 1100))
     assert.equal(received.length, 1)
+    hooks.dispose()
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)))
     await fs.rm(home, { recursive: true, force: true })
