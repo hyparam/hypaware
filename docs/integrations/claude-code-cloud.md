@@ -109,7 +109,10 @@ hyp query sql "select session_id, role, count(*) n from ai_gateway_messages grou
 
 Check that one actual daemon is running. The relaunch shell may also appear
 in the process listing. `session-context.jsonl` plus telemetry rows verifies
-the live lane; conversation rows verify transcript capture. To verify delivery,
+the live lane. Conversation rows confirm the conversation was recorded, but
+not by which lane: live telemetry and transcript recovery both write
+`ai_gateway_messages`, so checking transcript recovery on its own needs a
+separate recovery check. To verify delivery,
 wait at least 60 seconds after the last reply, check for `upload after reply`
 in `cloud-daemon.log`, and query that session on your HypAware server. A log
 line alone proves an upload was attempted, not that the server accepted it.
