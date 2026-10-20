@@ -17,6 +17,8 @@ locally or publish it to HypAware Cloud to share with your organization.
 
 ## Generate a report
 
+We recommend Fable or Astra for the best report quality.
+
 `hyp report generate` opens a recorded AI client that has the
 `hypaware-report` skill installed, which means Claude Code or Codex, to analyze
 your local recordings. Tell it which period to cover and what to investigate:
