@@ -182,7 +182,10 @@ export function createRowRedactor(config = {}, customOnly = false) {
       const local = objectValue(value)
       const input = local && objectValue(local.input ?? local.arguments ?? local.args)
       if (!customOnly && [local, input].some(object => object && [...PATH_KEYS].some(key => typeof object[key] === 'string' && sensitiveFile(/** @type {string} */ (object[key]))))) hide = true
-      let copy
+      // Changes are applied after the walk, so a row refused by the budget
+      // never pays for a copy of a wide container.
+      /** @type {[string | number, unknown][] | undefined} */
+      let changes
       /** @param {string | number} key @param {unknown} child */
       const step = (key, child) => {
         const childMode = mode === 'preserve' || (depth === 0 && typeof key === 'string' && isExportIdentityColumn(key)) ? 'preserve'
@@ -190,14 +193,15 @@ export function createRowRedactor(config = {}, customOnly = false) {
             : mode === 'args' && typeof key === 'string' && PATH_KEYS.has(key) ? 'path'
               : undefined
         const changed = visit(child, hide || (!customOnly && typeof key === 'string' && CREDENTIAL_KEYS.test(key)), depth + 1, childMode)
-        if (changed !== child) {
-          copy ??= Array.isArray(value) ? value.slice() : { ...value }
-          copy[key] = changed
-        }
+        if (changed !== child) (changes ??= []).push([key, changed])
       }
       if (Array.isArray(value)) for (let i = 0; i < value.length; i++) step(i, value[i])
       else for (const key in value) if (Object.hasOwn(value, key)) step(key, value[key])
-      return copy ?? value
+      if (!changes) return value
+      /** @type {any} */
+      const copy = Array.isArray(value) ? value.slice() : { ...value }
+      for (const [key, changed] of changes) copy[key] = changed
+      return copy
     }
     return /** @type {T} */ (visit(row, mask, 0))
   }

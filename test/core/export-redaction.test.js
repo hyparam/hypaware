@@ -135,6 +135,15 @@ test('the traversal budget refuses an over-wide container before walking it', ()
   assert.ok(process.memoryUsage().heapUsed - before < 32 * 1024 * 1024)
 })
 
+test('a wide object with an early masked field is refused without copying it', () => {
+  /** @type {Record<string, unknown>} */
+  const frame = { password: 'secret-value' }
+  for (let i = 0; i < 1_000_000; i++) frame[`k${i}`] = null
+  const before = process.memoryUsage().heapUsed
+  assert.throws(() => createRowRedactor()({ raw_frame: frame }), /traversal budget/)
+  assert.ok(process.memoryUsage().heapUsed - before < 64 * 1024 * 1024)
+})
+
 test('joined boot keeps both layers\' custom patterns through the add-back merge', async t => {
   const central = { version: /** @type {const} */ (2), redaction: { custom_patterns: [{ pattern: 'org-private' }] } }
   const local = { version: /** @type {const} */ (2), plugins: [{ name: 'local-plugin' }], sinks: { mine: { plugin: 'local-plugin' } }, redaction: { custom_patterns: [{ pattern: 'local-private' }] } }
