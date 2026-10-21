@@ -406,7 +406,8 @@ export async function projectHermesSession(args) {
     session_id: hermesScopeId(session.id),
     conversation_source: clientName,
     client_name: clientName,
-    entrypoint: session.source,
+    // Hermes stores interactive surfaces as 'local'; created_source preserves the launch surface.
+    entrypoint: session.source === 'local' ? (session.created_source || session.source) : session.source,
     messages: projectedMessages,
   }
   const conversationStartedAt = hermesTimestampToIso(session.started_at)

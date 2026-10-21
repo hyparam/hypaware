@@ -122,7 +122,7 @@ const SESSION_COLUMNS = [
   'end_reason', 'billing_provider', 'billing_base_url', 'system_prompt',
   'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
   'reasoning_tokens', 'estimated_cost_usd', 'actual_cost_usd', 'api_call_count',
-].join(', ')
+]
 
 const MESSAGE_COLUMNS = [
   'id', 'session_id', 'role', 'content', 'tool_calls', 'tool_name',
@@ -148,17 +148,55 @@ export class HermesStateDb {
     this.lastDataVersion = undefined
     /** @type {HermesChangedSession[] | undefined} */
     this.snapshot = undefined
+    /** @type {{ schemaVersion: number, sql: string, listSql: string } | undefined} */
+    this.sessionQuery = undefined
   }
 
   /**
-   * All sessions, oldest first.
+   * Resolve modern Hermes metadata while keeping older stores readable. Cache
+   * only SQL, not prompt payloads, and refresh after an upstream migration.
+   * The listing form skips the prompt join: discovery needs no prompt, and
+   * resolving one per session would expand a shared prompt for all history.
+   * @ref LLP 0449#detection [implements]: every read fingerprints the same resolved metadata it projects.
+   * @param {{ listing?: boolean }} [options]
+   * @returns {string}
+   */
+  sessionSelect({ listing = false } = {}) {
+    const schemaVersion = Number(this.db.prepare('PRAGMA schema_version').get()?.schema_version)
+    if (this.sessionQuery?.schemaVersion !== schemaVersion) {
+      const columns = new Set(this.db.prepare('PRAGMA table_info(sessions)').all().map(row => String(row.name)))
+      const promptColumns = columns.has('system_prompt_hash')
+        ? new Set(this.db.prepare('PRAGMA table_info(system_prompts)').all().map(row => String(row.name)))
+        : new Set()
+      const resolvePrompt = promptColumns.has('hash') && promptColumns.has('prompt')
+      const plain = SESSION_COLUMNS.map(column => `sessions.${column}`)
+      const selected = SESSION_COLUMNS.map(column => column === 'system_prompt' && resolvePrompt
+        ? 'COALESCE(system_prompts.prompt, sessions.system_prompt) AS system_prompt'
+        : `sessions.${column}`)
+      if (columns.has('created_source')) {
+        plain.push('sessions.created_source')
+        selected.push('sessions.created_source')
+      }
+      const join = resolvePrompt ? ' LEFT JOIN system_prompts ON system_prompts.hash = sessions.system_prompt_hash' : ''
+      this.sessionQuery = {
+        schemaVersion,
+        sql: `SELECT ${selected.join(', ')} FROM sessions${join}`,
+        listSql: `SELECT ${plain.join(', ')} FROM sessions`,
+      }
+    }
+    return listing ? this.sessionQuery.listSql : this.sessionQuery.sql
+  }
+
+  /**
+   * All sessions, oldest first, for discovery. `system_prompt` is the inline
+   * column only; `readSessionSnapshot` resolves a hash-backed prompt.
    *
    * @returns {Promise<HermesSessionRow[]>}
    */
   async listSessions() {
     return withBusyRetry(
       () => /** @type {HermesSessionRow[]} */ (/** @type {unknown} */ (
-        this.db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions ORDER BY id ASC`).all()
+        this.db.prepare(`${this.sessionSelect({ listing: true })} ORDER BY sessions.id ASC`).all()
       )),
       this.retryOpts
     )
@@ -209,7 +247,7 @@ export class HermesStateDb {
           // its whole `system_prompt`, and `.all()` would hold every one of
           // them resident for the length of the full-history hash.
           const marks = []
-          for (const session of this.db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions ORDER BY id ASC`).iterate()) {
+          for (const session of this.db.prepare(`${this.sessionSelect()} ORDER BY sessions.id ASC`).iterate()) {
             marks.push(sessionMark(/** @type {HermesSessionRow} */ (/** @type {unknown} */ (session)),
               /** @type {Iterable<HermesMessageRow>} */ (/** @type {unknown} */ (statement.iterate(session.id)))))
           }
@@ -245,7 +283,7 @@ export class HermesStateDb {
       this.db.exec('BEGIN')
       try {
         const session = /** @type {HermesSessionRow | undefined} */ (/** @type {unknown} */ (
-          this.db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions WHERE id = ?`).get(sessionId)))
+          this.db.prepare(`${this.sessionSelect()} WHERE sessions.id = ?`).get(sessionId)))
         const messages = session ? /** @type {HermesMessageRow[]} */ (/** @type {unknown} */ (
           this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE session_id = ? AND ${this.visibleClause()} ORDER BY id ASC`)
             .all(sessionId))) : []

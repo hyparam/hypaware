@@ -4,8 +4,8 @@ import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
  * Row and watermark shapes for the `@hypaware/hermes` adapter's reader
  * (`src/state_db.js`). Column sets mirror hermes's own `state.db` schema as
  * described in LLP 0118 (spec) and mapped in LLP 0122 (design, projection
- * table); the reader returns these unmodified, the projector (T2) is the
- * only place that reshapes them into `AiGatewayProjectedExchange`.
+ * table); the reader resolves hash-backed system prompts, and the projector
+ * (T2) reshapes the rows into `AiGatewayProjectedExchange`.
  */
 
 /**
@@ -19,8 +19,10 @@ import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
 export interface HermesSessionRow {
   /** Store-scoped session id, namespaced by the projector as `hermes-<id>`. */
   id: string | number
-  /** Launch surface: `cli`, `telegram`, `discord`, `slack`, `whatsapp`, `signal`, `email`, ... */
+  /** Stored source: `local` in newer interactive sessions, or `cli`, `telegram`, ... */
   source: string
+  /** Creating launch surface when recorded by Hermes; absent on older stores. */
+  created_source?: string | null
   /** Model id, when recorded. */
   model: string | null
   /** Working directory for interactive sessions; NULL for some interactive and all channel sessions until the projector stamps the channel scope path. */
@@ -37,7 +39,7 @@ export interface HermesSessionRow {
   billing_provider: string | null
   /** Upstream `base_url` hermes recorded for this session. */
   billing_base_url: string | null
-  /** System prompt text, when recorded. */
+  /** System prompt text, resolved from system_prompts with inline fallback when available. */
   system_prompt: string | null
   /** Final input token total, populated once the session ends. */
   input_tokens: number | null

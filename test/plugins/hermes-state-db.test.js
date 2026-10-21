@@ -198,6 +198,111 @@ test('the reader connection is genuinely read-only', async () => {
   }
 })
 
+/** @param {DatabaseSync} db */
+function addCurrentSessionSchema(db) {
+  db.exec(`
+    ALTER TABLE sessions ADD COLUMN created_source TEXT;
+    ALTER TABLE sessions ADD COLUMN system_prompt_hash TEXT;
+    CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
+    INSERT INTO system_prompts VALUES ('prompt-1', 'Resolved system prompt');
+    UPDATE sessions SET source = 'local', created_source = 'cli',
+      system_prompt = NULL, system_prompt_hash = 'prompt-1' WHERE id = 1;
+  `)
+}
+
+test('current session metadata resolves prompts in snapshots and fingerprints, not the discovery listing', async t => {
+  const dir = await tmpDir()
+  const dbPath = await buildFixtureStateDb(dir)
+  const writer = new DatabaseSync(dbPath)
+  addCurrentSessionSchema(writer)
+  writer.exec(`
+    UPDATE sessions SET system_prompt = 'Inline fallback', system_prompt_hash = 'missing' WHERE id = 2;
+    UPDATE sessions SET system_prompt = 'Stale inline prompt' WHERE id = 1;
+  `)
+  const reader = await openHermesStateDb(dbPath)
+  t.after(async () => {
+    reader.close()
+    writer.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+  const sessions = await reader.listSessions()
+  assert.equal(sessions[0].source, 'local')
+  assert.equal(sessions[0].created_source, 'cli')
+  // Discovery reads only the inline column, so a shared prompt is never
+  // expanded across history before the backfill window is applied.
+  assert.deepEqual(sessions.map(row => row.system_prompt), ['Stale inline prompt', 'Inline fallback', null])
+  const marks = await reader.listChangedSessions()
+  const resolved = ['Resolved system prompt', 'Inline fallback', null]
+  for (const [i, session] of sessions.entries()) {
+    const snapshot = await reader.readSessionSnapshot(session.id)
+    assert.deepEqual({ ...snapshot?.session }, { ...session, system_prompt: resolved[i] })
+    assert.equal(snapshot?.mark.fingerprint, marks.find(mark => mark.session_id === session.id)?.fingerprint)
+  }
+  assert.equal(await reader.readSessionSnapshot(999), null)
+})
+
+test('partially upgraded stores keep inline prompts when the hash column or prompt table is absent', async t => {
+  for (const addition of [
+    'ALTER TABLE sessions ADD COLUMN system_prompt_hash TEXT',
+    'CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL)',
+  ]) {
+    await t.test(addition, async t => {
+      const dir = await tmpDir()
+      const dbPath = await buildFixtureStateDb(dir)
+      const writer = new DatabaseSync(dbPath)
+      writer.exec(addition)
+      writer.close()
+      const reader = await openHermesStateDb(dbPath)
+      t.after(async () => {
+        reader.close()
+        await fs.rm(dir, { recursive: true, force: true })
+      })
+      assert.equal((await reader.listSessions())[0].system_prompt, 'You are a helpful assistant.')
+      assert.equal((await reader.readSessionSnapshot(1))?.session.system_prompt, 'You are a helpful assistant.')
+      assert.equal((await reader.listChangedSessions()).length, 3)
+    })
+  }
+})
+
+test('schema, surface and prompt changes invalidate fingerprints without new messages', async t => {
+  const dir = await tmpDir()
+  const dbPath = await buildFixtureStateDb(dir)
+  const writer = new DatabaseSync(dbPath)
+  const reader = await openHermesStateDb(dbPath)
+  t.after(async () => {
+    reader.close()
+    writer.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+  let marks = Object.fromEntries((await reader.listChangedSessions()).map(mark => [mark.session_id, mark]))
+  addCurrentSessionSchema(writer)
+  // A reader opened before Hermes migrated the database must refresh its query.
+  assert.equal((await reader.listSessions())[0].created_source, 'cli')
+  assert.equal((await reader.readSessionSnapshot(1))?.session.system_prompt, 'Resolved system prompt')
+  let changed = await reader.listChangedSessions(marks)
+  assert.ok(changed.some(mark => mark.session_id === 1))
+  marks = Object.fromEntries((await reader.listChangedSessions()).map(mark => [mark.session_id, mark]))
+  assert.deepEqual(await reader.listChangedSessions(marks), [])
+
+  for (const mutation of [
+    "UPDATE sessions SET created_source = 'desktop' WHERE id = 1",
+    "INSERT INTO system_prompts VALUES ('prompt-2', 'Updated system prompt'); UPDATE sessions SET system_prompt_hash = 'prompt-2' WHERE id = 1",
+    // Prompt-table changes affect the resolved view even if no session row changes.
+    "DELETE FROM system_prompts WHERE hash = 'prompt-2'",
+  ]) {
+    writer.exec(mutation)
+    changed = await reader.listChangedSessions(marks)
+    assert.equal(changed.length, 1)
+    assert.equal(changed[0].session_id, 1)
+    assert.equal(changed[0].reason, 'changed')
+    assert.equal(changed[0].max_message_id, 3)
+    const snapshot = await reader.readSessionSnapshot(1)
+    assert.equal(snapshot?.mark.fingerprint, changed[0].fingerprint)
+    marks[1] = changed[0]
+    assert.deepEqual(await reader.listChangedSessions(marks), [])
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Missing-file probe
 // ---------------------------------------------------------------------------
@@ -343,7 +448,8 @@ test('withBusyRetry defaults to DEFAULT_BUSY_RETRY_ATTEMPTS', async () => {
 test('HermesStateDb read methods retry through a transiently busy connection', async () => {
   let attempts = 0
   const fakeDb = /** @type {any} */ ({
-    prepare() {
+    prepare(/** @type {string} */ sql) {
+      if (sql.startsWith('PRAGMA')) return { get: () => ({ schema_version: 1 }), all: () => [] }
       return {
         all() {
           attempts++
@@ -508,7 +614,7 @@ test('readSessionSnapshot rethrows the original error when SQLite already ended 
   const dir = await tmpDir()
   const real = new DatabaseSync(await buildFixtureStateDb(dir), { readOnly: true })
   try {
-    const reader = new HermesStateDb(interceptPrepare(real, 'FROM sessions WHERE id = ?', (db) => db.exec('ROLLBACK')), NO_WAIT)
+    const reader = new HermesStateDb(interceptPrepare(real, 'FROM sessions WHERE sessions.id = ?', (db) => db.exec('ROLLBACK')), NO_WAIT)
     await assert.rejects(() => reader.readSessionSnapshot(1), (/** @type {any} */ err) => {
       assert.equal(err.code, 'ERR_SQLITE_ERROR')
       assert.match(err.message, /cannot commit - no transaction is active/, 'the COMMIT failure, not the recovery ROLLBACK one')

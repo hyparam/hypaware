@@ -366,3 +366,79 @@ test('Hermes edits, rewinds and compaction reconcile real local cache rows', asy
   }
   assert.deepEqual((await read()).map(row => row.content_text), ['replacement'])
 })
+
+test('Hermes metadata recovery repairs cached history after restart and stays consistent with backfill', async t => {
+  const dir = await tmpDir()
+  const dbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(dbPath)
+  insertOpenSession(db, 'metadata-session')
+  insertMessage(db, { id: 1, sessionId: 'metadata-session', role: 'user', content: 'unchanged message' })
+  db.exec("UPDATE sessions SET source = 'local'")
+  const storage = createQueryStorageService({ cacheRoot: path.join(dir, 'cache') })
+  const ctx = makeCtx({ stateDbPath: dbPath, stateDir: dir, storage })
+  let runner = createHermesPollRunner(ctx)
+  t.after(async () => {
+    runner.db?.close()
+    db.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+  const read = async () => {
+    const rows = []
+    for (const part of await storage.discoverCachePartitions()) for await (const row of storage.readRows(part.path)) rows.push(row)
+    assert.equal(rows.length, 1, 'metadata repair must not duplicate the captured message')
+    return rows[0]
+  }
+  const poll = async () => {
+    await runHermesPollTick(runner, ctx)
+    assert.equal(runner.lastError, undefined)
+  }
+  await poll()
+  const before = await read()
+  assert.equal(before.entrypoint, 'local')
+  assert.equal(before.system_text, null)
+  const oldFingerprint = runner.watermark['metadata-session'].fingerprint
+  runner.db?.close()
+
+  db.exec(`
+    ALTER TABLE sessions ADD COLUMN created_source TEXT;
+    ALTER TABLE sessions ADD COLUMN system_prompt_hash TEXT;
+    CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
+    INSERT INTO system_prompts VALUES ('prompt-1', 'Recovered fixture prompt');
+    UPDATE sessions SET created_source = 'cli', system_prompt_hash = 'prompt-1';
+  `)
+  runner = createHermesPollRunner(ctx)
+  await poll()
+  let row = await read()
+  assert.equal(row.entrypoint, 'cli')
+  assert.equal(row.system_text, 'Recovered fixture prompt')
+  assert.equal(row.part_id, before.part_id)
+  assert.equal(row.content_text, before.content_text)
+  assert.equal(row.attributes?.hermes?.source, 'local')
+  assert.equal(row.cwd, '/home/dev/project')
+  assert.notEqual(runner.watermark['metadata-session'].fingerprint, oldFingerprint)
+
+  db.exec("UPDATE sessions SET created_source = 'desktop'")
+  await poll()
+  assert.equal((await read()).entrypoint, 'desktop')
+  db.exec(`
+    INSERT INTO system_prompts VALUES ('prompt-2', 'Updated fixture prompt');
+    UPDATE sessions SET system_prompt_hash = 'prompt-2';
+  `)
+  const provider = createHermesBackfillProvider({ stateDbPath: dbPath, homeDir: dir })
+  const materializer = aiGatewayBackfillMaterializer()
+  const runCtx = { storage, env: {}, log: ctx.log, dryRun: false }
+  for await (const item of provider.run(/** @type {any} */ (runCtx))) {
+    if (!('kind' in item)) continue
+    const rows = await materializer.materialize(item, /** @type {any} */ (runCtx))
+    assert.ok(item.reconcile)
+    assert.ok(storage.reconcileRows)
+    await storage.reconcileRows(item.dataset, [...AI_GATEWAY_MESSAGE_COLUMNS], rows, item.reconcile)
+  }
+  row = await read()
+  assert.equal(row.system_text, 'Updated fixture prompt')
+  assert.equal(row.entrypoint, 'desktop')
+  const written = runner.rowsWritten
+  await poll()
+  assert.equal(runner.rowsWritten, written, 'polling and backfill materialize identical metadata')
+  assert.deepEqual(await read(), row)
+})
