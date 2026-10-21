@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-26
 **Related:** LLP 0016, LLP 0036, LLP 0037, LLP 0041, LLP 0044
+**Extended-by:** LLP 0551 (standalone root-level hook maps reuse exact-command undo for Factory Droid)
 **Extended-by:** LLP 0549 (literal JSONC settings-file undo records for Copilot)
 **Extended-by:** LLP 0432 (saved Codex provider compatibility and key-scoped TOML undo)
 **Extended-by:** LLP 0086 (attach tracks the gateway's ephemeral port, extends the "attach once" model of Part 1 with endpoint-aware markers that re-attach on a rebind, and teaches manual `hyp attach` to read the daemon's live port from `status.json`; the §Part 1 proven-bound-endpoint invariant is preserved unchanged)

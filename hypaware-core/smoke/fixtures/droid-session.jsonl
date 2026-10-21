@@ -1,0 +1,6 @@
+{"type":"session_start","id":"00000000-0000-4000-8000-000000000001","title":"Inspect the example","owner":"fixture","version":2,"cwd":"/fixture/droid"}
+{"type":"message","id":"m-user","seq":0,"timestamp":"2026-10-20T12:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"Read example.txt"}]}}
+{"type":"message","id":"m-call","parentId":"m-user","seq":1,"timestamp":"2026-10-20T12:00:01.000Z","tokens":2048,"message":{"role":"assistant","modelId":"fixture-model","apiProvider":"anthropic","content":[{"type":"text","text":"I will read it."},{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"/fixture/droid/example.txt"}}]}}
+{"type":"message","id":"m-result","parentId":"m-call","seq":2,"timestamp":"2026-10-20T12:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false,"content":[{"type":"text","text":"Example content"}]}]}}
+{"type":"compaction_state","summaryKind":"llm_summary","anchorMessage":{"id":"m-result"}}
+{"type":"message","id":"m-final","parentId":"m-result","seq":3,"timestamp":"2026-10-20T12:00:03.000Z","message":{"role":"assistant","modelId":"fixture-model","apiProvider":"anthropic","content":[{"type":"text","text":"The file contains example content."}]}}

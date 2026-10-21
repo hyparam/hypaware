@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
 test('test and smoke client environments discard inherited settings and history paths', () => {
-  const inherited = { HOME: '/live', CODEX_HOME: '/live/codex', HYP_CONFIG: '/live/hyp.json', CLAUDE_CONFIG_DIR: '/live/claude', PI_CODING_AGENT_SESSION_DIR: '/live/pi', XDG_CONFIG_HOME: '/live/config', PATH: '/bin' }
+  const inherited = { HOME: '/live', FACTORY_HOME_OVERRIDE: '/live/factory', CODEX_HOME: '/live/codex', HYP_CONFIG: '/live/hyp.json', CLAUDE_CONFIG_DIR: '/live/claude', PI_CODING_AGENT_SESSION_DIR: '/live/pi', XDG_CONFIG_HOME: '/live/config', PATH: '/bin' }
   const env = isolatedClientEnv(inherited, '/fixture')
   assert.equal(env.HOME, '/fixture')
   assert.equal(env.USERPROFILE, '/fixture')
@@ -17,6 +17,7 @@ test('test and smoke client environments discard inherited settings and history 
   assert.equal(env.HYP_CONFIG, undefined)
   assert.equal(env.CLAUDE_CONFIG_DIR, undefined)
   assert.equal(env.PI_CODING_AGENT_SESSION_DIR, undefined)
+  assert.equal(env.FACTORY_HOME_OVERRIDE, undefined)
   assert.equal(env.XDG_CONFIG_HOME, path.join('/fixture', '.config'))
   assert.equal(env.PATH, '/bin')
   assert.equal(inherited.CODEX_HOME, '/live/codex')
