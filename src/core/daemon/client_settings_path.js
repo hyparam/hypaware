@@ -116,6 +116,11 @@ export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir
   if (clientName === 'cursor') {
     return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, settingsFile), field)
   }
+  // @ref LLP 0551#attachment: Factory relocates the home containing .factory.
+  if (clientName === 'droid') {
+    const base = env?.FACTORY_HOME_OVERRIDE || homeDir
+    return withinBase(clientName, settingsFile, base, path.join(base, settingsFile), field)
+  }
   // @ref LLP 0416#installation: Pi relocates its agent directory, not PI_HOME
   if (clientName === 'pi') {
     const parts = settingsFile.split('/')

@@ -602,7 +602,8 @@ function collectManagedHookEntries(managed) {
  * @param {unknown[]} hookEntries
  */
 export function stripManagedHooks(value, hookEntries) {
-  const hooksRoot = value.hooks
+  // @ref LLP 0551#attachment: standalone hooks files store events at the root.
+  const hooksRoot = value.hooks === undefined ? value : value.hooks
   if (!isPlainObject(hooksRoot)) return
 
   for (const entry of hookEntries) {
@@ -642,7 +643,7 @@ export function stripManagedHooks(value, hookEntries) {
     }
   }
 
-  if (Object.keys(hooksRoot).length === 0) delete value.hooks
+  if (hooksRoot !== value && Object.keys(hooksRoot).length === 0) delete value.hooks
 }
 
 /**

@@ -35,6 +35,7 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
   '@hypaware/cursor',
   '@hypaware/copilot',
   '@hypaware/pi',
+  '@hypaware/droid',
   '@hypaware/local-fs',
   '@hypaware/s3',
   '@hypaware/format-parquet',
