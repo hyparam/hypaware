@@ -1,13 +1,41 @@
 // @ts-check
 
 import fs from 'node:fs'
-import { centralLifetime, readCentralJson, readErrorDetail } from './backoff.js'
+import { centralLifetime, readCentralJson, readErrorDetail, readStopCode } from './backoff.js'
 
-import { atomicWriteJsonSync, canonicalOrigin, isPlainObject, sha256Hex } from 'hypaware/core/util'
+import { atomicWriteJsonSync, canonicalOrigin, isPlainObject, readKeptServiceToken, serviceTokenPath, sha256Hex, writeKeptServiceToken } from 'hypaware/core/util'
 
 /**
+ * @import fsp from 'node:fs/promises'
  * @import { AcquireSource, PersistedIdentity, RefreshLease, RefreshOperation } from '../../../../hypaware-core/plugins-workspace/central/src/types.js'
+ * @import { KeptServiceToken } from '../../../../src/core/remote/types.js'
+ * @import { PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  */
+
+/**
+ * The sink stopped sending on a service credential: the server refused it
+ * permanently (`service_token_revoked`, `service_account_disabled`), or the
+ * kept record could not be read (`service_token_unreadable`). Never retried;
+ * the remedy is a new `hyp join`.
+ */
+export class ServiceCredentialStopped extends Error {
+  /**
+   * @param {string} code
+   * @param {string} message
+   */
+  constructor(code, message) {
+    super(message)
+    this.name = 'ServiceCredentialStopped'
+    /** @type {string} */
+    this.code = code
+  }
+}
+
+/** @param {string} code @returns {string} */
+function stoppedMessage(code) {
+  const what = code === 'service_account_disabled' ? 'the service account is disabled' : 'the service token was revoked'
+  return `central stopped: ${what}. Create a new token in HypAware and run \`hyp join\` again`
+}
 
 /**
  * Fingerprint a bootstrap token for the persisted identity's
@@ -44,6 +72,8 @@ export class IdentityClient {
    *   persistedPath: string,
    *   fetchFn?: typeof fetch,
    *   now?: () => number,
+   *   log?: PluginLogger,
+   *   fs?: typeof fsp,
    * }} opts
    */
   constructor(opts) {
@@ -67,6 +97,18 @@ export class IdentityClient {
     this.identity = undefined
     /** @type {RefreshOperation | undefined} */
     this.refreshing = undefined
+    /** @type {PluginLogger | undefined} */
+    this.log = opts.log
+    /** @type {typeof fsp | undefined} */
+    this.keptFs = opts.fs
+    /** @type {string} */
+    this.keptPath = serviceTokenPath(opts.persistedPath)
+    /** @type {KeptServiceToken | undefined} */
+    this.kept = undefined
+    /** @type {string | undefined} */
+    this.stopped = undefined
+    /** @type {Promise<unknown> | undefined} */
+    this.stopWrite = undefined
   }
 
   /**
@@ -78,6 +120,19 @@ export class IdentityClient {
    * @returns {Promise<AcquireSource>}
    */
   async acquire() {
+    // @ref LLP 0547#activation-stop [implements]: the kept record is read before identity.json or any request; rows 0, 1, 4 and 7 refuse with no request
+    const read = await readKeptServiceToken(this.keptPath, this.keptFs ? { fs: this.keptFs } : undefined)
+    if (read.state === 'unreadable') {
+      this.stopped = 'service_token_unreadable'
+      this.logService('warn', 'central.identity.service_token_unreadable', { status: 'stopped', error_kind: 'service_token_unreadable', reason: read.reason })
+      throw new ServiceCredentialStopped('service_token_unreadable',
+        `central stopped: the kept service token ${this.keptPath} cannot be read (${read.reason}). Run \`hyp join\` again`)
+    }
+    const kept = read.state === 'ok' ? read.record : undefined
+    this.kept = kept
+    if (this.bootstrapToken && kept?.stopped_code && this.keptNames(fingerprintToken(this.bootstrapToken), this.centralUrl)) {
+      throw this.refuseStopped(kept.stopped_code)
+    }
     const persisted = readPersistedFile(this.persistedPath)
     if (persisted) {
       // Re-enrollment guard: when a bootstrap token is configured (a
@@ -110,6 +165,9 @@ export class IdentityClient {
           `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. ${remedy}`
         )
       }
+      if (!this.bootstrapToken && kept?.stopped_code && this.keptNames(persisted.bootstrap_token_fp, persisted.central_url, persisted.origin)) {
+        throw this.refuseStopped(kept.stopped_code)
+      }
       this.identity = persisted
       const remainingSec = persisted.expires_at - Math.floor(this.now() / 1000)
       if (remainingSec <= REFRESH_WINDOW_SECONDS) {
@@ -118,8 +176,110 @@ export class IdentityClient {
       }
       return 'loaded'
     }
+    if (!this.bootstrapToken && kept) {
+      // @ref LLP 0547#rebootstrap [implements]: a lost identity recovers from the record only at the record's own destination
+      if (!sameCentral(kept.central_url, this.centralUrl)) {
+        throw new Error(
+          `identity bootstrap failed: this collector is enrolled with ${kept.central_url} but the configured central server is ${this.centralUrl}. Run \`hyp join ${this.centralUrl} -\` with a service token from that server`
+        )
+      }
+      if (kept.stopped_code) throw this.refuseStopped(kept.stopped_code)
+      await this.bootstrap(kept.secret)
+      return 'bootstrapped'
+    }
     await this.bootstrap()
     return 'bootstrapped'
+  }
+
+  /**
+   * Whether the kept record names this credential: the same secret, at the
+   * same destination, and never a login identity.
+   *
+   * @param {string | undefined} fingerprint
+   * @param {string | undefined} centralUrl
+   * @param {PersistedIdentity['origin']} [origin]
+   * @returns {boolean}
+   */
+  keptNames(fingerprint, centralUrl, origin) {
+    const kept = this.kept
+    return kept !== undefined && origin !== 'login' && fingerprint === kept.fingerprint &&
+      centralUrl !== undefined && sameCentral(kept.central_url, centralUrl)
+  }
+
+  /**
+   * Hold a stop for the life of the client and return the error to throw.
+   *
+   * @param {string} code
+   * @returns {ServiceCredentialStopped}
+   */
+  refuseStopped(code) {
+    this.stopped = code
+    this.logService('warn', 'central.identity.stopped', { status: 'stopped', error_kind: code })
+    return new ServiceCredentialStopped(code, stoppedMessage(code))
+  }
+
+  /**
+   * The server refused a service credential permanently. Stop sending at
+   * once, and write the stop into the record when the record names the
+   * refused credential so a restart refuses before any request.
+   *
+   * @ref LLP 0547#rebootstrap [implements]: a stored stop is never wrong because revocation and disable are permanent
+   * @param {string} code
+   * @param {{ fingerprint: string | undefined, centralUrl: string | undefined, origin?: PersistedIdentity['origin'] }} credential
+   * @returns {Promise<ServiceCredentialStopped>}
+   */
+  async stop(code, credential) {
+    // Publish the stop before the record write is awaited, so no caller is
+    // handed the refused bearer while the write is pending.
+    this.stopped = code
+    const kept = this.kept
+    if (!kept || !this.keptNames(credential.fingerprint, credential.centralUrl, credential.origin)) {
+      this.logService('warn', 'central.identity.stop_not_persisted', { status: 'stopped', error_kind: 'service_stop_not_persisted' })
+      return this.refuseStopped(code)
+    }
+    if (kept.stopped_code === code) return this.refuseStopped(code)
+    // Concurrent refusals share the one write rather than each publishing.
+    if (this.stopWrite) {
+      await this.stopWrite
+      return this.refuseStopped(code)
+    }
+    /** @type {KeptServiceToken} */
+    const record = { ...kept, stopped_code: code }
+    // A join or leave since this client read the record may have replaced or
+    // retired it: the stop is written only over the exact record it read.
+    const write = writeKeptServiceToken(this.keptPath, record, { expected: kept, ...this.keptFs ? { fs: this.keptFs } : {} })
+    this.stopWrite = write
+    const wrote = await write
+    if (wrote.outcome === 'written' || wrote.outcome === 'visible') {
+      this.kept = record
+    } else {
+      this.logService('warn', 'central.identity.stop_not_persisted', { status: 'stopped', error_kind: 'service_stop_not_persisted', write_outcome: wrote.outcome })
+    }
+    return this.refuseStopped(code)
+  }
+
+  /**
+   * Stop on a refusal the sink saw on upload or registration, for the
+   * identity it was using.
+   *
+   * @param {string} code
+   * @returns {Promise<ServiceCredentialStopped>}
+   */
+  stopCurrent(code) {
+    return this.stop(code, {
+      fingerprint: this.identity?.bootstrap_token_fp,
+      centralUrl: this.identity?.central_url,
+      origin: this.identity?.origin,
+    })
+  }
+
+  /**
+   * @param {'info' | 'warn'} level
+   * @param {string} event
+   * @param {Record<string, unknown>} attrs
+   */
+  logService(level, event, attrs) {
+    this.log?.[level](event, { component: 'central', credential_kind: 'service_token', ...attrs })
   }
 
   /**
@@ -127,10 +287,12 @@ export class IdentityClient {
    * persist it. Required on first run; the operator issues bootstrap
    * tokens out-of-band.
    *
+   * @param {string | undefined} [token] the kept service secret on recovery
+   * @param {AbortSignal} [signal] the refresh lifetime on a 401 recovery
    * @returns {Promise<void>}
    */
-  async bootstrap() {
-    const token = this.bootstrapToken
+  async bootstrap(token = this.bootstrapToken, signal) {
+    if (this.stopped) throw new ServiceCredentialStopped(this.stopped, stoppedMessage(this.stopped))
     if (typeof token !== 'string' || token.length === 0) {
       throw new Error(
         'identity bootstrap failed: identity.bootstrap_token is not set. Run `hyp join <central-url> <token>` to enroll this host, or remove the central sink if you only capture locally'
@@ -143,23 +305,31 @@ export class IdentityClient {
     try {
       response = await this.fetchFn(url, {
         method: 'POST',
+        signal,
         headers: { 'content-type': 'application/json' },
         body,
       })
     } catch (err) {
+      signal?.throwIfAborted()
       throw new Error(`failed to reach central server ${this.centralUrl}: ${formatError(err)}`)
     }
 
+    if (response.status === 403) {
+      const code = await readStopCode(response, signal)
+      if (code) throw await this.stop(code, { fingerprint: fingerprintToken(token), centralUrl: this.centralUrl })
+      throw new Error('identity bootstrap failed: HTTP 403')
+    }
     if (!response.ok) {
-      throw new Error(`identity bootstrap failed: ${await readErrorDetail(response)}`)
+      throw new Error(`identity bootstrap failed: ${await readErrorDetail(response, signal)}`)
     }
 
-    const parsed = await readJsonResponse(response, 'bootstrap')
+    const parsed = await readJsonResponse(response, 'bootstrap', signal)
     const identity = identityFromPayload(parsed)
     // Stamp what minted this identity so a later re-join with a different
     // token/URL is detected (see acquire()).
     identity.central_url = this.centralUrl
     identity.bootstrap_token_fp = fingerprintToken(token)
+    signal?.throwIfAborted()
     this.identity = identity
     writePersistedFile(this.persistedPath, identity)
   }
@@ -222,6 +392,7 @@ export class IdentityClient {
 
   /** @param {AbortSignal} signal @returns {Promise<void>} */
   async doRefresh(signal) {
+    if (this.stopped) throw new ServiceCredentialStopped(this.stopped, stoppedMessage(this.stopped))
     if (!this.identity) {
       throw new Error('identity refresh failed: no current JWT to refresh')
     }
@@ -236,6 +407,20 @@ export class IdentityClient {
     } catch {
       signal.throwIfAborted()
       throw new Error('identity refresh failed: transport unavailable')
+    }
+    if (response.status === 403) {
+      const code = await readStopCode(response, signal)
+      if (code) throw await this.stopCurrent(code)
+      throw new Error('identity refresh failed: HTTP 403')
+    }
+    // @ref LLP 0547#rebootstrap [implements]: a 401 recovers once from the record that enrolled this identity, never for a login identity or a stopped record
+    const current = this.identity
+    if (response.status === 401 && this.kept && !this.kept.stopped_code &&
+      sameCentral(this.kept.central_url, this.centralUrl) && this.keptNames(current.bootstrap_token_fp, current.central_url, current.origin)) {
+      await readErrorDetail(response, signal)
+      this.logService('info', 'central.identity.service_token_recover', { status: 'started' })
+      await this.bootstrap(this.kept.secret, signal)
+      return
     }
     if (!response.ok) {
       throw new Error(`identity refresh failed: ${await readErrorDetail(response, signal)}`)
@@ -262,12 +447,15 @@ export class IdentityClient {
    */
   async getCurrentJwt(signal) {
     signal?.throwIfAborted()
+    if (this.stopped) throw new ServiceCredentialStopped(this.stopped, stoppedMessage(this.stopped))
     if (!this.identity) {
       throw new Error('identity not acquired - call acquire() first')
     }
     const remainingSec = this.identity.expires_at - Math.floor(this.now() / 1000)
     if (remainingSec <= REFRESH_WINDOW_SECONDS) {
       await this.refresh(signal)
+      // A stop that landed while the refresh was in flight refuses its JWT too.
+      if (this.stopped) throw new ServiceCredentialStopped(this.stopped, stoppedMessage(this.stopped))
     }
     if (!this.identity) {
       throw new Error('identity refresh did not produce a JWT')
@@ -462,11 +650,13 @@ function joinUrl(base, suffix) {
 /**
  * @param {Response} response
  * @param {'bootstrap' | 'refresh'} kind
+ * @param {AbortSignal} [signal]
  */
-async function readJsonResponse(response, kind) {
+async function readJsonResponse(response, kind, signal) {
   try {
-    return await readCentralJson(response)
+    return await readCentralJson(response, signal)
   } catch (err) {
+    signal?.throwIfAborted()
     throw new Error(`identity ${kind} failed: invalid JSON in server response: ${formatError(err)}`)
   }
 }

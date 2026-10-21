@@ -6,7 +6,7 @@ import { gzip } from 'node:zlib'
 import { promisify } from 'node:util'
 import { openReceipts } from './receipts.js'
 
-import { CENTRAL_OPERATION_TIMEOUT_MS, RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail } from './backoff.js'
+import { CENTRAL_OPERATION_TIMEOUT_MS, RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail, readStopCode } from './backoff.js'
 import { claimPartitionMutation, isPartitionMutationBusy } from '../../../../src/core/util/mutation_guard.js'
 
 /**
@@ -1499,6 +1499,12 @@ async function postNdjson(args) {
         continue
       }
 
+      // @ref LLP 0547#rebootstrap [implements]: a revoked or disabled service credential stops sending at once, never retried
+      if (response.status === 403) {
+        const code = await readStopCode(response, abortSignal)
+        if (code) throw await identityClient.stopCurrent(code)
+        throw new Error(`central.forward POST ${url} failed: HTTP 403`)
+      }
       const detail = await readErrorDetail(response, abortSignal)
       throw new Error(`central.forward POST ${url} failed: ${detail}`)
     }
@@ -1613,6 +1619,11 @@ async function registerDataset(args) {
         reprobe_after_ms: DATASET_REGISTRATION_REPROBE_MS,
       })
       return
+    }
+    if (response.status === 403) {
+      const code = await readStopCode(response, signal)
+      if (code) throw await identityClient.stopCurrent(code)
+      throw new Error(`central.forward PUT ${url} failed: HTTP 403`)
     }
     if (!response.ok) {
       const detail = await readErrorDetail(response, signal)

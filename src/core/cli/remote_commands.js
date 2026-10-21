@@ -29,10 +29,13 @@ import {
   remoteTokenEnvVar,
   removeToken,
   resolveAccessJwt,
+  serviceRefusal,
+  writeServiceRecord,
   writeSession,
   writeToken,
 } from '../remote/credentials.js'
-import { NO_FETCH_MESSAGE, describeRefreshError, expiryTimestamp } from '../remote/identity_client.js'
+import { NO_FETCH_MESSAGE, describeRefreshError, exchangeServiceToken, expiryTimestamp } from '../remote/identity_client.js'
+import { hasServiceTokenPrefix, isServiceTokenShape } from '../remote/service_token.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
@@ -498,7 +501,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs, and `binPath` is the CLI that lane already resolved for the daemon (LLP 0404)
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string, fetchImpl?: typeof fetch }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs, and `binPath` is the CLI that lane already resolved for the daemon (LLP 0404)
  * @returns {Promise<number>}
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
@@ -520,7 +523,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string }} [deps]
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string, fetchImpl?: typeof fetch }} [deps] `fetchImpl` is the service-token exchange's seam
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0179#outcome [implements]: the login lane returns { exitCode, reason }; runRemoteLogin is the adapter that keeps the CLI contract a number
  */
@@ -591,7 +594,7 @@ export async function remoteLogin(argv, ctx, deps = {}) {
     if (host) {
       ctx.stderr.write('note: --host is ignored with a static token (it applies to the browser login flow)\n')
     }
-    return runStaticLogin(name, tokenFile, stdin, ctx)
+    return runStaticLogin(name, tokenFile, stdin, ctx, { remotes: snapshot.remotes, legacy: snapshot.legacyOf(name), fetchImpl: deps.fetchImpl })
   }
 
   // Browser flow. `--no-browser` selects it explicitly ("print the URL instead
@@ -666,10 +669,11 @@ export function valueFlag(argv, flag) {
  * @param {string | undefined} tokenFile
  * @param {any} stdin
  * @param {CommandRunContext} ctx
+ * @param {{ remotes: Record<string, { url: string }>, legacy?: string, fetchImpl?: typeof fetch }} service what the `hsa_` branch needs: the target's URL, its earlier credential name, and the exchange's fetch seam
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0058#d8 [implements]: static token stays the documented headless fallback
  */
-async function runStaticLogin(name, tokenFile, stdin, ctx) {
+async function runStaticLogin(name, tokenFile, stdin, ctx, service) {
   /** @type {string} */
   let token
   try {
@@ -690,7 +694,85 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
     return { exitCode: 2, reason: 'usage' }
   }
 
+  if (hasServiceTokenPrefix(token)) return persistServiceToken(name, token, ctx, service)
   return persistStaticToken(name, token, ctx)
+}
+
+/**
+ * @param {string} name
+ * @param {string} legacy
+ * @param {CommandRunContext} ctx
+ * @returns {LoginOutcome}
+ */
+function refuseLegacySession(name, legacy, ctx) {
+  ctx.stderr.write(`hyp remote login: a login is stored for '${name}' under its earlier name '${legacy}', which an older hyp would use instead of the service token - run 'hyp remote remove ${name}' first, or store the service token in its own HYP_HOME\n`)
+  return { exitCode: 2, reason: 'usage' }
+}
+
+/**
+ * Store an org service secret (LLP 0547 D4): refuse a malformed one locally,
+ * exchange it once so a revoked or mistyped secret fails here rather than at
+ * the first query, then store it with the JWT it bought as `kind: 'service'`.
+ * The secret is never printed.
+ *
+ * @param {string} name
+ * @param {string} token a non-empty, trimmed token carrying the `hsa_` prefix
+ * @param {CommandRunContext} ctx
+ * @param {{ remotes: Record<string, { url: string }>, legacy?: string, fetchImpl?: typeof fetch }} service
+ * @returns {Promise<LoginOutcome>}
+ * @ref LLP 0547#remote-login [implements]: exchange before storing, so the server's refusal code surfaces at login
+ */
+async function persistServiceToken(name, token, ctx, { remotes, legacy, fetchImpl }) {
+  if (!isServiceTokenShape(token)) {
+    ctx.stderr.write("hyp remote login: the token starts with 'hsa_' but is not a whole service token - copy it again from HypAware\n")
+    return { exitCode: 2, reason: 'usage' }
+  }
+  const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
+  if (!entry) {
+    ctx.stderr.write(`hyp remote login: '${name}' is not a configured target - add it with 'hyp remote add ${name} <url>' before storing a service token\n`)
+    return { exitCode: 2, reason: 'usage' }
+  }
+  const identityBase = deriveIdentityBase(entry.url)
+  if (!identityBase) {
+    ctx.stderr.write(`hyp remote login: cannot derive the identity endpoint from '${entry.url}'\n`)
+    return { exitCode: 2, reason: 'usage' }
+  }
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  // An older hyp does not read a service record, and falls back to the
+  // session stored under this target's earlier name; refuse while one is
+  // there, so no hyp queries as that person in place of the service account.
+  // This early read only saves an exchange: the write below rechecks under
+  // the store lock, since a session can land while the exchange is awaited.
+  if (legacy !== undefined) {
+    /** @type {Record<string, unknown>} */
+    let creds
+    try {
+      creds = await readCredentials(stateDir)
+    } catch (err) {
+      ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
+      return { exitCode: 1, reason: 'store_failed' }
+    }
+    if (Object.hasOwn(creds, legacy)) return refuseLegacySession(name, legacy, ctx)
+  }
+  /** @type {Awaited<ReturnType<typeof exchangeServiceToken>>} */
+  let exchanged
+  try {
+    exchanged = await exchangeServiceToken({ identityBase, serviceToken: token, fetchImpl })
+  } catch (err) {
+    ctx.stderr.write(`hyp remote login: ${serviceRefusal(err, name) ?? (err instanceof Error ? err.message : String(err))}\n`)
+    return { exitCode: 1, reason: 'login_failed' }
+  }
+  /** @type {boolean} */
+  let stored
+  try {
+    stored = await writeServiceRecord(stateDir, name, { secret: token, ...exchanged }, { unlessStored: legacy })
+  } catch (err) {
+    ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
+    return { exitCode: 1, reason: 'store_failed' }
+  }
+  if (!stored) return refuseLegacySession(name, /** @type {string} */ (legacy), ctx)
+  ctx.stdout.write(`stored service token for '${name}'${exchanged.org ? ` (org ${exchanged.org})` : ''}\n`)
+  return { exitCode: 0, reason: 'ok' }
 }
 
 /**
@@ -1233,6 +1315,11 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   }
   if (!resolved.ok) {
     ctx.stderr.write(`hyp remote mint: ${resolved.error}\n`)
+    return 2
+  }
+  // Minting needs a person's session; the server refuses a service JWT too.
+  if (resolved.kind === 'service') {
+    ctx.stderr.write(`hyp remote mint: '${name}' holds a service token, which cannot mint - sign in as a person with 'hyp remote login ${name}'\n`)
     return 2
   }
 

@@ -122,11 +122,54 @@ export interface RemoteOidcRecord {
 }
 
 /**
+ * An org service-account secret (LLP 0547 D4): the `hsa_` secret, exchanged
+ * for a one-hour read JWT that is cached beside it. An older reader finds no
+ * `token` or `refreshToken` here and drops the record, so it fails closed.
+ */
+export interface RemoteServiceRecord {
+  kind: 'service'
+  secret: string
+  /** Cached; `''` until the first exchange. */
+  accessJwt: string
+  /** ISO-8601 expiry of `accessJwt`. */
+  expiresAt: string
+  org: string
+}
+
+/**
  * One per-target record in `remote-credentials.json`, discriminated by
- * `kind`. Both kinds live in the same file, share one resolve path, and are
+ * `kind`. Every kind lives in the same file, shares one resolve path, and is
  * dropped by the same `removeToken`.
  */
-export type RemoteCredentialRecord = RemoteStaticRecord | RemoteOidcRecord
+export type RemoteCredentialRecord = RemoteStaticRecord | RemoteOidcRecord | RemoteServiceRecord
+
+/**
+ * The record an `hsa_` join keeps beside the central sink's identity
+ * (LLP 0547 D2), mode 0600, bound to the URL it enrolled against.
+ */
+export interface KeptServiceToken {
+  version: 1
+  secret: string
+  /** The join URL; compared with the central sink's `sameCentral`. */
+  central_url: string
+  /** sha256 of `secret`, checked on read. */
+  fingerprint: string
+  /** ISO-8601. */
+  written_at: string
+  /** The server's permanent refusal, set by the central sink's stop. */
+  stopped_code?: string
+}
+
+/** A kept-record read: absent (ENOENT), a checked record, or unreadable. */
+export type KeptServiceTokenRead =
+  | { state: 'absent' }
+  | { state: 'ok', record: KeptServiceToken }
+  | { state: 'unreadable', reason: string }
+
+/** How a kept-record write ended, classified by re-reading it (LLP 0547#write-failure). */
+export type KeptServiceTokenWrite =
+  | { outcome: 'written' | 'superseded' }
+  | { outcome: 'visible' | 'not_written' | 'unreadable', error: string }
 
 /**
  * Why a `hyp remote login` ended the way it did (LLP 0179#outcome). A code,

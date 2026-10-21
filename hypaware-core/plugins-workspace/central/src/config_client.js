@@ -1,6 +1,6 @@
 // @ts-check
 
-import { RETRY_BACKOFF_SECONDS, parseRetryAfter, readBodyCapped, discardBody } from './backoff.js'
+import { RETRY_BACKOFF_SECONDS, parseRetryAfter, readBodyCapped, readStopCode, discardBody } from './backoff.js'
 
 /**
  * @import { ConfigControlFacade, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
@@ -175,6 +175,11 @@ export function createConfigPullLoop(args) {
           })
           return 'retry_backoff'
         }
+      }
+
+      if (response.status === 403) {
+        const code = await readStopCode(response, signal)
+        if (code) throw await identityClient.stopCurrent(code)
       }
 
       if (response.status === 304) {

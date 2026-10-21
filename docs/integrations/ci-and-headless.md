@@ -150,5 +150,61 @@ host that keeps running; the scheduled exports drain it. Flush with
   with the server. A syntactically valid query-target URL (`.../v1/mcp`) or an
   expired token can therefore fail later when the daemon connects.
 
+## Collect as an organization service account
+
+A service-account token (it starts with `hsa_`) is created in HypAware by an
+organization admin and belongs to the organization, not to a person. A host
+joined with one uploads as that account and keeps working when the person who
+set it up leaves. Run it in its own environment: on a person's machine the same
+join would replace that machine's enrollment.
+
+<!-- @ref LLP 0547#provision: the documented collector setup is the shipped join in its own HYP_HOME -->
+```sh
+export HYP_HOME=/srv/hypaware-collector   # its own state root, never a person's
+install -d -m 700 "$HYP_HOME"
+printf '%s' "$HYP_SERVICE_TOKEN" | hyp join https://api.hypaware.ai - --no-daemon
+hyp daemon install    # or, under your own supervisor: hyp daemon run
+```
+
+The token is read from standard input, so it never appears in shell history or
+the command's arguments. If your secret store mounts it as a file instead,
+create the file private from the start and join from it:
+
+```sh
+rm -f "$HYP_HOME/.service-token"
+(umask 077; printf '%s' "$HYP_SERVICE_TOKEN" > "$HYP_HOME/.service-token")
+hyp join https://api.hypaware.ai --token-file "$HYP_HOME/.service-token" --no-daemon
+```
+
+`hyp join` reads the file and does not keep or change it; you can delete it
+after the join. Join keeps its own private copy (mode `0600`) at
+`$HYP_HOME/hypaware/plugins/@hypaware/central/service-token`, which is what the
+daemon uses to sign in again on its own when its session expires. The join also
+writes the token into its private config seed under
+`$HYP_HOME/hypaware/config-control/`; the first config the host applies keeps
+that seed as its rollback copy, and the next config update replaces it.
+HypAware never logs the token.
+
+To query your organization's data as the service account, store the same
+token for the built-in `hypaware` target:
+
+```sh
+hyp remote login hypaware --token-file "$HYP_HOME/.service-token"
+hyp query sql "select count(*) from ai_gateway_messages" --remote hypaware
+```
+
+The login stores the token, with the short-lived session it exchanges it for, in
+`$HYP_HOME/hypaware/remote-credentials.json` (mode `0600`); `hyp remote remove
+hypaware` removes it.
+
+When the token is revoked or the account is disabled, the host stops uploading
+and does not retry: the stop is written into the kept copy, so a restart stays
+stopped, and `hyp status` reports `stopped: service token revoked` (or `service
+account disabled`). Queries fail with the same reason, but nothing records it,
+so each later query whose session has expired asks the server again. Create a
+new token in HypAware and run the join again; for queries, run `hyp remote
+login hypaware --token-file` with the new token. `hyp leave` removes the kept
+copy.
+
 Command details live in
 [the CLI reference](../CLI_REFERENCE.md#hyp-remote-mint).

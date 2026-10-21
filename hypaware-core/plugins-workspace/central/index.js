@@ -57,6 +57,7 @@ export async function activate(ctx) {
         centralUrl: config.url,
         bootstrapToken: config.identity.bootstrap_token,
         persistedPath,
+        log: sinkCtx.log,
       })
       const source = await identityClient.acquire()
       sinkCtx.log.info('central.identity.acquired', {

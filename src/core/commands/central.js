@@ -16,6 +16,14 @@ import {
   readInstalledAssets,
 } from '../config/action_reconciler.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
+import {
+  hasServiceTokenPrefix,
+  isServiceTokenShape,
+  keptServiceToken,
+  retireKeptServiceToken,
+  serviceTokenPath,
+  writeKeptServiceToken,
+} from '../remote/service_token.js'
 import { sameServer, serverDisplayName, syncDestinationName } from '../remote/builtin_remotes.js'
 import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
 import { buildClientDescriptorMap, detachClientViaCore, withAttachKeyLock } from './clients.js'
@@ -89,6 +97,13 @@ export async function runJoin(argv, ctx) {
     ctx.stderr.write('hyp join: token is empty\n')
     return 2
   }
+  // Refused here rather than sent: a clipped copy of a service secret would
+  // otherwise reach the server as an ordinary bootstrap token.
+  const serviceToken = hasServiceTokenPrefix(token)
+  if (serviceToken && !isServiceTokenShape(token)) {
+    ctx.stderr.write("hyp join: the token starts with 'hsa_' but is not a whole service token - copy it again from HypAware\n")
+    return 2
+  }
 
   /** @type {HypAwareV2Config} */
   const seed = {
@@ -146,6 +161,18 @@ export async function runJoin(argv, ctx) {
       // @ref LLP 0188#migration [implements]: enrollment seeds the empty store before the central seed is written
       await seedClientSyncStoreBestEffort(ctx, obsEnv.stateDir)
 
+      const kept = await keepOrRetireServiceToken(ctx, {
+        stateRoot: obsEnv.stateDir,
+        url: /** @type {string} */ (parsed.url),
+        token: serviceToken ? token : undefined,
+      })
+      span.setAttribute('credential_kind', serviceToken ? 'service_token' : 'bootstrap_token')
+      if (!kept) {
+        span.setAttribute('status', 'failed')
+        span.setAttribute('error_kind', 'service_token_store_failed')
+        return 1
+      }
+
       // The token is the only credential on disk until the first
       // bootstrap, so the seed write is atomic and mode 0600.
       await atomicWriteJson(seedPath, seed, { mode: 0o600 })
@@ -181,6 +208,48 @@ export async function runJoin(argv, ctx) {
     },
     { component: 'join' }
   )
+}
+
+/**
+ * The kept service record for a join (LLP 0547 D2), settled before the seed
+ * is written: an `hsa_` join keeps its secret beside the default identity
+ * path, the one its seed's sink resolves, and any other join retires every
+ * record a previous enrollment may have left. Records beside the old
+ * enrollment's other identity paths are retired in both cases. Returns false
+ * (after reporting) when the join must stop before the seed.
+ *
+ * @ref LLP 0547#secret-file [implements]: record first, then the seed; a failed retirement stops the join before anything new is written
+ * @param {CommandRunContext} ctx
+ * @param {{ stateRoot: string, url: string, token: string | undefined }} args
+ * @returns {Promise<boolean>}
+ */
+async function keepOrRetireServiceToken(ctx, { stateRoot, url, token }) {
+  const defaultIdentity = path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
+  const layerPath = resolveCentralLayerPath({ stateRoot })
+  const identityPaths = new Set(layerPath !== null ? (await readCentralSinks(layerPath, stateRoot)).map((s) => s.persistedPath) : [])
+  if (token === undefined) identityPaths.add(defaultIdentity)
+  else identityPaths.delete(defaultIdentity)
+  for (const identityPath of identityPaths) {
+    const recordPath = serviceTokenPath(identityPath)
+    try {
+      await retireKeptServiceToken(recordPath)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`hyp join: could not remove the kept service token ${recordPath}: ${message}\n`)
+      return false
+    }
+  }
+  if (token === undefined) return true
+
+  const recordPath = serviceTokenPath(defaultIdentity)
+  const result = await writeKeptServiceToken(recordPath, keptServiceToken({ secret: token, centralUrl: url }))
+  if (result.outcome === 'written') return true
+  if (result.outcome === 'visible') {
+    ctx.stderr.write(`warning: kept the service token at ${recordPath}, but its sync failed (${result.error}); re-run \`hyp join\` if this host crashes before the next start\n`)
+    return true
+  }
+  ctx.stderr.write(`hyp join: could not keep the service token at ${recordPath} (${'error' in result ? result.error : result.outcome}); nothing was changed, re-run the join\n`)
+  return false
 }
 
 /**
@@ -597,6 +666,17 @@ export async function runLeave(argv, ctx) {
       }
       let removedIdentity = false
       for (const identityPath of identityPaths) {
+        // The kept service record goes first, so a failure leaves the
+        // identity it belongs to in place for the re-run (LLP 0547 D2).
+        const recordPath = serviceTokenPath(identityPath)
+        try {
+          if (await retireKeptServiceToken(recordPath)) removedIdentity = true
+        } catch (err) {
+          failures += 1
+          const message = err instanceof Error ? err.message : String(err)
+          ctx.stderr.write(`hyp leave: could not remove the kept service token ${recordPath}: ${message}\n`)
+          continue
+        }
         try {
           await fs.unlink(identityPath)
           removedIdentity = true
