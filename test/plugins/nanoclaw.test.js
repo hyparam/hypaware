@@ -11,6 +11,7 @@ import { readGroups, discoverFiles, discoverNanoclawRoots, readTranscript, proje
 import { validateNanoclawConfig } from '../../hypaware-core/plugins-workspace/nanoclaw/src/config.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { runClientDiscover } from '../../src/core/commands/clients.js'
 import { readObservabilityEnv } from '../../src/core/observability/env.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
@@ -300,6 +301,29 @@ test('NanoClaw discovery validates catalog and contained Claude layout without r
   await fs.rename(group.projects + '-aside', group.projects)
   await fs.writeFile(path.join(root, 'data/v2.db'), 'not sqlite')
   assert.deepEqual(await discoverNanoclawRoots([root]), [])
+})
+
+test('client discover escapes a root for the terminal and keeps it exact in JSON', async t => {
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-nanoclaw-')))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const root = path.join(home, 'root\nFORGED\u001b[2J')
+  await fs.mkdir(path.join(root, 'groups', 'g'), { recursive: true })
+  await fs.mkdir(path.join(root, 'data', 'v2-sessions', 'g', '.claude-shared', 'projects'), { recursive: true })
+  const db = new DatabaseSync(path.join(root, 'data', 'v2.db'))
+  db.exec("CREATE TABLE agent_groups (id TEXT, folder TEXT); INSERT INTO agent_groups VALUES ('g', 'g')")
+  db.close()
+  /** @param {string[]} argv */
+  async function run(argv) {
+    let out = ''
+    const code = await runClientDiscover(argv, /** @type {any} */ ({ cwd: home, config: { version: 2 }, stdout: { write: (/** @type {string} */ chunk) => { out += chunk } }, stderr: { write() {} } }))
+    return { code, out }
+  }
+  const text = await run(['nanoclaw', root])
+  assert.equal(text.code, 0)
+  assert.ok(!text.out.includes('\u001b'))
+  assert.ok(!text.out.includes('\nFORGED'))
+  const json = await run(['nanoclaw', root, '--json'])
+  assert.deepEqual(JSON.parse(json.out).roots, [root])
 })
 
 test('client discover runs before NanoClaw setup and never enables capture', async t => {

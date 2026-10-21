@@ -151,6 +151,8 @@ test('LangGraph detects only direct declarations in the current project', async 
     ['pyproject.toml', '[project]\nname = "demo"\ndependencies = [\n "langgraph>=1", # comment\n "requests"\n]\n[tool.other]\nvalue = 1\n', true],
     ['pyproject.toml', "[project]\ndependencies = ['langgraph[foo]>=1']\n", true],
     ['pyproject.toml', '[project]\ndescription = "langgraph"\n[tool.other]\ndependencies = ["langgraph"]\n', false],
+    ['pyproject.toml', '[project]\nname = "demo"\n[[tool.example]]\ndependencies = ["langgraph"]\n', false],
+    ['pyproject.toml', '[project]\nname = "demo"\n  [tool.example]\ndependencies = ["langgraph"]\n', false],
     ['pyproject.toml', '[project]\n# dependencies = ["langgraph"]\ndependencies = ["langgraph-sdk"]\n', false],
     ['pyproject.toml', '[project]\ndescription = """\ndependencies = ["langgraph"]\n"""\n', false],
     ['pyproject.toml', '[project]\n' + 'dependencies = [\n'.repeat(14000), false],

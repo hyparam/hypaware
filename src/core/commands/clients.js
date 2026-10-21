@@ -52,6 +52,7 @@ import {
 } from '../usage-policy/index.js'
 import { executeQuerySql } from '../query/sql.js'
 import { pluginStateDir } from './plugin.js'
+import { escapeForDisplay } from '../util/json_util.js'
 
 /**
  * @import { AiGatewayCapability, ClientRegistry, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -122,7 +123,7 @@ export async function runClientDiscover(argv, ctx) {
     getLogger('clients').info('client.discover', { component: 'clients', operation: 'discover', client_name: 'nanoclaw', candidate_count: candidates.length, root_count: roots.length, status: roots.length ? 'ok' : 'not_found' })
     if (parsed.params.json) ctx.stdout.write(JSON.stringify({ client: 'nanoclaw', roots, changed: false }) + '\n')
     else {
-      ctx.stdout.write(roots.length ? roots.map(root => `NanoClaw installation: ${root}\n`).join('') : 'No supported NanoClaw v2 Claude installation found in the checked locations.\n')
+      ctx.stdout.write(roots.length ? roots.map(root => `NanoClaw installation: ${escapeForDisplay(root)}\n`).join('') : 'No supported NanoClaw v2 Claude installation found in the checked locations.\n')
       ctx.stdout.write('Discovery changes no settings. To record, explicitly add @hypaware/nanoclaw with config.root set to the chosen absolute root, validate config, and restart the daemon.\n')
     }
     return 0
