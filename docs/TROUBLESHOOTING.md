@@ -60,6 +60,12 @@ process. Check the [Claude Code requirements](integrations/claude-code.md#requir
 for minimum versions.
 For transcript-only clients, allow time for the scheduled recovery sweep.
 
+For Factory Droid, restart Droid after attaching so it loads the native hooks.
+Check `hyp client status droid`, then preview recovery with
+`hyp backfill droid --dry-run`. The collector must have access to the same
+Factory home as Droid. See [Droid troubleshooting and limits](integrations/droid.md#troubleshooting-and-limits)
+for legacy hook files, missing transcripts, and capture bounds.
+
 Detaching a gateway-routed client restores its own connection settings if a
 stopped gateway is preventing normal use where that integration manages them.
 Ollama detach leaves the capture host unchanged. With its collector stopped,

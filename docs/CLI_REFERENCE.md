@@ -37,7 +37,7 @@ page; it doesn't prove the plugin can run.
 This reference identifies each plugin-owned family:
 
 - `session ...`: shared commands provided by `@hypaware/ai-gateway`,
-  `@hypaware/opencode`, `@hypaware/pi`, or `@hypaware/cursor`.
+  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, or `@hypaware/cursor`.
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
@@ -768,7 +768,8 @@ and daemon restarts until you unignore it. The Cursor recorder is the
 exception: it advertises the control route but still holds its set in memory,
 so a restart clears Cursor's exclusions. A fork has a new session ID and needs
 its own ignore. Supported routes include the gateway, Claude telemetry,
-OpenCode, Pi, and Cursor. OpenClaw and Hermes do not support session opt-out;
+OpenCode, Pi, Droid, and Cursor. Droid requires an explicitly verified native
+session ID. OpenClaw and Hermes do not support session opt-out;
 use [directory controls](PRIVACY.md#marking-directories) for them.
 
 ### `hyp session status`
@@ -872,6 +873,11 @@ Codex attach covers both Codex CLI and Codex Desktop because they share
 
 OpenCode attach likewise covers CLI and Desktop because they share the same
 XDG config home and session store.
+
+[Factory Droid](integrations/droid.md) attach installs managed native hooks in
+`~/.factory/hooks.json` and requires no gateway. Restart Droid to load them.
+Capture reads local CLI transcripts; hosted sessions without local files are
+not covered.
 
 ### `hyp client detach`
 
@@ -1209,6 +1215,7 @@ capture:
 | --- | --- | --- |
 | `@hypaware/codex` (transcript mode) | One minute | No (it is Codex's only capture lane) |
 | `@hypaware/pi` | Five minutes | Yes |
+| `@hypaware/droid` | Five minutes | Yes |
 | `@hypaware/claude` (also Claude Desktop) | Five minutes | Yes |
 | `@hypaware/cursor` | Five minutes | Yes |
 | `@hypaware/openclaw` | Five minutes | Yes |

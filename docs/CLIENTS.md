@@ -21,6 +21,11 @@ Attach enables its native database exporters; reload VS Code afterward. Capture
 runs every minute for local single-folder workspaces, within VS Code's native
 history retention.
 
+[Factory Droid](integrations/droid.md) uses the setup id `droid`. Attach installs
+native transcript-change hooks; restart Droid afterward. Recovery imports local
+session files every five minutes. Hosted sessions without local transcripts
+are not captured.
+
 ```sh
 hyp setup
 hyp client status
