@@ -76,6 +76,10 @@ with `&` alone does not prove capture is ready. Status is a diagnostic snapshot,
 not a command that waits for readiness; adapt the job to check its required
 integration before starting the agent.
 
+LangGraph applications also need their callback configured on the remote host.
+Follow the [remote LangGraph recipe](langgraph.md#remote-hosts-and-hypaware-cloud)
+for setup, journal placement and a server-side SQL check after upload.
+
 > **Note:** The teardown step matters. Sinks export on a schedule, and the most valuable
 > rows land when the agent session ends, seconds before the runner dies, so no
 > schedule can be trusted to drain the tail. Always run `hyp sync --yes` as the

@@ -127,6 +127,88 @@ collected yet. `dropped`, `policyDrops` and `lastError` identify recording
 failures or privacy exclusions. The daemon normally checks the queue every
 second and reports pending events, rows written and duplicate rows skipped.
 
+## Remote hosts and HypAware Cloud
+
+Run the application, callback journal and HypAware collector on the same remote
+host, under the same OS user. For a containerized application, run them inside
+that container. Use the same `HOME`, `HYP_HOME` and any custom `HYP_CONFIG` for
+setup, attach, collection and the application. Copy the callback paths printed
+on that host into the application; laptop paths do not apply there. Python still
+starts its private Node helper automatically.
+
+Use a HypAware build containing the LangGraph plugin. As of 2026-10-20, the
+plugin is merged but the published npm latest, 1.43.0, does not contain it. The
+remote validation below used a tarball built from merged master. Identify a
+prerelease tarball by its source commit rather than its package version alone.
+
+On your signed-in workstation, mint an enrollment token and store the printed
+value in the remote job's secret store as `HYP_CI_TOKEN`:
+
+```sh
+hyp remote mint --label langgraph-worker
+```
+
+On a fresh remote installation, with Node.js 22.12 or newer and a durable
+HypAware installation, configure LangGraph and join your team:
+
+```sh
+hyp setup --source langgraph --export configure-later --no-backfill --no-daemon
+hyp client attach langgraph
+printf '%s' "$HYP_CI_TOKEN" | hyp join https://api.hypaware.ai --no-daemon
+( rc=75; while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done; exit "$rc" ) &
+hyp status
+hyp client status langgraph
+```
+
+For a self-hosted server, use its base URL in place of `https://api.hypaware.ai`.
+An existing installation can add LangGraph with `hyp client attach langgraph`;
+preserve its configuration and existing enrollment. The
+[headless deployment guide](ci-and-headless.md) covers token expiry, foreground
+supervision and long-lived service installation.
+
+Before starting the application, confirm that `hyp status` reports the daemon
+running, the LangGraph source ready and the central destination configured.
+Organization configuration can request a restart during enrollment; the loop
+above handles exit 75. A source waiting for an application is ready to receive
+callbacks. Add the [JavaScript](#javascript) or [Python](#python) callback recipe
+printed on the remote host, and use a unique session ID for your verification
+run. Model credentials stay with the application.
+
+After the application finishes, keep the collector running until its pending
+events are drained and the session is queryable locally. Substitute your actual
+session ID in both queries below. On the remote host:
+
+```sh
+hyp query sql "select session_id, count(*) as rows from ai_gateway_messages where client_name = 'langgraph' and session_id = 'your-verification-session-id' group by session_id" --refresh always
+hyp sync --yes
+```
+
+Confirm that sync reports a successful upload. Then, on your workstation,
+discover your configured query target and query the same session on the server:
+
+```sh
+hyp remote list
+hyp query sql "select session_id, count(*) as rows from ai_gateway_messages where client_name = 'langgraph' and session_id = 'your-verification-session-id' group by session_id" --remote <target>
+```
+
+Replace `<target>` with a name from `hyp remote list`. Matching remote rows
+confirm central visibility. Callback `queued` counts and successful remote
+execution alone do not confirm upload. Folder, session and client privacy
+controls still apply: local-only rows stay on the remote host. Apply the intended
+privacy settings before running the application.
+
+**Remote validation, 2026-10-20:** an isolated installed build from master
+`4056c359b5fc3398dde5064644c58df5f262de69` passed on a Linux host using real
+JavaScript, Python sync and Python async LangGraph SDKs with fixture responses.
+Nested agents and tool failure/retry produced 21 completed events while the
+collector was stopped. Restart recovered 33 rows, including 12 usage carriers;
+replay added zero rows or token usage. The normal enrollment/export path sent
+all three sessions to HypAware Cloud, where remote SQL confirmed matching rows
+and usage. Fresh live-model requests were blocked by OpenAI credits and
+Anthropic HTTP 429 responses, so this run does not establish fresh live-model
+compatibility. Systemd/launchd installation and hosted Agent Server deployments
+were not exercised.
+
 ## Recovery and limits
 
 Completed events are saved under `<HYP_HOME>/hypaware/langgraph/outbox` before
