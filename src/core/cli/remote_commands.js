@@ -1401,7 +1401,7 @@ function agentTokensEndpoint(url) {
  * @param {{ command: string, name: string, method: string, suffix?: string, body?: Record<string, unknown> }} request
  * @param {CommandRunContext} ctx
  * @param {{ fetchImpl?: typeof fetch }} deps
- * @returns {Promise<{ ok: true, status: number, json: any, retryAfter: string | null } | { ok: false, code: number }>}
+ * @returns {Promise<{ ok: true, status: number, json: any, retryAfter: string | null, bearerOrg: string | null } | { ok: false, code: number }>}
  */
 async function agentTokensRequest({ command, name, method, suffix = '', body }, ctx, deps) {
   const fail = (/** @type {string} */ line, /** @type {number} */ code) => {
@@ -1440,8 +1440,11 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
     return fail(resolved.error, 2)
   }
 
+  // The bearer of the last attempt, the one the answer below belongs to.
+  let sentToken = ''
   /** @param {string} token @returns {Promise<{ authFailed: boolean, value: { ok: true, response: Response } | { ok: false, error: string } }>} */
   const op = async (token) => {
+    sentToken = token
     /** @type {Response} */
     let response
     try {
@@ -1524,7 +1527,27 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
       return fail(`'${name}' does not serve agent tokens yet (HTTP ${response.status}) - the server predates them`, 1)
     }
   }
-  return { ok: true, status: response.status, json, retryAfter: response.headers?.get?.('retry-after') ?? null }
+  return { ok: true, status: response.status, json, retryAfter: response.headers?.get?.('retry-after') ?? null, bearerOrg: bearerOrgClaim(sentToken) }
+}
+
+/**
+ * The `org` claim of a bearer JWT, read for display only: the server scopes
+ * /v1/org/tokens/mine by the org its verified claims name, so the bearer that
+ * got the answer is the one source that names it. Null for a token that is
+ * not a JWT or carries no org.
+ *
+ * @param {string} token
+ * @returns {string | null}
+ */
+function bearerOrgClaim(token) {
+  const payload = token.split('.')[1]
+  if (!payload) return null
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    return isPlainObject(claims) && typeof claims.org === 'string' && claims.org !== '' ? claims.org : null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -1661,7 +1684,7 @@ export async function runRemoteTokens(argv, ctx, deps = {}) {
   }))
   // A server that predates MCP connections sends no array; that lists none.
   const connectionRows = isPlainObject(answer.json) && Array.isArray(answer.json.connections) ? answer.json.connections : []
-  const org = connectionRows.length > 0 ? await sessionOrg(ctx, name) : null
+  const org = answer.bearerOrg
   const connections = connectionRows.filter(isPlainObject).map((c) => ({
     id: typeof c.id === 'string' ? c.id : '',
     client: typeof c.client_name === 'string' ? c.client_name : typeof c.redirect_host === 'string' ? c.redirect_host : null,
@@ -1690,24 +1713,6 @@ export async function runRemoteTokens(argv, ctx, deps = {}) {
     }
   }
   return 0
-}
-
-/**
- * The org of the session stored for `name`, the org every connection the
- * server lists for it belongs to. Null when the record carries none.
- *
- * @param {CommandRunContext} ctx
- * @param {string} name
- * @returns {Promise<string | null>}
- */
-async function sessionOrg(ctx, name) {
-  try {
-    const stored = await readCredentials(readObservabilityEnv(ctx.env).stateDir)
-    const record = Object.hasOwn(stored, name) ? stored[name] : undefined
-    return record && record.kind === 'oidc' && record.org ? record.org : null
-  } catch {
-    return null
-  }
 }
 
 /**

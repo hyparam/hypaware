@@ -199,8 +199,9 @@ Claude can see and cut their connections without an admin.
 - `hyp remote tokens` prints the agent-token table, then an
   `MCP connections` table: id, client (the client's own `client_name`
   claim, else the redirect host, escaped for display), org, created and
-  expires. The org is the stored session's, since the route lists only
-  the session's org. `--json` prints `{tokens, connections}`, mirroring
+  expires. The org is the `org` claim of the bearer that got the
+  answer, since the route lists only the org its verified claims name; a
+  bearer with no readable claim shows `-`. `--json` prints `{tokens, connections}`, mirroring
   the reply, and no longer a bare token array. A server that sends no
   `connections` lists none.
 - `hyp remote tokens revoke <id>` takes a connection id as well as a

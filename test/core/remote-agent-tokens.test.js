@@ -322,6 +322,16 @@ test('tokens --json prints the named fields only', async () => {
   })
 })
 
+/** An unsigned JWT-shaped bearer naming `org`, as the server's access JWT does. @param {string} org */
+function jwtFor(org) {
+  return `h.${Buffer.from(JSON.stringify({ sub: 'alex', org })).toString('base64url')}.sig`
+}
+
+/** Seed a fresh session whose bearer names `org`; the record's own org differs. @param {string} hypHome @param {string} org */
+async function seedSessionFor(hypHome, org) {
+  await writeSession(stateDirOf(hypHome), 'prod', { refreshToken: 'rt', accessJwt: jwtFor(org), expiresAt: FUTURE, org: 'stored-org' })
+}
+
 const CONNECTIONS = [
   {
     id: 'oauth-0123456789abcdef',
@@ -336,10 +346,10 @@ const CONNECTIONS = [
   { id: 'oauth-fedcba9876543210', redirect_host: 'chatgpt.com', created_at: '2026-10-21T00:00:00.000Z', expires_at: '2026-11-20T00:00:00.000Z' },
 ]
 
-test('tokens lists MCP connections with client, org from the session, created and expires', async () => {
+test('tokens lists MCP connections with client, the bearer org, created and expires', async () => {
   const hypHome = await tmpHome()
   const { ctx, out } = await makeCtx({ hypHome })
-  await seedSession(hypHome)
+  await seedSessionFor(hypHome, 'acme')
   const before = await snapshot(hypHome)
   const { impl, calls } = fetchStub([{ status: 200, body: { tokens: [], connections: CONNECTIONS } }])
   assert.equal(await runRemoteTokens(['prod'], ctx, { fetchImpl: impl }), 0)
@@ -360,7 +370,7 @@ test('tokens lists MCP connections with client, org from the session, created an
 test('tokens --json carries the connections beside the tokens', async () => {
   const hypHome = await tmpHome()
   const { ctx, out } = await makeCtx({ hypHome })
-  await seedSession(hypHome)
+  await seedSessionFor(hypHome, 'acme')
   const { impl } = fetchStub([{ status: 200, body: { tokens: [], connections: CONNECTIONS } }])
   assert.equal(await runRemoteTokens(['prod', '--json'], ctx, { fetchImpl: impl }), 0)
   const text = out.join('')
@@ -372,6 +382,52 @@ test('tokens --json carries the connections beside the tokens', async () => {
       { id: 'oauth-fedcba9876543210', client: 'chatgpt.com', org: 'acme', createdAt: '2026-10-21T00:00:00.000Z', expiresAt: '2026-11-20T00:00:00.000Z' },
     ],
   })
+})
+
+test('the connection org is the answering bearer, not the stored record or a later file', async () => {
+  // The org shown must be the one the server scoped the answer by: the
+  // claims of the bearer that got it. A refresh retry and an env override
+  // each answer for their own bearer.
+  const reply = { tokens: [], connections: [CONNECTIONS[1]] }
+  const orgOf = (/** @type {string[]} */ out) => JSON.parse(out.join('')).connections[0].org
+
+  const retried = await tmpHome()
+  {
+    const { ctx, out } = await makeCtx({ hypHome: retried })
+    await seedSessionFor(retried, 'alpha')
+    let gets = 0
+    const impl = /** @type {typeof fetch} */ (/** @type {unknown} */ (async (/** @type {any} */ url) => {
+      if (String(url).endsWith('/v1/identity/token')) {
+        const body = { refresh_token: 'rt-2', access_jwt: jwtFor('beta'), expires_at: 32503680000, org: 'beta' }
+        return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) }
+      }
+      gets++
+      if (gets === 1) return { ok: false, status: 401, headers: { get: () => null }, text: async () => '' }
+      return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(reply) }
+    }))
+    assert.equal(await runRemoteTokens(['prod', '--json'], ctx, { fetchImpl: impl }), 0)
+    assert.equal(orgOf(out), 'beta')
+  }
+
+  const overridden = await tmpHome()
+  {
+    const { ctx, out } = await makeCtx({ hypHome: overridden })
+    await seedSessionFor(overridden, 'alpha')
+    ctx.env.HYP_REMOTE_TOKEN_PROD = jwtFor('gamma')
+    const { impl, calls } = fetchStub([{ status: 200, body: reply }])
+    assert.equal(await runRemoteTokens(['prod', '--json'], ctx, { fetchImpl: impl }), 0)
+    assert.equal(calls[0].init.headers.authorization, `Bearer ${jwtFor('gamma')}`)
+    assert.equal(orgOf(out), 'gamma')
+  }
+
+  const opaque = await tmpHome()
+  {
+    const { ctx, out } = await makeCtx({ hypHome: opaque })
+    await seedSession(opaque)
+    const { impl } = fetchStub([{ status: 200, body: reply }])
+    assert.equal(await runRemoteTokens(['prod'], ctx, { fetchImpl: impl }), 0)
+    assert.match(out.join(''), /\noauth-fedcba9876543210\tchatgpt\.com\t-\t/)
+  }
 })
 
 test('tokens against a server without connections prints the token table alone', async () => {
