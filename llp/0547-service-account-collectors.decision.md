@@ -349,7 +349,12 @@ interface RemoteServiceRecord {
   #credentials), which an older `hyp` falls back to. So login refuses a
   service secret while one is there and names `hyp remote remove`, and a
   current `hyp` reads a present but unusable own record as logged out rather
-  than falling back.
+  than falling back. The refusal is checked under the credential lock that
+  writes the service record, so a session saved while the exchange is in
+  flight is caught too. It cannot stop a `hyp` from saving a session under
+  the earlier name after the service record is written; an older `hyp` then
+  queries as that person. A dedicated `HYP_HOME` per service account (D1) is
+  what keeps a person's login out of the store.
 - `hyp remote mint` refuses a service record locally (the server refuses it
   too: minting needs a session, 0620#matrix).
 

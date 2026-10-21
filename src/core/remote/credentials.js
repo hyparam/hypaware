@@ -331,12 +331,16 @@ export async function writeToken(stateDir, target, token) {
  * @param {string} stateDir
  * @param {string} target
  * @param {Omit<RemoteServiceRecord, 'kind'>} record
- * @returns {Promise<void>}
+ * @param {{ unlessStored?: string }} [opts] write nothing while the store
+ *   holds a record under this name, checked under the same lock as the write
+ * @returns {Promise<boolean>} false when `unlessStored` refused the write
  */
-export async function writeServiceRecord(stateDir, target, record) {
-  await withCredentialsLock(stateDir, async () => {
+export async function writeServiceRecord(stateDir, target, record, { unlessStored } = {}) {
+  return withCredentialsLock(stateDir, async () => {
     const current = await readRawCredentials(stateDir)
+    if (unlessStored !== undefined && Object.hasOwn(current, unlessStored)) return false
     await writeCredentials(stateDir, putRecord(current, target, serviceEntry(record)))
+    return true
   })
 }
 

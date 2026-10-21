@@ -699,6 +699,17 @@ async function runStaticLogin(name, tokenFile, stdin, ctx, service) {
 }
 
 /**
+ * @param {string} name
+ * @param {string} legacy
+ * @param {CommandRunContext} ctx
+ * @returns {LoginOutcome}
+ */
+function refuseLegacySession(name, legacy, ctx) {
+  ctx.stderr.write(`hyp remote login: a login is stored for '${name}' under its earlier name '${legacy}', which an older hyp would use instead of the service token - run 'hyp remote remove ${name}' first, or store the service token in its own HYP_HOME\n`)
+  return { exitCode: 2, reason: 'usage' }
+}
+
+/**
  * Store an org service secret (LLP 0547 D4): refuse a malformed one locally,
  * exchange it once so a revoked or mistyped secret fails here rather than at
  * the first query, then store it with the JWT it bought as `kind: 'service'`.
@@ -730,6 +741,8 @@ async function persistServiceToken(name, token, ctx, { remotes, legacy, fetchImp
   // An older hyp does not read a service record, and falls back to the
   // session stored under this target's earlier name; refuse while one is
   // there, so no hyp queries as that person in place of the service account.
+  // This early read only saves an exchange: the write below rechecks under
+  // the store lock, since a session can land while the exchange is awaited.
   if (legacy !== undefined) {
     /** @type {Record<string, unknown>} */
     let creds
@@ -739,10 +752,7 @@ async function persistServiceToken(name, token, ctx, { remotes, legacy, fetchImp
       ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
       return { exitCode: 1, reason: 'store_failed' }
     }
-    if (Object.hasOwn(creds, legacy)) {
-      ctx.stderr.write(`hyp remote login: a login is stored for '${name}' under its earlier name '${legacy}', which an older hyp would use instead of the service token - run 'hyp remote remove ${name}' first, or store the service token in its own HYP_HOME\n`)
-      return { exitCode: 2, reason: 'usage' }
-    }
+    if (Object.hasOwn(creds, legacy)) return refuseLegacySession(name, legacy, ctx)
   }
   /** @type {Awaited<ReturnType<typeof exchangeServiceToken>>} */
   let exchanged
@@ -752,12 +762,15 @@ async function persistServiceToken(name, token, ctx, { remotes, legacy, fetchImp
     ctx.stderr.write(`hyp remote login: ${serviceRefusal(err, name) ?? (err instanceof Error ? err.message : String(err))}\n`)
     return { exitCode: 1, reason: 'login_failed' }
   }
+  /** @type {boolean} */
+  let stored
   try {
-    await writeServiceRecord(stateDir, name, { secret: token, ...exchanged })
+    stored = await writeServiceRecord(stateDir, name, { secret: token, ...exchanged }, { unlessStored: legacy })
   } catch (err) {
     ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
     return { exitCode: 1, reason: 'store_failed' }
   }
+  if (!stored) return refuseLegacySession(name, /** @type {string} */ (legacy), ctx)
   ctx.stdout.write(`stored service token for '${name}'${exchanged.org ? ` (org ${exchanged.org})` : ''}\n`)
   return { exitCode: 0, reason: 'ok' }
 }

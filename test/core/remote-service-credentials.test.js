@@ -196,6 +196,35 @@ test('service login is refused while a session is stored under the target\'s ear
   assert.equal((await readCredentials(stateDir)).hypaware, undefined)
 })
 
+test('a session saved under the earlier name during the exchange still refuses the service login', async () => {
+  const hypHome = await tmpState()
+  const tokenFile = path.join(hypHome, 'tok.txt')
+  await fs.writeFile(tokenFile, SECRET)
+  const { ctx, err } = await makeCtx(hypHome)
+  const stateDir = path.join(hypHome, 'hypaware')
+  /** @type {() => void} */
+  let entered = () => {}
+  /** @type {() => void} */
+  let release = () => {}
+  const atExchange = new Promise((resolve) => { entered = () => resolve(undefined) })
+  const held = new Promise((resolve) => { release = () => resolve(undefined) })
+  /** @type {typeof fetch} */
+  const fetchImpl = async () => {
+    entered()
+    await held
+    return new Response(JSON.stringify({ access_jwt: 'jwt-1', expires_at: FUTURE, org: 'acme' }), { status: 200 })
+  }
+  const login = runRemoteLogin(['hypaware', '--token-file', tokenFile], ctx, { fetchImpl })
+  await atExchange
+  await writeSession(stateDir, 'hyperparam', { refreshToken: 'rt', accessJwt: 'jwt-personal', expiresAt: FUTURE, org: 'acme' })
+  release()
+  assert.equal(await login, 2)
+  assert.match(err.join(''), /run 'hyp remote remove hypaware' first/)
+  const stored = await readCredentials(stateDir)
+  assert.equal(stored.hypaware, undefined)
+  assert.ok(stored.hyperparam)
+})
+
 test('an exchange error that echoes the secret prints and logs only the status', async () => {
   const echoed = { error: `invalid token ${SECRET}` }
   const leaks = (/** @type {string} */ text) => text.includes(SECRET) || text.includes(sha256Hex(SECRET))
