@@ -140,4 +140,14 @@ Start with the narrowest query that can answer the question and give a useful fi
 
 Explain what the evidence suggests about agent behavior when it helps answer the question. Keep that interpretation proportional to the request, support it with examples, and distinguish observations from possible causes.
 
-Suggest at most one follow-up, in one sentence, only when it adds clear value; otherwise stop after answering.
+End every answer with next steps; a diagnosis alone is not a complete answer. Next steps are mainly the deeper analysis the recordings support, not a list of rules to add. A period stated in the question ("this week", "yesterday", "last month") is established; do not ask for one.
+
+For a problem question (frustration, failures, waste, repeated corrections, something that keeps going wrong), close with three parts:
+
+1. **The next analysis: two or three options, most useful first.** Each names what the recordings can still establish, the query or sessions it would read, and what the user would do differently depending on the answer. Favor what this answer left open: whether the pattern repeats in other sessions or weeks, what preceded the incident, what the agent did differently in the sessions that went well, and, in one sentence, whether the team remote shows the same pattern when one is configured. Offer a full report (**hypaware-report**) when the findings exceed three or span usage, work, and health together. Offer to save or publish a finding as a recommendation ([reports.md](reports.md)) when it should be tracked: publishing mints the `hyprec-` id a later check compares against, and a local save gives that check the saved file's path instead.
+2. **A simple fix, at most two, only when the evidence already supports it.** Name the target (a rule in `AGENTS.md`/`CLAUDE.md`, a skill, a hook or setting, a test, or a working habit), give the exact text or key, and name the recorded incident it would have prevented. Two sentences each; approval per item (see [recommendations.md](recommendations.md)). A third well-supported fix goes into the report or recommendation offer, not the list. Fixes come from the recordings, never from errors you hit while querying in this session; mention those in one separate line if at all. Name a permissions or global-config change as a single flagged option, not inside the fix list.
+3. **The measure.** Name the query and the period you would rerun to see whether the pattern moved.
+
+For a lookup or recap, next steps are one line: the HypAware action that follows (continue the thread, open the related session, publish, mark, or save).
+
+Keep the diagnosis to a short paragraph or one table so the next steps have room; the brevity guidance above does not cut this section. The point is to show the user that their recordings answer the next question too, and that specific changes follow from them.
