@@ -296,7 +296,7 @@ test('a sink saved under the built-in target\'s previous host is the built-in ta
   }
   assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 0)
   assert.equal(calls, 1)
-  assert.deepEqual(Object.keys(JSON.parse(output()).remotes), ['hyperparam'])
+  assert.deepEqual(Object.keys(JSON.parse(output()).remotes), ['hypaware'])
 })
 
 test('two targets on one server that differ only by a registered selector stay distinct purge targets', async t => {

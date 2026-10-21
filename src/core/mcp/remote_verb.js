@@ -1,7 +1,7 @@
 // @ts-check
 
 import { readObservabilityEnv } from '../observability/env.js'
-import { effectiveRemotes } from '../remote/builtin_remotes.js'
+import { canonicalRemoteName, effectiveRemotes, legacyCredentialName } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, describeAuthRejection, resolveAccessJwt } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { createHttpMcpClient, isAuthStatus, orgReadRefusedMessage } from './client.js'
@@ -24,9 +24,12 @@ import { createHttpMcpClient, isAuthStatus, orgReadRefusedMessage } from './clie
  * @returns {Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode?: number }>}
  * @ref LLP 0033#two-truncations [implements]: server cap surfaced here as its own line; client cannot lift it
  */
-export async function runRemoteVerb({ verb, params, target, org, ctx }) {
+export async function runRemoteVerb({ verb, params, target: named, org, ctx }) {
   // Built-in targets (the shipped central server) layered under the user's
-  // own `query.remotes`, so `--remote hyperparam` works with no `remote add`.
+  // own `query.remotes`, so `--remote hypaware` works with no `remote add`,
+  // and the old built-in name `hyperparam` still reaches it.
+  const target = canonicalRemoteName(named, ctx.config)
+  const legacyTarget = legacyCredentialName(target, ctx.config)
   // Own-key read: an inherited Object.prototype member is truthy, so a target
   // named `constructor` walked past this refusal and was signposted as an
   // unrefreshable session rather than an unregistered target.
@@ -59,7 +62,7 @@ export async function runRemoteVerb({ verb, params, target, org, ctx }) {
   try {
     // The initial resolve can itself refresh (and fail) when the stored JWT is
     // already stale; map an invalid_grant here too, not only on the 401 retry.
-    resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+    resolved = await resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase })
   } catch (err) {
     return mapRefreshError(err, target)
   }
@@ -101,7 +104,7 @@ export async function runRemoteVerb({ verb, params, target, org, ctx }) {
   try {
     const out = await attachWithRefresh({
       resolved,
-      refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+      refresh: () => resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
       op,
     })
     if (!out.ok) return { ok: false, error: out.error, exitCode: 2 }

@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
-import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
+import { BUILTIN_REMOTE_ALIASES, BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
 import { parseRedactionConfig } from '../sinks/redaction.js'
 
@@ -636,12 +636,13 @@ function parseQueryConfig(obj, pointer, errors) {
   // default_remote must name a defined target, so `--remote` with no arg
   // never silently resolves to nothing. A shipped built-in target counts as
   // defined, so a config may default to the central server without also
-  // restating its URL under `remotes`.
+  // restating its URL under `remotes`; so does a built-in's old name.
   if (obj.default_remote !== undefined) {
     const defaultName = obj.default_remote
     const defined =
       (result.remotes && Object.prototype.hasOwnProperty.call(result.remotes, defaultName)) ||
-      Object.prototype.hasOwnProperty.call(BUILTIN_REMOTES, defaultName)
+      Object.prototype.hasOwnProperty.call(BUILTIN_REMOTES, defaultName) ||
+      Object.prototype.hasOwnProperty.call(BUILTIN_REMOTE_ALIASES, defaultName)
     if (!isNonEmptyString(defaultName)) {
       errors.push({ pointer: `${pointer}/default_remote`, message: 'query.default_remote must be a non-empty string' })
     } else if (!defined) {

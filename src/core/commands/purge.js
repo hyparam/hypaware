@@ -11,7 +11,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { purgeCache, purgeCleanupFrom, purgeObservationsFrom, purgeSkipsFrom } from '../cache/purge.js'
 import { createSessionPurgeStore } from '../cache/session-purges.js'
-import { BUILTIN_ORIGIN_ALIASES, effectiveRemotes } from '../remote/builtin_remotes.js'
+import { BUILTIN_ORIGIN_ALIASES, canonicalRemoteName, effectiveRemotes, legacyCredentialName } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, readCredentials, remoteTokenEnvVar, resolveAccessJwt } from '../remote/credentials.js'
 import { captureSpoolRoot, sweepCaptureSpool } from '../capture_spool.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/index.js'
@@ -347,14 +347,19 @@ async function purgeRemotes(ctx, parsed, stateDir) {
   if (parsed.session === undefined || parsed.localOnly) return targets
   const registry = effectiveRemotes(ctx.config)
   if (parsed.remote) {
-    if (!Object.hasOwn(registry, parsed.remote)) throw new Error('unknown remote target')
-    targets.set(parsed.remote, registry[parsed.remote].url)
+    const name = canonicalRemoteName(parsed.remote, ctx.config)
+    if (!Object.hasOwn(registry, name)) throw new Error('unknown remote target')
+    targets.set(name, registry[name].url)
     return targets
   }
   const credentials = await readCredentials(stateDir)
+  const configuredDefault = ctx.config?.query?.default_remote
   for (const [name, remote] of Object.entries(registry)) {
+    const legacy = legacyCredentialName(name, ctx.config)
     if (Object.hasOwn(ctx.config?.query?.remotes ?? {}, name) ||
-      ctx.config?.query?.default_remote === name || Object.hasOwn(credentials, name) || ctx.env[remoteTokenEnvVar(name)]) {
+      (typeof configuredDefault === 'string' && canonicalRemoteName(configuredDefault, ctx.config) === name) ||
+      Object.hasOwn(credentials, name) || ctx.env[remoteTokenEnvVar(name)] ||
+      (legacy !== undefined && (Object.hasOwn(credentials, legacy) || ctx.env[remoteTokenEnvVar(legacy)]))) {
       targets.set(name, remote.url)
     }
   }
@@ -397,14 +402,15 @@ async function purgeRemotes(ctx, parsed, stateDir) {
  */
 async function purgeRemoteSession({ ctx, target, url, sessionId }) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const legacyTarget = legacyCredentialName(target, ctx.config)
   const identityBase = deriveIdentityBase(url) ?? undefined
-  const resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+  const resolved = await resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase })
   if (!resolved.ok) throw new Error(resolved.error)
   const endpoint = new URL(deriveMcpEndpoint(url))
   endpoint.pathname = endpoint.pathname.replace(/\/mcp$/, '/sessions/purge')
   const result = await attachWithRefresh({
     resolved,
-    refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+    refresh: () => resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
     async op(token) {
       const response = await fetch(endpoint, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(300000),

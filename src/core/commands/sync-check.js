@@ -7,7 +7,7 @@ import { loadLatestFileCatalogMetadata } from 'icebird'
 import { fileURLToPath } from 'node:url'
 import { setImmediate } from 'node:timers/promises'
 import { inventoryBucket, inventoryDay, inventoryKey, summarizeInventoryKeys } from '../sinks/sync-inventory.js'
-import { effectiveRemotes, sameServer } from '../remote/builtin_remotes.js'
+import { effectiveRemotes, legacyCredentialName, sameServer } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, resolveAccessJwt } from '../remote/credentials.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { sinkInstanceConfig, sinkInstanceName } from '../registry/sinks.js'
@@ -148,10 +148,11 @@ export async function runSyncCheck(options, ctx) {
     const remote = Object.entries(effectiveRemotes(ctx.config)).find(([, target]) => sameServer(sinkUrl, target.url))
     if (!remote) throw new Error('add a read remote for this destination with hyp remote add, then log in')
     const [target, { url }] = remote
+    const legacyTarget = legacyCredentialName(target, ctx.config)
     const stateDir = readObservabilityEnv(ctx.env).stateDir
     if (await readFirstSyncDeadline({ stateDir }) !== null) throw new Error('first sync is still held; check is incomplete')
     const identityBase = deriveIdentityBase(url) ?? undefined
-    const resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+    const resolved = await resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase })
     if (!resolved.ok) throw new Error(resolved.error)
     const endpoint = new URL(deriveMcpEndpoint(url))
     endpoint.pathname = endpoint.pathname.replace(/\/mcp$/, '/sync-inventory')
@@ -200,7 +201,7 @@ export async function runSyncCheck(options, ctx) {
     const selectedRows = /** @type {Map<string, Record<string, unknown>[]>} */ (new Map())
     const result = await compareSyncInventory(local, async body => {
       const response = await attachWithRefresh({ resolved,
-        refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+        refresh: () => resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
         async op(token) {
           const value = await fetch(endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000),
             headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) })

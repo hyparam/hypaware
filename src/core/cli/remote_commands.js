@@ -11,7 +11,15 @@ import { defaultConfigPath } from '../config/schema.js'
 import { isEntryRecording } from '../config/client_recording.js'
 import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { BUILTIN_REMOTES, effectiveDefaultRemote, originOf, sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
+import {
+  BUILTIN_REMOTES,
+  canonicalRemoteName,
+  effectiveDefaultRemote,
+  legacyCredentialName,
+  originOf,
+  sameServer,
+  serverDisplayName,
+} from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
   deriveIdentityBase,
@@ -556,7 +564,9 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // A bare `hyp remote login` (no target) signs in to the default target: an
   // explicit query.default_remote, else the shipped built-in central server.
   // @ref LLP 0062#bare-remote [implements]: bare `remote login` resolves the default target, the companion of bare `--remote`
-  const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
+  const named = /** @type {string | undefined} */ (gate.params.name)
+  const snapshot = await readRemoteSnapshot(ctx)
+  const name = snapshot.resolve(named)
   const forceBrowser = gate.params.browser === true
   const noBrowser = gate.params['no-browser'] === true
   // Enrollment opt-outs (LLP 0063): --no-forward signs in for queries only;
@@ -589,7 +599,7 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // as a static token. A piped token *without* a browser-mode flag already took
   // the static path above (`useStatic`), so nothing is swallowed silently there;
   // only an explicit `--no-browser` ignores a pipe, by design.
-  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, force, compact: deps.compact === true, binPath: deps.binPath }, ctx, {
+  return runBrowserLogin(name, { remotes: snapshot.remotes, org, host, noBrowser, noForward, noDaemon, force, compact: deps.compact === true, binPath: deps.binPath }, ctx, {
     login: deps.login ?? loginWithBrowser,
     seed: deps.seed ?? seedLoginGateway,
     enroll: deps.enroll ?? enrollCentralSink,
@@ -725,13 +735,12 @@ async function persistStaticToken(name, token, ctx) {
  * from one command, unless `--no-forward` declines it.
  *
  * @param {string} name
- * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, force?: boolean, compact?: boolean, binPath?: string }} opts
+ * @param {{ remotes: Record<string, { url: string }>, org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, force?: boolean, compact?: boolean, binPath?: string }} opts
  * @param {CommandRunContext} ctx
  * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach }} deps
  * @returns {Promise<LoginOutcome>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, force, compact = false, binPath }, ctx, { login, seed, enroll, waitForAttach }) {
-  const remotes = await readConfiguredRemotes(ctx)
+async function runBrowserLogin(name, { remotes, org, host, noBrowser, noForward, noDaemon, force, compact = false, binPath }, ctx, { login, seed, enroll, waitForAttach }) {
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
     ctx.stderr.write(`hyp remote login: '${name}' is not a configured target - add it first with 'hyp remote add ${name} <url>'\n`)
@@ -1172,10 +1181,10 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   if (!gate.ok) return gate.code
   // Bare `hyp remote mint` targets the default remote, like bare `remote login`.
   // @ref LLP 0062#bare-remote [implements]: bare `remote mint` resolves the default target
-  const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
+  const named = /** @type {string | undefined} */ (gate.params.name)
   const label = /** @type {string | undefined} */ (gate.params.label)
   if (gate.params.scope === 'query') {
-    return runAgentMint({ name, label, expiresDays: /** @type {number | undefined} */ (gate.params['expires-days']) }, ctx, deps)
+    return runAgentMint({ named, label, expiresDays: /** @type {number | undefined} */ (gate.params['expires-days']) }, ctx, deps)
   }
   // The schema (LLP 0293) owns the minimum; the ceiling is this branch's, like
   // the default: the agent mint sends neither and takes the server's.
@@ -1185,7 +1194,8 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
     ctx.stderr.write(`usage: ${coreUsage('remote mint')}\n`)
     return 2
   }
-  const remotes = await readConfiguredRemotes(ctx)
+  const { remotes, legacyOf, resolve } = await readRemoteSnapshot(ctx)
+  const name = resolve(named)
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
     ctx.stderr.write(`hyp remote mint: unknown remote target '${name}' - add it with 'hyp remote add ${name} <url>'\n`)
@@ -1211,10 +1221,11 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   }
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const legacyTarget = legacyOf(name)
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
   let resolved
   try {
-    resolved = await resolveAccessJwt({ target: name, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl })
+    resolved = await resolveAccessJwt({ target: name, legacyTarget, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl })
   } catch (err) {
     const { sessionExpired, message } = describeRefreshError(err, name)
     ctx.stderr.write(`hyp remote mint: ${message}\n`)
@@ -1246,7 +1257,7 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   try {
     out = await attachWithRefresh({
       resolved,
-      refresh: () => resolveAccessJwt({ target: name, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl, forceRefresh: true }),
+      refresh: () => resolveAccessJwt({ target: name, legacyTarget, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl, forceRefresh: true }),
       op,
     })
   } catch (refreshErr) {
@@ -1398,17 +1409,18 @@ function agentTokensEndpoint(url) {
  * agent-token command shares are written here (exit 1), so the three
  * commands word them alike.
  *
- * @param {{ command: string, name: string, method: string, suffix?: string, body?: Record<string, unknown> }} request
+ * @param {{ command: string, named: string | undefined, method: string, suffix?: string, body?: Record<string, unknown> }} request
  * @param {CommandRunContext} ctx
  * @param {{ fetchImpl?: typeof fetch }} deps
- * @returns {Promise<{ ok: true, status: number, json: any, retryAfter: string | null, bearerOrg: string | null } | { ok: false, code: number }>}
+ * @returns {Promise<{ ok: true, status: number, json: any, retryAfter: string | null, bearerOrg: string | null, server: string, name: string } | { ok: false, code: number }>}
  */
-async function agentTokensRequest({ command, name, method, suffix = '', body }, ctx, deps) {
+async function agentTokensRequest({ command, named, method, suffix = '', body }, ctx, deps) {
   const fail = (/** @type {string} */ line, /** @type {number} */ code) => {
     ctx.stderr.write(`hyp ${command}: ${line}\n`)
     return /** @type {{ ok: false, code: number }} */ ({ ok: false, code })
   }
-  const remotes = await readConfiguredRemotes(ctx)
+  const { remotes, legacyOf, resolve } = await readRemoteSnapshot(ctx)
+  const name = resolve(named)
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) return fail(`unknown remote target '${name}' - add it with 'hyp remote add ${name} <url>'`, 2)
   const identityBase = deriveIdentityBase(entry.url)
@@ -1418,10 +1430,11 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
   if (typeof doFetch !== 'function') return fail(NO_FETCH_MESSAGE, 1)
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const legacyTarget = legacyOf(name)
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
   let resolved
   try {
-    resolved = await resolveAccessJwt({ target: name, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl })
+    resolved = await resolveAccessJwt({ target: name, legacyTarget, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl })
   } catch (err) {
     const { sessionExpired, message } = describeRefreshError(err, name)
     return fail(message, sessionExpired ? 2 : 1)
@@ -1468,7 +1481,7 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
   try {
     out = await attachWithRefresh({
       resolved,
-      refresh: () => resolveAccessJwt({ target: name, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl, forceRefresh: true }),
+      refresh: () => resolveAccessJwt({ target: name, legacyTarget, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl, forceRefresh: true }),
       op,
     })
   } catch (refreshErr) {
@@ -1482,8 +1495,10 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
       return fail(`'${name}' refused the session (HTTP 401) - sign in again with 'hyp remote login ${name}'`, 1)
     }
     if (resolved.source === 'env') {
+      // The override read may be the one under the built-in's old name.
+      const envVar = !ctx.env[remoteTokenEnvVar(name)] && legacyTarget !== undefined ? remoteTokenEnvVar(legacyTarget) : remoteTokenEnvVar(name)
       return fail(
-        `'${name}' refused the ${remoteTokenEnvVar(name)} override (HTTP 401) - agent tokens need a session; ` +
+        `'${name}' refused the ${envVar} override (HTTP 401) - agent tokens need a session; ` +
           `unset it and sign in with 'hyp remote login ${name}'`,
         1,
       )
@@ -1527,7 +1542,31 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
       return fail(`'${name}' does not serve agent tokens yet (HTTP ${response.status}) - the server predates them`, 1)
     }
   }
-  return { ok: true, status: response.status, json, retryAfter: response.headers?.get?.('retry-after') ?? null, bearerOrg: bearerOrgClaim(sentToken) }
+  return {
+    ok: true,
+    status: response.status,
+    json,
+    retryAfter: response.headers?.get?.('retry-after') ?? null,
+    bearerOrg: bearerOrgClaim(sentToken),
+    server: serverLabel(name, remotes),
+    name,
+  }
+}
+
+/**
+ * How a message names the server a remote target points at: the server's own
+ * name (HypAware Cloud for the built-in), with the local remote name added
+ * only when more than one remote is configured, so the server alone could be
+ * the wrong one to read.
+ *
+ * @param {string} name
+ * @param {Record<string, { url: string }>} remotes
+ * @returns {string}
+ * @ref LLP 0552#messages [implements]: the server's name, the remote name only when several are configured
+ */
+function serverLabel(name, remotes) {
+  const server = serverDisplayName(remotes[name].url)
+  return Object.keys(remotes).length > 1 ? `${server} ('${name}')` : server
 }
 
 /**
@@ -1580,17 +1619,17 @@ function genericRefusal(what, status, json) {
  * mint the caller a personal agent token, a standalone credential that reads
  * and publishes as them after their session has ended, and print it once.
  *
- * @param {{ name: string, label: string | undefined, expiresDays: number | undefined }} args
+ * @param {{ named: string | undefined, label: string | undefined, expiresDays: number | undefined }} args
  * @param {CommandRunContext} ctx
  * @param {{ fetchImpl?: typeof fetch }} deps
  * @returns {Promise<number>}
  * @ref LLP 0494#cli-mint [implements]: POST <api base>/v1/org/tokens/mine; the body is {} plus ttl_seconds only when asked and label when given, so the server owns the default lifetime
  */
-async function runAgentMint({ name, label, expiresDays }, ctx, deps) {
+async function runAgentMint({ named, label, expiresDays }, ctx, deps) {
   const command = 'remote mint'
   const answer = await agentTokensRequest({
     command,
-    name,
+    named,
     method: 'POST',
     body: {
       ...(expiresDays !== undefined ? { ttl_seconds: expiresDays * 86400 } : {}),
@@ -1598,7 +1637,7 @@ async function runAgentMint({ name, label, expiresDays }, ctx, deps) {
     },
   }, ctx, deps)
   if (!answer.ok) return answer.code
-  const { status, json } = answer
+  const { status, json, name } = answer
   if (status < 200 || status >= 300) {
     const error = errorCode(json)
     const detail = isPlainObject(json) && typeof json.detail === 'string' ? json.detail.slice(0, 200) : ''
@@ -1610,7 +1649,7 @@ async function runAgentMint({ name, label, expiresDays }, ctx, deps) {
       // The server names its ceiling, a per-deployment setting the CLI does not copy.
       line = detail
     } else if (status === 429 && error === 'token_limit' && answer.retryAfter === null) {
-      line = `you have ten live agent tokens on '${name}' - list them with 'hyp remote tokens ${name}' and revoke one`
+      line = `you have ten live agent tokens on ${answer.server} - list them with 'hyp remote tokens ${name}' and revoke one`
     } else if (status === 429 && error === 'token_limit') {
       // The retained bound counts revoked tokens too, so revoking frees
       // nothing; the server's detail says when the next one frees.
@@ -1632,7 +1671,7 @@ async function runAgentMint({ name, label, expiresDays }, ctx, deps) {
   const detail = [jti ? `jti ${jti}` : '', mintedLabel ? `label ${mintedLabel}` : '', expiresAt ? `expires ${expiresAt}` : ''].filter(Boolean).join(', ')
   const revoke = `hyp remote tokens revoke ${jti ?? '<jti>'}${name === effectiveDefaultRemote(ctx.config) ? '' : ` --remote ${name}`}`
   // @ref LLP 0494#cli-mint [implements]: stdout is the token alone; nothing is kept client-side, so this print is its only copy
-  ctx.stderr.write(`minted agent token for '${name}'${detail ? ` (${detail})` : ''}\n`)
+  ctx.stderr.write(`minted agent token for ${answer.server}${detail ? ` (${detail})` : ''}\n`)
   ctx.stdout.write(`${token}\n`)
   ctx.stderr.write(
     "it reads the org's recorded history and can mark recommendations, publish reports and delete reports, " +
@@ -1660,9 +1699,10 @@ export async function runRemoteTokens(argv, ctx, deps = {}) {
   const command = 'remote tokens'
   const gate = parseCoreCommandArgv(command, argv, ctx)
   if (!gate.ok) return gate.code
-  const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
-  const answer = await agentTokensRequest({ command, name, method: 'GET' }, ctx, deps)
+  const named = /** @type {string | undefined} */ (gate.params.name)
+  const answer = await agentTokensRequest({ command, named, method: 'GET' }, ctx, deps)
   if (!answer.ok) return answer.code
+  const { name } = answer
   if (answer.status < 200 || answer.status >= 300) {
     ctx.stderr.write(`hyp ${command}: ${genericRefusal('listing', answer.status, answer.json)}\n`)
     return 1
@@ -1697,7 +1737,7 @@ export async function runRemoteTokens(argv, ctx, deps = {}) {
     return 0
   }
   if (tokens.length === 0) {
-    ctx.stdout.write(`no agent tokens on '${name}' - mint one with 'hyp remote mint ${name} --scope query'\n`)
+    ctx.stdout.write(`no agent tokens on ${answer.server} - mint one with 'hyp remote mint ${name} --scope query'\n`)
   } else {
     ctx.stdout.write('jti\tlabel\tcreated\texpires\trevoked\n')
     for (const t of tokens) {
@@ -1706,7 +1746,7 @@ export async function runRemoteTokens(argv, ctx, deps = {}) {
     }
   }
   if (connections.length > 0) {
-    ctx.stdout.write(`\nMCP connections on '${name}':\n`)
+    ctx.stdout.write(`\nMCP connections on ${answer.server}:\n`)
     ctx.stdout.write('id\tclient\torg\tcreated\texpires\n')
     for (const c of connections) {
       ctx.stdout.write(`${c.id}\t${escapeForDisplay(c.client ?? '-')}\t${c.org ?? '-'}\t${c.createdAt ?? '-'}\t${c.expiresAt ?? '-'}\n`)
@@ -1733,11 +1773,12 @@ export async function runRemoteTokensRevoke(argv, ctx, deps = {}) {
   const gate = parseCoreCommandArgv(command, argv, ctx)
   if (!gate.ok) return gate.code
   const jti = /** @type {string} */ (gate.params.jti)
-  const name = /** @type {string | undefined} */ (gate.params.remote) ?? effectiveDefaultRemote(ctx.config)
-  const answer = await agentTokensRequest({ command, name, method: 'DELETE', suffix: `/${encodeURIComponent(jti)}` }, ctx, deps)
+  const named = /** @type {string | undefined} */ (gate.params.remote)
+  const answer = await agentTokensRequest({ command, named, method: 'DELETE', suffix: `/${encodeURIComponent(jti)}` }, ctx, deps)
   if (!answer.ok) return answer.code
+  const { name } = answer
   if (answer.status === 404) {
-    ctx.stderr.write(`hyp ${command}: '${name}' has no agent token or MCP connection ${jti} of yours - list them with 'hyp remote tokens ${name}'\n`)
+    ctx.stderr.write(`hyp ${command}: ${answer.server} has no agent token or MCP connection ${jti} of yours - list them with 'hyp remote tokens ${name}'\n`)
     return 1
   }
   if (answer.status < 200 || answer.status >= 300) {
@@ -1745,8 +1786,10 @@ export async function runRemoteTokensRevoke(argv, ctx, deps = {}) {
     return 1
   }
   const json = answer.json
-  const connection = isPlainObject(json) && typeof json.id === 'string' && typeof json.jti !== 'string'
-  ctx.stdout.write(`revoked ${connection ? 'MCP connection' : 'agent token'} ${jti} on '${name}'\n`)
+  // The server mints connection ids as `oauth-<hex>`; the prefix names one
+  // even from a server whose reply does not.
+  const connection = jti.startsWith('oauth-') || (isPlainObject(json) && typeof json.id === 'string' && typeof json.jti !== 'string')
+  ctx.stdout.write(`revoked ${connection ? 'connection' : 'agent token'} ${jti} on ${answer.server}\n`)
   return 0
 }
 
@@ -1761,15 +1804,17 @@ export async function runRemoteList(argv, ctx) {
   const parsed = parseCoreCommandArgv('remote list', argv, ctx)
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
-  const remotes = await readConfiguredRemotes(ctx)
+  const { remotes, legacyOf } = await readRemoteSnapshot(ctx)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const stored = await readCredentials(stateDir)
   const names = Object.keys(remotes).sort()
 
   /** @param {string} name */
   const tokenStatus = (name) => {
-    if (typeof ctx.env[remoteTokenEnvVar(name)] === 'string' && ctx.env[remoteTokenEnvVar(name)]) return 'env'
-    return Object.hasOwn(stored, name) && stored[name] ? 'stored' : 'missing'
+    const legacy = legacyOf(name)
+    const keys = legacy === undefined ? [name] : [name, legacy]
+    if (keys.some((key) => typeof ctx.env[remoteTokenEnvVar(key)] === 'string' && ctx.env[remoteTokenEnvVar(key)])) return 'env'
+    return keys.some((key) => Object.hasOwn(stored, key) && stored[key]) ? 'stored' : 'missing'
   }
 
   if (json) {
@@ -1799,11 +1844,18 @@ export async function runRemoteList(argv, ctx) {
 export async function runRemoteRemove(argv, ctx) {
   const parsed = parseCoreCommandArgv('remote remove', argv, ctx)
   if (!parsed.ok) return parsed.code
-  const name = String(parsed.params.name)
+  let name = String(parsed.params.name)
   let removedConfig = false
+  /** @type {string | undefined} */
+  let legacy
   const configPath = localConfigPath(ctx)
   try {
     await mutateLocalConfig(configPath, (config) => {
+      // Resolved from the file this edit holds, so the name, the entry deleted
+      // and the credentials cleared below all mean the same target.
+      const snapshot = /** @type {any} */ ({ query: { remotes: ownRemotes(config) } })
+      name = canonicalRemoteName(name, snapshot)
+      legacy = legacyCredentialName(name, snapshot)
       if (isPlainObject(config.query) && isPlainObject(config.query.remotes) && Object.hasOwn(config.query.remotes, name)) {
         delete config.query.remotes[name]
         removedConfig = true
@@ -1818,6 +1870,8 @@ export async function runRemoteRemove(argv, ctx) {
   let removedToken = false
   try {
     removedToken = await removeToken(stateDir, name)
+    // A session stored under the built-in's old name is this target's too.
+    if (legacy !== undefined && (await removeToken(stateDir, legacy))) removedToken = true
   } catch (err) {
     // removeToken now contends for the cross-process credentials lock and can
     // throw a lock timeout. The config edit above already landed, so report the
@@ -1855,6 +1909,22 @@ function localConfigPath(ctx) {
  * @returns {Promise<Record<string, { url: string }>>}
  */
 async function readConfiguredRemotes(ctx) {
+  return (await readRemoteSnapshot(ctx)).remotes
+}
+
+/**
+ * The configured targets and, from the same read of the config file, the
+ * target a typed name (or, with none, the default) means and the old name its
+ * credential may still be stored under (legacyCredentialName). One snapshot
+ * for all three, so a config edit landing mid-command cannot pair a
+ * credential stored for the built-in with some other server's URL, or act on
+ * a target other than the one the URL belongs to.
+ *
+ * @ref LLP 0552#credentials [implements]: the fallback's eligibility and the URL it is sent to come from one config read
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<{ remotes: Record<string, { url: string }>, resolve: (named: string | undefined) => string, legacyOf: (name: string) => string | undefined }>}
+ */
+async function readRemoteSnapshot(ctx) {
   // Ship the built-in targets under any user-defined ones, so `remote login`
   // and `remote list` see the central server even before a `remote add`; a
   // user entry of the same name overrides it.
@@ -1866,13 +1936,27 @@ async function readConfiguredRemotes(ctx) {
   // `Object.hasOwn`, since the names they look up are operator-supplied too.
   /** @type {[string, { url: string }][]} */
   const pairs = Object.entries(BUILTIN_REMOTES)
-  const config = await readLocalConfigRaw(localConfigPath(ctx))
-  if (isPlainObject(config.query) && isPlainObject(config.query.remotes)) {
-    for (const [name, entry] of Object.entries(config.query.remotes)) {
-      if (isPlainObject(entry) && typeof entry.url === 'string') pairs.push([name, { url: entry.url }])
-    }
+  const raw = await readLocalConfigRaw(localConfigPath(ctx))
+  const own = ownRemotes(raw)
+  for (const [name, entry] of Object.entries(own)) {
+    if (isPlainObject(entry) && typeof entry.url === 'string') pairs.push([name, { url: entry.url }])
   }
-  return Object.fromEntries(pairs)
+  const snapshot = /** @type {any} */ ({ query: { remotes: own, default_remote: isPlainObject(raw.query) ? raw.query.default_remote : undefined } })
+  return {
+    remotes: Object.fromEntries(pairs),
+    resolve: (named) => named === undefined ? effectiveDefaultRemote(snapshot) : canonicalRemoteName(named, snapshot),
+    legacyOf: (name) => legacyCredentialName(name, snapshot),
+  }
+}
+
+/**
+ * The user's own `query.remotes` map from a raw config file, or an empty map.
+ *
+ * @param {any} config
+ * @returns {Record<string, unknown>}
+ */
+function ownRemotes(config) {
+  return isPlainObject(config.query) && isPlainObject(config.query.remotes) ? config.query.remotes : {}
 }
 
 /**
