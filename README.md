@@ -99,6 +99,9 @@ Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
 OpenClaw, Hermes Agent, Pi, Ollama, and any tool that exports OpenTelemetry logs,
 traces, or metrics.
 
+[NanoClaw v2](./docs/integrations/nanoclaw.md) Claude transcript capture is
+supported with an explicitly configured local installation root.
+
 Claude Code is captured through its built-in telemetry, so it still talks
 directly to Anthropic and nothing sits in the path of your session. See
 [clients and history](./docs/CLIENTS.md), including how to import sessions

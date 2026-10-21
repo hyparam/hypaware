@@ -1212,6 +1212,7 @@ capture:
 | `@hypaware/claude` (also Claude Desktop) | Five minutes | Yes |
 | `@hypaware/cursor` | Five minutes | Yes |
 | `@hypaware/openclaw` | Five minutes | Yes |
+| `@hypaware/nanoclaw` | Five minutes | Yes (this is NanoClaw's only capture route) |
 
 `hyp client detach <client>` stops every client's scheduled recovery, whatever
 `on_join` says; `hyp client attach <client>` resumes it.
@@ -1232,8 +1233,10 @@ limit. See [retention configuration](CONFIGURATION.md#set-local-retention).
 
 `sweep_cron` changes the recovery cadence and has no "never" value. For the
 adapters marked Yes above, `backfill.on_join: false` stops automatic history
-import only: live capture continues, and an explicit `hyp backfill <provider>`
-still imports on demand. Detach only when you want to stop capture as well.
+import: any separate live capture continues, and an explicit
+`hyp backfill <provider>` still imports on demand. NanoClaw has no separate
+live capture route, so disabling its schedule stops automatic capture entirely.
+Detach when you want to stop all capture for a client.
 
 ## Collect GitHub activity
 

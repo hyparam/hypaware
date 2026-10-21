@@ -14,6 +14,11 @@ add the printed JavaScript or Python callback to your application. It recovers
 events the callback saved while the collector was down, but does not import old
 checkpoints or automatically discover projects.
 
+[NanoClaw](integrations/nanoclaw.md) requires an explicit local installation
+root in the `@hypaware/nanoclaw` plugin configuration. It is not offered in the
+setup picker. Once configured, it recovers local v2 Claude transcripts every
+five minutes, including subagents.
+
 ## Choose and check a client
 
 [VS Code (GitHub Copilot)](integrations/copilot.md) uses the setup id `copilot`.
