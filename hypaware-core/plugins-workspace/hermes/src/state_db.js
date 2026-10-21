@@ -148,43 +148,55 @@ export class HermesStateDb {
     this.lastDataVersion = undefined
     /** @type {HermesChangedSession[] | undefined} */
     this.snapshot = undefined
-    /** @type {{ schemaVersion: number, sql: string } | undefined} */
+    /** @type {{ schemaVersion: number, sql: string, listSql: string } | undefined} */
     this.sessionQuery = undefined
   }
 
   /**
    * Resolve modern Hermes metadata while keeping older stores readable. Cache
    * only SQL, not prompt payloads, and refresh after an upstream migration.
+   * The listing form skips the prompt join: discovery needs no prompt, and
+   * resolving one per session would expand a shared prompt for all history.
    * @ref LLP 0449#detection [implements]: every read fingerprints the same resolved metadata it projects.
+   * @param {{ listing?: boolean }} [options]
    * @returns {string}
    */
-  sessionSelect() {
+  sessionSelect({ listing = false } = {}) {
     const schemaVersion = Number(this.db.prepare('PRAGMA schema_version').get()?.schema_version)
-    if (this.sessionQuery?.schemaVersion === schemaVersion) return this.sessionQuery.sql
-    const columns = new Set(this.db.prepare('PRAGMA table_info(sessions)').all().map(row => String(row.name)))
-    const promptColumns = columns.has('system_prompt_hash')
-      ? new Set(this.db.prepare('PRAGMA table_info(system_prompts)').all().map(row => String(row.name)))
-      : new Set()
-    const resolvePrompt = promptColumns.has('hash') && promptColumns.has('prompt')
-    const selected = SESSION_COLUMNS.map(column => column === 'system_prompt' && resolvePrompt
-      ? 'COALESCE(system_prompts.prompt, sessions.system_prompt) AS system_prompt'
-      : `sessions.${column}`)
-    if (columns.has('created_source')) selected.push('sessions.created_source')
-    const join = resolvePrompt ? ' LEFT JOIN system_prompts ON system_prompts.hash = sessions.system_prompt_hash' : ''
-    const sql = `SELECT ${selected.join(', ')} FROM sessions${join}`
-    this.sessionQuery = { schemaVersion, sql }
-    return sql
+    if (this.sessionQuery?.schemaVersion !== schemaVersion) {
+      const columns = new Set(this.db.prepare('PRAGMA table_info(sessions)').all().map(row => String(row.name)))
+      const promptColumns = columns.has('system_prompt_hash')
+        ? new Set(this.db.prepare('PRAGMA table_info(system_prompts)').all().map(row => String(row.name)))
+        : new Set()
+      const resolvePrompt = promptColumns.has('hash') && promptColumns.has('prompt')
+      const plain = SESSION_COLUMNS.map(column => `sessions.${column}`)
+      const selected = SESSION_COLUMNS.map(column => column === 'system_prompt' && resolvePrompt
+        ? 'COALESCE(system_prompts.prompt, sessions.system_prompt) AS system_prompt'
+        : `sessions.${column}`)
+      if (columns.has('created_source')) {
+        plain.push('sessions.created_source')
+        selected.push('sessions.created_source')
+      }
+      const join = resolvePrompt ? ' LEFT JOIN system_prompts ON system_prompts.hash = sessions.system_prompt_hash' : ''
+      this.sessionQuery = {
+        schemaVersion,
+        sql: `SELECT ${selected.join(', ')} FROM sessions${join}`,
+        listSql: `SELECT ${plain.join(', ')} FROM sessions`,
+      }
+    }
+    return listing ? this.sessionQuery.listSql : this.sessionQuery.sql
   }
 
   /**
-   * All sessions, oldest first.
+   * All sessions, oldest first, for discovery. `system_prompt` is the inline
+   * column only; `readSessionSnapshot` resolves a hash-backed prompt.
    *
    * @returns {Promise<HermesSessionRow[]>}
    */
   async listSessions() {
     return withBusyRetry(
       () => /** @type {HermesSessionRow[]} */ (/** @type {unknown} */ (
-        this.db.prepare(`${this.sessionSelect()} ORDER BY sessions.id ASC`).all()
+        this.db.prepare(`${this.sessionSelect({ listing: true })} ORDER BY sessions.id ASC`).all()
       )),
       this.retryOpts
     )

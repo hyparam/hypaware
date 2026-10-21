@@ -210,7 +210,7 @@ function addCurrentSessionSchema(db) {
   `)
 }
 
-test('current session metadata resolves prompts and agrees across listing, snapshots and fingerprints', async t => {
+test('current session metadata resolves prompts in snapshots and fingerprints, not the discovery listing', async t => {
   const dir = await tmpDir()
   const dbPath = await buildFixtureStateDb(dir)
   const writer = new DatabaseSync(dbPath)
@@ -228,11 +228,14 @@ test('current session metadata resolves prompts and agrees across listing, snaps
   const sessions = await reader.listSessions()
   assert.equal(sessions[0].source, 'local')
   assert.equal(sessions[0].created_source, 'cli')
-  assert.deepEqual(sessions.map(row => row.system_prompt), ['Resolved system prompt', 'Inline fallback', null])
+  // Discovery reads only the inline column, so a shared prompt is never
+  // expanded across history before the backfill window is applied.
+  assert.deepEqual(sessions.map(row => row.system_prompt), ['Stale inline prompt', 'Inline fallback', null])
   const marks = await reader.listChangedSessions()
-  for (const session of sessions) {
+  const resolved = ['Resolved system prompt', 'Inline fallback', null]
+  for (const [i, session] of sessions.entries()) {
     const snapshot = await reader.readSessionSnapshot(session.id)
-    assert.deepEqual(snapshot?.session, session)
+    assert.deepEqual({ ...snapshot?.session }, { ...session, system_prompt: resolved[i] })
     assert.equal(snapshot?.mark.fingerprint, marks.find(mark => mark.session_id === session.id)?.fingerprint)
   }
   assert.equal(await reader.readSessionSnapshot(999), null)
@@ -274,7 +277,8 @@ test('schema, surface and prompt changes invalidate fingerprints without new mes
   let marks = Object.fromEntries((await reader.listChangedSessions()).map(mark => [mark.session_id, mark]))
   addCurrentSessionSchema(writer)
   // A reader opened before Hermes migrated the database must refresh its query.
-  assert.equal((await reader.listSessions())[0].system_prompt, 'Resolved system prompt')
+  assert.equal((await reader.listSessions())[0].created_source, 'cli')
+  assert.equal((await reader.readSessionSnapshot(1))?.session.system_prompt, 'Resolved system prompt')
   let changed = await reader.listChangedSessions(marks)
   assert.ok(changed.some(mark => mark.session_id === 1))
   marks = Object.fromEntries((await reader.listChangedSessions()).map(mark => [mark.session_id, mark]))
