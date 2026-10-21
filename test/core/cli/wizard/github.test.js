@@ -16,12 +16,14 @@ function options() {
 test('GitHub offer requires its own yes and declines EOF', async () => {
   const opts = options()
   assert.equal(await offerWizardGithub({ ...opts, confirm: async (q) => {
-    assert.match(q.title, /AI sessions.*repositories, pull requests/)
+    assert.equal(q.title, 'Connect GitHub?')
     // The yes spends a grant wider than the title implies: `hyp github login`
     // requests the `repo` scope, which reaches private repositories and which
     // GitHub grants with write. The offer states that before the yes, not only
     // in the login command's own disclosure afterwards.
-    assert.match(String(q.options.find((o) => o.value === 'yes')?.summary), /including private repositories/)
+    const summary = String(q.options.find((o) => o.value === 'yes')?.summary)
+    assert.match(summary, /pull requests/)
+    assert.match(summary, /read and write access to all your repos/)
     assert.equal(q.default, 'yes')
     assert.equal(q.eofValue, 'no')
     return 'yes'

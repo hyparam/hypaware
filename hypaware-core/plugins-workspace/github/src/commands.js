@@ -91,7 +91,7 @@ export async function runGithubLogin(argv, ctx) {
   process.on('SIGINT', cancel)
   process.on('SIGTERM', cancel)
   try {
-    ctx.stdout.write('GitHub login requests repo access, including private repositories. GitHub grants write permissions with this scope; HypAware only reads.\n')
+    ctx.stdout.write('HypAware only needs read access, but GitHub has no read-only option, so it will ask for read and write access to all your repos.\n')
     if (rt.env[rt.config.token_env]?.trim()) ctx.stdout.write(`Environment override ${rt.config.token_env} remains the effective capture credential.\n`)
     // The device code is only needed while the sign-in is open, so on a
     // terminal it is drawn above the wait's spinner and goes with it

@@ -20,8 +20,9 @@ hyp github login
 hyp github status
 ```
 
-Login uses a GitHub device code. GitHub's `repo` authorization scope includes
-write access, although HypAware only reads. Review the repositories selected in
+Login uses a GitHub device code. HypAware only needs read access, but GitHub
+has no read-only option, so it asks for read and write access to all your
+repositories (the `repo` scope). Review the repositories selected in
 the plugin configuration. By default HypAware polls the repositories it has
 seen in your recorded sessions.
 

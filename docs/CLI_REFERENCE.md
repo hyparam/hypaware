@@ -1254,8 +1254,9 @@ hyp github login [--no-browser]
 ```
 
 Signs in with a GitHub device code. `--no-browser` prints the code and URL without
-opening a browser. GitHub's `repo` scope includes private repositories and write
-permissions; HypAware only reads. A configured environment token continues to
+opening a browser. HypAware only needs read access,
+but GitHub has no read-only option, so it asks for read and write access to all
+your repositories (the `repo` scope). A configured environment token continues to
 override the saved OAuth credential. Canceling returns `130`; login failure
 returns `1`.
 

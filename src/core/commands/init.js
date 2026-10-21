@@ -237,7 +237,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '  --yes alone selects claude + otel, regardless of detection. Name choices explicitly.',
       '  Offer the detected choices together as defaults, or let the person customize them.',
       '  Separately ask: collect GitHub information from AI sessions (repositories, pull requests, and more)?',
-      '    Explain before asking: GitHub authorization includes private repos and grants write scope; HypAware only reads.',
+      '    Explain before asking: HypAware only needs read access, but GitHub authorization includes private repos and grants write scope because GitHub has no read-only option.',
       '    If yes, add --github to the setup command. If no, omit it; --yes never opts into GitHub.',
       '',
       '2. Recommend cloud sync. Offer "Cloud sync (recommended)" and "Local only".',
