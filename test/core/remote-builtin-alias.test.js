@@ -172,3 +172,19 @@ test('the old env override still wins over a session stored under the new name',
   const both = { ...args, env: { ...args.env, HYP_REMOTE_TOKEN_HYPAWARE: 'env-new' } }
   assert.equal(/** @type {any} */ (await resolveAccessJwt(both)).token, 'env-new')
 })
+
+test('a name typed after an own hyperparam was written means that remote, not the built-in', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, stateDir } = await makeCtx(hypHome)
+  await writeSession(stateDir, 'hypaware', { refreshToken: 'rt', accessJwt: 'jwt-cloud', expiresAt: FUTURE, org: 'acme' })
+  await writeSession(stateDir, 'hyperparam', { refreshToken: 'rt', accessJwt: 'jwt-other', expiresAt: FUTURE, org: 'acme' })
+  await fs.writeFile(path.join(hypHome, 'config.json'), JSON.stringify({ version: 2, query: { remotes: { hyperparam: { url: 'https://other.example' } } } }))
+  const { impl, calls } = fetchStub([{ status: 200, body: { tokens: [] } }])
+  assert.equal(await runRemoteTokens(['hyperparam'], ctx, { fetchImpl: impl }), 0)
+  assert.equal(calls[0].url, 'https://other.example/v1/org/tokens/mine')
+  assert.equal(calls[0].init.headers.authorization, 'Bearer jwt-other')
+  assert.equal(await runRemoteRemove(['hyperparam'], ctx), 0)
+  assert.match(out.join(''), /removed remote 'hyperparam' \(config \+ token\)/)
+  assert.deepEqual(Object.keys(await readCredentials(stateDir)), ['hypaware'])
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(hypHome, 'config.json'), 'utf8')).query.remotes, {})
+})
