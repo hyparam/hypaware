@@ -248,7 +248,7 @@ async function keepOrRetireServiceToken(ctx, { stateRoot, url, token }) {
     ctx.stderr.write(`warning: kept the service token at ${recordPath}, but its sync failed (${result.error}); re-run \`hyp join\` if this host crashes before the next start\n`)
     return true
   }
-  ctx.stderr.write(`hyp join: could not keep the service token at ${recordPath} (${result.error}); nothing was changed, re-run the join\n`)
+  ctx.stderr.write(`hyp join: could not keep the service token at ${recordPath} (${'error' in result ? result.error : result.outcome}); nothing was changed, re-run the join\n`)
   return false
 }
 

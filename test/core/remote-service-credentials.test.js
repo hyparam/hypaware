@@ -13,7 +13,10 @@ import {
   remoteCredentialsPath,
   resolveAccessJwt,
   writeServiceRecord,
+  writeSession,
 } from '../../src/core/remote/credentials.js'
+import { sha256Hex } from '../../src/core/util/json_util.js'
+import { withLogRecords } from '../helpers/log_records.js'
 
 /**
  * The `kind: 'service'` record `hyp remote login --token-file` stores for an
@@ -164,4 +167,58 @@ test('mint refuses a service record before any request', async () => {
   assert.equal(await runRemoteMint(['prod'], ctx, { fetchImpl }), 2)
   assert.match(err.join(''), /holds a service token, which cannot mint/)
   assert.equal(calls.length, 0)
+})
+
+test('an unusable service record under the target\'s own name does not hand it the old name\'s session', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'hyperparam', { refreshToken: 'rt', accessJwt: 'jwt-personal', expiresAt: FUTURE, org: 'acme' })
+  const legacyTarget = 'hyperparam'
+  assert.equal(/** @type {any} */ (await resolveAccessJwt({ target: 'hypaware', legacyTarget, env: {}, stateDir: dir })).token, 'jwt-personal')
+
+  const store = JSON.parse(await fs.readFile(remoteCredentialsPath(dir), 'utf8'))
+  await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ ...store, hypaware: { kind: 'service', secret: 'hsa_clipped' } }))
+  const r = await resolveAccessJwt({ target: 'hypaware', legacyTarget, env: {}, stateDir: dir })
+  assert.equal(r.ok, false)
+  assert.ok(!JSON.stringify(r).includes('jwt-personal'))
+})
+
+test('service login is refused while a session is stored under the target\'s earlier name', async () => {
+  const hypHome = await tmpState()
+  const tokenFile = path.join(hypHome, 'tok.txt')
+  await fs.writeFile(tokenFile, SECRET)
+  const { ctx, err } = await makeCtx(hypHome)
+  const stateDir = path.join(hypHome, 'hypaware')
+  await writeSession(stateDir, 'hyperparam', { refreshToken: 'rt', accessJwt: 'jwt-personal', expiresAt: FUTURE, org: 'acme' })
+  const { fetchImpl, calls } = tokenEndpoint(200, { access_jwt: 'jwt-1', expires_at: FUTURE, org: 'acme' })
+  assert.equal(await runRemoteLogin(['hypaware', '--token-file', tokenFile], ctx, { fetchImpl }), 2)
+  assert.match(err.join(''), /run 'hyp remote remove hypaware' first/)
+  assert.equal(calls.length, 0)
+  assert.equal((await readCredentials(stateDir)).hypaware, undefined)
+})
+
+test('an exchange error that echoes the secret prints and logs only the status', async () => {
+  const echoed = { error: `invalid token ${SECRET}` }
+  const leaks = (/** @type {string} */ text) => text.includes(SECRET) || text.includes(sha256Hex(SECRET))
+
+  const hypHome = await tmpState()
+  const tokenFile = path.join(hypHome, 'tok.txt')
+  await fs.writeFile(tokenFile, SECRET)
+  const { ctx, out, err } = await makeCtx(hypHome)
+  const login = await withLogRecords(() => runRemoteLogin(['prod', '--token-file', tokenFile], ctx, tokenEndpoint(400, echoed)))
+  assert.equal(login.result, 1)
+  assert.match(err.join(''), /HTTP 400/)
+  assert.ok(!leaks(out.join('')) && !leaks(err.join('')))
+  assert.ok(login.records.length > 0 && !leaks(JSON.stringify(login.records)))
+
+  const dir = await tmpState()
+  await writeServiceRecord(dir, 'prod', { secret: SECRET, accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  const { fetchImpl } = tokenEndpoint(400, echoed)
+  // Not a refusal, so the query path throws it for its caller to print.
+  const query = await withLogRecords(() => resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: IDENTITY, fetchImpl }).then(
+    () => assert.fail('expected the exchange error'),
+    (/** @type {Error} */ e) => e.message,
+  ))
+  assert.match(query.result, /HTTP 400/)
+  assert.ok(!leaks(query.result) && !query.result.includes('jwt-old'))
+  assert.ok(query.records.length > 0 && !leaks(JSON.stringify(query.records)))
 })

@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { IdentityClient, ServiceCredentialStopped } from '../../hypaware-core/plugins-workspace/central/src/identity_client.js'
-import { keptServiceToken, readKeptServiceToken, serviceTokenPath, writeKeptServiceToken } from '../../src/core/remote/service_token.js'
+import { keptServiceToken, readKeptServiceToken, retireKeptServiceToken, serviceTokenPath, writeKeptServiceToken } from '../../src/core/remote/service_token.js'
 import { sha256Hex } from '../../src/core/util/json_util.js'
 
 const DAY = 24 * 60 * 60
@@ -373,6 +373,190 @@ test('a 403 with any other body keeps the ordinary error path and stores no stop
   await assert.rejects(c.acquire(), (err) => !(err instanceof ServiceCredentialStopped) && /HTTP 403/.test(String(/** @type {Error} */ (err).message)))
   assert.equal(await storedStop(p), undefined)
   assert.equal(c.stopped, undefined)
+})
+
+function gate() {
+  /** @type {() => void} */
+  let open = () => {}
+  const opened = new Promise((resolve) => { open = () => resolve(undefined) })
+  return { opened, open }
+}
+
+/** acquire() refreshes a near-expiry identity once; every later refresh is a 401. */
+function refreshThen401() {
+  let calls = 0
+  return () => {
+    calls += 1
+    return calls === 1
+      ? json(200, { jwt: fakeJwt('gw-kept'), expires_at: NOW_SEC + 60 })
+      : json(401, { error: 'jwt_invalid_or_revoked' })
+  }
+}
+
+test('a stop refuses the next bearer while its record write is still pending', async () => {
+  const p = tmpIdentityPath()
+  writeIdentity(p)
+  await keep(p)
+  const held = gate()
+  const heldRename = /** @type {typeof fsp} */ ({ ...fsp, rename: async (/** @type {any} */ a, /** @type {any} */ b) => { await held.opened; return fsp.rename(a, b) } })
+  const c = client(p, makeFetch().fetchFn, { fs: heldRename })
+  await c.acquire()
+  const stopping = c.stopCurrent('service_token_revoked')
+  await rejectsStopped(c.getCurrentJwt(), 'service_token_revoked')
+  held.open()
+  assert.ok(await stopping instanceof ServiceCredentialStopped)
+  assert.equal(await storedStop(p), 'service_token_revoked')
+})
+
+test('a refresh in flight when the stop lands does not hand out its new JWT', async () => {
+  const p = tmpIdentityPath()
+  writeIdentity(p, { expiresIn: 60 })
+  await keep(p)
+  const held = gate()
+  let refreshes = 0
+  /** @type {typeof fetch} */
+  const fetchFn = async (url) => {
+    assert.ok(String(url).endsWith('/v1/identity/refresh'))
+    refreshes += 1
+    // acquire() refreshes the near-expiry identity once; hold the next one.
+    if (refreshes === 1) return json(200, { jwt: fakeJwt('gw-kept'), expires_at: NOW_SEC + 60 })
+    await held.opened
+    return json(200, { jwt: fakeJwt('gw-new'), expires_at: NOW_SEC + 60 * DAY })
+  }
+  const c = client(p, fetchFn)
+  await c.acquire()
+  const pending = c.getCurrentJwt()
+  await c.stopCurrent('service_token_revoked')
+  held.open()
+  await rejectsStopped(pending, 'service_token_revoked')
+})
+
+test('a cancelled refresh cancels its recovery bootstrap and writes no late identity', async () => {
+  // Held response: the fetch honors the signal, as a real fetch does.
+  {
+    const p = tmpIdentityPath()
+    writeIdentity(p, { expiresIn: 60 })
+    await keep(p)
+    const staleThen401 = refreshThen401()
+    const reached = gate()
+    /** @type {typeof fetch} */
+    const fetchFn = async (url, init) => {
+      if (String(url).endsWith('/v1/identity/refresh')) return staleThen401()
+      reached.open()
+      const signal = /** @type {AbortSignal} */ (init?.signal)
+      return new Promise((_, reject) => { signal.addEventListener('abort', () => reject(signal.reason), { once: true }) })
+    }
+    const c = client(p, fetchFn)
+    await c.acquire()
+    const before = fs.readFileSync(p, 'utf8')
+    const ac = new AbortController()
+    const refreshing = c.refresh(ac.signal)
+    await reached.opened
+    ac.abort(new Error('cancelled'))
+    await assert.rejects(refreshing, /cancelled/)
+    assert.equal(c.refreshing, undefined)
+    assert.equal(fs.readFileSync(p, 'utf8'), before)
+  }
+
+  // Held body: the stream is cancelled, not left open.
+  {
+    const p = tmpIdentityPath()
+    writeIdentity(p, { expiresIn: 60 })
+    await keep(p)
+    const staleThen401 = refreshThen401()
+    const reached = gate()
+    let cancelled = false
+    /** @type {typeof fetch} */
+    const fetchFn = async (url) => {
+      if (String(url).endsWith('/v1/identity/refresh')) return staleThen401()
+      // The gate opens once the body read has begun.
+      const body = new ReadableStream({ pull: () => { reached.open(); return new Promise(() => {}) }, cancel() { cancelled = true } }, { highWaterMark: 0 })
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    const c = client(p, fetchFn)
+    await c.acquire()
+    const before = fs.readFileSync(p, 'utf8')
+    const ac = new AbortController()
+    const refreshing = c.refresh(ac.signal)
+    await reached.opened
+    ac.abort(new Error('cancelled'))
+    await assert.rejects(refreshing, /cancelled/)
+    assert.equal(cancelled, true)
+    assert.equal(fs.readFileSync(p, 'utf8'), before)
+  }
+
+  // A transport that ignores the signal: its late success is not published.
+  {
+    const p = tmpIdentityPath()
+    writeIdentity(p, { expiresIn: 60 })
+    await keep(p)
+    const staleThen401 = refreshThen401()
+    const reached = gate()
+    const release = gate()
+    /** @type {typeof fetch} */
+    const fetchFn = async (url) => {
+      if (String(url).endsWith('/v1/identity/refresh')) return staleThen401()
+      reached.open()
+      await release.opened
+      return json(200, { jwt: fakeJwt('gw-late'), expires_at: NOW_SEC + 30 * DAY })
+    }
+    const c = client(p, fetchFn)
+    await c.acquire()
+    const before = fs.readFileSync(p, 'utf8')
+    const ac = new AbortController()
+    const refreshing = c.refresh(ac.signal)
+    await reached.opened
+    ac.abort(new Error('cancelled'))
+    release.open()
+    await assert.rejects(refreshing, /cancelled/)
+    assert.equal(fs.readFileSync(p, 'utf8'), before)
+    assert.equal(c.identity?.gateway_id, 'gw-kept')
+  }
+})
+
+test('a stale client stops in memory without replacing a newer join or reviving a retired record', async () => {
+  /** @type {Array<[string, (identityPath: string) => Promise<void>, (identityPath: string) => Promise<void>]>} */
+  const cases = [
+    ['new secret', (ip) => keep(ip, { secret: OTHER_SECRET }), async (ip) => {
+      const read = await readKeptServiceToken(serviceTokenPath(ip))
+      assert.equal(read.state === 'ok' && read.record.secret, OTHER_SECRET)
+      assert.equal(read.state === 'ok' && read.record.stopped_code, undefined)
+    }],
+    ['same secret, new generation', async (ip) => {
+      const record = keptServiceToken({ secret: SECRET, centralUrl: URL_A, now: now() + 1000 })
+      assert.equal((await writeKeptServiceToken(serviceTokenPath(ip), record)).outcome, 'written')
+    }, async (ip) => assert.equal(await storedStop(ip), undefined)],
+    ['retired', async (ip) => { assert.equal(await retireKeptServiceToken(serviceTokenPath(ip)), true) }, async (ip) => {
+      assert.equal(fs.existsSync(serviceTokenPath(ip)), false)
+    }],
+  ]
+  for (const [name, replace, check] of cases) {
+    const p = tmpIdentityPath()
+    writeIdentity(p)
+    await keep(p)
+    const { log, entries } = makeLog()
+    const c = client(p, makeFetch().fetchFn, { log })
+    await c.acquire()
+    await replace(p)
+    assert.ok(await c.stopCurrent('service_token_revoked') instanceof ServiceCredentialStopped, name)
+    await rejectsStopped(c.getCurrentJwt(), 'service_token_revoked')
+    await check(p)
+    assert.ok(entries.some((e) => e.attrs.write_outcome === 'superseded'), name)
+  }
+})
+
+test('concurrent refusals share one record write', async () => {
+  const p = tmpIdentityPath()
+  writeIdentity(p)
+  await keep(p)
+  let renames = 0
+  const counting = /** @type {typeof fsp} */ ({ ...fsp, rename: async (/** @type {any} */ a, /** @type {any} */ b) => { renames += 1; return fsp.rename(a, b) } })
+  const c = client(p, makeFetch().fetchFn, { fs: counting })
+  await c.acquire()
+  const stops = await Promise.all([c.stopCurrent('service_token_revoked'), c.stopCurrent('service_token_revoked'), c.stopCurrent('service_token_revoked')])
+  assert.ok(stops.every((e) => e instanceof ServiceCredentialStopped))
+  assert.equal(renames, 1)
+  assert.equal(await storedStop(p), 'service_token_revoked')
 })
 
 /**

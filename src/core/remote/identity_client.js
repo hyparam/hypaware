@@ -27,6 +27,20 @@ import { isServiceStopCode } from './service_token.js'
 const TOKEN_TIMEOUT_MS = 30 * 1000
 
 /**
+ * The `/token` error codes a diagnostic may repeat. Anything else is reported
+ * by HTTP status alone, so a body that echoes the credential prints nothing.
+ */
+const PUBLIC_TOKEN_ERRORS = new Set([
+  'invalid_grant',
+  'invalid_request',
+  'invalid_client',
+  'unsupported_grant_type',
+  'rate_limited',
+  'service_token_revoked',
+  'service_account_disabled',
+])
+
+/**
  * Shared base wording for a missing global `fetch`, so every attach entrypoint
  * (the verb, the stdio proxy, this identity client) reports the same phrase with
  * its own context appended rather than three independently-drifting strings.
@@ -240,7 +254,9 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
     parseFailed = true
   }
   if (!res.ok) {
-    const errCode = json && typeof json.error === 'string' ? json.error : undefined
+    // Only a known public code is kept: the body is the server's, and an echoed
+    // credential must reach neither the thrown message nor the log.
+    const errCode = json && typeof json.error === 'string' && PUBLIC_TOKEN_ERRORS.has(json.error) ? json.error : undefined
     const service = body.grant_type === 'service_token'
     log.warn('remote.token_error', {
       [Attr.COMPONENT]: service ? 'remote' : 'remote-oidc',

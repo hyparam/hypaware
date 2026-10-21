@@ -179,8 +179,11 @@ hyp join https://api.hypaware.ai --token-file "$HYP_HOME/.service-token" --no-da
 `hyp join` reads the file and does not keep or change it; you can delete it
 after the join. Join keeps its own private copy (mode `0600`) at
 `$HYP_HOME/hypaware/plugins/@hypaware/central/service-token`, which is what the
-daemon uses to sign in again on its own when its session expires. Nothing else
-writes the token to disk, and HypAware never logs it.
+daemon uses to sign in again on its own when its session expires. The join also
+writes the token into its private config seed under
+`$HYP_HOME/hypaware/config-control/`; the first config the host applies keeps
+that seed as its rollback copy, and the next config update replaces it.
+HypAware never logs the token.
 
 To query your organization's data as the service account, store the same
 token for the built-in `hypaware` target:
@@ -190,11 +193,18 @@ hyp remote login hypaware --token-file "$HYP_HOME/.service-token"
 hyp query sql "select count(*) from ai_gateway_messages" --remote hypaware
 ```
 
+The login stores the token, with the short-lived session it exchanges it for, in
+`$HYP_HOME/hypaware/remote-credentials.json` (mode `0600`); `hyp remote remove
+hypaware` removes it.
+
 When the token is revoked or the account is disabled, the host stops uploading
-and querying and does not retry. `hyp status` reports `stopped: service token
-revoked` (or `service account disabled`). Create a new token in HypAware and run
-the join again; for queries, run `hyp remote login hypaware --token-file` with
-the new token. `hyp leave` removes the kept copy.
+and does not retry: the stop is written into the kept copy, so a restart stays
+stopped, and `hyp status` reports `stopped: service token revoked` (or `service
+account disabled`). Queries fail with the same reason, but nothing records it,
+so each later query whose session has expired asks the server again. Create a
+new token in HypAware and run the join again; for queries, run `hyp remote
+login hypaware --token-file` with the new token. `hyp leave` removes the kept
+copy.
 
 Command details live in
 [the CLI reference](../CLI_REFERENCE.md#hyp-remote-mint).

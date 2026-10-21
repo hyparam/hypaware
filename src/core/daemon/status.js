@@ -34,6 +34,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { detectShadowedPlugins } from '../runtime/boot.js'
 import { centralLayerUnreadable } from '../remote/gateway_seed.js'
 import { readKeptServiceToken, serviceTokenPath } from '../remote/service_token.js'
+import { canonicalOrigin } from '../remote/builtin_remotes.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
@@ -47,7 +48,7 @@ import { isEphemeralRecordedBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { clientAssetStateRoot, readClientAssetLedger } from '../runtime/client_asset_ledger.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
-import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
+import { errCode, getAtDottedPath, isPlainObject, sanitizeLabel, sha256Hex } from '../util/json_util.js'
 import {
   ClientSyncListUnreadableError,
   localOnlyListPath,
@@ -90,6 +91,7 @@ import {
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { ClientAssetLedgerRecord, DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
+ * @import { KeptServiceToken } from '../../../src/core/remote/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
  */
 
@@ -4837,7 +4839,8 @@ async function heldDatasetDiagnostics(stateRoot, config) {
  * A central sink whose kept service token records a permanent stop, or cannot
  * be read, sends nothing until a new `hyp join`. Only the record on disk is
  * read, so a stop the sink could not persist is not shown here, and the
- * record's contents never are.
+ * record's contents never are. A stop is shown only when the record names
+ * the credential the sink would activate with ({@link keptStopApplies}).
  *
  * @ref LLP 0547#rebootstrap [implements]: status names the stop and its remedy
  * @param {string} stateRoot
@@ -4864,7 +4867,7 @@ async function serviceTokenDiagnostics(stateRoot, config) {
         message: `${label}: stopped: service token file unreadable (${sanitizeLabel(recordPath, 512) ?? 'unknown'})`,
         repair: ['run `hyp join` again'],
       })
-    } else if (read.state === 'ok' && read.record.stopped_code) {
+    } else if (read.state === 'ok' && read.record.stopped_code && await keptStopApplies(read.record, raw.config, identityPath)) {
       const what = read.record.stopped_code === 'service_account_disabled' ? 'service account disabled' : 'service token revoked'
       out.push({
         severity: 'error',
@@ -4875,6 +4878,63 @@ async function serviceTokenDiagnostics(stateRoot, config) {
     }
   }
   return out
+}
+
+/**
+ * Whether a stored stop names the credential this sink would activate with,
+ * by the rule the central sink's activation applies: the seed's bootstrap
+ * token when one is set, otherwise the persisted identity it minted (never a
+ * login identity), otherwise the record's own destination. A stop on a record
+ * the sink would not use is not this sink's stop. An identity that cannot be
+ * read keeps the stop shown.
+ *
+ * @param {KeptServiceToken} record
+ * @param {unknown} sinkConfig
+ * @param {string} identityPath
+ * @returns {Promise<boolean>}
+ */
+async function keptStopApplies(record, sinkConfig, identityPath) {
+  const config = isPlainObject(sinkConfig) ? sinkConfig : {}
+  const sinkUrl = typeof config.url === 'string' ? config.url : undefined
+  const identity = isPlainObject(config.identity) ? config.identity : {}
+  /**
+   * @param {unknown} fingerprint
+   * @param {unknown} url
+   * @param {unknown} [origin]
+   */
+  const names = (fingerprint, url, origin) => origin !== 'login' && fingerprint === record.fingerprint &&
+    typeof url === 'string' && sameCentralUrl(record.central_url, url)
+  const token = identity.bootstrap_token
+  if (typeof token === 'string' && token.length > 0) return names(sha256Hex(token), sinkUrl)
+  let persisted
+  try {
+    persisted = JSON.parse(await fsp.readFile(identityPath, 'utf8'))
+  } catch (err) {
+    if (errCode(err) !== 'ENOENT') return true
+    return sinkUrl !== undefined && sameCentralUrl(record.central_url, sinkUrl)
+  }
+  if (!isPlainObject(persisted)) return true
+  return names(persisted.bootstrap_token_fp, persisted.central_url, persisted.origin)
+}
+
+/**
+ * The central sink's destination comparison: the same origin through the
+ * built-in alias table, and the same path, ignoring trailing slashes.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function sameCentralUrl(a, b) {
+  if (a === b) return true
+  const origin = canonicalOrigin(a)
+  if (origin === null || origin !== canonicalOrigin(b)) return false
+  /** @param {string} url */
+  const rest = (url) => {
+    const { pathname, search } = new URL(url)
+    return `${pathname.replace(/\/+$/, '')}${search}`
+  }
+  return rest(a) === rest(b)
 }
 
 /**

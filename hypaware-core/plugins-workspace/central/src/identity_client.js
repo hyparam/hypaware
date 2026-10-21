@@ -107,6 +107,8 @@ export class IdentityClient {
     this.kept = undefined
     /** @type {string | undefined} */
     this.stopped = undefined
+    /** @type {Promise<unknown> | undefined} */
+    this.stopWrite = undefined
   }
 
   /**
@@ -227,15 +229,27 @@ export class IdentityClient {
    * @returns {Promise<ServiceCredentialStopped>}
    */
   async stop(code, credential) {
+    // Publish the stop before the record write is awaited, so no caller is
+    // handed the refused bearer while the write is pending.
+    this.stopped = code
     const kept = this.kept
     if (!kept || !this.keptNames(credential.fingerprint, credential.centralUrl, credential.origin)) {
       this.logService('warn', 'central.identity.stop_not_persisted', { status: 'stopped', error_kind: 'service_stop_not_persisted' })
       return this.refuseStopped(code)
     }
     if (kept.stopped_code === code) return this.refuseStopped(code)
+    // Concurrent refusals share the one write rather than each publishing.
+    if (this.stopWrite) {
+      await this.stopWrite
+      return this.refuseStopped(code)
+    }
     /** @type {KeptServiceToken} */
     const record = { ...kept, stopped_code: code }
-    const wrote = await writeKeptServiceToken(this.keptPath, record, this.keptFs ? { fs: this.keptFs } : undefined)
+    // A join or leave since this client read the record may have replaced or
+    // retired it: the stop is written only over the exact record it read.
+    const write = writeKeptServiceToken(this.keptPath, record, { expected: kept, ...this.keptFs ? { fs: this.keptFs } : {} })
+    this.stopWrite = write
+    const wrote = await write
     if (wrote.outcome === 'written' || wrote.outcome === 'visible') {
       this.kept = record
     } else {
@@ -274,9 +288,10 @@ export class IdentityClient {
    * tokens out-of-band.
    *
    * @param {string | undefined} [token] the kept service secret on recovery
+   * @param {AbortSignal} [signal] the refresh lifetime on a 401 recovery
    * @returns {Promise<void>}
    */
-  async bootstrap(token = this.bootstrapToken) {
+  async bootstrap(token = this.bootstrapToken, signal) {
     if (this.stopped) throw new ServiceCredentialStopped(this.stopped, stoppedMessage(this.stopped))
     if (typeof token !== 'string' || token.length === 0) {
       throw new Error(
@@ -290,28 +305,31 @@ export class IdentityClient {
     try {
       response = await this.fetchFn(url, {
         method: 'POST',
+        signal,
         headers: { 'content-type': 'application/json' },
         body,
       })
     } catch (err) {
+      signal?.throwIfAborted()
       throw new Error(`failed to reach central server ${this.centralUrl}: ${formatError(err)}`)
     }
 
     if (response.status === 403) {
-      const code = await readStopCode(response)
+      const code = await readStopCode(response, signal)
       if (code) throw await this.stop(code, { fingerprint: fingerprintToken(token), centralUrl: this.centralUrl })
       throw new Error('identity bootstrap failed: HTTP 403')
     }
     if (!response.ok) {
-      throw new Error(`identity bootstrap failed: ${await readErrorDetail(response)}`)
+      throw new Error(`identity bootstrap failed: ${await readErrorDetail(response, signal)}`)
     }
 
-    const parsed = await readJsonResponse(response, 'bootstrap')
+    const parsed = await readJsonResponse(response, 'bootstrap', signal)
     const identity = identityFromPayload(parsed)
     // Stamp what minted this identity so a later re-join with a different
     // token/URL is detected (see acquire()).
     identity.central_url = this.centralUrl
     identity.bootstrap_token_fp = fingerprintToken(token)
+    signal?.throwIfAborted()
     this.identity = identity
     writePersistedFile(this.persistedPath, identity)
   }
@@ -401,7 +419,7 @@ export class IdentityClient {
       sameCentral(this.kept.central_url, this.centralUrl) && this.keptNames(current.bootstrap_token_fp, current.central_url, current.origin)) {
       await readErrorDetail(response, signal)
       this.logService('info', 'central.identity.service_token_recover', { status: 'started' })
-      await this.bootstrap(this.kept.secret)
+      await this.bootstrap(this.kept.secret, signal)
       return
     }
     if (!response.ok) {
@@ -436,6 +454,8 @@ export class IdentityClient {
     const remainingSec = this.identity.expires_at - Math.floor(this.now() / 1000)
     if (remainingSec <= REFRESH_WINDOW_SECONDS) {
       await this.refresh(signal)
+      // A stop that landed while the refresh was in flight refuses its JWT too.
+      if (this.stopped) throw new ServiceCredentialStopped(this.stopped, stoppedMessage(this.stopped))
     }
     if (!this.identity) {
       throw new Error('identity refresh did not produce a JWT')
@@ -630,11 +650,13 @@ function joinUrl(base, suffix) {
 /**
  * @param {Response} response
  * @param {'bootstrap' | 'refresh'} kind
+ * @param {AbortSignal} [signal]
  */
-async function readJsonResponse(response, kind) {
+async function readJsonResponse(response, kind, signal) {
   try {
-    return await readCentralJson(response)
+    return await readCentralJson(response, signal)
   } catch (err) {
+    signal?.throwIfAborted()
     throw new Error(`identity ${kind} failed: invalid JSON in server response: ${formatError(err)}`)
   }
 }

@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
+import { sha256Hex } from '../../src/core/util/json_util.js'
 
 /**
  * `hyp status` names a central sink stopped by its kept service token, and
@@ -67,4 +68,39 @@ test('an unreadable record is a stop that names the file, not its contents', asy
   assert.match(found[0].message, /stopped: service token file unreadable \(.*service-token\)/)
   assert.match(String(found[0].repair), /hyp join/)
   assert.ok(!JSON.stringify(found).includes(SECRET))
+})
+
+test('a stop for another credential or destination raises nothing; one for this identity does', async () => {
+  const OTHER = `hsa_fedcba9876543210_${'B'.repeat(43)}`
+  /**
+   * @param {(ctx: { home: string, seedPath: string, identityPath: string }) => Promise<void>} change
+   */
+  const after = async (change) => {
+    const { home, recordPath } = await joined()
+    const record = JSON.parse(await fs.readFile(recordPath, 'utf8'))
+    await fs.writeFile(recordPath, JSON.stringify({ ...record, stopped_code: 'service_token_revoked' }))
+    const seedPath = path.join(home, 'hypaware', 'config-control', 'seed.json')
+    await change({ home, seedPath, identityPath: path.join(path.dirname(recordPath), 'identity.json') })
+    return stopped(home)
+  }
+  /** @param {string} seedPath @param {(config: any) => void} edit */
+  const editSink = async (seedPath, edit) => {
+    const seed = JSON.parse(await fs.readFile(seedPath, 'utf8'))
+    edit(seed.sinks.central.config)
+    await fs.writeFile(seedPath, JSON.stringify(seed))
+  }
+  /** @param {string} identityPath @param {Record<string, unknown>} fields */
+  const writeIdentity = (identityPath, fields) => fs.writeFile(identityPath, JSON.stringify({ jwt: 'x.y.z', expires_at: 2_000_000_000, gateway_id: 'gw', central_url: 'https://central.example', ...fields }))
+
+  assert.deepEqual(await after(({ seedPath }) => editSink(seedPath, (c) => { c.identity.bootstrap_token = OTHER })), [], 'different seed')
+  assert.deepEqual(await after(({ seedPath }) => editSink(seedPath, (c) => { c.url = 'https://other.example' })), [], 'different destination')
+  assert.deepEqual(await after(async ({ seedPath, identityPath }) => {
+    await editSink(seedPath, (c) => { delete c.identity })
+    await writeIdentity(identityPath, { origin: 'login' })
+  }), [], 'login identity')
+  const own = await after(async ({ seedPath, identityPath }) => {
+    await editSink(seedPath, (c) => { delete c.identity })
+    await writeIdentity(identityPath, { bootstrap_token_fp: sha256Hex(SECRET) })
+  })
+  assert.equal(own.length, 1, 'identity the record enrolled')
 })

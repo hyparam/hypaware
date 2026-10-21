@@ -594,7 +594,7 @@ export async function remoteLogin(argv, ctx, deps = {}) {
     if (host) {
       ctx.stderr.write('note: --host is ignored with a static token (it applies to the browser login flow)\n')
     }
-    return runStaticLogin(name, tokenFile, stdin, ctx, { remotes: snapshot.remotes, fetchImpl: deps.fetchImpl })
+    return runStaticLogin(name, tokenFile, stdin, ctx, { remotes: snapshot.remotes, legacy: snapshot.legacyOf(name), fetchImpl: deps.fetchImpl })
   }
 
   // Browser flow. `--no-browser` selects it explicitly ("print the URL instead
@@ -669,7 +669,7 @@ export function valueFlag(argv, flag) {
  * @param {string | undefined} tokenFile
  * @param {any} stdin
  * @param {CommandRunContext} ctx
- * @param {{ remotes: Record<string, { url: string }>, fetchImpl?: typeof fetch }} service what the `hsa_` branch needs: the target's URL and the exchange's fetch seam
+ * @param {{ remotes: Record<string, { url: string }>, legacy?: string, fetchImpl?: typeof fetch }} service what the `hsa_` branch needs: the target's URL, its earlier credential name, and the exchange's fetch seam
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0058#d8 [implements]: static token stays the documented headless fallback
  */
@@ -707,11 +707,11 @@ async function runStaticLogin(name, tokenFile, stdin, ctx, service) {
  * @param {string} name
  * @param {string} token a non-empty, trimmed token carrying the `hsa_` prefix
  * @param {CommandRunContext} ctx
- * @param {{ remotes: Record<string, { url: string }>, fetchImpl?: typeof fetch }} service
+ * @param {{ remotes: Record<string, { url: string }>, legacy?: string, fetchImpl?: typeof fetch }} service
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0547#remote-login [implements]: exchange before storing, so the server's refusal code surfaces at login
  */
-async function persistServiceToken(name, token, ctx, { remotes, fetchImpl }) {
+async function persistServiceToken(name, token, ctx, { remotes, legacy, fetchImpl }) {
   if (!isServiceTokenShape(token)) {
     ctx.stderr.write("hyp remote login: the token starts with 'hsa_' but is not a whole service token - copy it again from HypAware\n")
     return { exitCode: 2, reason: 'usage' }
@@ -726,6 +726,24 @@ async function persistServiceToken(name, token, ctx, { remotes, fetchImpl }) {
     ctx.stderr.write(`hyp remote login: cannot derive the identity endpoint from '${entry.url}'\n`)
     return { exitCode: 2, reason: 'usage' }
   }
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  // An older hyp does not read a service record, and falls back to the
+  // session stored under this target's earlier name; refuse while one is
+  // there, so no hyp queries as that person in place of the service account.
+  if (legacy !== undefined) {
+    /** @type {Record<string, unknown>} */
+    let creds
+    try {
+      creds = await readCredentials(stateDir)
+    } catch (err) {
+      ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
+      return { exitCode: 1, reason: 'store_failed' }
+    }
+    if (Object.hasOwn(creds, legacy)) {
+      ctx.stderr.write(`hyp remote login: a login is stored for '${name}' under its earlier name '${legacy}', which an older hyp would use instead of the service token - run 'hyp remote remove ${name}' first, or store the service token in its own HYP_HOME\n`)
+      return { exitCode: 2, reason: 'usage' }
+    }
+  }
   /** @type {Awaited<ReturnType<typeof exchangeServiceToken>>} */
   let exchanged
   try {
@@ -734,7 +752,6 @@ async function persistServiceToken(name, token, ctx, { remotes, fetchImpl }) {
     ctx.stderr.write(`hyp remote login: ${serviceRefusal(err, name) ?? (err instanceof Error ? err.message : String(err))}\n`)
     return { exitCode: 1, reason: 'login_failed' }
   }
-  const stateDir = readObservabilityEnv(ctx.env).stateDir
   try {
     await writeServiceRecord(stateDir, name, { secret: token, ...exchanged })
   } catch (err) {

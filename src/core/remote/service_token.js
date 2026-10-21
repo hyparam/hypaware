@@ -3,6 +3,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
+import { withFileLock } from '../util/file_lock.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { errCode, isPlainObject, sha256Hex } from '../util/json_util.js'
 
@@ -133,18 +134,29 @@ export async function readKeptServiceToken(filePath, { fs = fsp } = {}) {
  * - `not_written`: any other record, or none, is visible;
  * - `unreadable`: the target cannot be read back.
  *
- * No retry: the caller decides what each outcome means.
+ * - `superseded`: `expected` was given and the record on disk is not it, so
+ *   nothing was written.
+ *
+ * No retry: the caller decides what each outcome means. Every write and
+ * retirement holds the record's lock, so a stop written with `expected`
+ * cannot land over a record a join published after it was read.
  *
  * @ref LLP 0547#write-failure [implements]: classify a failed write by re-reading it once; only an exact match counts as written
  * @param {string} filePath
  * @param {KeptServiceToken} record
- * @param {{ fs?: typeof fsp }} [options]
+ * @param {{ fs?: typeof fsp, expected?: KeptServiceToken }} [options]
  * @returns {Promise<KeptServiceTokenWrite>}
  */
-export async function writeKeptServiceToken(filePath, record, { fs = fsp } = {}) {
+export async function writeKeptServiceToken(filePath, record, { fs = fsp, expected } = {}) {
   try {
-    await atomicWriteJson(filePath, record, { mode: 0o600, dirMode: 0o700, fsync: true, fs })
-    return { outcome: 'written' }
+    return await withRecordLock(filePath, async () => {
+      if (expected !== undefined) {
+        const current = await readKeptServiceToken(filePath, { fs })
+        if (current.state !== 'ok' || !sameRecord(current.record, expected)) return { outcome: 'superseded' }
+      }
+      await atomicWriteJson(filePath, record, { mode: 0o600, dirMode: 0o700, fsync: true, fs })
+      return { outcome: 'written' }
+    })
   } catch (err) {
     const error = errCode(err) ?? (err instanceof Error ? err.message : String(err))
     const seen = await readKeptServiceToken(filePath, { fs })
@@ -164,13 +176,31 @@ export async function writeKeptServiceToken(filePath, record, { fs = fsp } = {})
  * @returns {Promise<boolean>}
  */
 export async function retireKeptServiceToken(filePath, { fs = fsp } = {}) {
-  try {
-    await fs.unlink(filePath)
-    return true
-  } catch (err) {
-    if (errCode(err) === 'ENOENT') return false
-    throw err
-  }
+  if (await fs.stat(filePath).then(() => false, (err) => errCode(err) === 'ENOENT')) return false
+  return withRecordLock(filePath, async () => {
+    try {
+      await fs.unlink(filePath)
+      return true
+    } catch (err) {
+      if (errCode(err) === 'ENOENT') return false
+      throw err
+    }
+  })
+}
+
+/**
+ * Run `fn` holding the record's lock, beside it in its directory. The
+ * directory is created private first, as the write would create it, so the
+ * lock never creates it with a wider mode.
+ *
+ * @template T
+ * @param {string} filePath
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function withRecordLock(filePath, fn) {
+  await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
+  return withFileLock(`${filePath}.lock`, fn)
 }
 
 /**

@@ -168,7 +168,7 @@ export type KeptServiceTokenRead =
 
 /** How a kept-record write ended, classified by re-reading it (LLP 0547#write-failure). */
 export type KeptServiceTokenWrite =
-  | { outcome: 'written' }
+  | { outcome: 'written' | 'superseded' }
   | { outcome: 'visible' | 'not_written' | 'unreadable', error: string }
 
 /**

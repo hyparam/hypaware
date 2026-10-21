@@ -344,7 +344,12 @@ interface RemoteServiceRecord {
   remedy; there is no retry beyond the existing one.
 - An older `hyp` reading a `kind: 'service'` record finds no `token` and no
   `refreshToken`, so `normalizeRecord` returns `null` and the target reads
-  as logged out: it fails closed and never sends the secret.
+  as logged out: it fails closed and never sends the secret. That holds only
+  while the store has no session under the target's earlier name (LLP 0552
+  #credentials), which an older `hyp` falls back to. So login refuses a
+  service secret while one is there and names `hyp remote remove`, and a
+  current `hyp` reads a present but unusable own record as logged out rather
+  than falling back.
 - `hyp remote mint` refuses a service record locally (the server refuses it
   too: minting needs a session, 0620#matrix).
 

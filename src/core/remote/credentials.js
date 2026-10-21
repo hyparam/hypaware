@@ -177,7 +177,14 @@ export function remoteTokenEnvVar(target) {
  * @ref LLP 0033#credentials [constrained-by]: single 0600 per-target store, secrets never in config
  */
 export async function readCredentials(stateDir) {
-  const parsed = await readRawCredentials(stateDir)
+  return normalizeAll(await readRawCredentials(stateDir))
+}
+
+/**
+ * @param {Record<string, unknown>} parsed
+ * @returns {Record<string, RemoteCredentialRecord>}
+ */
+function normalizeAll(parsed) {
   // Object.fromEntries, not `out[target] = record`: a target named `__proto__`
   // would run the inherited setter, dropping the record from the map and making
   // it the prototype, from where it answers every other name's lookup.
@@ -459,11 +466,12 @@ export async function resolveToken({ target, legacyTarget, env, stateDir }) {
   if (fromEnv !== undefined) {
     return { ok: true, token: fromEnv, source: 'env' }
   }
-  const creds = await readCredentials(stateDir)
+  const raw = await readRawCredentials(stateDir)
+  const creds = normalizeAll(raw)
   // Own-key read: an inherited Object.prototype member is truthy, so a target
   // named `constructor` walked past this presence check and died in bearerOf's
   // `token.length` instead of reporting that it has no stored token.
-  const key = storedKey(creds, target, legacyTarget)
+  const key = storedKey(raw, target, legacyTarget)
   const entry = Object.hasOwn(creds, key) ? creds[key] : undefined
   if (entry) {
     const token = bearerOf(entry)
@@ -515,10 +523,11 @@ export async function resolveAccessJwt({ target, legacyTarget, env, stateDir, id
   // A forced refresh is the live-401 retry: drop the parse cache so the read
   // below sees the freshest refresh token a sibling may have just rotated in.
   if (forceRefresh) rawCache = null
-  const creds = await readCredentials(stateDir)
+  const raw = await readRawCredentials(stateDir)
+  const creds = normalizeAll(raw)
   // Own-key read, as in resolveToken: an inherited member is truthy, so the
   // miss was signposted as an unrefreshable session, not a logged-out target.
-  const key = storedKey(creds, target, legacyTarget)
+  const key = storedKey(raw, target, legacyTarget)
   const entry = Object.hasOwn(creds, key) ? creds[key] : undefined
   if (!entry) {
     return { ok: false, error: noTokenError(target, envName) }
@@ -614,7 +623,10 @@ export function serviceRefusal(err, target) {
  * The credential-file key a target's record is read under: its own name, or
  * the legacy name an earlier release stored it under when only that one holds
  * a record. A refresh commits back to the key it read, so the session stays
- * where it is until the next login writes the target's own name.
+ * where it is until the next login writes the target's own name. Presence is
+ * read from the raw store: an entry this release cannot use under the
+ * target's own name (a malformed service record) fails closed rather than
+ * handing the target the old name's session.
  *
  * @ref LLP 0552#credentials [implements]: the old name's record answers only when the new name has none
  * @param {Record<string, unknown>} creds

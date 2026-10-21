@@ -137,6 +137,7 @@ test('retire removes the record, treats a missing one as done, and throws any ot
   assert.equal(await retireKeptServiceToken(p), true)
   assert.equal(fs.existsSync(p), false)
   assert.equal(await retireKeptServiceToken(p), false)
+  await writeKeptServiceToken(p, keptServiceToken({ secret: SECRET, centralUrl: 'https://c.example' }))
   await assert.rejects(
     retireKeptServiceToken(p, { fs: /** @type {typeof fsp} */ ({ ...fsp, unlink: fail('EPERM') }) }),
     /EPERM/
