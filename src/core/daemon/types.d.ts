@@ -282,6 +282,7 @@ export type StatusDiagnosticKind =
   | 'recent_errors'
   | 'sink_export_failing'
   | 'sink_dataset_unsupported'
+  | 'central_service_token_stopped'
   | 'sink_materialize_failed'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'

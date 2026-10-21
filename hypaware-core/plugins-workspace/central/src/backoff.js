@@ -11,6 +11,7 @@
  */
 
 import { abortReason, readBodyCapped } from '../../../../src/core/util/backoff.js'
+import { isServiceStopCode } from '../../../../src/core/remote/service_token.js'
 
 export {
   RETRY_BACKOFF_SECONDS,
@@ -60,4 +61,24 @@ export async function readCentralJson(response, signal) {
 export async function readErrorDetail(response, signal) {
   await readBodyCapped(response, MAX_CENTRAL_RESPONSE_BYTES, signal)
   return `HTTP ${response.status}`
+}
+
+/**
+ * The server's permanent service-credential refusal, read from a `403` body
+ * under the same cap, or `undefined` for any other body. Only the two known
+ * codes are kept; nothing else of the body is.
+ *
+ * @param {Response} response
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<string | undefined>}
+ */
+export async function readStopCode(response, signal) {
+  const result = await readBodyCapped(response, MAX_CENTRAL_RESPONSE_BYTES, signal)
+  if (!result.ok) return undefined
+  try {
+    const code = JSON.parse(result.body)?.error
+    return isServiceStopCode(code) ? code : undefined
+  } catch {
+    return undefined
+  }
 }

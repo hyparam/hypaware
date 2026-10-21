@@ -402,7 +402,7 @@ function base64UrlEncode(buf) {
  * @param {string} dir
  * @param {string} devRunId
  */
-async function writeOtelFixturePlugin(dir, devRunId) {
+export async function writeOtelFixturePlugin(dir, devRunId) {
   await fs.mkdir(dir, { recursive: true })
   const manifest = {
     schema_version: 1,

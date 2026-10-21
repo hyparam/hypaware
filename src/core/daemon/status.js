@@ -33,6 +33,7 @@ import { discoverInstalledPlugins, unloadableInstalledPlugins } from '../runtime
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { detectShadowedPlugins } from '../runtime/boot.js'
 import { centralLayerUnreadable } from '../remote/gateway_seed.js'
+import { readKeptServiceToken, serviceTokenPath } from '../remote/service_token.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
@@ -3038,6 +3039,7 @@ export async function collectHypAwareStatus(opts = {}) {
   diagnostics.push(...recentErrors.sinkDiagnostics)
   if (sinksAreConfigured && config?.sinks) {
     diagnostics.push(...await heldDatasetDiagnostics(stateRoot, config))
+    diagnostics.push(...await serviceTokenDiagnostics(stateRoot, config))
   }
   // A probation that expired while a sink could not materialize says this
   // host could not confirm the revision, not that the revision is bad, so the
@@ -4827,6 +4829,50 @@ async function heldDatasetDiagnostics(stateRoot, config) {
       message: `${label}: the server cannot accept ${count} dataset${count === 1 ? '' : 's'} (${names}); their rows stay local`,
       repair: ['upgrade the server; held rows forward once it accepts the dataset'],
     })
+  }
+  return out
+}
+
+/**
+ * A central sink whose kept service token records a permanent stop, or cannot
+ * be read, sends nothing until a new `hyp join`. Only the record on disk is
+ * read, so a stop the sink could not persist is not shown here, and the
+ * record's contents never are.
+ *
+ * @ref LLP 0547#rebootstrap [implements]: status names the stop and its remedy
+ * @param {string} stateRoot
+ * @param {HypAwareV2Config} config
+ * @returns {Promise<StatusDiagnostic[]>}
+ */
+async function serviceTokenDiagnostics(stateRoot, config) {
+  const plugin = '@hypaware/central'
+  if ((config.plugins ?? []).some((p) => p.name === plugin && p.enabled === false)) return []
+  /** @type {StatusDiagnostic[]} */
+  const out = []
+  for (const [instance, raw] of Object.entries(config.sinks ?? {})) {
+    if (!('plugin' in raw) || raw.plugin !== plugin) continue
+    const identity = raw.config?.identity
+    const configured = isPlainObject(identity) ? identity.persisted_path : undefined
+    const identityPath = typeof configured === 'string' ? configured : path.join(pluginStateDir(stateRoot, plugin), 'identity.json')
+    const recordPath = serviceTokenPath(identityPath)
+    const read = await readKeptServiceToken(recordPath)
+    const label = sanitizeLabel(instance) ?? 'unknown'
+    if (read.state === 'unreadable') {
+      out.push({
+        severity: 'error',
+        kind: 'central_service_token_stopped',
+        message: `${label}: stopped: service token file unreadable (${sanitizeLabel(recordPath, 512) ?? 'unknown'})`,
+        repair: ['run `hyp join` again'],
+      })
+    } else if (read.state === 'ok' && read.record.stopped_code) {
+      const what = read.record.stopped_code === 'service_account_disabled' ? 'service account disabled' : 'service token revoked'
+      out.push({
+        severity: 'error',
+        kind: 'central_service_token_stopped',
+        message: `${label}: stopped: ${what}`,
+        repair: ['create a new token in HypAware and run `hyp join` again'],
+      })
+    }
   }
   return out
 }

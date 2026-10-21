@@ -8,6 +8,7 @@ import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { centralLayerResolutionFailure } from '../config/apply.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { originOf, sameServer } from './builtin_remotes.js'
+import { retireKeptServiceToken, serviceTokenPath } from './service_token.js'
 
 /**
  * Bridge from a login-minted gateway credential to the `central` forward
@@ -73,6 +74,10 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
       : path.join(stateDir, 'plugins', CENTRAL_PLUGIN, 'identity.json')
     if (seenPaths.has(persistedPath)) continue
     seenPaths.add(persistedPath)
+    // A person's login replaces a service enrollment outright: the kept
+    // secret goes before the login identity is written, and a failed unlink
+    // throws so the caller rolls back (LLP 0547 D2).
+    await retireKeptServiceToken(serviceTokenPath(persistedPath))
     const { replaced } = writeLoginSeed({
       persistedPath,
       centralUrl,

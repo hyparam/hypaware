@@ -2,6 +2,7 @@
 
 import { safeText } from '../http_text.js'
 import { Attr, getLogger } from '../observability/index.js'
+import { isServiceStopCode } from './service_token.js'
 
 /**
  * Plain JSON client for hypaware-server's identity surface
@@ -44,6 +45,20 @@ export class InvalidGrantError extends Error {
     this.name = 'InvalidGrantError'
     /** @type {'invalid_grant'} */
     this.code = 'invalid_grant'
+  }
+}
+
+/**
+ * Error thrown when the token endpoint refuses a service secret permanently
+ * (`403 service_token_revoked` / `service_account_disabled`, LLP 0547 D4).
+ * `code` is the server's, and only ever one of those two.
+ */
+export class ServiceTokenStoppedError extends Error {
+  /** @param {string} code */
+  constructor(code) {
+    super(`the service token was refused (${code}) - create a new token in HypAware and log in again`)
+    this.name = 'ServiceTokenStoppedError'
+    this.code = code
   }
 }
 
@@ -153,6 +168,24 @@ export async function refreshSession({ identityBase, refreshToken, fetchImpl }) 
 }
 
 /**
+ * Exchange an org service secret for a read JWT (the `service_token` grant,
+ * LLP 0547 D4). Throws {@link InvalidGrantError} on `401 invalid_grant` and
+ * {@link ServiceTokenStoppedError} on a permanent `403`.
+ *
+ * @param {{ identityBase: string, serviceToken: string, fetchImpl?: typeof fetch }} args
+ * @returns {Promise<{ accessJwt: string, expiresAt: string, org: string }>}
+ */
+export async function exchangeServiceToken({ identityBase, serviceToken, fetchImpl }) {
+  const body = { grant_type: 'service_token', service_token: serviceToken }
+  const json = await postToken({ identityBase, body, fetchImpl, operation: 'remote.service_exchange' })
+  return {
+    accessJwt: str(json.access_jwt, 'access_jwt'),
+    expiresAt: expiryTimestamp(json.expires_at, 'expires_at'),
+    org: typeof json.org === 'string' ? json.org : '',
+  }
+}
+
+/**
  * POST a JSON body to `<identityBase>/token` and parse the JSON response. A
  * non-2xx whose body carries `error: "invalid_grant"` becomes an
  * {@link InvalidGrantError} (regardless of the exact status: RFC 6749 uses 400,
@@ -208,12 +241,15 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
   }
   if (!res.ok) {
     const errCode = json && typeof json.error === 'string' ? json.error : undefined
+    const service = body.grant_type === 'service_token'
     log.warn('remote.token_error', {
-      [Attr.COMPONENT]: 'remote-oidc',
+      [Attr.COMPONENT]: service ? 'remote' : 'remote-oidc',
       [Attr.OPERATION]: operation,
       [Attr.STATUS]: 'failed',
       [Attr.ERROR_KIND]: errCode ?? `http_${res.status}`,
+      ...(service ? { credential_kind: 'service_token' } : {}),
     })
+    if (res.status === 403 && isServiceStopCode(errCode)) throw new ServiceTokenStoppedError(errCode)
     // A revoked/expired refresh row must reach the re-login guidance even when
     // the body is empty or non-JSON: the only credential this endpoint
     // authenticates is the refresh token, so a 401 means re-login regardless of
@@ -241,10 +277,12 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
     // field extractors below report a misleading "missing 'access_jwt'".
     throw new Error(`identity endpoint returned an empty response (HTTP ${res.status}) - try again`)
   }
+  const service = body.grant_type === 'service_token'
   log.info('remote.token_ok', {
-    [Attr.COMPONENT]: 'remote-oidc',
+    [Attr.COMPONENT]: service ? 'remote' : 'remote-oidc',
     [Attr.OPERATION]: operation,
     [Attr.STATUS]: 'ok',
+    ...(service ? { credential_kind: 'service_token' } : {}),
   })
   return json && typeof json === 'object' ? json : {}
 }
