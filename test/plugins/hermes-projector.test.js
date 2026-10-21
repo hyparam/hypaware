@@ -161,6 +161,38 @@ function throwingDeriveRepo() {
   return async () => { throw new Error('deriveRepo must not be called for this session') }
 }
 
+test('local sessions recover the creating surface while preserving raw source and cwd policy', async () => {
+  for (const createdSource of ['cli', 'tui', 'desktop', 'acp', '', null, undefined]) {
+    const session = { ...openInteractiveSession(), source: 'local', created_source: createdSource }
+    const item = await projectHermesSession({
+      session, messages: openInteractiveMessages(), resolver: fakeResolver(), deriveRepo: noopDeriveRepo(),
+    })
+    const exchange = /** @type {any} */ (item?.value)
+    assert.equal(exchange.entrypoint, createdSource || 'local')
+    assert.deepEqual(exchange.attributes.hermes, { source: 'local' })
+    assert.equal(exchange.cwd, session.cwd)
+    assert.ok(session.cwd)
+    assert.equal(await projectHermesSession({
+      session, messages: openInteractiveMessages(), resolver: fakeResolver([session.cwd]),
+      deriveRepo: throwingDeriveRepo(),
+    }), undefined)
+  }
+})
+
+test('created_source never overrides legacy or channel sources or their policy scope', async () => {
+  for (const source of ['cli', 'tool', 'oneshot', 'telegram']) {
+    const session = { ...openInteractiveSession(), source, created_source: 'desktop' }
+    const item = await projectHermesSession({
+      session, messages: openInteractiveMessages(), resolver: fakeResolver(), homeDir: HOME_DIR,
+      deriveRepo: source === 'telegram' ? throwingDeriveRepo() : noopDeriveRepo(),
+    })
+    const exchange = /** @type {any} */ (item?.value)
+    assert.equal(exchange.entrypoint, source)
+    assert.deepEqual(exchange.attributes.hermes, source === 'telegram' ? { source, real_cwd: session.cwd } : { source })
+    assert.equal(exchange.cwd, source === 'telegram' ? channelScopePath(source, HOME_DIR) : session.cwd)
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Golden projection (T1 fixture, open interactive session)
 // ---------------------------------------------------------------------------
