@@ -24,7 +24,7 @@ export async function run({ harness, expect }) {
   async function cli(args) {
     let output = ''
     let error = ''
-    const code = await dispatch(args, { kernel: daemon.runtime, registry, env: process.env,
+    const code = await dispatch(args, { kernel: daemon?.runtime, registry, env: process.env,
       stdout: { write(v) { output += v; return true } }, stderr: { write(v) { error += v; return true } } })
     expect.that(`CLI ${args[0]} succeeds`, { code, error }, value => value.code === 0 && !value.error)
     return JSON.parse(output)
@@ -41,6 +41,11 @@ export async function run({ harness, expect }) {
       const records = (await fs.readFile(new URL('../fixtures/nanoclaw-session.jsonl', import.meta.url), 'utf8')).trim().split('\n').map((line, i) => ({ ...JSON.parse(line), sessionId: harness.devRunId, timestamp: new Date(now - 10000 + i).toISOString() }))
       const old = { ...records[0], uuid: 'too-old', timestamp: new Date(now - 2 * 86400000).toISOString() }
       await fs.writeFile(file, [old, ...records].map(record => JSON.stringify(record)).join('\n') + '\n')
+      const discovered = await cli(['client', 'discover', 'nanoclaw', root, '--json'])
+      const canonicalRoot = await fs.realpath(root)
+      expect.that('discovery reports the supported root before configuration', discovered.roots, values => values.length === 1 && values[0] === canonicalRoot)
+      expect.that('discovery does not enable capture', discovered.changed, value => value === false)
+      expect.that('discovery writes no configuration', await fs.stat(configPath).then(() => true, () => false), value => value === false)
       await fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false,
         plugins: [{ name: '@hypaware/nanoclaw', config: { root, backfill: { window_days: 1, sweep_cron: '* * * * *' } } }],
         query: { cache: { retention: { default_days: 30 } } },
@@ -110,6 +115,7 @@ export async function run({ harness, expect }) {
     await daemon.done
     await obs.shutdown()
     const logs = await expect.logs()
+    expect.that('discovery emits bounded metadata counts without paths', logs, values => values.some(e => e.body === 'client.discover' && e.attributes?.root_count === 1 && e.attributes?.candidate_count === 1 && !e.attributes?.root))
     expect.that('native scan emits content-free counts', logs, values => values.some(e => e.body === 'nanoclaw.backfill.scan' && e.attributes?.files_read === 1))
     expect.that('privacy signal emitted', logs, values => values.some(e => e.body === 'nanoclaw.backfill.scan' && e.attributes?.policy_drops > 0))
     expect.that('run-specific steps traced', (await expect.traces()).filter(t => String(t.name).startsWith('smoke.step.') && t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId).length, value => value === 6)

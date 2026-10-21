@@ -46,6 +46,7 @@ import { runJoin, runLeave } from '../commands/central.js'
 import { runPurge } from '../commands/purge.js'
 import {
   runAttach,
+  runClientDiscover,
   runDetach,
   runIgnore,
   runSkillsInstall,
@@ -445,6 +446,15 @@ function buildCoreCommands(registry) {
         '--dry-run reports what would change without writing.',
       ].join('\n'),
       run: runAttach,
+    },
+    {
+      name: 'client discover',
+      category: 'capture-movement',
+      audience: 'everyday',
+      bootProfile: 'none',
+      summary: 'Find local NanoClaw installation roots without enabling capture',
+      usage: 'hyp client discover nanoclaw [root] [--json]',
+      run: runClientDiscover,
     },
     {
       name: 'client status',

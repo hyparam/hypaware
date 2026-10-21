@@ -209,7 +209,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
     })()
     const rows = visiblePickerDescriptors([...orderPickerDescriptors(catalog.pickerDescriptors).values()], opts.platform)
       .filter((row) => INIT_SOURCE_CHOICES.includes(/** @type {PickerSource} */ (row.id)))
-    const detected = await detectPickerSources(catalog, ctx.env)
+    const detected = await detectPickerSources(catalog, ctx.env, ctx.cwd)
     const configPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(readObservabilityEnv(ctx.env).hypHome)
     let existing = 'none'
     try {

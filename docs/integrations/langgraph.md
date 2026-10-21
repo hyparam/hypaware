@@ -30,9 +30,14 @@ Keep using your application's own LangGraph and model-provider packages.
 Python applications additionally need their existing LangChain Core package
 and access to the Node executable installed with HypAware.
 
-In `hyp setup`, choose **Customize**, then **LangGraph (JavaScript / Python)**.
-Global setup does not scan projects for LangGraph and **Record everything** does
-not select it. To add it later:
+Run `hyp setup` from your application directory. A direct LangGraph dependency
+in `package.json`, `requirements.txt`, or the standard `[project] dependencies`
+array in `pyproject.toml` suggests **LangGraph (JavaScript / Python)** in setup.
+Detection checks only that directory and reads at most 256 KiB per file. It
+does not inspect parent projects, lockfiles, requirement includes, Poetry tables,
+or dynamic metadata. Without a matching declaration, choose **Customize** and
+select LangGraph explicitly. Detection does not wire your application: you must
+still add the callback printed by attach. To add the integration later:
 
 ```sh
 hyp client attach langgraph

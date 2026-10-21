@@ -478,6 +478,8 @@ export type PickerDetectProbe =
   | { settings_file: string } // reuses the `contributes.client.attach_probe` settings-file shape, home-relative likewise
   | { app_bundle: string } // stat-exists check on a macOS `.app` bundle path
   | { path: string } // stat-exists check on a directory (honors `$FOO_HOME`-style env overrides)
+  | { vscode_extension: string } // installed extension identifier in local VS Code extension metadata
+  | { project_dependencies: { npm?: string, python?: string } } // declarations in the caller's current project only
 
 export interface PluginCommandManifest {
   name: string

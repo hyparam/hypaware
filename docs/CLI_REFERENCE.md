@@ -909,6 +909,32 @@ reattach through a proxy.
 hyp client detach codex --dry-run
 ```
 
+### `hyp client discover`
+
+```text
+hyp client discover nanoclaw [root] [--json]
+```
+
+Finds a supported NanoClaw v2 installation to record. With `root`, it checks
+only that path, resolved from the current directory. Without one, it checks
+the configured `@hypaware/nanoclaw` `config.root`, when that is absolute, and
+then the current directory and its ancestors, at most eight locations in all.
+It does not search your home or other projects.
+
+Discovery is read-only. It checks the NanoClaw catalog and directory layout,
+reads no transcripts, writes no settings, and enables no capture. At least one
+group's Claude projects directory must exist for a root to qualify. To record
+a root, add `@hypaware/nanoclaw` with `config.root` set to it, validate the
+config, and restart the daemon (see the
+[NanoClaw guide](integrations/nanoclaw.md)). A run that finds nothing still
+succeeds. `--json` prints `{"client":"nanoclaw","roots":[...],"changed":false}`,
+where `roots` holds each qualifying absolute root and `changed` is always
+`false`.
+
+```sh
+hyp client discover nanoclaw /absolute/path/to/nanoclaw --json
+```
+
 ### Client skill commands
 
 The visible `hyp client skills` group contains the install command:

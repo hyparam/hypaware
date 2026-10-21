@@ -46,6 +46,7 @@ export const COMMANDS = Object.freeze([
   'client claude-desktop status',
   'client claude-desktop verify',
   'client detach',
+  'client discover',
   'client skills',
   'client skills install',
   'client status',

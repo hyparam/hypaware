@@ -9,8 +9,8 @@
 
 ## Requested integration {#onboarding}
 
-Ship a bundled LangGraph plugin, offered under Customize without detection or
-first-run express selection. Global setup has no project to inspect. Reuse
+Ship a bundled LangGraph plugin. LLP 0554 adds bounded dependency detection
+in the invoking project; without that evidence it remains an explicit choice. Reuse
 `hyp client attach langgraph` to enable it later, including after Record
 everything. Attach installs one managed module and prints its import and callback
 example. It does not edit arbitrary applications. Detach uses the existing

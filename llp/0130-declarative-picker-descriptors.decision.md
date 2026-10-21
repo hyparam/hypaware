@@ -9,6 +9,7 @@
 **Extended-by:** LLP 0202 (a picker row may set `hidden` to stay out of the menu while remaining a source)
 **Extended-by:** LLP 0511 (hosted Codex choices use a bounded local account grant for seeding and confirmation)
 **Extended-by:** LLP 0368 (a picker row may set `platforms` to be offered only where its integration exists)
+**Extended-by:** LLP 0554 (bounded extension and project dependency presence probes)
 
 > Spawned by [LLP 0128](./0128-install-experience-overhaul.rfc.md) on
 > acceptance. Extends [LLP 0005](./0005-plugin-manifest.spec.md): the

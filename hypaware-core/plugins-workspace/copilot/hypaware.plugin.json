@@ -29,7 +29,7 @@
         "label": "VS Code GitHub Copilot",
         "summary": "Records completed chat/model/tool spans from both VS Code Copilot harnesses in local single-folder workspaces. Reload required. Native history retention applies.",
         "detect": {
-          "settings_file": ".vscode"
+          "vscode_extension": "github.copilot-chat"
         },
         "compose": {
           "plugin": {
