@@ -1426,7 +1426,19 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
     const { sessionExpired, message } = describeRefreshError(err, name)
     return fail(message, sessionExpired ? 2 : 1)
   }
-  if (!resolved.ok) return fail(resolved.error, 2)
+  if (!resolved.ok) {
+    // A person who connected only through an MCP client such as Claude holds
+    // no session here, and /v1/org/tokens/mine refuses every other credential.
+    if (method !== 'POST') {
+      return fail(
+        `${resolved.error}\n` +
+          `an MCP connection made only through a client such as Claude has no session on this computer: ` +
+          `sign in with 'hyp remote login ${name}' to list or revoke it here, or remove HypAware from the client's connectors`,
+        2,
+      )
+    }
+    return fail(resolved.error, 2)
+  }
 
   /** @param {string} token @returns {Promise<{ authFailed: boolean, value: { ok: true, response: Response } | { ok: false, error: string } }>} */
   const op = async (token) => {
@@ -1611,14 +1623,15 @@ async function runAgentMint({ name, label, expiresDays }, ctx, deps) {
 
 /**
  * `hyp remote tokens [name] [--json]`: the caller's own agent tokens on a
- * target, revoked ones included until they expire. Never a token value: the
- * server holds none to return.
+ * target, revoked ones included until they expire, then their own live MCP
+ * OAuth connections. Never a token value: the server holds none to return.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @param {{ fetchImpl?: typeof fetch }} [deps] test seam for the request
  * @returns {Promise<number>}
  * @ref LLP 0494#cli-tokens [implements]: GET /v1/org/tokens/mine, printing jti, label, created, expires and revoked
+ * @ref LLP 0494#cli-connections [implements]: the same reply's connections, printing id, client, org, created and expires
  */
 export async function runRemoteTokens(argv, ctx, deps = {}) {
   const command = 'remote tokens'
@@ -1646,32 +1659,69 @@ export async function runRemoteTokens(argv, ctx, deps = {}) {
     revoked: t.revoked === true,
     revokedAt: typeof t.revokedAt === 'string' ? t.revokedAt : null,
   }))
+  // A server that predates MCP connections sends no array; that lists none.
+  const connectionRows = isPlainObject(answer.json) && Array.isArray(answer.json.connections) ? answer.json.connections : []
+  const org = connectionRows.length > 0 ? await sessionOrg(ctx, name) : null
+  const connections = connectionRows.filter(isPlainObject).map((c) => ({
+    id: typeof c.id === 'string' ? c.id : '',
+    client: typeof c.client_name === 'string' ? c.client_name : typeof c.redirect_host === 'string' ? c.redirect_host : null,
+    org,
+    createdAt: typeof c.created_at === 'string' ? c.created_at : null,
+    expiresAt: typeof c.expires_at === 'string' ? c.expires_at : null,
+  }))
   if (gate.params.json === true) {
-    ctx.stdout.write(JSON.stringify(tokens, null, 2) + '\n')
+    ctx.stdout.write(JSON.stringify({ tokens, connections }, null, 2) + '\n')
     return 0
   }
   if (tokens.length === 0) {
     ctx.stdout.write(`no agent tokens on '${name}' - mint one with 'hyp remote mint ${name} --scope query'\n`)
-    return 0
+  } else {
+    ctx.stdout.write('jti\tlabel\tcreated\texpires\trevoked\n')
+    for (const t of tokens) {
+      const revoked = t.revoked ? t.revokedAt ?? 'yes' : 'no'
+      ctx.stdout.write(`${t.jti}\t${t.label ?? '-'}\t${t.mintedAt ?? '-'}\t${readExpiry(t.exp) ?? '-'}\t${revoked}\n`)
+    }
   }
-  ctx.stdout.write('jti\tlabel\tcreated\texpires\trevoked\n')
-  for (const t of tokens) {
-    const revoked = t.revoked ? t.revokedAt ?? 'yes' : 'no'
-    ctx.stdout.write(`${t.jti}\t${t.label ?? '-'}\t${t.mintedAt ?? '-'}\t${readExpiry(t.exp) ?? '-'}\t${revoked}\n`)
+  if (connections.length > 0) {
+    ctx.stdout.write(`\nMCP connections on '${name}':\n`)
+    ctx.stdout.write('id\tclient\torg\tcreated\texpires\n')
+    for (const c of connections) {
+      ctx.stdout.write(`${c.id}\t${escapeForDisplay(c.client ?? '-')}\t${c.org ?? '-'}\t${c.createdAt ?? '-'}\t${c.expiresAt ?? '-'}\n`)
+    }
   }
   return 0
 }
 
 /**
+ * The org of the session stored for `name`, the org every connection the
+ * server lists for it belongs to. Null when the record carries none.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {string} name
+ * @returns {Promise<string | null>}
+ */
+async function sessionOrg(ctx, name) {
+  try {
+    const stored = await readCredentials(readObservabilityEnv(ctx.env).stateDir)
+    const record = Object.hasOwn(stored, name) ? stored[name] : undefined
+    return record && record.kind === 'oidc' && record.org ? record.org : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * `hyp remote tokens revoke <jti> [--remote <name>]`: revoke one of the
- * caller's own agent tokens. The server answers a second revoke of the same
- * jti with 200 again.
+ * caller's own agent tokens, or one of their MCP connections by its id (the
+ * route takes both). The server answers a second revoke of the same id with
+ * 200 again.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @param {{ fetchImpl?: typeof fetch }} [deps] test seam for the request
  * @returns {Promise<number>}
  * @ref LLP 0494#cli-tokens [implements]: DELETE /v1/org/tokens/mine/<jti>, the member's own revoke
+ * @ref LLP 0494#cli-connections [implements]: a connection id rides the same DELETE; the reply names it as id, not jti
  */
 export async function runRemoteTokensRevoke(argv, ctx, deps = {}) {
   const command = 'remote tokens revoke'
@@ -1682,14 +1732,16 @@ export async function runRemoteTokensRevoke(argv, ctx, deps = {}) {
   const answer = await agentTokensRequest({ command, name, method: 'DELETE', suffix: `/${encodeURIComponent(jti)}` }, ctx, deps)
   if (!answer.ok) return answer.code
   if (answer.status === 404) {
-    ctx.stderr.write(`hyp ${command}: '${name}' has no agent token ${jti} of yours - list them with 'hyp remote tokens ${name}'\n`)
+    ctx.stderr.write(`hyp ${command}: '${name}' has no agent token or MCP connection ${jti} of yours - list them with 'hyp remote tokens ${name}'\n`)
     return 1
   }
   if (answer.status < 200 || answer.status >= 300) {
     ctx.stderr.write(`hyp ${command}: ${genericRefusal('revoke', answer.status, answer.json)}\n`)
     return 1
   }
-  ctx.stdout.write(`revoked agent token ${jti} on '${name}'\n`)
+  const json = answer.json
+  const connection = isPlainObject(json) && typeof json.id === 'string' && typeof json.jti !== 'string'
+  ctx.stdout.write(`revoked ${connection ? 'MCP connection' : 'agent token'} ${jti} on '${name}'\n`)
   return 0
 }
 

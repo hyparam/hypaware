@@ -783,13 +783,13 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'remote tokens',
-      summary: 'List your agent tokens on a remote target (never a token value)',
+      summary: 'List your agent tokens and MCP connections on a remote target (never a token value)',
       usage: coreUsage('remote tokens'),
       run: runRemoteTokens,
     },
     {
       name: 'remote tokens revoke',
-      summary: 'Revoke one of your agent tokens on a remote target',
+      summary: 'Revoke one of your agent tokens or MCP connections on a remote target',
       usage: coreUsage('remote tokens revoke'),
       run: runRemoteTokensRevoke,
     },

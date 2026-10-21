@@ -2007,6 +2007,15 @@ Lists your agent tokens on a target: the token ID (`jti`), label, creation
 time, expiry, and whether it's revoked. It never prints a token value. You
 can hold at most ten live agent tokens at a time.
 
+It then lists your live MCP connections on that target, the ones a client
+such as Claude made when you signed in through its connector: the
+connection ID, the client, the org, creation time, and expiry. With
+`--json` it prints `{"tokens": [...], "connections": [...]}`.
+
+Both lists need a `hyp remote login` session on this computer. If you
+connected only through Claude, sign in with `hyp remote login` first, or
+remove HypAware from Claude's connectors to cut the connection there.
+
 ```sh
 hyp remote tokens team
 ```
@@ -2017,11 +2026,13 @@ hyp remote tokens team
 hyp remote tokens revoke <jti> [--remote <name>]
 ```
 
-Revokes one of your agent tokens by its ID, on the default target unless
-`--remote` names another.
+Revokes one of your agent tokens or MCP connections by its ID, on the
+default target unless `--remote` names another. The connection's client
+loses access at its next request and has to sign in again.
 
 ```sh
 hyp remote tokens revoke rt-0123456789abcdef --remote team
+hyp remote tokens revoke oauth-0123456789abcdef --remote team
 ```
 
 ### `hyp remote list`

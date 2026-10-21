@@ -313,10 +313,94 @@ test('tokens --json prints the named fields only', async () => {
   assert.equal(await runRemoteTokens(['prod', '--json'], ctx, { fetchImpl: impl }), 0)
   const text = out.join('')
   assert.doesNotMatch(text, /planted-secret/)
-  assert.deepEqual(JSON.parse(text), [
-    { jti: 'rt-aaaaaaaaaaaaaaaa', label: 'nightly', mintedAt: '2026-10-01T00:00:00.000Z', exp: 1798761600, revoked: false, revokedAt: null },
-    { jti: 'rt-bbbbbbbbbbbbbbbb', mintedAt: '2026-10-02T00:00:00.000Z', exp: 1798848000, revoked: true, revokedAt: '2026-10-03T00:00:00.000Z' },
-  ])
+  assert.deepEqual(JSON.parse(text), {
+    tokens: [
+      { jti: 'rt-aaaaaaaaaaaaaaaa', label: 'nightly', mintedAt: '2026-10-01T00:00:00.000Z', exp: 1798761600, revoked: false, revokedAt: null },
+      { jti: 'rt-bbbbbbbbbbbbbbbb', mintedAt: '2026-10-02T00:00:00.000Z', exp: 1798848000, revoked: true, revokedAt: '2026-10-03T00:00:00.000Z' },
+    ],
+    connections: [],
+  })
+})
+
+const CONNECTIONS = [
+  {
+    id: 'oauth-0123456789abcdef',
+    client_name: 'Claude\u001b[31m',
+    redirect_host: 'claude.ai',
+    scope: 'read',
+    created_at: '2026-10-20T00:00:00.000Z',
+    last_used_at: null,
+    expires_at: '2026-11-19T00:00:00.000Z',
+    refresh_token: 'planted-refresh',
+  },
+  { id: 'oauth-fedcba9876543210', redirect_host: 'chatgpt.com', created_at: '2026-10-21T00:00:00.000Z', expires_at: '2026-11-20T00:00:00.000Z' },
+]
+
+test('tokens lists MCP connections with client, org from the session, created and expires', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  await seedSession(hypHome)
+  const before = await snapshot(hypHome)
+  const { impl, calls } = fetchStub([{ status: 200, body: { tokens: [], connections: CONNECTIONS } }])
+  assert.equal(await runRemoteTokens(['prod'], ctx, { fetchImpl: impl }), 0)
+  assert.equal(calls.length, 1)
+  const text = out.join('')
+  assert.equal(
+    text,
+    "no agent tokens on 'prod' - mint one with 'hyp remote mint prod --scope query'\n" +
+      "\nMCP connections on 'prod':\n" +
+      'id\tclient\torg\tcreated\texpires\n' +
+      'oauth-0123456789abcdef\tClaude\\u001b[31m\tacme\t2026-10-20T00:00:00.000Z\t2026-11-19T00:00:00.000Z\n' +
+      'oauth-fedcba9876543210\tchatgpt.com\tacme\t2026-10-21T00:00:00.000Z\t2026-11-20T00:00:00.000Z\n',
+  )
+  assert.doesNotMatch(text, /planted-refresh/)
+  assert.deepEqual(await snapshot(hypHome), before)
+})
+
+test('tokens --json carries the connections beside the tokens', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  await seedSession(hypHome)
+  const { impl } = fetchStub([{ status: 200, body: { tokens: [], connections: CONNECTIONS } }])
+  assert.equal(await runRemoteTokens(['prod', '--json'], ctx, { fetchImpl: impl }), 0)
+  const text = out.join('')
+  assert.doesNotMatch(text, /planted-refresh/)
+  assert.deepEqual(JSON.parse(text), {
+    tokens: [],
+    connections: [
+      { id: 'oauth-0123456789abcdef', client: 'Claude\u001b[31m', org: 'acme', createdAt: '2026-10-20T00:00:00.000Z', expiresAt: '2026-11-19T00:00:00.000Z' },
+      { id: 'oauth-fedcba9876543210', client: 'chatgpt.com', org: 'acme', createdAt: '2026-10-21T00:00:00.000Z', expiresAt: '2026-11-20T00:00:00.000Z' },
+    ],
+  })
+})
+
+test('tokens against a server without connections prints the token table alone', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  await seedSession(hypHome)
+  const { impl } = fetchStub([{ status: 200, body: LIST }])
+  assert.equal(await runRemoteTokens(['prod'], ctx, { fetchImpl: impl }), 0)
+  assert.doesNotMatch(out.join(''), /MCP connections/)
+})
+
+test('tokens and revoke with no session name the client-only connection case', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const { impl, calls } = fetchStub([{ status: 200, body: {} }])
+  assert.equal(await runRemoteTokens(['prod'], ctx, { fetchImpl: impl }), 2)
+  assert.equal(await runRemoteTokensRevoke(['oauth-0123456789abcdef', '--remote', 'prod'], ctx, { fetchImpl: impl }), 2)
+  assert.equal(calls.length, 0)
+  const text = err.join('')
+  assert.equal(text.match(/made only through a client such as Claude has no session on this computer: sign in with 'hyp remote login prod'/g)?.length, 2)
+  assert.match(text, /remove HypAware from the client's connectors/)
+})
+
+test('mint with no session keeps its own line', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const { impl } = fetchStub([{ status: 201, body: MINTED }])
+  assert.equal(await runRemoteMint(['prod', '--scope', 'query'], ctx, { fetchImpl: impl }), 2)
+  assert.doesNotMatch(err.join(''), /client such as Claude/)
 })
 
 test('tokens with none says how to mint one', async () => {
@@ -359,6 +443,17 @@ test('tokens revoke sends DELETE for the jti and writes nothing locally', async 
   assert.deepEqual(await snapshot(hypHome), before)
 })
 
+test('tokens revoke of an MCP connection id names it as a connection', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome, defaultRemote: 'prod' })
+  await seedSession(hypHome)
+  const { impl, calls } = fetchStub([{ status: 200, body: { id: 'oauth-0123456789abcdef', revoked: true } }])
+  assert.equal(await runRemoteTokensRevoke(['oauth-0123456789abcdef'], ctx, { fetchImpl: impl }), 0)
+  assert.equal(calls[0].url, `${ENDPOINT}/oauth-0123456789abcdef`)
+  assert.equal(calls[0].init.method, 'DELETE')
+  assert.equal(out.join(''), "revoked MCP connection oauth-0123456789abcdef on 'prod'\n")
+})
+
 test('tokens revoke takes --remote and encodes the jti into one path segment', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({ hypHome })
@@ -375,7 +470,7 @@ test('tokens revoke of a jti that is not yours names the list command', async ()
   const { impl } = fetchStub([{ status: 404, body: { error: 'unknown_org_token' } }])
   assert.equal(await runRemoteTokensRevoke(['rt-cccccccccccccccc', '--remote', 'prod'], ctx, { fetchImpl: impl }), 1)
   const text = err.join('')
-  assert.match(text, /'prod' has no agent token rt-cccccccccccccccc of yours - list them with 'hyp remote tokens prod'/)
+  assert.match(text, /'prod' has no agent token or MCP connection rt-cccccccccccccccc of yours - list them with 'hyp remote tokens prod'/)
   assert.doesNotMatch(text, /does not serve agent tokens/)
 })
 

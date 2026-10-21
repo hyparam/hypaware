@@ -85,6 +85,17 @@ hyp remote tokens revoke <jti>
 `hyp remote tokens` lists the `jti`, label, creation time, expiry, and revoked
 state of each of your agent tokens. It never shows a token value.
 
+It also lists your MCP connections, the ones Claude or another client made
+when you signed in through its connector: the connection ID, the client, the
+org, creation time, and expiry. Revoke one with the same command:
+
+```sh
+hyp remote tokens revoke <connection id>
+```
+
+Both need a `hyp remote login` session. If you connected only through
+Claude, sign in first, or remove HypAware from Claude's connectors.
+
 ## Client setup
 
 Each client below has a local block and, where the client supports a bearer
