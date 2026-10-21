@@ -98,6 +98,8 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/ollama',
   // @ref LLP 0548#onboarding: explicitly selected in Customize or attached later
   '@hypaware/langgraph',
+  // @ref LLP 0553#capture: NanoClaw roots are explicit local selections.
+  '@hypaware/nanoclaw',
 ]))
 
 /**

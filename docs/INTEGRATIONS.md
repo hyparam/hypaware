@@ -14,7 +14,7 @@ in general.
 
 | Status | Meaning |
 | --- | --- |
-| Supported | Built and maintained by the HypAware team and offered in `hyp setup`. |
+| Supported | Built and maintained by the HypAware team. Setup follows each integration's guide. |
 | Beta | Built by the HypAware team and usable today, but it depends on an interface that may change. Behavior can change between releases. |
 | Community | Built and maintained outside the HypAware team, usually as a [plugin](PLUGIN_AUTHORING.md). No community integrations are listed yet. |
 
@@ -54,6 +54,7 @@ HypAware 1.42.0. It includes setup, session startup, and upload after replies.
 | --- | --- | --- | --- | --- | --- |
 | [OpenClaw](integrations/openclaw.md) | Supported | Your machine or a server | Anthropic and OpenAI model calls through the local gateway, plus a transcript sweep every five minutes | Yes | `openclaw` |
 | [Hermes Agent](integrations/hermes.md) | Supported | Your machine or a server | Hermes's local state database, read-only, polled every 60 seconds | Yes | `hermes` |
+| [NanoClaw](integrations/nanoclaw.md) | Supported | Your machine or a server | Local v2 Claude transcripts, including subagents, recovered every five minutes; explicit installation root required | Yes | Explicit config; client `nanoclaw` |
 | [LangGraph](integrations/langgraph.md) | Beta | Your machine, a server, or CI | JavaScript or Python callbacks write a bounded local queue; the daemon collects completed events, including after an outage; only under **Customize** | No checkpoint import; queued-event recovery | `langgraph` |
 
 ## Software factories and CI

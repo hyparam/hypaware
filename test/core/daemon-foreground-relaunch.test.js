@@ -294,6 +294,7 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
   })
   /** @type {unknown} */
   let served = null
+  let initialPolls = 0
   const central = await listen((req, res) => {
     req.resume()
     const url = new URL(req.url ?? '/', 'http://localhost')
@@ -302,7 +303,9 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ jwt: `${b64({ alg: 'none' })}.${b64({ sub: 'relaunch-e2e' })}.x`, expires_at: Math.floor(Date.now() / 1000) + 86400 }))
     } else if (req.method === 'GET' && url.pathname === '/v1/config') {
-      if (!served) { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"error":"no_config"}') }
+      // The revision is temporarily unavailable. A 404 invokes the protocol's
+      // five-minute legacy backoff, making this test race its 45-second wait.
+      if (!served) { initialPolls++; res.writeHead(503, { 'retry-after': '1' }); res.end() }
       else if (req.headers['if-none-match'] === 'rev-1') { res.writeHead(304, { etag: 'rev-1' }); res.end() }
       else { res.writeHead(200, { 'content-type': 'application/json', etag: 'rev-1' }); res.end(JSON.stringify(served)) }
     } else {
@@ -352,6 +355,7 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
     assert.deepEqual(before, { status: 200, body: '{"upstream":"relaunch-e2e"}' })
 
     // Central now serves a revision: the daemon applies it, which is a staged restart.
+    await waitFor(() => initialPolls > 0, 5000, describe)
     served = centralLayer({})
     await waitFor(() => /daemon: running \(pid=\d+\)[\s\S]*daemon: running \(pid=\d+\)/.test(stdout), 45_000, describe)
     await waitFor(async () => (await ask(gateway)).status === 200, 30_000, describe)
