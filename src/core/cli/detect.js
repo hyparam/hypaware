@@ -172,7 +172,7 @@ function pyprojectDependencies(text) {
   if (text.includes('"""') || text.includes("'''")) return []
   // Preserve quoted values while stripping comments outside them.
   const clean = text.replace(/"(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*'|#[^\r\n]*/g, value => value.startsWith('#') ? '' : value)
-  const section = /(?:^|\n)\[project\][ \t]*\r?\n([\s\S]*?)(?=\n[ \t]*\[|$)/.exec(clean)?.[1]
+  const section = /(?:^|\n)\[project\][ \t]*\r?(?=\n)([\s\S]*?)(?=\n[ \t]*\[|$)/.exec(clean)?.[1]
   if (!section) return []
   const assignment = /(?:^|\n)dependencies[ \t]*=[ \t]*\[/.exec(section)
   if (!assignment) return []
