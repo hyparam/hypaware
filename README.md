@@ -96,7 +96,8 @@ saved request and response. See [Ollama setup, recording and direct recovery](./
 for supported versions and privacy limits.
 
 Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
-OpenClaw, Hermes Agent, Pi, Ollama, and any tool that exports OpenTelemetry logs,
+OpenClaw, Hermes Agent, Pi, [Factory Droid](./docs/integrations/droid.md), Ollama,
+and any tool that exports OpenTelemetry logs,
 traces, or metrics.
 
 Claude Code is captured through its built-in telemetry, so it still talks

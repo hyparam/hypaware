@@ -17,6 +17,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools |
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
 | `pi` | Pi conversations from its managed extension and local session files |
+| `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory; no billed token usage or cost |
 | `openclaw` | OpenClaw conversations from gateway traffic and local transcripts |
 | `hermes` | Hermes Agent conversations read from its local state database |
 | `raw-anthropic`, `raw-openai` | API requests and responses routed through the local gateway |
@@ -166,7 +167,7 @@ Three caveats apply to both surfaces:
 > separate, explicit `hyp privacy purge` step below.
 
 **Class resolution needs a working directory.** The client sources
-(Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, OpenClaw) supply
+(Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, Droid, OpenClaw) supply
 one. Hermes supplies the real one for an interactive session it recorded a
 cwd for, and scopes a messaging-channel session (Telegram, Discord, Slack,
 WhatsApp, Signal, email) under a derived `~/.hermes/channels/<source>` path
@@ -207,17 +208,17 @@ For another supported recorder, pass an explicitly verified session ID as
 shown in the [session reference](CLI_REFERENCE.md#control-the-current-session).
 
 The command sends the exclusion to local recorder control routes for the gateway,
-Claude telemetry, OpenCode, Pi, and Cursor when they are running. The Claude
+Claude telemetry, OpenCode, Pi, Droid, and Cursor when they are running. The Claude
 listener deletes ignored sessions' spooled bodies unread. Use
 `hyp session unignore` to resume and `hyp session status` to check the result.
 
-Gateway, Claude, OpenCode, and Pi exclusions are saved under
+Gateway, Claude, OpenCode, Pi, and Droid exclusions are saved under
 `<HYP_HOME>/hypaware/session-ignores/` and survive restarts. **Cursor exclusions
 are currently in memory only and must be reapplied after a recorder restart.**
 OpenClaw and Hermes do not support this session control; use directory markings
 or disable their capture integrations.
 
-Claude (including Desktop transcripts), Codex, OpenCode, and Pi backfill honor
+Claude (including Desktop transcripts), Codex, OpenCode, Pi, and Droid backfill honor
 saved exclusions, including manual imports in a separate process. Saving must
 succeed before a persistent recorder reports success. If its exclusion store is
 unreadable or corrupt, capture and transcript imports pause while AI requests
