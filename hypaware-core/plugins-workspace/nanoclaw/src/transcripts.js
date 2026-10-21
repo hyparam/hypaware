@@ -67,6 +67,34 @@ export async function readGroups(root) {
 }
 
 /**
+ * Validate at most eight caller-supplied installation candidates. Catalog and
+ * directory metadata only; never enumerate or read conversation files.
+ * @param {string[]} candidates
+ * @ref LLP 0554#nanoclaw-discovery: discovery reports roots without enabling capture
+ */
+export async function discoverNanoclawRoots(candidates) {
+  const roots = []
+  const seen = new Set()
+  for (const candidate of candidates.slice(0, 8)) {
+    try {
+      const root = await fs.realpath(candidate)
+      if (seen.has(root)) continue
+      seen.add(root)
+      const groups = await readGroups(root)
+      for (const group of groups) {
+        try {
+          await containedPath(root, group.projects)
+          if (!(await fs.stat(group.projects)).isDirectory()) continue
+          roots.push(root)
+          break
+        } catch { /* Another group may have initialized Claude. */ }
+      }
+    } catch { /* Missing, malformed, or unsafe roots are not suggestions. */ }
+  }
+  return roots
+}
+
+/**
  * Four levels cover project/session/subagents without an unbounded recursive
  * walk. Only native JSONL and NanoClaw's native rotated JSONL are eligible.
  * @param {string} root @param {NanoclawGroup[]} groups

@@ -81,6 +81,19 @@ test('with no detections the guide asks instead of selecting the --yes defaults'
   assert.deepEqual(await fs.readdir(f.home), [])
 })
 
+test('agent guide detects LangGraph in the command project and preserves callback instructions', async t => {
+  const f = await fixture(t)
+  f.ctx.cwd = f.home
+  await fs.writeFile(path.join(f.home, 'package.json'), '{"dependencies":{"@langchain/langgraph":"^1"}}')
+  const manifest = JSON.parse(await fs.readFile(new URL('../../hypaware-core/plugins-workspace/langgraph/hypaware.plugin.json', import.meta.url), 'utf8'))
+  const cat = catalog()
+  cat.pickerDescriptors.set('langgraph', row({ ...manifest.contributes.picker[0], id: 'langgraph', plugin: '@hypaware/langgraph' }))
+  assert.equal(await writeSetupGuide(f.ctx, { catalog: cat }), 0)
+  assert.match(f.stdout(), /LangGraph.*\(detected\): --source langgraph/)
+  assert.match(f.stdout(), /callback.*Setup prints the code to add/)
+  assert.deepEqual(await fs.readdir(f.home), ['package.json'])
+})
+
 // @ref LLP 0462#handoffs [tests]: the guide names pipe-safe sign-ins and status fields, not bare login
 test('guide explains human handoffs and verification', async (t) => {
   const f = await fixture(t)

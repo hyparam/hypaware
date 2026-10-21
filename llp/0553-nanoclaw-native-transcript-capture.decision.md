@@ -11,6 +11,7 @@
 
 Implement the requested NanoClaw integration as an explicitly configured,
 bundled adapter. `config.root` names one absolute local installation root.
+LLP 0554 adds bounded read-only root suggestions without enabling capture.
 There is no guessed default root, home-directory search, inference proxy,
 credential access, NanoClaw settings edit or additional runtime dependency.
 The adapter registers the existing conversation storage contracts and uses

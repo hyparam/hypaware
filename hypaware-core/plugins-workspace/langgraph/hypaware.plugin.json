@@ -31,6 +31,7 @@
         "name": "langgraph",
         "label": "LangGraph (JavaScript / Python)",
         "summary": "Connect your LangGraph application with a callback. Setup prints the code to add.",
+        "detect": { "project_dependencies": { "npm": "@langchain/langgraph", "python": "langgraph" } },
         "compose": {
           "plugin": {
             "name": "@hypaware/langgraph"

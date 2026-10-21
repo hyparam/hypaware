@@ -7,7 +7,7 @@ import test from 'node:test'
 import { DatabaseSync } from 'node:sqlite'
 import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createNanoclawBackfillProvider, writeGuards } from '../../hypaware-core/plugins-workspace/nanoclaw/src/backfill.js'
-import { readGroups, discoverFiles, readTranscript, projectTranscript, MAX_FILE_BYTES } from '../../hypaware-core/plugins-workspace/nanoclaw/src/transcripts.js'
+import { readGroups, discoverFiles, discoverNanoclawRoots, readTranscript, projectTranscript, MAX_FILE_BYTES } from '../../hypaware-core/plugins-workspace/nanoclaw/src/transcripts.js'
 import { validateNanoclawConfig } from '../../hypaware-core/plugins-workspace/nanoclaw/src/config.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
@@ -285,4 +285,35 @@ test('NanoClaw-only session controls persist exclusions through dispatch without
 test('NanoClaw manifest requires the node:sqlite floor it imports', async () => {
   const manifest = JSON.parse(await fs.readFile(new URL('../../hypaware-core/plugins-workspace/nanoclaw/hypaware.plugin.json', import.meta.url), 'utf8'))
   assert.equal(manifest.node_engine, '>=22.13')
+})
+
+test('NanoClaw discovery validates catalog and contained Claude layout without reading transcripts', async t => {
+  const { root, file, group } = await setup(t)
+  await fs.writeFile(file, 'invalid transcript that discovery must not read')
+  assert.deepEqual(await discoverNanoclawRoots([root, root]), [root])
+  assert.deepEqual(await discoverNanoclawRoots([...Array(8).fill(path.join(root, 'missing')), root]), [])
+  await fs.rename(group.projects, group.projects + '-aside')
+  assert.deepEqual(await discoverNanoclawRoots([root]), [])
+  await fs.symlink(group.projects + '-aside', group.projects)
+  assert.deepEqual(await discoverNanoclawRoots([root]), [])
+  await fs.unlink(group.projects)
+  await fs.rename(group.projects + '-aside', group.projects)
+  await fs.writeFile(path.join(root, 'data/v2.db'), 'not sqlite')
+  assert.deepEqual(await discoverNanoclawRoots([root]), [])
+})
+
+test('client discover runs before NanoClaw setup and never enables capture', async t => {
+  const { root, group } = await setup(t)
+  const home = path.join(root, 'isolated-home')
+  await fs.mkdir(home)
+  const env = { ...isolatedClientEnv(process.env, home), HYP_HOME: home, HYP_CONFIG: path.join(home, 'config.json') }
+  let out = ''
+  let err = ''
+  const code = await dispatch(['client', 'discover', 'nanoclaw', '--json'], {
+    env, cwd: group.cwd,
+    stdout: { write: chunk => { out += chunk; return true } }, stderr: { write: chunk => { err += chunk; return true } },
+  })
+  assert.equal(code, 0, err)
+  assert.deepEqual(JSON.parse(out), { client: 'nanoclaw', roots: [root], changed: false })
+  await assert.rejects(fs.stat(env.HYP_CONFIG), { code: 'ENOENT' })
 })

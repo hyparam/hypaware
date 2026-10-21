@@ -26,7 +26,20 @@ Install a HypAware version containing the bundled `@hypaware/nanoclaw` plugin
 on the same macOS or Linux host as NanoClaw. Use Node.js 22.13 or newer for
 both the CLI and daemon, with the unflagged `node:sqlite` builtin available.
 
-NanoClaw is opt-in and is not discovered by `hyp setup`. Add this entry to the
+NanoClaw is opt-in and is not selected by `hyp setup`. To find a supported local
+root, run `hyp client discover nanoclaw` from the installation or a group
+workspace, or pass a candidate explicitly:
+
+```sh
+hyp client discover nanoclaw /absolute/path/to/nanoclaw --json
+```
+
+Discovery checks catalog and directory metadata only and changes no settings.
+Without an explicit path it checks the configured root and current-directory
+ancestors, at most eight locations. It does not search your home or other
+projects. At least one group's Claude projects directory must exist.
+
+Choose the root you want to record, then add this entry to the
 existing `plugins` list in your HypAware configuration, preserving the other
 entries:
 

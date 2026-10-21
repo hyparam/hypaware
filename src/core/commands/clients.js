@@ -80,6 +80,56 @@ export async function runAttach(argv, ctx) {
 }
 
 /**
+ * Read-only discovery for an adapter whose setup needs an installation root.
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @ref LLP 0554#nanoclaw-discovery: explicit or bounded ancestor candidates, never a home crawl
+ */
+export async function runClientDiscover(argv, ctx) {
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: { client: { type: 'string' }, root: { type: 'string' }, json: { type: 'boolean' } },
+    positional: ['client', 'root'],
+  }, STRICT_SHORT_FLAGS)
+  if (!('help' in parsed) && !parsed.ok) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+  if ('help' in parsed || parsed.params.client !== 'nanoclaw') {
+    ctx.stderr.write('Usage: hyp client discover nanoclaw [root] [--json]\n')
+    return 2
+  }
+  const candidates = []
+  if (typeof parsed.params.root === 'string') candidates.push(path.resolve(ctx.cwd, parsed.params.root))
+  else {
+    const configured = ctx.config.plugins?.find(plugin => plugin.name === '@hypaware/nanoclaw')?.config?.root
+    if (typeof configured === 'string' && path.isAbsolute(configured)) candidates.push(configured)
+    let dir = path.resolve(ctx.cwd)
+    while (candidates.length < 8) {
+      candidates.push(dir)
+      const parent = path.dirname(dir)
+      if (parent === dir) break
+      dir = parent
+    }
+  }
+  return withSpan('client.discover', { component: 'clients', operation: 'discover', client_name: 'nanoclaw' }, async span => {
+    const { discoverNanoclawRoots } = await import(new URL('../../../hypaware-core/plugins-workspace/nanoclaw/src/transcripts.js', import.meta.url).href)
+    /** @type {string[]} */
+    const roots = await discoverNanoclawRoots(candidates)
+    span.setAttribute('candidate_count', candidates.length)
+    span.setAttribute('root_count', roots.length)
+    span.setAttribute('status', roots.length ? 'ok' : 'not_found')
+    getLogger('clients').info('client.discover', { component: 'clients', operation: 'discover', client_name: 'nanoclaw', candidate_count: candidates.length, root_count: roots.length, status: roots.length ? 'ok' : 'not_found' })
+    if (parsed.params.json) ctx.stdout.write(JSON.stringify({ client: 'nanoclaw', roots, changed: false }) + '\n')
+    else {
+      ctx.stdout.write(roots.length ? roots.map(root => `NanoClaw installation: ${root}\n`).join('') : 'No supported NanoClaw v2 Claude installation found in the checked locations.\n')
+      ctx.stdout.write('Discovery changes no settings. To record, explicitly add @hypaware/nanoclaw with config.root set to the chosen absolute root, validate config, and restart the daemon.\n')
+    }
+    return 0
+  })
+}
+
+/**
  * `hyp detach [client]`
  *
  * Reverses a client's attach. Unlike `attach`, detach does **not**
