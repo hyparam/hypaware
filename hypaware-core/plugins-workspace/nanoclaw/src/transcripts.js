@@ -2,6 +2,7 @@
 import fs from 'node:fs/promises'
 import { constants, statSync } from 'node:fs'
 import path from 'node:path'
+import { compareStrings } from 'hypaware/core/util'
 import { transcriptEntryFromRow } from '../../claude/src/transcripts.js'
 import { projectedExchangeFromEntries } from '../../claude/src/backfill.js'
 
@@ -93,7 +94,7 @@ export async function discoverFiles(root, groups) {
       }
     }
   }
-  return files.sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+  return files.sort((a, b) => compareStrings(a.file, b.file))
 }
 
 /**
