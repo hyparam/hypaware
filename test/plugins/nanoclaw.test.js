@@ -10,6 +10,9 @@ import { createNanoclawBackfillProvider, writeGuards } from '../../hypaware-core
 import { readGroups, discoverFiles, readTranscript, projectTranscript, MAX_FILE_BYTES } from '../../hypaware-core/plugins-workspace/nanoclaw/src/transcripts.js'
 import { validateNanoclawConfig } from '../../hypaware-core/plugins-workspace/nanoclaw/src/config.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { dispatch } from '../../src/core/cli/dispatch.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
+import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
 const silent = { info() {}, warn() {}, debug() {}, error() {} }
 const fixture = await fs.readFile(new URL('../../hypaware-core/smoke/fixtures/nanoclaw-session.jsonl', import.meta.url), 'utf8')
@@ -248,4 +251,38 @@ test('NanoClaw retries an append during a snapshot and recovers rotation during 
   const unique = new Map([...recovered, ...duringRotation, ...afterRotation].map(row => [row.part_id, row]))
   assert.equal(unique.size, 6)
   assert.equal(health.files_failed, 0)
+})
+
+test('NanoClaw-only session controls persist exclusions through dispatch without a gateway', async t => {
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-nanoclaw-cli-')))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const configPath = path.join(home, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false, plugins: [{ name: '@hypaware/nanoclaw', config: { root: path.join(home, 'nano') } }] }))
+  const env = { ...isolatedClientEnv(process.env, home), HYP_HOME: home, HYP_CONFIG: configPath }
+  /** @param {string[]} argv */
+  const run = async argv => {
+    let out = ''
+    let err = ''
+    const code = await dispatch(['session', ...argv], { env, stdout: { write: chunk => { out += chunk; return true } }, stderr: { write: chunk => { err += chunk; return true } } })
+    return { code, out, err }
+  }
+  const ignored = await run(['ignore', 'native-1', '--json'])
+  assert.equal(ignored.code, 0, ignored.err)
+  assert.deepEqual(JSON.parse(ignored.out), { status: 'ok', session_id: 'native-1', ignored: true, guarantee: 'persisted_set_membership', earlier_rows: 'retained', recorder: 'nanoclaw' })
+  const store = new SessionIgnoreSet(readObservabilityEnv(env).stateDir)
+  store.refresh()
+  assert.equal(store.has('native-1'), true)
+  assert.equal((await run(['status', 'native-1'])).code, 0)
+  assert.equal((await run(['unignore', 'native-1'])).code, 0)
+  const status = await run(['status', 'native-1'])
+  assert.equal(status.code, 1)
+  assert.match(status.out, /eligible for NanoClaw recording/)
+  const missing = await run(['ignore'])
+  assert.equal(missing.code, 2)
+  assert.match(missing.err, /NanoClaw session controls require an explicit native session ID/)
+})
+
+test('NanoClaw manifest requires the node:sqlite floor it imports', async () => {
+  const manifest = JSON.parse(await fs.readFile(new URL('../../hypaware-core/plugins-workspace/nanoclaw/hypaware.plugin.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.node_engine, '>=22.13')
 })

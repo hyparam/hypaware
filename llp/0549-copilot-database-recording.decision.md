@@ -107,8 +107,9 @@ successful checkpoint. Local-only remains the existing cwd-based export seam.
 
 ## Session controls {#session-controls}
 
-When Copilot is the only registered client and no gateway capability is active,
-its session commands require an explicit native ID and use the existing durable
+When every registered client is a database-only recorder (Copilot, and NanoClaw
+per LLP 0553) and no gateway capability is active, the session commands require
+an explicit native ID and use the existing durable
 SessionIgnoreSet directly. The receipt confirms persisted set membership only.
 Other live-recorder installations retain the shared HTTP control flow. Every
 recovery run refreshes exclusions; directory identity/mtime/ctime changes trigger

@@ -4,7 +4,7 @@ import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_st
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { ensureAiGatewayStorageContracts } from '../../ai-gateway/src/storage_contracts.js'
 import { aiGatewayBackfillMaterializer } from '../../ai-gateway/src/dataset.js'
-import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../ai-gateway/src/session_command.js'
+import { databaseOnlySessionCommand } from '../../copilot/src/session.js'
 import { createNanoclawBackfillProvider, NANOCLAW_KIND, writeGuards } from './backfill.js'
 import { validateNanoclawConfig } from './config.js'
 
@@ -48,7 +48,7 @@ export async function activate(ctx) {
       else attachCtx.stdout.write('NanoClaw native capture is configured. Restart the HypAware daemon to enable scheduled recovery. NanoClaw needs no settings changes.\n')
     },
   })
-  for (const [name, run] of /** @type {const} */ ([['session ignore', runSessionIgnore], ['session unignore', runSessionUnignore], ['session status', runSessionStatus]])) {
-    if (!ctx.commands.get(name)) ctx.commands.register({ name, run, usage: `hyp ${name} [session-id] [--json]`, plugin: '@hypaware/nanoclaw', category: 'capture-movement', audience: 'everyday', summary: 'Manage persistent recording exclusions for a native session ID' })
+  for (const [name, operation] of /** @type {const} */ ([['session ignore', 'ignore'], ['session unignore', 'unignore'], ['session status', 'status']])) {
+    if (!ctx.commands.get(name)) ctx.commands.register({ name, run: databaseOnlySessionCommand(operation, 'nanoclaw'), usage: `hyp ${name} [session-id] [--json]`, plugin: '@hypaware/nanoclaw', category: 'capture-movement', audience: 'everyday', summary: 'Manage persistent recording exclusions for a native session ID' })
   }
 }

@@ -5,7 +5,7 @@
   "description": "Read-only recovery of NanoClaw v2 Claude transcripts from an explicitly configured local installation.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
-  "node_engine": ">=22.12",
+  "node_engine": ">=22.13",
   "entrypoint": "./src/index.js",
   "permissions": ["read_home", "read_state", "write_state"],
   "contributes": {

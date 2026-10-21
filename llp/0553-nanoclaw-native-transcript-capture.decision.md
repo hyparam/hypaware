@@ -71,6 +71,9 @@ Refresh persistent session exclusions before each run. Check workspace ignore
 policy before reading, session exclusions before projecting, and the policy
 again before and after asynchronous materialization. Dropped sessions never
 advance a recovery fingerprint, so explicit unignore can recover them.
+NanoClaw hosts no control route, so a NanoClaw-only install uses the
+database-only session controls of LLP 0549 #session-controls: an explicit
+native ID, written to the same durable SessionIgnoreSet.
 Detach and `backfill.on_join=false` retain their existing kernel semantics.
 `local-only` is enforced by the shared export path using the host workspace.
 
