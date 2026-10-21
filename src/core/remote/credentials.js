@@ -70,7 +70,7 @@ const MCP_PATH = '/v1/mcp'
 /**
  * Derive the MCP endpoint a target's remote tool calls POST to, from the one
  * registered target URL (LLP 0084 D1). A target is registered with the server's
- * **base** URL - the built-in `hyperparam` ships exactly that - and the server
+ * **base** URL - the built-in `hypaware` ships exactly that - and the server
  * serves MCP only at `<base>/v1/mcp`, so a base URL POSTed verbatim 404s on
  * every remote verb. Back-compat (LLP 0084 D2): a URL whose path already ends in
  * `/v1/mcp` (the form LLP 0033 originally documented) is honored verbatim;
@@ -406,12 +406,16 @@ export async function removeToken(stateDir, target) {
  * exists for the stdio proxy's fail-fast probe, which only asks "is there a
  * credential here at all" and must not refuse a session it could refresh.
  *
- * @param {{ target: string, env: NodeJS.ProcessEnv, stateDir: string }} args
+ * `legacyTarget` is the name an earlier release stored this target's
+ * credential under (legacyCredentialName): its env override and record answer
+ * only when the target's own name has none.
+ *
+ * @param {{ target: string, legacyTarget?: string, env: NodeJS.ProcessEnv, stateDir: string }} args
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file' } | { ok: false, error: string }>}
  */
-export async function resolveToken({ target, env, stateDir }) {
+export async function resolveToken({ target, legacyTarget, env, stateDir }) {
   const envName = remoteTokenEnvVar(target)
-  const fromEnv = envOverride(env, target)
+  const fromEnv = envOverride(env, target) ?? (legacyTarget === undefined ? undefined : envOverride(env, legacyTarget))
   if (fromEnv !== undefined) {
     return { ok: true, token: fromEnv, source: 'env' }
   }
@@ -419,7 +423,8 @@ export async function resolveToken({ target, env, stateDir }) {
   // Own-key read: an inherited Object.prototype member is truthy, so a target
   // named `constructor` walked past this presence check and died in bearerOf's
   // `token.length` instead of reporting that it has no stored token.
-  const entry = Object.hasOwn(creds, target) ? creds[target] : undefined
+  const key = storedKey(creds, target, legacyTarget)
+  const entry = Object.hasOwn(creds, key) ? creds[key] : undefined
   if (entry) {
     const token = bearerOf(entry)
     // A non-empty cached bearer is usable as-is; an oidc record is also present
@@ -442,6 +447,7 @@ export async function resolveToken({ target, env, stateDir }) {
  *
  * @param {{
  *   target: string,
+ *   legacyTarget?: string,
  *   env: NodeJS.ProcessEnv,
  *   stateDir: string,
  *   identityBase?: string,
@@ -452,9 +458,9 @@ export async function resolveToken({ target, env, stateDir }) {
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file', kind?: 'static' | 'oidc' } | { ok: false, error: string }>}
  * @ref LLP 0058#d5 [implements]: silent refresh on the attach path; env override still wins
  */
-export async function resolveAccessJwt({ target, env, stateDir, identityBase, now = Date.now(), fetchImpl, forceRefresh = false }) {
+export async function resolveAccessJwt({ target, legacyTarget, env, stateDir, identityBase, now = Date.now(), fetchImpl, forceRefresh = false }) {
   const envName = remoteTokenEnvVar(target)
-  const fromEnv = envOverride(env, target)
+  const fromEnv = envOverride(env, target) ?? (legacyTarget === undefined ? undefined : envOverride(env, legacyTarget))
   if (fromEnv !== undefined) {
     return { ok: true, token: fromEnv, source: 'env', kind: 'static' }
   }
@@ -465,7 +471,8 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
   const creds = await readCredentials(stateDir)
   // Own-key read, as in resolveToken: an inherited member is truthy, so the
   // miss was signposted as an unrefreshable session, not a logged-out target.
-  const entry = Object.hasOwn(creds, target) ? creds[target] : undefined
+  const key = storedKey(creds, target, legacyTarget)
+  const entry = Object.hasOwn(creds, key) ? creds[key] : undefined
   if (!entry) {
     return { ok: false, error: noTokenError(target, envName) }
   }
@@ -482,7 +489,24 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
   if (!identityBase) {
     return { ok: false, error: `cannot refresh '${target}': no identity endpoint resolved` }
   }
-  return refreshOidcSession({ target, stateDir, identityBase, fetchImpl, from: entry, envName })
+  return refreshOidcSession({ target, key, stateDir, identityBase, fetchImpl, from: entry, envName })
+}
+
+/**
+ * The credential-file key a target's record is read under: its own name, or
+ * the legacy name an earlier release stored it under when only that one holds
+ * a record. A refresh commits back to the key it read, so the session stays
+ * where it is until the next login writes the target's own name.
+ *
+ * @ref LLP 0552#credentials [implements]: the old name's record answers only when the new name has none
+ * @param {Record<string, unknown>} creds
+ * @param {string} target
+ * @param {string | undefined} legacyTarget
+ * @returns {string}
+ */
+function storedKey(creds, target, legacyTarget) {
+  if (legacyTarget === undefined || Object.hasOwn(creds, target)) return target
+  return Object.hasOwn(creds, legacyTarget) ? legacyTarget : target
 }
 
 /**
@@ -513,6 +537,7 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
  *
  * @param {{
  *   target: string,
+ *   key: string,
  *   stateDir: string,
  *   identityBase: string,
  *   fetchImpl?: typeof fetch,
@@ -522,9 +547,9 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
  * @returns {Promise<{ ok: true, token: string, source: 'file', kind: 'oidc' } | { ok: false, error: string }>}
  * @ref LLP 0058#d5 [implements]: single-flight refresh under the lock - no double-spend, clobber, or lost-race re-login across concurrent hyp processes
  */
-async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, from, envName }) {
+async function refreshOidcSession({ target, key, stateDir, identityBase, fetchImpl, from, envName }) {
   return withCredentialsLock(stateDir, async () => {
-    const latest = await readOidcRecord(stateDir, target)
+    const latest = await readOidcRecord(stateDir, key)
     if (!latest) {
       // `hyp remote remove` ran (or a static login replaced the record) before we
       // got the lock. Honor that instead of resurrecting a refreshed session.
@@ -547,7 +572,7 @@ async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, f
     // on the network, we surface the fresh JWT for this in-flight request but leave
     // the newer on-disk state untouched rather than resurrecting or clobbering it.
     const refreshed = await refreshSession({ identityBase, refreshToken: latest.refreshToken, fetchImpl })
-    await commitSession(stateDir, target, {
+    await commitSession(stateDir, key, {
       refreshToken: refreshed.refreshToken || latest.refreshToken,
       accessJwt: refreshed.accessJwt,
       expiresAt: refreshed.expiresAt,

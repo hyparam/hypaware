@@ -12,7 +12,7 @@ import { askYesNo } from './confirm.js'
 import { parseCoreCommandArgv } from './command_args.js'
 import { Attr, markSpanStatus, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { effectiveDefaultRemote, effectiveRemotes } from '../remote/builtin_remotes.js'
+import { canonicalRemoteName, effectiveDefaultRemote, effectiveRemotes, legacyCredentialName } from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
   deriveIdentityBase,
@@ -1788,7 +1788,7 @@ export async function runReportDelete(argv, ctx) {
  */
 function resolveReportsTarget(params, ctx, cmd) {
   const remote = params.remote
-  const target = remote !== undefined ? String(remote) : effectiveDefaultRemote(ctx.config)
+  const target = remote !== undefined ? canonicalRemoteName(String(remote), ctx.config) : effectiveDefaultRemote(ctx.config)
   // Own-key read: an inherited Object.prototype member is truthy, so a target
   // named `constructor` walked past the refusal below and reached
   // `deriveReportsEndpoint(undefined).replace`.
@@ -1844,10 +1844,11 @@ async function reportsRequest({ ctx, target, identityBase, write, cmd }, send) {
     return { ok: false, error: `${NO_FETCH_MESSAGE} for 'hyp ${cmd}'`, exitCode: 1 }
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const legacyTarget = legacyCredentialName(target, ctx.config)
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
   let resolved
   try {
-    resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+    resolved = await resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase })
   } catch (err) {
     return mapRefreshError(err, target)
   }
@@ -1873,7 +1874,7 @@ async function reportsRequest({ ctx, target, identityBase, write, cmd }, send) {
   try {
     const out = await attachWithRefresh({
       resolved,
-      refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+      refresh: () => resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
       op,
     })
     if (!out.ok) return { ok: false, error: out.error, exitCode: 2 }

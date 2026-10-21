@@ -6,7 +6,7 @@
 
 /**
  * Targets shipped preconfigured with the client, so an operator can attach to
- * the Hyperparam-hosted central server with just `hyp remote login` +
+ * the HypAware-hosted central server with just `hyp remote login` +
  * `hyp <verb> --remote`, no `hyp remote add` first. A user's own
  * `query.remotes` entry of the same name wins (see effectiveRemotes), so this
  * is a default, not a lock. The URL is non-secret and committable, exactly as
@@ -16,14 +16,27 @@
  * @type {Record<string, QueryRemoteTarget>}
  */
 export const BUILTIN_REMOTES = {
-  hyperparam: { url: 'https://api.hypaware.ai' },
+  hypaware: { url: 'https://api.hypaware.ai' },
 }
 
 /**
  * Name of the shipped default target, used by bare `--remote` (and bare
  * `hyp remote login`) when the local config sets no `query.default_remote`.
  */
-export const BUILTIN_DEFAULT_REMOTE = 'hyperparam'
+export const BUILTIN_DEFAULT_REMOTE = 'hypaware'
+
+/**
+ * Names a built-in target answered to before it was renamed, keyed by the old
+ * name. `--remote hyperparam`, `query.default_remote: "hyperparam"` and a
+ * credential stored under that name all still reach the built-in, unless the
+ * user's own `query.remotes` defines the old name, which then means theirs.
+ *
+ * @ref LLP 0552#alias [implements]: the old built-in name stays an alias of the renamed one
+ * @type {Record<string, string>}
+ */
+export const BUILTIN_REMOTE_ALIASES = {
+  hyperparam: 'hypaware',
+}
 
 /**
  * Hosts a built-in target answered on before it moved, keyed by the old origin.
@@ -155,5 +168,39 @@ export function effectiveRemotes(config) {
  */
 export function effectiveDefaultRemote(config) {
   const configured = config?.query?.default_remote
-  return typeof configured === 'string' && configured ? configured : BUILTIN_DEFAULT_REMOTE
+  return typeof configured === 'string' && configured ? canonicalRemoteName(configured, config) : BUILTIN_DEFAULT_REMOTE
+}
+
+/**
+ * The target a typed or configured name means: the user's own `query.remotes`
+ * entry when there is one, else the built-in an old name is an alias of
+ * ({@link BUILTIN_REMOTE_ALIASES}), else the name unchanged.
+ *
+ * @param {string} name
+ * @param {HypAwareV2Config | undefined} config
+ * @returns {string}
+ */
+export function canonicalRemoteName(name, config) {
+  if (Object.hasOwn(config?.query?.remotes ?? {}, name)) return name
+  return Object.hasOwn(BUILTIN_REMOTE_ALIASES, name) ? BUILTIN_REMOTE_ALIASES[name] : name
+}
+
+/**
+ * The name an earlier release stored a built-in target's credential and env
+ * override under, when that name still means this built-in: undefined when the
+ * user's own `query.remotes` defines either name, so a credential for some
+ * other server is never sent here.
+ *
+ * @ref LLP 0552#credentials [implements]: a session stored under the old name keeps working until the next login
+ * @param {string} target a canonical target name
+ * @param {HypAwareV2Config | undefined} config
+ * @returns {string | undefined}
+ */
+export function legacyCredentialName(target, config) {
+  const own = config?.query?.remotes ?? {}
+  if (Object.hasOwn(own, target) || !Object.hasOwn(BUILTIN_REMOTES, target)) return undefined
+  for (const [alias, canonical] of Object.entries(BUILTIN_REMOTE_ALIASES)) {
+    if (canonical === target && !Object.hasOwn(own, alias)) return alias
+  }
+  return undefined
 }

@@ -1288,7 +1288,7 @@ test('a missing target name resolves the default (built-in) target; a value flag
   assert.ok(seen)
   assert.match(seen.identityBase, /api\.hypaware\.ai/)
   assert.equal(seen.org, 'acme')
-  assert.match(out.join(''), /logged in to 'hyperparam' as org 'acme'/)
+  assert.match(out.join(''), /logged in to 'hypaware' as org 'acme'/)
 })
 
 test('--org as the last arg with no value is a usage error', async () => {

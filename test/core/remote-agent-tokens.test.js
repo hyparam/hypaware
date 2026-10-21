@@ -109,7 +109,7 @@ test('mint --scope query posts {} to the API base with the session bearer and pr
   assert.deepEqual(JSON.parse(calls[0].init.body), {})
   assert.equal(out.join(''), 'agent-tok-1\n')
   const text = err.join('')
-  assert.match(text, /minted agent token for 'prod' \(jti rt-0123456789abcdef, label nightly, expires 2027-01-01T00:00:00.000Z\)/)
+  assert.match(text, /minted agent token for hyp\.internal \('prod'\) \(jti rt-0123456789abcdef, label nightly, expires 2027-01-01T00:00:00.000Z\)/)
   assert.match(text, /reads the org's recorded history/)
   assert.match(text, /mark recommendations/)
   assert.match(text, /publish reports/)
@@ -239,7 +239,7 @@ const MINT_REFUSALS = [
     line: /the label must be 1 to 64 letters, digits, spaces, '\.', '_' or '-' \(label must be/,
   },
   { name: 'bad ttl', status: 400, body: { error: 'invalid_ttl', detail: 'ttl_seconds must be a positive integer no greater than 7776000' }, line: /hyp remote mint: ttl_seconds must be a positive integer no greater than 7776000\n/ },
-  { name: 'ten live', status: 429, body: { error: 'token_limit', detail: 'at most 10 live agent tokens per person' }, line: /ten live agent tokens on 'prod' - list them with 'hyp remote tokens prod' and revoke one/ },
+  { name: 'ten live', status: 429, body: { error: 'token_limit', detail: 'at most 10 live agent tokens per person' }, line: /ten live agent tokens on hyp\.internal \('prod'\) - list them with 'hyp remote tokens prod' and revoke one/ },
   {
     name: 'retained cap',
     status: 429,
@@ -357,8 +357,8 @@ test('tokens lists MCP connections with client, the bearer org, created and expi
   const text = out.join('')
   assert.equal(
     text,
-    "no agent tokens on 'prod' - mint one with 'hyp remote mint prod --scope query'\n" +
-      "\nMCP connections on 'prod':\n" +
+    "no agent tokens on hyp.internal ('prod') - mint one with 'hyp remote mint prod --scope query'\n" +
+      "\nMCP connections on hyp.internal ('prod'):\n" +
       'id\tclient\torg\tcreated\texpires\n' +
       'oauth-0123456789abcdef\tClaude\\u001b[31m\tacme\t2026-10-20T00:00:00.000Z\t2026-11-19T00:00:00.000Z\n' +
       'oauth-fedcba9876543210\tchatgpt.com\tacme\t2026-10-21T00:00:00.000Z\t2026-11-20T00:00:00.000Z\n',
@@ -465,7 +465,7 @@ test('tokens with none says how to mint one', async () => {
   await seedSession(hypHome)
   const { impl } = fetchStub([{ status: 200, body: { tokens: [] } }])
   assert.equal(await runRemoteTokens(['prod'], ctx, { fetchImpl: impl }), 0)
-  assert.match(out.join(''), /no agent tokens on 'prod' - mint one with 'hyp remote mint prod --scope query'/)
+  assert.match(out.join(''), /no agent tokens on hyp\.internal \('prod'\) - mint one with 'hyp remote mint prod --scope query'/)
 })
 
 test('tokens maps the shared refusals', async () => {
@@ -495,7 +495,7 @@ test('tokens revoke sends DELETE for the jti and writes nothing locally', async 
   assert.equal(calls[0].init.method, 'DELETE')
   assert.equal(calls[0].init.headers.authorization, 'Bearer jwt-1')
   assert.equal(calls[0].init.body, undefined)
-  assert.equal(out.join(''), "revoked agent token rt-aaaaaaaaaaaaaaaa on 'prod'\n")
+  assert.equal(out.join(''), "revoked agent token rt-aaaaaaaaaaaaaaaa on hyp.internal ('prod')\n")
   assert.deepEqual(await snapshot(hypHome), before)
 })
 
@@ -507,7 +507,7 @@ test('tokens revoke of an MCP connection id names it as a connection', async () 
   assert.equal(await runRemoteTokensRevoke(['oauth-0123456789abcdef'], ctx, { fetchImpl: impl }), 0)
   assert.equal(calls[0].url, `${ENDPOINT}/oauth-0123456789abcdef`)
   assert.equal(calls[0].init.method, 'DELETE')
-  assert.equal(out.join(''), "revoked MCP connection oauth-0123456789abcdef on 'prod'\n")
+  assert.equal(out.join(''), "revoked connection oauth-0123456789abcdef on hyp.internal ('prod')\n")
 })
 
 test('tokens revoke takes --remote and encodes the jti into one path segment', async () => {
@@ -526,7 +526,7 @@ test('tokens revoke of a jti that is not yours names the list command', async ()
   const { impl } = fetchStub([{ status: 404, body: { error: 'unknown_org_token' } }])
   assert.equal(await runRemoteTokensRevoke(['rt-cccccccccccccccc', '--remote', 'prod'], ctx, { fetchImpl: impl }), 1)
   const text = err.join('')
-  assert.match(text, /'prod' has no agent token or MCP connection rt-cccccccccccccccc of yours - list them with 'hyp remote tokens prod'/)
+  assert.match(text, /hyp\.internal \('prod'\) has no agent token or MCP connection rt-cccccccccccccccc of yours - list them with 'hyp remote tokens prod'/)
   assert.doesNotMatch(text, /does not serve agent tokens/)
 })
 

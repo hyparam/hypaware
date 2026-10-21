@@ -36,6 +36,10 @@ public client is therefore consistent with that section, not a secrets leak.
 > requires the paths to match), so an install enrolled under the old host is not read
 > as connected elsewhere. The decision is unchanged, only the shipped value moved.
 
+> **Extended-by: [LLP 0552](./0552-builtin-remote-named-hypaware.decision.md).**
+> The built-in is now named `hypaware`; `hyperparam` stays an alias for it, and
+> a session stored under the old name still serves it.
+
 This keeps the local-first default intact: a bare `hyp <verb>` still runs
 locally. The built-in only changes what a target *name* resolves to, never
 whether a plain command goes remote.
