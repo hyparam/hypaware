@@ -185,6 +185,32 @@ needs `org-manage` (hypscope LLP 0015, T4). The fallback is an org admin
 revoking the token on that Tokens tab, and the `429 token_limit` line then
 says "ask an org admin to revoke one on the dashboard's Tokens tab".
 
+<a id="cli-connections"></a>
+### `hyp remote tokens` and MCP connections (hyparam/hypaware#2787)
+
+hypaware-server LLP 0618#revocation adds a `connections` array to the
+same `GET /v1/org/tokens/mine` reply: the caller's own live MCP OAuth
+connections, `{id, client_name, redirect_host, scope, created_at,
+last_used_at, expires_at}`. The same `DELETE /v1/org/tokens/mine/<id>`
+cuts one and answers `{id, revoked: true}`. Hernan asked for the client
+half as question 8's follow-up, so that a person whose only client is
+Claude can see and cut their connections without an admin.
+
+- `hyp remote tokens` prints the agent-token table, then an
+  `MCP connections` table: id, client (the client's own `client_name`
+  claim, else the redirect host, escaped for display), org, created and
+  expires. The org is the `org` claim of the bearer that got the
+  answer, since the route lists only the org its verified claims name; a
+  bearer with no readable claim shows `-`. `--json` prints `{tokens, connections}`, mirroring
+  the reply, and no longer a bare token array. A server that sends no
+  `connections` lists none.
+- `hyp remote tokens revoke <id>` takes a connection id as well as a
+  `jti`. The positional keeps its name; the success line says which kind
+  was cut, from the reply.
+- The route needs a `hyp remote login` session. When there is none, the
+  listing and the revoke say so, and name the two ways that remain
+  (sign in, or remove the connector in the client).
+
 <a id="remote-contracts"></a>
 ## The recommendation tool contracts (HYP-131, client share)
 
