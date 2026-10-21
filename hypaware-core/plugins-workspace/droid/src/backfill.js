@@ -5,7 +5,7 @@ import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/ind
 import { refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import { AI_GATEWAY_MESSAGES_DATASET, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
-import { droidSessionsRoot, droidSessionFiles, fingerprint, MAX_FILE_BYTES, readDroidTranscript } from './transcript.js'
+import { droidSessionsRoot, droidSessionFiles, fingerprint, MAX_FILE_BYTES, present, readDroidTranscript } from './transcript.js'
 
 /** @import { BackfillContribution, JsonObject } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -27,7 +27,7 @@ export function createDroidBackfillProvider(opts = {}) {
     async *run(ctx) {
       refreshSessionIgnores(opts.ignoredSessions)
       if (sessionIgnoreLoadError(opts.ignoredSessions)) throw new Error('Droid session exclusions are unreadable')
-      const resolver = createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
+      const resolver = createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath, existsSync: present })
       const root = droidSessionsRoot(opts.env ?? ctx.env)
       const window = resolveWindow(ctx)
       const files = []

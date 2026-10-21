@@ -1,7 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { constants, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { droidSessionHeader, projectDroidEntries } from './projector.js'
@@ -17,6 +17,22 @@ export const MAX_LIVE_BYTES = 8 * 1024 * 1024
 /** @param {NodeJS.ProcessEnv} env */
 export function droidSessionsRoot(env) {
   return path.resolve(env.FACTORY_HOME_OVERRIDE || env.HOME || os.homedir(), '.factory', 'sessions')
+}
+
+/**
+ * A path that cannot be probed counts as present, so an unreadable .hypignore
+ * resolves through the fail-closed read path instead of as absent.
+ *
+ * @param {string} file
+ */
+export function present(file) {
+  try {
+    statSync(file)
+    return true
+  } catch (error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (error).code
+    return code !== 'ENOENT' && code !== 'ENOTDIR'
+  }
 }
 
 /** @param {Stats} stat */

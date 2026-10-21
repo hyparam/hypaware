@@ -10,7 +10,7 @@ import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/ind
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_writer.js'
 import { droidListenPort } from './config.js'
-import { droidSessionsRoot, MAX_LIVE_BYTES, readDroidTranscript } from './transcript.js'
+import { droidSessionsRoot, MAX_LIVE_BYTES, present, readDroidTranscript } from './transcript.js'
 
 /** @import { PluginActivationContext, StartedSource } from '../../../../hypaware-plugin-kernel-types.js' */
 /** @import { DroidCursor } from '../../../../hypaware-core/plugins-workspace/droid/src/types.js' */
@@ -88,7 +88,7 @@ export function createStartDroidSource(deps) {
           }
           state.notifications++
           refreshSessionIgnores(ignored)
-          const resolver = createUsagePolicyResolver({ localOnlyListPath: deps.localOnlyListPath })
+          const resolver = createUsagePolicyResolver({ localOnlyListPath: deps.localOnlyListPath, existsSync: present })
           const file = path.resolve(raw.transcript_path)
           let rows = 0
           let skipped = 0

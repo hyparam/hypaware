@@ -239,3 +239,45 @@ test('Droid live writer failure leaves the cursor retryable; persistent opt-out 
   const recovery = createDroidBackfillProvider({ env: { HOME: home }, ignoredSessions: restartedIgnores })
   assert.equal((await collect(recovery.run(/** @type {any} */ ({ env: {}, log: silent })))).length, 0)
 })
+
+test('Droid live capture and recovery fail closed when the session folder cannot be probed', async t => {
+  if (process.getuid?.() === 0) return t.skip('root reads through directory permissions')
+  const { home, file, records } = await setup(t)
+  const locked = path.join(home, 'locked')
+  await fs.mkdir(locked)
+  records[0].cwd = locked
+  await fs.writeFile(file, records.map(e => JSON.stringify(e)).join('\n') + '\n')
+  const { createStartDroidSource } = await import('../../hypaware-core/plugins-workspace/droid/src/listener.js')
+  /** @param {string} state */
+  async function capture(state) {
+    const recorded = []
+    const storage = {
+      cacheTablePath: () => '/cache/droid', async discoverCachePartitions() { return [] },
+      async *readRows() {}, async *readSpooledRows() { yield* recorded },
+      async appendRows(_plugin, _contract, batch) { recorded.push(...batch) },
+    }
+    const ignoredSessions = new SessionIgnoreSet(path.join(home, `state-${state}`), silent)
+    const source = await createStartDroidSource({ ignoredSessions })(/** @type {any} */ ({ config: { listen_port: 0 }, env: { HOME: home }, storage, log: silent }))
+    try {
+      const endpoint = `http://127.0.0.1:${(await source.status?.())?.details?.listen_port}`
+      await fetch(endpoint + '/hook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session_id: records[0].id, transcript_path: file }) })
+    } finally {
+      await source.stop()
+    }
+    const recovery = createDroidBackfillProvider({ env: { HOME: home }, ignoredSessions })
+    const recovered = await collect(recovery.run(/** @type {any} */ ({ env: {}, log: silent, dryRun: true })))
+    return { live: recorded.length, recovered: recovered.filter(i => i.value).length }
+  }
+  await fs.writeFile(path.join(locked, '.hypignore'), 'ignore\n')
+  assert.deepEqual(await capture('readable'), { live: 0, recovered: 0 })
+  await fs.chmod(locked, 0o000)
+  try {
+    assert.deepEqual(await capture('locked'), { live: 0, recovered: 0 })
+  } finally {
+    await fs.chmod(locked, 0o700)
+  }
+  await fs.unlink(path.join(locked, '.hypignore'))
+  const open = await capture('open')
+  assert.equal(open.live, 5)
+  assert.ok(open.recovered > 0)
+})
