@@ -407,8 +407,9 @@ export async function removeToken(stateDir, target) {
  * credential here at all" and must not refuse a session it could refresh.
  *
  * `legacyTarget` is the name an earlier release stored this target's
- * credential under (legacyCredentialName): its env override and record answer
- * only when the target's own name has none.
+ * credential under (legacyCredentialName). Env overrides still beat stored
+ * records, so the order is: the target's env override, the old name's, the
+ * target's record, the old name's record.
  *
  * @param {{ target: string, legacyTarget?: string, env: NodeJS.ProcessEnv, stateDir: string }} args
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file' } | { ok: false, error: string }>}

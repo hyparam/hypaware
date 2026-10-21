@@ -191,7 +191,7 @@ export function canonicalRemoteName(name, config) {
  * user's own `query.remotes` defines either name, so a credential for some
  * other server is never sent here.
  *
- * @ref LLP 0552#credentials [implements]: a session stored under the old name keeps working until the next login
+ * @ref LLP 0552#credentials [implements]: a credential stored or exported under the old name keeps serving the built-in
  * @param {string} target a canonical target name
  * @param {HypAwareV2Config | undefined} config
  * @returns {string | undefined}

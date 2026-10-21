@@ -1195,7 +1195,7 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
     ctx.stderr.write(`usage: ${coreUsage('remote mint')}\n`)
     return 2
   }
-  const remotes = await readConfiguredRemotes(ctx)
+  const { remotes, legacyOf } = await readRemoteSnapshot(ctx)
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
     ctx.stderr.write(`hyp remote mint: unknown remote target '${name}' - add it with 'hyp remote add ${name} <url>'\n`)
@@ -1221,7 +1221,7 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   }
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const legacyTarget = legacyCredentialName(name, ctx.config)
+  const legacyTarget = legacyOf(name)
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
   let resolved
   try {
@@ -1419,7 +1419,7 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
     ctx.stderr.write(`hyp ${command}: ${line}\n`)
     return /** @type {{ ok: false, code: number }} */ ({ ok: false, code })
   }
-  const remotes = await readConfiguredRemotes(ctx)
+  const { remotes, legacyOf } = await readRemoteSnapshot(ctx)
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) return fail(`unknown remote target '${name}' - add it with 'hyp remote add ${name} <url>'`, 2)
   const identityBase = deriveIdentityBase(entry.url)
@@ -1429,7 +1429,7 @@ async function agentTokensRequest({ command, name, method, suffix = '', body }, 
   if (typeof doFetch !== 'function') return fail(NO_FETCH_MESSAGE, 1)
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const legacyTarget = legacyCredentialName(name, ctx.config)
+  const legacyTarget = legacyOf(name)
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
   let resolved
   try {
@@ -1802,14 +1802,14 @@ export async function runRemoteList(argv, ctx) {
   const parsed = parseCoreCommandArgv('remote list', argv, ctx)
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
-  const remotes = await readConfiguredRemotes(ctx)
+  const { remotes, legacyOf } = await readRemoteSnapshot(ctx)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const stored = await readCredentials(stateDir)
   const names = Object.keys(remotes).sort()
 
   /** @param {string} name */
   const tokenStatus = (name) => {
-    const legacy = legacyCredentialName(name, ctx.config)
+    const legacy = legacyOf(name)
     const keys = legacy === undefined ? [name] : [name, legacy]
     if (keys.some((key) => typeof ctx.env[remoteTokenEnvVar(key)] === 'string' && ctx.env[remoteTokenEnvVar(key)])) return 'env'
     return keys.some((key) => Object.hasOwn(stored, key) && stored[key]) ? 'stored' : 'missing'
@@ -1844,9 +1844,12 @@ export async function runRemoteRemove(argv, ctx) {
   if (!parsed.ok) return parsed.code
   const name = canonicalRemoteName(String(parsed.params.name), ctx.config)
   let removedConfig = false
+  /** @type {string | undefined} */
+  let legacy
   const configPath = localConfigPath(ctx)
   try {
     await mutateLocalConfig(configPath, (config) => {
+      legacy = legacyCredentialName(name, /** @type {any} */ ({ query: { remotes: ownRemotes(config) } }))
       if (isPlainObject(config.query) && isPlainObject(config.query.remotes) && Object.hasOwn(config.query.remotes, name)) {
         delete config.query.remotes[name]
         removedConfig = true
@@ -1862,7 +1865,6 @@ export async function runRemoteRemove(argv, ctx) {
   try {
     removedToken = await removeToken(stateDir, name)
     // A session stored under the built-in's old name is this target's too.
-    const legacy = legacyCredentialName(name, ctx.config)
     if (legacy !== undefined && (await removeToken(stateDir, legacy))) removedToken = true
   } catch (err) {
     // removeToken now contends for the cross-process credentials lock and can
@@ -1901,6 +1903,20 @@ function localConfigPath(ctx) {
  * @returns {Promise<Record<string, { url: string }>>}
  */
 async function readConfiguredRemotes(ctx) {
+  return (await readRemoteSnapshot(ctx)).remotes
+}
+
+/**
+ * The configured targets and, from the same read of the config file, the old
+ * name each one's credential may still be stored under (legacyCredentialName).
+ * One snapshot for both, so a config edit landing mid-command cannot pair a
+ * credential stored for the built-in with some other server's URL.
+ *
+ * @ref LLP 0552#credentials [implements]: the fallback's eligibility and the URL it is sent to come from one config read
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<{ remotes: Record<string, { url: string }>, legacyOf: (name: string) => string | undefined }>}
+ */
+async function readRemoteSnapshot(ctx) {
   // Ship the built-in targets under any user-defined ones, so `remote login`
   // and `remote list` see the central server even before a `remote add`; a
   // user entry of the same name overrides it.
@@ -1912,13 +1928,22 @@ async function readConfiguredRemotes(ctx) {
   // `Object.hasOwn`, since the names they look up are operator-supplied too.
   /** @type {[string, { url: string }][]} */
   const pairs = Object.entries(BUILTIN_REMOTES)
-  const config = await readLocalConfigRaw(localConfigPath(ctx))
-  if (isPlainObject(config.query) && isPlainObject(config.query.remotes)) {
-    for (const [name, entry] of Object.entries(config.query.remotes)) {
-      if (isPlainObject(entry) && typeof entry.url === 'string') pairs.push([name, { url: entry.url }])
-    }
+  const own = ownRemotes(await readLocalConfigRaw(localConfigPath(ctx)))
+  for (const [name, entry] of Object.entries(own)) {
+    if (isPlainObject(entry) && typeof entry.url === 'string') pairs.push([name, { url: entry.url }])
   }
-  return Object.fromEntries(pairs)
+  const snapshot = /** @type {any} */ ({ query: { remotes: own } })
+  return { remotes: Object.fromEntries(pairs), legacyOf: (name) => legacyCredentialName(name, snapshot) }
+}
+
+/**
+ * The user's own `query.remotes` map from a raw config file, or an empty map.
+ *
+ * @param {any} config
+ * @returns {Record<string, unknown>}
+ */
+function ownRemotes(config) {
+  return isPlainObject(config.query) && isPlainObject(config.query.remotes) ? config.query.remotes : {}
 }
 
 /**

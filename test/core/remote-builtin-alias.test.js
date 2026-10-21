@@ -15,7 +15,7 @@ import {
 } from '../../src/core/remote/builtin_remotes.js'
 import { readCredentials, resolveAccessJwt, resolveToken, writeSession } from '../../src/core/remote/credentials.js'
 import { parseConfigShape } from '../../src/core/config/schema.js'
-import { runRemoteList, runRemoteRemove, runRemoteTokens, runRemoteTokensRevoke } from '../../src/core/cli/remote_commands.js'
+import { runRemoteList, runRemoteMint, runRemoteRemove, runRemoteTokens, runRemoteTokensRevoke } from '../../src/core/cli/remote_commands.js'
 import { runRemoteVerb } from '../../src/core/mcp/remote_verb.js'
 
 const FUTURE = '2999-01-01T00:00:00Z'
@@ -148,4 +148,27 @@ test('a revoke of an oauth- id says revoked connection', async () => {
   const { impl } = fetchStub([{ status: 200, body: { revoked: true } }])
   assert.equal(await runRemoteTokensRevoke(['oauth-0123456789abcdef'], ctx, { fetchImpl: impl }), 0)
   assert.equal(out.join(''), 'revoked connection oauth-0123456789abcdef on HypAware Cloud\n')
+})
+
+test('an own remote written after the command loaded its config never receives the old-name credential', async () => {
+  for (const own of ['hypaware', 'hyperparam']) {
+    const hypHome = await tmpHome()
+    const { ctx, stateDir } = await makeCtx(hypHome)
+    await writeSession(stateDir, 'hyperparam', { refreshToken: 'rt', accessJwt: 'jwt-old-cloud', expiresAt: FUTURE, org: 'acme' })
+    await fs.writeFile(path.join(hypHome, 'config.json'), JSON.stringify({ version: 2, query: { remotes: { [own]: { url: 'https://other.example' } } } }))
+    const { impl, calls } = fetchStub([{ status: 200, body: { tokens: [] } }])
+    await runRemoteTokens([], ctx, { fetchImpl: impl })
+    await runRemoteMint(['--scope', 'query'], ctx, { fetchImpl: impl })
+    for (const call of calls) assert.notEqual(call.init?.headers?.authorization, 'Bearer jwt-old-cloud', `${own}: ${call.url}`)
+  }
+})
+
+test('the old env override still wins over a session stored under the new name', async () => {
+  const { stateDir } = await makeCtx(await tmpHome())
+  await writeSession(stateDir, 'hypaware', { refreshToken: 'rt', accessJwt: 'jwt-new', expiresAt: FUTURE, org: 'acme' })
+  const args = { target: 'hypaware', legacyTarget: 'hyperparam', env: { HYP_REMOTE_TOKEN_HYPERPARAM: 'env-old' }, stateDir }
+  assert.equal(/** @type {any} */ (await resolveAccessJwt(args)).token, 'env-old')
+  assert.equal(/** @type {any} */ (await resolveToken(args)).token, 'env-old')
+  const both = { ...args, env: { ...args.env, HYP_REMOTE_TOKEN_HYPAWARE: 'env-new' } }
+  assert.equal(/** @type {any} */ (await resolveAccessJwt(both)).token, 'env-new')
 })
