@@ -25,7 +25,7 @@ export async function offerWizardGithub(opts) {
   }, async (span) => {
     try {
       const answer = await confirm({
-        title: 'Add GitHub history for the repos your AI sessions work in?',
+        title: 'Connect GitHub?',
         options: [
           { value: 'yes', label: 'Yes, connect GitHub', summary: 'Pulls issues, pull requests, reviews, and commits for each repo you run an AI session in. HypAware only needs read access, but GitHub has no read-only option, so it will ask for read and write access to all your repos.' },
           { value: 'no', label: 'Not now' },
