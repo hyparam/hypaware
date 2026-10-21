@@ -186,7 +186,16 @@ that seed as its rollback copy, and the next config update replaces it.
 HypAware never logs the token.
 
 To query your organization's data as the service account, store the same
-token for the built-in `hypaware` target:
+token for the built-in `hypaware` target. That target is HypAware Cloud
+(`https://api.hypaware.ai`), so if you joined your own server instead, first
+point it at that server, in the same `HYP_HOME`, so queries go to the server
+the host joined:
+
+```sh
+hyp remote add hypaware https://hyp.example.com   # your own server only; skip for HypAware Cloud
+```
+
+Then log in and query:
 
 ```sh
 hyp remote login hypaware --token-file "$HYP_HOME/.service-token"
