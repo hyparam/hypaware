@@ -1,3 +1,24 @@
+import type { CommandRunner } from '../../../src/core/cli/types.js'
+
+export interface NodeRuntimeArtifact {
+  version: string
+  platform: string
+  arch: string
+  filename: string
+  sha256: string
+}
+
+export interface NodeRuntimeOptions {
+  env?: NodeJS.ProcessEnv
+  version?: string
+  platform?: string
+  arch?: string
+  artifact?: NodeRuntimeArtifact
+  download?: (artifact: NodeRuntimeArtifact, destination: string) => Promise<void>
+  run?: CommandRunner
+  log?: (event: string, fields?: Record<string, unknown>) => void
+}
+
 /** State persisted at `<stateRoot>/self-update.json` between checks. */
 export interface SelfUpdateState {
   /** ISO timestamp of the last registry probe. */

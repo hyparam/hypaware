@@ -18,6 +18,7 @@ import { daemonRunDir, processIsAlive, readPidFile } from '../daemon/pid.js'
 import { LAUNCH_LABEL } from '../daemon/platform.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { isLoopbackHost } from '../util/loopback.js'
+import { nodeRuntimeEnvironment } from './node_runtime.js'
 
 /**
  * @import { CommandRunner } from '../../../src/core/cli/types.js'
@@ -592,11 +593,7 @@ export function previousBootLooksStuck(stateRoot) {
  * @returns {NodeJS.ProcessEnv}
  */
 export function withNodeBinOnPath(env) {
-  const nodeBin = path.dirname(process.execPath)
-  if (!nodeBin || nodeBin === '.') return env
-  const parts = (env.PATH ?? '').split(path.delimiter).filter(Boolean)
-  if (parts[0] === nodeBin) return env
-  return { ...env, PATH: [nodeBin, ...parts.filter((p) => p !== nodeBin)].join(path.delimiter) }
+  return nodeRuntimeEnvironment(env)
 }
 
 /**

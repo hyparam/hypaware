@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0008, LLP 0118, LLP 0119, LLP 0122
+**Extended-by:** LLP 0555 (22.12 remains the bootstrap floor; application commands acquire a patched private runtime when necessary)
 
 > The package `engines` floor rises from `>=20` to `>=22.12`, and CI pins a
 > `setup-node` matrix of 22 and 24. Builtin modules present in Node 22.x

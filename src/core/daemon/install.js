@@ -15,6 +15,7 @@ import {
 } from './platform.js'
 import * as macos from './macos.js'
 import * as linux from './linux.js'
+import { managedNodeForProcess } from '../update/node_runtime.js'
 
 /**
  * Resolve the default service label for `platform`. macOS uses the
@@ -66,7 +67,7 @@ export function planDaemonInstall(options) {
   }
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
   const logDir = options.logDir ?? defaultLogDir(options.homeDir)
-  const merged = { ...options, configPath, logDir }
+  const merged = { ...options, configPath, logDir, nodePath: options.nodePath ?? managedNodeForProcess(options.durableBin?.env ?? process.env) }
   if (platform === 'darwin') return macos.planLaunchAgentInstall(merged)
   return linux.planSystemdInstall(merged)
 }
@@ -191,7 +192,7 @@ export async function installDaemon(options) {
   }
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
   const logDir = options.logDir ?? defaultLogDir(options.homeDir)
-  const merged = { ...options, configPath, logDir }
+  const merged = { ...options, configPath, logDir, nodePath: options.nodePath ?? managedNodeForProcess(options.durableBin?.env ?? process.env) }
   return withDaemonOp(
     'install',
     platform,

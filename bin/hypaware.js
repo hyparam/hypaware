@@ -4,7 +4,7 @@
 import process from 'node:process'
 import { createRequire } from 'node:module'
 import { withProductInvocation } from '../src/core/product_telemetry/client.js'
-import { matchesSemverRange } from '../src/core/semver.js'
+import { supportsApplicationNode } from '../src/core/update/node_version.js'
 
 // performance.now() is relative to process startup, so zero includes static
 // imports and bootstrap as well as dispatch and command-body work.
@@ -28,14 +28,34 @@ if (process.env.CURSOR_VERSION && argv[0] === 'claude-hook' &&
     (argv[1] === 'session-context' || argv[1] === 'classify-cwd') &&
     !argv.includes('--help') && !argv.includes('-h')) process.exit(0)
 
-const { engines } = createRequire(import.meta.url)('../package.json')
-// npm only warns about engines by default. Refuse before the updater, fetch
-// or gateway can pass remote data to an unpatched runtime's Brotli decoder.
-if (process.versions.node.includes('-') || !matchesSemverRange(process.versions.node, engines.node)) {
-  process.stderr.write(
-    `hyp: Node.js ${process.versions.node} is unsupported. Upgrade to a stable Node.js matching ${engines.node} (CVE-2026-111497 and October 2026 security fixes), then reinstall the HypAware daemon using the updated Node.js executable.\n`
-  )
-  process.exit(1)
+// @ref LLP 0555#older-updaters [implements]: metadata preflight stays local and fast, so older self-updaters can deliver the runtime migration
+const applicationNodeSupported = supportsApplicationNode(process.versions.node)
+if (!applicationNodeSupported && argv.length === 1 && (argv[0] === '--version' || argv[0] === '-V')) {
+  const pkg = createRequire(import.meta.url)('../package.json')
+  process.stdout.write(`hypaware ${pkg.version}\n`)
+  process.exit(0)
+}
+
+// @ref LLP 0555#private-runtime [implements]: switch before application code can decode remote data on an unpatched Node
+if (!applicationNodeSupported) {
+  try {
+    const { bootstrapNodeRuntime } = await import('../src/core/update/node_runtime.js')
+    process.exit(await bootstrapNodeRuntime({ argv, binPath: process.argv[1] }))
+  } catch (error) {
+    process.stderr.write(`hyp: ${error instanceof Error ? error.message : String(error)}\n`)
+    process.exit(1)
+  }
+}
+
+if (argv[0] === '__node_runtime_repoint') {
+  try {
+    const { repointNodeRuntime } = await import('../src/core/update/node_runtime_handover.js')
+    await repointNodeRuntime({ oldNodePath: argv[1], oldPid: Number(argv[2]), binPath: process.argv[1] })
+    process.exit(0)
+  } catch (error) {
+    process.stderr.write(`hyp: ${error instanceof Error ? error.message : String(error)}\n`)
+    process.exit(1)
+  }
 }
 
 const stderr = colorizeStderr(process.stderr, process.env)

@@ -160,7 +160,7 @@ export function buildUnit(options) {
  * @param {string} value
  * @returns {string}
  */
-function quoteExecArg(value) {
+export function quoteExecArg(value) {
   if (/^[A-Za-z0-9_\-./:=@%+]+$/.test(value)) return value
   return `"${escapeQuoted(value)}"`
 }
