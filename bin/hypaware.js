@@ -2,7 +2,9 @@
 // @ts-check
 
 import process from 'node:process'
+import { createRequire } from 'node:module'
 import { withProductInvocation } from '../src/core/product_telemetry/client.js'
+import { matchesSemverRange } from '../src/core/semver.js'
 
 // performance.now() is relative to process startup, so zero includes static
 // imports and bootstrap as well as dispatch and command-body work.
@@ -25,6 +27,16 @@ const argv = process.argv.slice(2)
 if (process.env.CURSOR_VERSION && argv[0] === 'claude-hook' &&
     (argv[1] === 'session-context' || argv[1] === 'classify-cwd') &&
     !argv.includes('--help') && !argv.includes('-h')) process.exit(0)
+
+const { engines } = createRequire(import.meta.url)('../package.json')
+// npm only warns about engines by default. Refuse before the updater, fetch
+// or gateway can pass remote data to an unpatched runtime's Brotli decoder.
+if (process.versions.node.includes('-') || !matchesSemverRange(process.versions.node, engines.node)) {
+  process.stderr.write(
+    `hyp: Node.js ${process.versions.node} is unsupported. Upgrade to a stable Node.js matching ${engines.node} (CVE-2026-111497 and October 2026 security fixes), then reinstall the HypAware daemon using the updated Node.js executable.\n`
+  )
+  process.exit(1)
+}
 
 const stderr = colorizeStderr(process.stderr, process.env)
 const color = useColor(process.stderr, process.env)
