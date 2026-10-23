@@ -27,6 +27,9 @@ It has no content, usage, tools, or model output. Its message timestamp is the
 last admitted content timestamp, so late generation and renames dirty the
 existing content day without moving session activity or importing older content.
 Replays deduplicate; a repeated name at a later native revision is a new update.
+The identity also includes the UTC day of that timestamp, so a session that
+continues onto a new content day re-carries its current name there and the
+newest day is never unnamed.
 Claude uses title-record ordinal as revision and transcript mtime as the
 observed title time because its title records have no native timestamp.
 
@@ -38,7 +41,8 @@ lexical title or content day. Existing rows remain usable without a title.
 ## Cost and other sources
 
 Reuse scheduled transcript scans and native metadata already fetched by each
-adapter. Codex metadata reads are byte/entry bounded; no per-message filesystem
+adapter. Codex metadata reads are byte/entry bounded, the SQLite budget
+covering the main file, its WAL, and the snapshot the select reads; no per-message filesystem
 lookup or lifetime-growing title cache is introduced. Title values never enter
 diagnostic logs. OpenCode snapshots and Codex cloud thread metadata use the
 same update contract. Their native snapshot update time can advance on a

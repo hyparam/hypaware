@@ -3,6 +3,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+const TITLE_DATABASE_BUDGET = 256 * 1024 * 1024
+
 /**
  * The index is small metadata, never a second transcript scan. Bound both
  * bytes and retained threads, including a concurrent append to the file.
@@ -48,11 +50,13 @@ export async function readCodexSessionTitles(file) {
 
 /**
  * Desktop stores some generated names only in the native thread database.
- * Read `name`, never `title` (which can be a first-prompt preview).
+ * Read `name`, never `title` (which can be a first-prompt preview). The
+ * budget covers the main file plus its WAL and the snapshot the SELECT reads.
  * @param {string} codexHome
+ * @param {number} [budget] bytes; tests lower it
  * @returns {Promise<Map<string, { title: string, updatedAt: string }>>}
  */
-export async function readCodexTitleDatabase(codexHome) {
+export async function readCodexTitleDatabase(codexHome, budget = TITLE_DATABASE_BUDGET) {
   const titles = new Map()
   let directory
   try { directory = await fs.opendir(codexHome) } catch (err) {
@@ -71,11 +75,25 @@ export async function readCodexTitleDatabase(codexHome) {
     }
   }
   if (!candidate) return titles
-  if ((await fs.stat(candidate)).size > 256 * 1024 * 1024) throw new Error('title_database_budget')
+  // Opening replays the WAL, so its bytes count against the budget too.
+  const wal = await fs.stat(`${candidate}-wal`).then(stat => stat.size, err => {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return 0
+    throw err
+  })
+  if ((await fs.stat(candidate)).size + wal > budget) throw new Error('title_database_budget')
   const { DatabaseSync } = await import('node:sqlite')
   const db = new DatabaseSync(candidate, { readOnly: true })
   try {
     db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 100')
+    // A read-only open still sees committed WAL frames, so the file size
+    // does not bound what the SELECT inspects. Bound the logical snapshot
+    // inside the same read transaction the SELECT runs in.
+    db.exec('BEGIN')
+    const pages = db.prepare('PRAGMA page_count').get()?.page_count
+    const size = db.prepare('PRAGMA page_size').get()?.page_size
+    if (typeof pages !== 'number' || typeof size !== 'number' || pages * size > budget) {
+      throw new Error('title_database_budget')
+    }
     const columns = new Set(db.prepare('PRAGMA table_info(threads)').all().map(row => row.name))
     if (!columns.has('id') || !columns.has('name') || !columns.has('updated_at')) throw new Error('title_database_schema')
     const time = columns.has('updated_at_ms') ? 'COALESCE(updated_at_ms, updated_at * 1000)' : 'updated_at * 1000'
@@ -89,5 +107,8 @@ export async function readCodexTitleDatabase(codexHome) {
       titles.set(row.id, { title: row.name, updatedAt: new Date(row.updated).toISOString() })
     }
     return titles
-  } finally { db.close() }
+  } finally {
+    if (db.isTransaction) db.exec('ROLLBACK')
+    db.close()
+  }
 }

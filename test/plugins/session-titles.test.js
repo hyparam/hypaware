@@ -142,6 +142,47 @@ test('Codex Desktop-only generated names are read from name without recording pr
   assert.deepEqual(await fs.readFile(file), before, 'the source database stays read-only')
 })
 
+test('Codex title database budget counts committed WAL pages, not only the main file', async t => {
+  let DatabaseSync
+  try { ({ DatabaseSync } = await import('node:sqlite')) } catch { t.skip('node:sqlite unavailable'); return }
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-title-wal-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const file = path.join(home, 'state_3.sqlite')
+  const writer = new DatabaseSync(file)
+  t.after(() => writer.close())
+  writer.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0')
+  writer.exec('CREATE TABLE threads (id TEXT, name TEXT, updated_at INTEGER, updated_at_ms INTEGER)')
+  writer.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+  const insert = writer.prepare('INSERT INTO threads VALUES (?, ?, ?, ?)')
+  for (let i = 0; i < 200; i++) insert.run(`filler-${i}`, 'x'.repeat(2000), 1, Date.parse(at))
+  insert.run('wal-1', 'Committed in the WAL', 2, Date.parse(at))
+  const main = (await fs.stat(file)).size
+  const wal = (await fs.stat(`${file}-wal`)).size
+  assert.ok(wal > main * 10, 'the rows live in the uncheckpointed WAL')
+  await assert.rejects(readCodexTitleDatabase(home, main + wal - 1), /title_database_budget/)
+  const names = await readCodexTitleDatabase(home, main + wal)
+  assert.equal(names.get('wal-1')?.title, 'Committed in the WAL')
+  assert.equal(names.size, 201)
+})
+
+test('a session continuing on a new UTC day re-carries its name there; a same-day replay does not', () => {
+  const state = createAiGatewayConversationState()
+  const day = (/** @type {string} */ id, /** @type {string} */ time) => ({ provider: 'openai', session_id: 'multi', client_name: 'codex',
+    messages: [{ role: 'user', message_id: id, content: 'hello', message_created_at: time }] })
+  const first = day('first', at)
+  captureSessionTitle(first, 'Long running', { updatedAt: at })
+  assert.equal(metadata(aiGatewayRowsFromProjectedExchange(first, { state })).length, 1)
+  const replay = day('first', at)
+  captureSessionTitle(replay, 'Long running', { updatedAt: at })
+  assert.equal(aiGatewayRowsFromProjectedExchange(replay, { state }).length, 0)
+  const later = '2026-10-21T09:00:00.000Z'
+  const next = day('second', later)
+  captureSessionTitle(next, 'Long running', { updatedAt: at })
+  const [carried] = metadata(aiGatewayRowsFromProjectedExchange(next, { state }))
+  assert.equal(carried?.message_created_at, later)
+  assert.equal((/** @type {any} */ (carried?.attributes))?.session?.title, 'Long running')
+})
+
 test('metadata never joins the predecessor chain or replicates heavy context', () => {
   const state = createAiGatewayConversationState()
   const exchange = { provider: 'openai', session_id: 'one', client_name: 'codex', model: 'model',
