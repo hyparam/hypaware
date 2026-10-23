@@ -5,6 +5,7 @@ import { readCloudConnection, DEFAULT_CLOUD_ORIGINS } from './cloud-state.js'
 import { compareStrings } from 'hypaware/core/util'
 import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 import { AI_GATEWAY_MESSAGES_DATASET, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
+import { captureSessionTitle } from '../../../../src/core/backfill/session_title.js'
 
 /** @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -58,6 +59,9 @@ export function projectCloudHistory(history, window = {}) {
     } }, messages,
   }
   if (Number.isFinite(thread.createdAt) && Math.abs(thread.createdAt) < 8640000000000) exchange.conversation_started_at = new Date(thread.createdAt * 1000).toISOString()
+  if (Number.isFinite(thread.updatedAt) && Math.abs(thread.updatedAt) < 8640000000000) {
+    captureSessionTitle(exchange, thread.name, { updatedAt: new Date(thread.updatedAt * 1000).toISOString() })
+  }
   return { exchange, unsupported, unfinished }
 }
 

@@ -1,6 +1,7 @@
 // @ts-check
 
 import { isPlainObject, stringValue } from 'hypaware/core/util'
+import { captureSessionTitle } from '../../../../src/core/backfill/session_title.js'
 
 /** @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject, JsonValue } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -37,7 +38,7 @@ export function projectOpenCodeSnapshot(raw, opts = {}) {
   const created = epochIso(readTime(session.time, 'created'))
   const model = isPlainObject(session.model) ? stringValue(session.model.id) : undefined
   const provider = isPlainObject(session.model) ? stringValue(session.model.providerID) : undefined
-  return {
+  const exchange = {
     provider: provider ?? firstMessageProvider(projected) ?? 'unknown',
     session_id: sessionId,
     conversation_id: sessionId,
@@ -58,6 +59,9 @@ export function projectOpenCodeSnapshot(raw, opts = {}) {
     },
     messages: projected,
   }
+  const updatedAt = epochIso(readTime(session.time, 'updated')) ?? created
+  if (updatedAt) captureSessionTitle(exchange, session.title, { updatedAt })
+  return exchange
 }
 
 /**

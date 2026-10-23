@@ -1,6 +1,7 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
+import { captureSessionTitle } from '../../../../src/core/backfill/session_title.js'
 import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
 import {
@@ -416,6 +417,22 @@ async function* runClaudeBackfill(args) {
       })
       if (!exchange) continue
 
+      // @ref LLP 0556#updates: title records have no timestamp and must be
+      // read from the whole file, including records outside the message window.
+      let title
+      let titleRevision = 0
+      for (const entry of sessionEntries) {
+        if (!entry.session_title) continue
+        titleRevision++
+        if (entry.session_title_kind === 'custom-title' || title?.kind !== 'custom-title') {
+          title = { value: entry.session_title, kind: entry.session_title_kind, revision: titleRevision }
+        }
+      }
+      const titleCaptured = title ? captureSessionTitle(exchange, title.value, {
+        updatedAt: new Date((fingerprint ?? await transcriptFingerprint(filePath)).mtimeMs).toISOString(),
+        revision: String(title.revision),
+      }) : false
+
       sessionsProjected += 1
       messagesProjected += exchange.messages.length
       log.info('claude.backfill.session_projected', {
@@ -423,6 +440,7 @@ async function* runClaudeBackfill(args) {
         operation: 'backfill.project',
         session_id: sessionId,
         message_count: exchange.messages.length,
+        title_captured: titleCaptured,
         status: 'ok',
       })
 

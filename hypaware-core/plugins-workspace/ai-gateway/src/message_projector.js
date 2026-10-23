@@ -786,6 +786,9 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     if (!role) continue
     const content = normalizeContent(message.content)
     if (content.length === 0) continue
+    // @ref LLP 0556#updates: metadata deduplicates, but never becomes a
+    // predecessor of the next conversation message.
+    const metadataOnly = role === 'system' && content.length === 1 && content[0].type === 'session_metadata'
 
     // The prior-message chain and fallback hash share `threadScope`
     // (above): a subagent's history (agent_id set) stays separate from the
@@ -816,7 +819,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     }
 
     if (state.seenMessages.has(identity.messageId)) {
-      chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
+      if (!metadataOnly) chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
       continue
     }
 
@@ -832,6 +835,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       projection,
       identity,
       conversationLookup,
+      metadataOnly,
     })
 
     for (const row of parts) {
@@ -854,7 +858,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     // append then fails has to be able to take it back (issue #879).
     state.seenMessages.add(identity.messageId)
     journal?.push(() => { state.seenMessages.delete(identity.messageId) })
-    chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
+    if (!metadataOnly) chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
   }
 
   return rows
@@ -1093,6 +1097,7 @@ function resolveIdentity(ctx) {
  *   projection: AiGatewayProjectedExchange,
  *   identity: { messageId: string, previousMessageId: string[], fromFallback: boolean },
  *   conversationLookup: Map<string, { tool_name?: string }>,
+ *   metadataOnly: boolean,
  * }} ctx
  * @returns {Record<string, unknown>[]}
  */
@@ -1129,9 +1134,9 @@ function expandMessageParts(ctx) {
     // falls back to the exchange model (which for live capture is the one
     // model per exchange (landing on user rows too), and for backfill is unset
     // (backfilled user/tool_result rows carry no model, by design)).
-    model: stringValue(ctx.message.model) ?? ctx.projection.model,
-    system_text: ctx.projection.system_text,
-    tools: ctx.projection.tools,
+    model: ctx.metadataOnly ? undefined : stringValue(ctx.message.model) ?? ctx.projection.model,
+    system_text: ctx.metadataOnly ? undefined : ctx.projection.system_text,
+    tools: ctx.metadataOnly ? undefined : ctx.projection.tools,
     conversation_started_at: ctx.conversationStarted,
     conversation_source: ctx.projection.conversation_source,
     client_name: stringValue(ctx.projection.client_name),

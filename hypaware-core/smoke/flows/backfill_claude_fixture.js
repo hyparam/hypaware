@@ -244,6 +244,28 @@ export async function run({ harness, expect }) {
     const rows3 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 3' })
     expect.that('query: the re-projected rerun did not duplicate rows either', rows3, (v) => Array.isArray(v) && v.length === 2)
 
+    // @ref LLP 0556#updates [tests]: a late title and idle renames survive
+    // durable part dedupe while preserving the original conversation rows.
+    for (const [index, title] of ['Generated name', 'Renamed chat', 'Generated name'].entries()) {
+      await runRoot('smoke.title_update', {
+        [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'title_update',
+        [Attr.DEV_RUN_ID]: harness.devRunId, status: 'ok',
+      }, async () => {
+        await fs.appendFile(transcriptPath, JSON.stringify(index === 0
+          ? { type: 'ai-title', aiTitle: title, sessionId }
+          : { type: 'custom-title', customTitle: title, sessionId }) + '\n')
+        const time = new Date(touched.getTime() + (index + 1) * 1000)
+        await fs.utimes(transcriptPath, time, time)
+        const { result } = await tickAndAwait(new Date(tick3Now.getTime() + (index + 1) * 5 * 60_000))
+        expect.that('idle title update writes exactly one metadata part', result,
+          v => v?.ok && v.rowsWritten === 1)
+        const rows = await queryRows({ dispatch, kernel, registry, env, expect, label: 'native title',
+          sql: `select max_by(JSON_EXTRACT(attributes, '$.session.title'), JSON_EXTRACT(attributes, '$.session.title_updated_at')) as title from ai_gateway_messages where session_id = '${sessionId}' and part_type = 'session_metadata'`,
+        })
+        expect.that('query returns the latest native title', rows[0]?.title, v => v === title)
+      })
+    }
+
     // ----- 4. Internal telemetry: dev_run_id + provider + row counts -----
     await obs.shutdown()
     const traces = await expect.traces()
@@ -283,13 +305,15 @@ export async function run({ harness, expect }) {
     )
 
     const logs = await expect.logs()
+    expect.that('logs: title capture is observable without title text', logs, v => v.some(l =>
+      l.body === 'claude.backfill.session_projected' && l.attributes?.title_captured === true))
     const dueLogs = logs.filter(
       (/** @type {any} */ l) => l.body === 'backfill.sweep_due' && l.attributes?.provider === 'claude',
     )
     expect.that(
       'logs: backfill.sweep_due fired once per tick',
       dueLogs,
-      (v) => Array.isArray(v) && v.length === 3,
+      (v) => Array.isArray(v) && v.length === 6,
     )
     const finishedLogs = logs.filter(
       (/** @type {any} */ l) => l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'claude',

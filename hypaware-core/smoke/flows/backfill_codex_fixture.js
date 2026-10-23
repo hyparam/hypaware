@@ -255,6 +255,28 @@ export async function run({ harness, expect }) {
     const secondSweep = await Promise.all(pending)
     expect.that('sweep: unchanged inputs do no materialization', secondSweep[0], (v) => v?.ok && v.scanned === 0 && v.rowsWritten === 0)
 
+    // @ref LLP 0556#updates [tests]: idle title changes must write just the
+    // metadata revision after durable dedupe, never duplicate old content.
+    for (const [index, title] of ['Generated name', 'Renamed chat', 'Generated name'].entries()) {
+      await runRoot('smoke.title_update', {
+        [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'title_update',
+        [Attr.DEV_RUN_ID]: harness.devRunId, status: 'ok',
+      }, async () => {
+        await fs.appendFile(path.join(fakeHome, '.codex', 'session_index.jsonl'), JSON.stringify({
+          id: sessionId, thread_name: title, updated_at: new Date(now.getTime() + (index + 1) * 1000).toISOString(),
+        }) + '\n')
+        pending.length = 0
+        await sweep.tick({ now: new Date(now.getTime() + (index + 2) * 60_000) })
+        const [result] = await Promise.all(pending)
+        expect.that('idle title update writes exactly one metadata part', result,
+          v => v?.ok && v.rowsWritten === 1)
+        const rows = await queryRows({ dispatch, kernel, registry, env, expect, label: 'native title',
+          sql: `select max_by(JSON_EXTRACT(attributes, '$.session.title'), JSON_EXTRACT(attributes, '$.session.title_updated_at')) as title from ai_gateway_messages where session_id = '${sessionId}' and part_type = 'session_metadata'`,
+        })
+        expect.that('query returns the latest native title', rows[0]?.title, v => v === title)
+      })
+    }
+
     // ----- 4. Internal telemetry: dev_run_id + provider + row counts -----
     await obs.shutdown()
     const traces = await expect.traces()
@@ -285,6 +307,8 @@ export async function run({ harness, expect }) {
     )
 
     const logs = await expect.logs()
+    expect.that('logs: title capture is observable without title text', logs, v => v.some(l =>
+      l.body === 'codex.backfill.session_projected' && l.attributes?.title_captured === true))
     expect.that('logs: scheduled unchanged-file skip', logs, (v) => v.some((l) =>
       l.body === 'codex.backfill.scan_complete' && l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 3))
     expect.that('logs: scheduled capture completed', logs, (v) => v.some((l) =>

@@ -990,6 +990,9 @@ export function transcriptEntryFromRow(row) {
   /** @type {TranscriptEntry} */
   const entry = {
     sessionId,
+    session_title: row.type === 'custom-title' ? stringValue(row.customTitle)
+      : row.type === 'ai-title' ? stringValue(row.aiTitle) : undefined,
+    session_title_kind: row.type === 'custom-title' || row.type === 'ai-title' ? row.type : undefined,
     role,
     content,
     cwd: stringValue(row.cwd),
@@ -1020,7 +1023,7 @@ export function transcriptEntryFromRow(row) {
     usage: readKey(message, 'usage'),
     tool_use_result: readKey(row, 'toolUseResult'),
   }
-  if (!entry.messageId && !entry.contentKey && !entry.provider_uuid) return undefined
+  if (!entry.messageId && !entry.contentKey && !entry.provider_uuid && !entry.session_title) return undefined
   return entry
 }
 
