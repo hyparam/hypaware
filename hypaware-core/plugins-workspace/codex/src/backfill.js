@@ -1,6 +1,8 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import { captureSessionTitle } from '../../../../src/core/backfill/session_title.js'
+import { readCodexSessionTitles, readCodexTitleDatabase } from './session_titles.js'
 import path from 'node:path'
 import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
@@ -121,7 +123,7 @@ export function createCodexBackfillProvider(opts) {
     ?? defaultUnsupportedLocations(opts.homeDir, opts.config?.capture_mode === 'gateway')
   const config = opts.config
   const backfill = isPlainObject(config?.backfill) ? config.backfill : {}
-  /** @type {Map<string, { ino: number, size: number, mtimeMs: number }>} */
+  /** @type {Map<string, { ino: number, size: number, mtimeMs: number, threadIds?: string[], titleRevision?: string }>} */
   const fingerprints = new Map()
   // How many sessions each file is still holding back, so `sessions_deferred`
   // is a level rather than a one-tick edge: the fingerprint skip below returns
@@ -279,7 +281,7 @@ function defaultUnsupportedLocations(homeDir, gatewayCapture = false) {
  *   clientName: string,
  *   resolver: UsagePolicyResolver,
  *   ignoredSessions?: Set<string>,
- *   fingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
+ *   fingerprints: Map<string, { ino: number, size: number, mtimeMs: number, threadIds?: string[], titleRevision?: string }>,
  *   deferrals: Map<string, number>,
  *   readFailures: Map<string, string>,
  *   floorMs?: number,
@@ -290,6 +292,27 @@ async function* runCodexBackfill(args) {
   const { ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver } = args
   refreshSessionIgnores(args.ignoredSessions)
   const log = ctx.log
+  let titles = new Map()
+  try { titles = await readCodexSessionTitles(path.join(codexHome, 'session_index.jsonl')) }
+  catch {
+    log.warn('codex.backfill.title_index_unavailable', {
+      component: COMPONENT, operation: 'backfill.titles', status: 'partial',
+      error_kind: 'title_index_unavailable',
+    })
+  }
+  try {
+    for (const [id, title] of await readCodexTitleDatabase(codexHome)) {
+      const prior = titles.get(id)
+      if (!prior || title.updatedAt >= prior.updatedAt) titles.set(id, title)
+    }
+  } catch {
+    log.warn('codex.backfill.title_database_unavailable', {
+      component: COMPONENT, operation: 'backfill.titles', status: 'partial',
+      error_kind: 'title_database_unavailable',
+    })
+  }
+  const titleRevision = (/** @type {string[] | undefined} */ ids) =>
+    JSON.stringify((ids ?? []).map(id => titles.get(id) ?? null))
   const window = resolveWindow(ctx)
   if (args.floorMs !== undefined && (window.sinceMs === undefined || window.sinceMs < args.floorMs)) {
     window.sinceMs = args.floorMs
@@ -341,6 +364,7 @@ async function* runCodexBackfill(args) {
     filesSeen += 1
     /** @type {CodexRolloutSession[]} */
     let sessions
+    /** @type {{ ino: number, size: number, mtimeMs: number, threadIds?: string[], titleRevision?: string } | undefined} */
     let fingerprint
     const failedBefore = ctx.itemsFailed ?? 0
     try {
@@ -348,7 +372,8 @@ async function* runCodexBackfill(args) {
         const stat = await fs.stat(filePath)
         fingerprint = { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs }
         const prior = args.fingerprints.get(filePath)
-        if (prior && prior.ino === stat.ino && prior.size === stat.size && prior.mtimeMs === stat.mtimeMs) {
+        if (prior && prior.ino === stat.ino && prior.size === stat.size && prior.mtimeMs === stat.mtimeMs
+            && prior.titleRevision === titleRevision(prior.threadIds)) {
           filesUnchanged += 1
           // Unread, but still owing whatever it owed when it was last read.
           sessionsDeferred += args.deferrals.get(filePath) ?? 0
@@ -388,6 +413,10 @@ async function* runCodexBackfill(args) {
       })
     }
 
+    if (fingerprint) {
+      fingerprint.threadIds = sessions.map(session => session.threadId)
+      fingerprint.titleRevision = titleRevision(fingerprint.threadIds)
+    }
     let fileDeferred = 0
     for (const session of sessions) {
       deliveryEvidenceSkipped += session.deliveryEvidenceSkipped ?? 0
@@ -443,6 +472,8 @@ async function* runCodexBackfill(args) {
         clientName,
       })
       if (!exchange) continue
+      const title = titles.get(session.threadId)
+      const titleCaptured = title ? captureSessionTitle(exchange, title.title, { updatedAt: title.updatedAt }) : false
 
       sessionsProjected += 1
       messagesProjected += exchange.messages.length
@@ -452,6 +483,7 @@ async function* runCodexBackfill(args) {
         conversation_id: session.threadId,
         message_count: exchange.messages.length,
         identity_source: readCodexIdentitySource(exchange),
+        title_captured: titleCaptured,
         status: 'ok',
       })
 

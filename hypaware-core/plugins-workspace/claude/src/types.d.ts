@@ -157,6 +157,8 @@ export interface SpooledClaudeBody {
 
 export interface TranscriptEntry {
   sessionId: string
+  session_title?: string
+  session_title_kind?: 'custom-title' | 'ai-title'
   role: string | undefined
   content: unknown
   /**
