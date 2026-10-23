@@ -68,9 +68,9 @@ hyp status
 hyp sync --yes
 ```
 
-The organization configuration must enable the integration your job uses. Join
-writes enrollment settings; the daemon then fetches configuration and starts
-capture. Before the agent step, use `hyp status` and `hyp client status <client>`
+Enable the integration your job uses through organization configuration or
+local client setup (see [Claude Agent SDK](#claude-agent-sdk)). Join writes
+enrollment settings; the daemon then fetches configuration and starts capture. Before the agent step, use `hyp status` and `hyp client status <client>`
 to check readiness and apply any required client settings. Starting the process
 with `&` alone does not prove capture is ready. Status is a diagnostic snapshot,
 not a command that waits for readiness; adapt the job to check its required
@@ -84,6 +84,196 @@ for setup, journal placement and a server-side SQL check after upload.
 > rows land when the agent session ends, seconds before the runner dies, so no
 > schedule can be trusted to drain the tail. Always run `hyp sync --yes` as the
 > final step, including on failed jobs.
+
+## Claude Agent SDK
+
+The Claude Agent SDK runs Claude Code. HypAware can record it using the same
+Claude integration on a workstation, CI runner, server, or in a container.
+Run the SDK and HypAware as the same OS user with the same writable `HOME`.
+This recipe runs the daemon alongside the application in the same environment;
+it does not require a sidecar.
+
+### Install and enable Claude capture
+
+Install HypAware where the SDK runs. For a Docker image, add this before the
+Dockerfile switches to a non-root user:
+
+```dockerfile
+RUN npm install -g hypaware@latest
+```
+
+HypAware requires Node 22.12 or newer.
+
+In your startup script, run setup as the application's user before the
+join/start sequence, only if no HypAware configuration exists:
+
+```sh
+if [ ! -f "${HYP_HOME:-$HOME/.hyp}/hypaware-config.json" ]; then
+  hyp setup --client claude --export keep-local --no-daemon --no-backfill --yes
+fi
+```
+
+This automatically runs setup on the first start and skips it on later starts
+when persistent storage retains the configuration.
+
+This enables capture and writes Claude settings and hooks under `HOME`. Keep
+that home writable at runtime. The hooks execute HypAware inside the SDK's
+environment to identify sessions and their working directories for privacy
+rules. Installing the package alone does not start the daemon.
+
+### Only change SDK settings if your app excludes user settings
+
+**If your app omits `settingSources`, no change is needed with SDK 0.3.302,
+which we tested.** If it already includes `'user'`, no change is needed either.
+
+If your app explicitly sets `settingSources` without `'user'`, add it to the
+existing list. For example, change `[]` inside your existing `query()` call:
+
+```js
+const response = query({
+  prompt,
+  options: {
+    // Keep your existing options.
+    // Replace settingSources: [] with:
+    settingSources: ['user'],
+  },
+})
+```
+
+Keep other sources you already use: `['project']` becomes `['project', 'user']`.
+User settings include `~/.claude/settings.json`, where HypAware configures
+recording. Check your SDK version's settings behavior if using another release.
+
+Follow [join, capture, flush](#each-run-join-capture-flush) to start the daemon
+and run your SDK application. Use your existing container startup script or
+supervisor for that flow.
+
+## Kubernetes
+
+Use the same headless flow inside your application's container. Kubernetes
+supplies the enrollment Secret and writable storage; agent-specific setup is
+separate. For a Claude Agent SDK application, follow the
+[SDK section](#claude-agent-sdk) as well.
+
+The examples below are additions to your existing manifests, not a replacement
+Deployment. **Replace every `<placeholder>` before running commands or applying
+YAML.** Keep the other names as written, or change every matching reference.
+
+| Placeholder | Your value |
+|---|---|
+| `<namespace>` | The namespace containing your application. |
+| `<org>` | The HypAware remote name you use on your workstation. |
+| `<workload-name>` | A label you choose for this recording host. |
+| `<expiry-days>` | The desired token lifetime in days. |
+| `<app-home>` | The app user's absolute HOME path. |
+| `<app-gid>` | The app user's numeric group ID, without quotes. |
+| `<storage-size>` | Requested storage, for example `1Gi`. |
+| `<deployment>`, `<deployment-file>` | Your Deployment name and updated manifest file. |
+
+### 1. Create the enrollment Secret
+
+On your signed-in workstation, in a Bash or Zsh shell:
+
+```sh
+set -o pipefail
+hyp remote mint <org> --label <workload-name> --expires-days <expiry-days> \
+  | kubectl -n <namespace> create secret generic hypaware-join \
+      --from-file=token=/dev/stdin
+```
+
+The pipe sends the token directly into the Secret; you do not paste it anywhere.
+Confirm both commands succeeded before proceeding. The Secret must be in the
+app's namespace.
+
+### 2. Mount the token and writable storage
+
+If the app already has a suitable persistent HOME volume, reuse it. Otherwise,
+save the following as `hypaware-home.yaml`:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hypaware-home
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: <storage-size>
+```
+
+Create the claim in the application's namespace:
+
+```sh
+kubectl -n <namespace> apply -f hypaware-home.yaml
+```
+
+This uses the default storage class. If the cluster has none, add
+`storageClassName: <storage-class>` under `spec`, replacing `<storage-class>`
+with an available class name.
+
+For this single-home example, use one replica and `strategy: { type: Recreate }`
+on the Deployment. Remove `strategy.rollingUpdate` if present. Give each replica
+its own home storage if you later scale out. `ReadWriteOnce` limits attachment
+to one node, not one pod.
+
+Merge these fields under `spec.template.spec`, preserving existing entries:
+
+```yaml
+securityContext:
+  fsGroup: <app-gid>
+volumes:
+  - name: hypaware-home
+    persistentVolumeClaim:
+      claimName: hypaware-home
+  - name: hypaware-join
+    secret:
+      secretName: hypaware-join
+      defaultMode: 0440
+```
+
+Add these mounts to the existing application container's `volumeMounts`:
+
+```yaml
+- name: hypaware-home
+  mountPath: <app-home>
+- name: hypaware-join
+  mountPath: /var/run/hypaware
+  readOnly: true
+```
+
+Keep the app's existing user and `HOME`. Verify that this user can write the
+home volume and read the token; PVC permission handling depends on the storage
+driver. Mounting a new volume over HOME hides files supplied there by the image,
+so preserve any settings the app already relies on.
+
+Persistent storage keeps settings and pending recordings across pod replacement.
+For a disposable Job, `emptyDir: {}` can replace `persistentVolumeClaim`, but
+removing the pod then loses any data that has not uploaded.
+
+### 3. Start capture and deploy
+
+In your existing container startup script, use the mounted token for the join
+step of [join, capture, flush](#each-run-join-capture-flush):
+
+```sh
+hyp join https://api.hypaware.ai --token-file /var/run/hypaware/token --no-daemon
+```
+
+Run the daemon and application using your existing startup script or supervisor,
+following the same readiness and flush guidance above. For a Job, include the
+final flush in its script before the container exits, including on failure.
+For a Deployment, allow enough `terminationGracePeriodSeconds` for your app's
+shutdown and final flush to finish.
+
+Build and publish your updated application image through your normal deployment
+process. Keep any registry pull credentials your Deployment requires. Save your
+updated Deployment as `<deployment-file>` and apply it:
+
+```sh
+kubectl -n <namespace> apply -f <deployment-file>
+kubectl -n <namespace> rollout status deploy/<deployment>
+```
 
 ## GitHub Actions example
 
