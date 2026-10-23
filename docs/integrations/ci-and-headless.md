@@ -104,12 +104,18 @@ RUN npm install -g hypaware@latest
 
 HypAware requires Node 22.12 or newer.
 
-Before the join/start sequence above, run this as the application's user at
-runtime to enable Claude capture and configure its local settings and hooks:
+On a fresh home, run this once as the application's user at runtime, before
+the join/start sequence, to enable Claude capture and configure its settings
+and hooks:
 
 ```sh
 hyp setup --client claude --export keep-local --no-daemon --no-backfill --yes
 ```
+
+On later starts, reuse the saved configuration. `hyp setup` refuses to overwrite
+an existing configuration; do not rerun it on every pod start with persistent
+storage. For an existing HypAware installation, enable Claude through its
+existing configuration rather than replacing it.
 
 This enables capture and writes Claude settings and hooks under `HOME`. Keep
 that home writable at runtime. The hooks execute HypAware inside the SDK's
