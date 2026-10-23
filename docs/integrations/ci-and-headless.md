@@ -69,9 +69,8 @@ hyp sync --yes
 ```
 
 Enable the integration your job uses through organization configuration or
-local client setup before running the agent. See the [Claude Agent SDK](#claude-agent-sdk)
-section for that client's setup. Join writes enrollment settings; the daemon
-then fetches configuration and starts capture. Before the agent step, use `hyp status` and `hyp client status <client>`
+local client setup (see [Claude Agent SDK](#claude-agent-sdk)). Join writes
+enrollment settings; the daemon then fetches configuration and starts capture. Before the agent step, use `hyp status` and `hyp client status <client>`
 to check readiness and apply any required client settings. Starting the process
 with `&` alone does not prove capture is ready. Status is a diagnostic snapshot,
 not a command that waits for readiness; adapt the job to check its required
@@ -103,8 +102,7 @@ Dockerfile switches to a non-root user:
 RUN npm install -g hypaware@latest
 ```
 
-HypAware requires Node 22.12 or newer. Build and publish the updated application
-image using your normal build process.
+HypAware requires Node 22.12 or newer.
 
 Before the join/start sequence above, run this as the application's user at
 runtime to enable Claude capture and configure its local settings and hooks:
@@ -141,98 +139,9 @@ Keep other sources you already use: `['project']` becomes `['project', 'user']`.
 User settings include `~/.claude/settings.json`, where HypAware configures
 recording. Check your SDK version's settings behavior if using another release.
 
-### Start capture before the SDK
-
-Follow [join, capture, flush](#each-run-join-capture-flush). The startup script
-runs inside the same container or host as the SDK. It must wait until the
-daemon is healthy, Claude capture is enabled, and organization sync is
-configured before starting the agent.
-
-For a single-container application, copy the supplied
-[`hypaware-start.mjs`](examples/claude-container/hypaware-start.mjs) into your
-application's build directory. It performs setup and enrollment on a fresh
-home, waits for capture readiness, and then runs the application command you
-supply. You do not need to implement a readiness check yourself or run the
-setup/join commands separately when using this helper.
-
-For a Debian-based Node image, add these lines to your Dockerfile **before**
-its `USER` instruction, alongside the HypAware installation above:
-
-```dockerfile
-RUN apt-get update && apt-get install -y --no-install-recommends tini \
-    && rm -rf /var/lib/apt/lists/*
-COPY hypaware-start.mjs /app/hypaware-start.mjs
-```
-
-Replace the image's entrypoint with:
-
-```dockerfile
-ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/hypaware-start.mjs"]
-```
-
-Keep your app's existing exec-form `CMD`, which becomes the helper's arguments.
-For example, **only if your app starts with `node server.js`**:
-
-```dockerfile
-CMD ["node", "server.js"]
-```
-
-If your image has an existing entrypoint that performs necessary initialization,
-preserve that work before invoking the helper. Other base images need their
-own package-manager command to install `tini`.
-
-Mount the enrollment token at `/var/run/hypaware/token`; the
-[Kubernetes section](#kubernetes) shows how. The helper reads the same writable
-HOME as the SDK. Use a dedicated home for this workload. On subsequent starts,
-it reuses the setup and enrollment saved on that volume. Replacing the Secret
-does not re-enroll an existing home: remove `<HYP_HOME>/.joined` and restart
-when rotating the token (`HYP_HOME` defaults to `$HOME/.hyp`).
-
-The helper checks `hyp status --json` for healthy daemon state, loaded
-organization configuration, and active Claude capture, with a 90-second
-startup deadline. If the app or daemon exits unexpectedly, it stops the other
-process and ends the container. A daemon exit of 75 during startup is retried;
-after app startup it triggers a container restart instead.
-
-On shutdown it gives the application up to 30 seconds to finish active work,
-allows five seconds for final telemetry processing, and attempts
-`hyp sync --yes` before stopping the daemon. The app must handle SIGTERM by
-stopping new work and finishing in-flight requests. Abrupt termination or
-work exceeding those limits can still lose the tail; the flush is best effort.
-It detects process exits, not a daemon that stays alive but becomes unhealthy.
-
-For a finite CI job using its own shell script instead, keep the documented
-[join, capture, flush](#each-run-join-capture-flush) sequence and implement the
-readiness and failure cleanup there. The helper is the complete single-container
-example tested with this guide.
-
-### Updates in this container example
-
-The helper preserves HypAware's default auto-update setting. In this container
-layout, automatic updates cannot rely on a recognized service manager, and the
-non-root app user cannot update the root-owned global npm installation. Rebuild
-with `hypaware@latest` and deploy a new image tag to update. Ensure the build
-reruns the npm installation instead of reusing its cached layer.
-
-### Optional: inspect capture status
-
-For troubleshooting, run these commands **inside the recording container or
-host**:
-
-```sh
-hyp status
-hyp client status claude
-```
-
-They show daemon health, Claude capture configuration, and sharing status.
-For Kubernetes, use the `kubectl exec` commands in the section below to run
-checks inside the container from your workstation.
-
-### Confirm the conversation reached the server
-
-Send a test request through your SDK app, then follow
-[verify the upload](#verify-the-upload). Finding the test prompt and reply on
-the server confirms recording and upload; a healthy status alone does not.
+Follow [join, capture, flush](#each-run-join-capture-flush) to start the daemon
+and run your SDK application. Use your existing container startup script or
+supervisor for that flow.
 
 ## Kubernetes
 
@@ -254,7 +163,7 @@ YAML.** Keep the other names as written, or change every matching reference.
 | `<app-home>` | The app user's absolute HOME path. |
 | `<app-gid>` | The app user's numeric group ID, without quotes. |
 | `<storage-size>` | Requested storage, for example `1Gi`. |
-| `<deployment>`, `<app-container>` | Your Deployment and application container names. |
+| `<deployment>`, `<deployment-file>` | Your Deployment name and updated manifest file. |
 
 ### 1. Create the enrollment Secret
 
@@ -268,8 +177,8 @@ hyp remote mint <org> --label <workload-name> --expires-days <expiry-days> \
 ```
 
 The pipe sends the token directly into the Secret; you do not paste it anywhere.
-Confirm both commands succeeded before proceeding. Save the printed `gw-...`
-host ID for verification. The Secret must be in the app's namespace.
+Confirm both commands succeeded before proceeding. The Secret must be in the
+app's namespace.
 
 ### 2. Mount the token and writable storage
 
@@ -339,46 +248,27 @@ removing the pod then loses any data that has not uploaded.
 
 ### 3. Start capture and deploy
 
-If using the SDK helper above, it reads the mounted token automatically.
-For a different agent with its own startup flow, the enrollment command is:
+In your existing container startup script, use the mounted token for the join
+step of [join, capture, flush](#each-run-join-capture-flush):
 
 ```sh
 hyp join https://api.hypaware.ai --token-file /var/run/hypaware/token --no-daemon
 ```
 
-The SDK helper handles daemon startup and readiness for you. For other startup
-scripts, follow [join, capture, flush](#each-run-join-capture-flush).
+Run the daemon and application using your existing startup script or supervisor,
+following the same readiness and flush guidance above. For a Job, include the
+final flush in its script before the container exits, including on failure.
+For a Deployment, allow enough `terminationGracePeriodSeconds` for your app's
+shutdown and final flush to finish.
 
-When using the helper, add `terminationGracePeriodSeconds: 60` under
-`spec.template.spec` to allow its shutdown sequence to complete. Keep an app
-readiness probe so traffic starts only after the app is listening.
-
-Deploy the updated app image through your normal Kubernetes deployment process.
-Keep any registry pull credentials your Deployment requires. Save your updated
-Deployment as `<deployment-file>` and apply it:
+Build and publish your updated application image through your normal deployment
+process. Keep any registry pull credentials your Deployment requires. Save your
+updated Deployment as `<deployment-file>` and apply it:
 
 ```sh
 kubectl -n <namespace> apply -f <deployment-file>
 kubectl -n <namespace> rollout status deploy/<deployment>
 ```
-
-Optionally check HypAware in
-the application container:
-
-```sh
-kubectl -n <namespace> exec deploy/<deployment> -c <app-container> -- hyp status
-```
-
-After a test conversation, flush pending uploads:
-
-```sh
-kubectl -n <namespace> exec deploy/<deployment> -c <app-container> -- hyp sync --yes
-```
-
-Those commands target a Deployment. For a Job, put readiness and the final flush
-in the job's script, including its failure cleanup, before the container exits.
-
-Finish by [verifying the upload](#verify-the-upload) from your workstation.
 
 ## GitHub Actions example
 
@@ -412,9 +302,6 @@ jobs:
 > **Tip:** `if: always()` runs the flush even when the agent step fails, which is often
 > the run you most want recorded. HypAware requires **Node 22.12 or newer**.
 
-After the workflow finishes, [verify the upload](#verify-the-upload) from your
-signed-in workstation.
-
 ## Long-lived headless hosts
 
 A server or VM that outlives one job uses the same join, but lets the daemon
@@ -434,8 +321,6 @@ the entrypoint or under your own supervisor, and relaunch it when it exits
 with code 75. No teardown flush is needed on a
 host that keeps running; the scheduled exports drain it. Flush with
 `hyp sync --yes` before deliberately retiring the host.
-
-After a test conversation, [verify the upload](#verify-the-upload).
 
 ### Headless troubleshooting
 
@@ -515,24 +400,5 @@ new token in HypAware and run the join again; for queries, run `hyp remote
 login hypaware --token-file` with the new token. `hyp leave` removes the kept
 copy.
 
-To confirm a test conversation arrived, [verify the upload](#verify-the-upload).
-
 Command details live in
 [the CLI reference](../CLI_REFERENCE.md#hyp-remote-mint).
-
-## Verify the upload
-
-From a workstation signed in to your organization, query the host ID printed by
-`hyp remote mint`. Replace `<org>`, `<host-id>`, and `<date>` with your remote
-name, `gw-...` host ID, and the test's UTC date in `YYYY-MM-DD` format:
-
-```sh
-hyp query sql "SELECT session_id, role, substr(content_text, 1, 120) AS text
-  FROM ai_gateway_messages
-  WHERE gateway_id = '<host-id>' AND date = '<date>'
-  ORDER BY message_created_at DESC LIMIT 20" --remote <org>
-```
-
-Confirm that your test prompt and reply appear. Allow time for server ingestion
-if an immediate query is empty. `hyp status` showing Sync confirms the sharing
-configuration; it does not prove that a particular conversation was uploaded.
