@@ -83,6 +83,24 @@ unfinished client actions, and flush failures, which have no severity to
 print. Ranking only the rows that have one would read as ranking the rest
 below them. `--verbose` and `--json` are unchanged.
 
+## Which install answered {#identity}
+
+Both text views open with the install's identity: the facts `hyp version`
+prints (version, platform and arch; verbose adds node and `hyp_home`, since
+paths stay out of the compact view) and the gateway id this host forwards
+under. Status reuses `hyp version`'s own helper, so the two commands never
+disagree.
+
+The gateway id is minted by the server and read from each `@hypaware/central`
+sink's persisted identity (its `identity.persisted_path`, else the per-plugin
+default), the same file the sink and `hyp remote login` use. Only `gateway_id`
+is read out; the JWT beside it never is. A host with no central sink reads
+`Not enrolled`. A configured sink whose identity is absent, or names another
+server, reads `Pending (not issued yet)`: the sink mints on first activation.
+A file that names no gateway id reads `Unreadable identity`. Several central
+sinks are each named. `--json` carries the same values under `identity`, with
+a null `gateway_id` when none is issued.
+
 ## Cost and validation {#validation}
 
 Both views use one existing status collection. Rendering adds no filesystem,

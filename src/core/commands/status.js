@@ -8,6 +8,7 @@ import { compareStrings } from '../util/compare_strings.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { productStatus } from '../product_telemetry/commands.js'
+import { versionInfo } from './misc.js'
 
 /**
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -97,6 +98,7 @@ export async function runStatus(argv, ctx) {
           clientNames,
           datasets,
           cacheRoot: ctx.storage.cacheRoot,
+          info: versionInfo(ctx.env),
         })
         ctx.stdout.write(JSON.stringify({ ...payload, product_telemetry: productStatus(ctx.env) }, null, 2) + '\n')
         return 0
@@ -109,6 +111,7 @@ export async function runStatus(argv, ctx) {
         cacheRoot: ctx.storage.cacheRoot,
         stdout: ctx.stdout,
         env: ctx.env,
+        info: versionInfo(ctx.env),
       }
       render(renderArgs)
       const telemetry = productStatus(ctx.env)
@@ -322,10 +325,10 @@ function listenerEndpointFromReport(report, sourceName) {
 
 /**
  * Compact status uses the existing report, without additional probes or reads.
- * @param {{ report: HypAwareStatusReport, stdout: { write(chunk: string): unknown } }} args
+ * @param {{ report: HypAwareStatusReport, stdout: { write(chunk: string): unknown }, info?: ReturnType<typeof versionInfo> }} args
  */
 // @ref LLP 0455#compact-view [implements]: policy and actionable health lead; inventory stays in --verbose
-export function renderStatusSummary({ report, stdout }) {
+export function renderStatusSummary({ report, stdout, info }) {
   const clients = new Map(report.clients.map((c) => [c.name, c]))
   const health = new Map(report.captureHealth.map((c) => [c.client, c]))
   const syncing = new Set(report.clientSync?.syncing)
@@ -338,6 +341,9 @@ export function renderStatusSummary({ report, stdout }) {
 
   // @ref LLP 0455#verdict-headline [implements]: the verdict rides on the existing heading, so the two-state cue keeps its words
   stdout.write(`HypAware · ${needsAttention ? `Needs attention${degraded ? ' (degraded)' : ''}` : 'Healthy'}\n\n`)
+  // @ref LLP 0455#identity [implements]: which install answered and which gateway it forwards as lead the compact view
+  if (info) stdout.write(`  Version    ${info.version} · ${info.platform} ${info.arch}\n`)
+  stdout.write(`  Gateway    ${describeGateways(report.gateways)}\n`)
   const daemon = report.daemon.running
     ? (report.daemon.state && report.daemon.state !== 'healthy' ? printable(report.daemon.state) : 'Running')
     : 'Not running'
@@ -518,11 +524,25 @@ function renderSharingNotices(report, stdout, indent = '  ') {
  *   clientNames: string[],
  *   datasets: { name: string, plugin: string }[],
  *   cacheRoot: string,
+ *   info?: ReturnType<typeof versionInfo>,
  * }} args
  */
-export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
+export function renderStatusJson({ report, clientNames, datasets, cacheRoot, info }) {
+  const gateways = report.gateways ?? []
   return {
     overall: report.overall,
+    // Which install answered and the gateway id it forwards under. Additive:
+    // `gateway_id` is null on a host that never enrolled or has no id yet.
+    // @ref LLP 0455#identity [implements]: --json carries the same identity the text views print
+    identity: {
+      version: info?.version ?? null,
+      node: info?.node ?? null,
+      platform: info?.platform ?? null,
+      arch: info?.arch ?? null,
+      hyp_home: info?.hypHome ?? null,
+      gateway_id: gateways.find((g) => g.gatewayId !== null)?.gatewayId ?? null,
+      gateways: gateways.map((g) => ({ sink: g.sink, gateway_id: g.gatewayId, state: g.state })),
+    },
     config: {
       path: report.configPath,
       exists: report.configExists,
@@ -929,12 +949,18 @@ const MAX_CACHE_FLUSH_FAILURES = 8
  *   cacheRoot: string,
  *   stdout: { write(chunk: string): unknown },
  *   env?: NodeJS.ProcessEnv,
+ *   info?: ReturnType<typeof versionInfo>,
  * }} args
  */
-export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout, env }) {
+export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout, env, info }) {
   const section = (/** @type {string} */ label) => stdout.write(`\n  ${label}:\n`)
   stdout.write('hypaware\n')
   stdout.write(`  overall:  ${report.overall}\n`)
+  if (info) {
+    stdout.write(`  version:  ${info.version} (node ${info.node}, ${info.platform} ${info.arch})\n`)
+    stdout.write(`  hyp_home: ${info.hypHome}\n`)
+  }
+  stdout.write(`  gateway:  ${describeGateways(report.gateways)}\n`)
   const configState = report.configExists
     ? (report.configValid ? 'ok' : 'invalid')
     : 'missing'
@@ -1633,4 +1659,21 @@ function renderOllamaCapture(capture, stdout, indent) {
   const earlierFailure = capture.lastPersisted && capture.lastFailed && capture.lastPersisted > capture.lastFailed
   if (capture.lastFailed) stdout.write(`${indent}  ${capture.historical ? 'Historical failure' : earlierFailure ? 'Earlier capture failure' : 'Capture failure'}: ${capture.reason ?? 'unconfirmed'} at ${capture.lastFailed}\n`)
   stdout.write(`${indent}  Next: ${capture.next}\n`)
+}
+
+/**
+ * One line naming the gateway id(s) this host forwards under. The id is read
+ * from a file, so it is cleaned like any other value read back off disk.
+ *
+ * @param {HypAwareStatusReport['gateways']} gateways
+ * @returns {string}
+ */
+function describeGateways(gateways = []) {
+  if (gateways.length === 0) return 'Not enrolled'
+  return gateways.map((g) => {
+    const value = g.state === 'issued' ? printable(g.gatewayId)
+      : g.state === 'pending' ? 'Pending (not issued yet)'
+      : 'Unreadable identity'
+    return gateways.length > 1 ? `${value} (${printable(g.sink)})` : value
+  }).join(', ')
 }

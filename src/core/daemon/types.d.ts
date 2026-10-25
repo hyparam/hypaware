@@ -778,6 +778,13 @@ export interface HypAwareStatusReport {
    * diagnostic, so it moves neither `overall` nor the headline.
    */
   assetCoverage?: string | null
+  /**
+   * The gateway id each configured `@hypaware/central` sink forwards under,
+   * read from its persisted identity. Empty on a host that never enrolled.
+   * `pending`: configured, but no identity for that server yet. `unreadable`:
+   * the identity file exists but names no gateway id.
+   */
+  gateways?: { sink: string, gatewayId: string | null, state: 'issued' | 'pending' | 'unreadable' }[]
 }
 
 export interface CollectStatusOptions {
