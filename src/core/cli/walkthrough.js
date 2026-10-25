@@ -16,6 +16,7 @@ import { daemonIncompleteNote, platformIsSupported } from '../daemon/platform.js
 import { ServiceOpError } from '../daemon/service_ops.js'
 import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { hypHomeFromEnv } from '../runtime/paths.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { CLAUDE_SKILL_RELOAD_HINT, copiedClaudeSkills, materializeClientAssets } from '../runtime/client_assets.js'
 import { loaderActivationKind } from '../runtime/loader.js'
@@ -76,10 +77,8 @@ export const LOCAL_INSTALL_RETENTION_DAYS = 120
  * @param {NodeJS.ProcessEnv} env
  */
 export function resolveHypHome(env) {
-  if (env.HYP_HOME) return env.HYP_HOME
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
-  const home = env.HOME || os.homedir()
-  return path.join(home, '.hyp')
+  return hypHomeFromEnv(env, env.HOME)
 }
 
 /**

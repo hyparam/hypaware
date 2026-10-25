@@ -2,10 +2,10 @@
 
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
-import path from 'node:path'
 
 import { readObservabilityEnv } from '../observability/env.js'
 import { resolveConfigPath } from '../runtime/boot.js'
+import { configControlActivePath, configControlSeedPath, configSlotPath } from '../runtime/paths.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { resolveCentralLayerPath } from './apply.js'
 import { prepareLocalConfigWrite } from './schema.js'
@@ -128,9 +128,9 @@ export function createClientRecordingPolicyReader({ env, plugin }) {
     // the four known names when resolution fails, never a directory listing.
     const centralPath = resolveCentralLayerPath({ stateRoot: stateDir })
     for (const key of cache.keys()) if (key !== localPath && key !== centralPath) cache.delete(key)
-    if (!centralPath) for (const name of ['active', 'seed.json', 'config.a.json', 'config.b.json']) {
+    if (!centralPath) for (const probe of [configControlActivePath(stateDir), configControlSeedPath(stateDir), configSlotPath(stateDir, 'a'), configSlotPath(stateDir, 'b')]) {
       try {
-        fsSync.lstatSync(path.join(stateDir, 'config-control', name))
+        fsSync.lstatSync(probe)
         return { recording: false, reason: 'policy_unreadable' }
       } catch (err) {
         if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') return { recording: false, reason: 'policy_unreadable' }

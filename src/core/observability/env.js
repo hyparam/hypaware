@@ -1,11 +1,8 @@
 // @ts-check
 
-import os from 'node:os'
-import path from 'node:path'
+import { hypHomeFromEnv, stateRootOf } from '../runtime/paths.js'
 
 const DEFAULT_SERVICE_NAME = 'hypaware'
-const DEFAULT_HYP_HOME_DIRNAME = '.hyp'
-const HYP_STATE_SUBDIR = 'hypaware'
 
 export const DEFAULT_RUNTIME_METRICS_INTERVAL_MS = 30_000
 export const MIN_RUNTIME_METRICS_INTERVAL_MS = 5_000
@@ -28,8 +25,8 @@ export function readObservabilityEnv(env = process.env) {
   const devTelemetry = env.HYP_DEV_TELEMETRY === '1' || env.HYP_DEV_TELEMETRY === 'true'
   const otlpEndpoint = env.OTEL_EXPORTER_OTLP_ENDPOINT || ''
   const serviceName = env.OTEL_SERVICE_NAME || DEFAULT_SERVICE_NAME
-  const hypHome = env.HYP_HOME || path.join(os.homedir(), DEFAULT_HYP_HOME_DIRNAME)
-  const stateDir = path.join(hypHome, HYP_STATE_SUBDIR)
+  const hypHome = hypHomeFromEnv(env)
+  const stateDir = stateRootOf(hypHome)
   const devRunId = env.DEV_RUN_ID
   const resourceAttributes = env.OTEL_RESOURCE_ATTRIBUTES || ''
   const runtimeMetrics = env.HYP_OTEL_RUNTIME_METRICS === '1' ||
@@ -52,13 +49,4 @@ export function readObservabilityEnv(env = process.env) {
     runtimeMetrics,
     runtimeMetricsIntervalMs,
   }
-}
-
-/**
- * Resolve directory for dev-telemetry JSONL outputs.
- * @param {string} stateDir
- * @returns {string}
- */
-export function devTelemetryDir(stateDir) {
-  return path.join(stateDir, 'dev-telemetry')
 }

@@ -1,9 +1,9 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
-import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { LOCAL_CONFIG_BASENAME, localConfigPath } from '../runtime/paths.js'
 import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
 import { BUILTIN_REMOTE_ALIASES, BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
@@ -25,7 +25,7 @@ import { parseRedactionConfig } from '../sinks/redaction.js'
  * The path is `<HYP_HOME>/hypaware-config.json` per design §Setup
  * and Onboarding.
  */
-export const CONFIG_BASENAME = 'hypaware-config.json'
+export const CONFIG_BASENAME = LOCAL_CONFIG_BASENAME
 
 /**
  * Resolve the default config path under `HYP_HOME`. Callers that want
@@ -36,7 +36,7 @@ export const CONFIG_BASENAME = 'hypaware-config.json'
  * @returns {string}
  */
 export function defaultConfigPath(hypHome) {
-  return path.join(hypHome, CONFIG_BASENAME)
+  return localConfigPath(hypHome)
 }
 
 /**

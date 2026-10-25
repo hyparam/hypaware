@@ -2,50 +2,14 @@
 
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
-import path from 'node:path'
 
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { claimPartitionMutation } from '../util/mutation_guard.js'
+import { pidFilePath } from '../runtime/paths.js'
 
 /**
  * @import { PidFileEntry } from '../../../src/core/daemon/types.js'
  */
-
-/**
- * Resolve the directory the daemon uses for runtime state files:
- * `<HYP_HOME>/hypaware/run`. The dispatcher passes `stateRoot`
- * (`<HYP_HOME>/hypaware`); this returns the `run` child.
- *
- * @param {string} stateRoot
- */
-export function daemonRunDir(stateRoot) {
-  return path.join(stateRoot, 'run')
-}
-
-/**
- * Resolve the state root the supervised processing daemon keeps its own
- * runtime files under: `<HYP_HOME>/hypaware/processing`. Its pid, status,
- * control and log paths are the ordinary ones rooted here, so a reader that
- * wants the processor's copy of one derives it through this rather than
- * repeating the segment. The gateway keeps the primary state root.
- *
- * @ref LLP 0038#lifecycle-and-operator-behavior [implements]: the processor's runtime files live below `hypaware/processing`
- * @param {string} stateRoot
- */
-export function processingStateRoot(stateRoot) {
-  return path.join(stateRoot, 'processing')
-}
-
-/**
- * Path to the PID file. There is exactly one daemon per `HYP_HOME`,
- * so a single fixed filename keeps `daemon stop` / `daemon status`
- * simple.
- *
- * @param {string} stateRoot
- */
-export function pidFilePath(stateRoot) {
-  return path.join(daemonRunDir(stateRoot), 'hypaware.pid')
-}
 
 /**
  * Write a PID file atomically (write to `.tmp`, then rename). The

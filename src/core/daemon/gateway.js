@@ -10,7 +10,8 @@ import { cacheTablePath } from '../cache/paths.js'
 import { claimPartitionMutation, isPartitionMutationBusy } from '../util/mutation_guard.js'
 import { installObservability } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { clearPidFile, isDaemonProcess, pidFilePath, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
+import { clearPidFile, isDaemonProcess, processIsAlive, readPidFile, writePidFile } from './pid.js'
+import { cacheRootOf, pidFilePath, processingStateRoot, processingSupervisorDir, stateRootOf } from '../runtime/paths.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
 import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins, recordUnloadableManifests } from './boot_failure.js'
@@ -96,10 +97,10 @@ export function claimDaemonStart(stateRoot, processingControlRoot, entry) {
 export async function runGatewayDaemon(opts = {}) {
   const env = opts.env ?? process.env
   const hypHome = opts.hypHome ?? readObservabilityEnv(env).hypHome
-  const stateRoot = path.join(hypHome, 'hypaware')
+  const stateRoot = stateRootOf(hypHome)
   const processingRoot = processingStateRoot(stateRoot)
-  const processingControlRoot = path.join(processingRoot, 'supervisor')
-  const cacheRoot = path.join(stateRoot, 'cache')
+  const processingControlRoot = processingSupervisorDir(stateRoot)
+  const cacheRoot = cacheRootOf(stateRoot)
   const startedAt = new Date().toISOString()
   const runId = opts.runId ?? `gateway-${process.pid}-${Date.now()}`
   installObservability()

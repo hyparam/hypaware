@@ -10,6 +10,7 @@ import { inventoryBucket, inventoryDay, inventoryKey, summarizeInventoryKeys } f
 import { effectiveRemotes, legacyCredentialName, sameServer } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, resolveAccessJwt } from '../remote/credentials.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { syncCheckProofDir } from '../runtime/paths.js'
 import { sinkInstanceConfig, sinkInstanceName } from '../registry/sinks.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
@@ -189,7 +190,7 @@ export async function runSyncCheck(options, ctx) {
       }
     }
     if (policy !== storage.exportPolicyFingerprint?.()) throw new Error('local export policy changed during the check')
-    const proofFile = path.join(stateDir, 'sync-check', createHash('sha256').update(endpoint.href).digest('hex') + '.json')
+    const proofFile = path.join(syncCheckProofDir(stateDir), createHash('sha256').update(endpoint.href).digest('hex') + '.json')
     const proofs = new Set()
     try {
       if ((await fs.stat(proofFile)).size <= 100_000) {

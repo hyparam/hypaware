@@ -22,6 +22,7 @@ import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime, pluginRegistryFacades } from '../runtime/activation.js'
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { cacheRootOf } from '../runtime/paths.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { activatePlugins, loaderActivationKind } from '../runtime/loader.js'
 import { reclaimPluginTempDirs } from '../runtime/paths.js'
@@ -246,7 +247,7 @@ async function dispatchInternal(argv, opts) {
   if (earlyMatch) noteInvocation({ command: earlyMatch.command.name, kind: 'execution' })
 
   const obsEnv = readObservabilityEnv(env)
-  const cacheRoot = path.join(obsEnv.stateDir, 'cache')
+  const cacheRoot = cacheRootOf(obsEnv.stateDir)
 
   // Inputs the help path uses to list plugin commands without booting.
   // `obsEnv.stateDir` is `<HYP_HOME>/hypaware`: the same `stateRoot`
@@ -388,7 +389,7 @@ async function dispatchInternal(argv, opts) {
   try {
     if (sinkPass) {
       const sinkResult = await materializeSinks(kernel, sinkPass.config, {
-        stateRoot: path.join(obsEnv.hypHome, 'hypaware'),
+        stateRoot: obsEnv.stateDir,
         runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
       })
       for (const err of sinkResult.errors) {

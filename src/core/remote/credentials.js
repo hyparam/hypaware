@@ -1,10 +1,10 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
-import path from 'node:path'
 
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { withFileLock } from '../util/file_lock.js'
+import { credentialsPath } from '../runtime/paths.js'
 import { InvalidGrantError, ServiceTokenStoppedError, exchangeServiceToken, refreshSession, sessionExpiredMessage } from './identity_client.js'
 import { hasServiceTokenPrefix, isServiceTokenShape } from './service_token.js'
 
@@ -30,8 +30,6 @@ import { hasServiceTokenPrefix, isServiceTokenShape } from './service_token.js'
  * (read/compute tools only; cannot author configs or mint tokens), not the
  * all-powerful operator token (LLP 0033 §credential-stakes).
  */
-
-const CREDENTIALS_BASENAME = 'remote-credentials.json'
 
 /** Refresh an `oidc` access JWT once it is within this window of expiry. */
 const REFRESH_SKEW_MS = 60 * 1000
@@ -149,7 +147,7 @@ export function deriveReportsEndpoint(url) {
  * @returns {string}
  */
 export function remoteCredentialsPath(stateDir) {
-  return path.join(stateDir, CREDENTIALS_BASENAME)
+  return credentialsPath(stateDir)
 }
 
 /**

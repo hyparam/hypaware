@@ -51,7 +51,7 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   if (!runId) throw new Error('createPluginPaths: runId is required')
 
   const stateDir = pluginStateDir(stateRoot, pluginName)
-  const cacheDir = path.join(stateRoot, 'cache', 'plugins', pluginName)
+  const cacheDir = path.join(cacheRootOf(stateRoot), 'plugins', pluginName)
   const tempBase = tmpRoot ?? os.tmpdir()
   // `runId` reaches here straight from `DEV_RUN_ID` (or similar) and is not
   // otherwise validated, so without sanitizing it the same way as `pluginName`
@@ -154,4 +154,360 @@ export function pluginStateDir(stateRoot, pluginName) {
  */
 function sanitizeTempSegment(name) {
   return name.replace(/\//g, '__').replace(/[^A-Za-z0-9._@-]/g, '_')
+}
+
+// ---------------------------------------------------------------------------
+// Kernel-owned state paths
+//
+// Every file and directory the kernel itself keeps under `HYP_HOME` is named
+// here and nowhere else. Stores import the function for their file; they do
+// not carry a directory constant of their own. The layout is the one LLP 0004
+// describes; the segment strings below are the single place to change when it
+// moves.
+// @ref LLP 0557#phase-1-one-definition-no-disk-change [implements]: one module names every kernel state path, so a layout change is a diff here plus a fixture
+// ---------------------------------------------------------------------------
+
+const HYP_HOME_DIRNAME = '.hyp'
+const STATE_ROOT_DIRNAME = 'hypaware'
+
+/**
+ * `HYP_HOME`: the env override when set, else `<home>/.hyp`.
+ *
+ * `homeDir` stands in for `os.homedir()` for callers that operate on a
+ * specific home (a disk-driven detach, every sandboxed test) and must not fall
+ * through to the ambient one. An empty string is never a home: it would make
+ * the result cwd-relative, so it falls through like `undefined`.
+ * @ref LLP 0300#home-resolution [constrained-by]: '' is never a home
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [homeDir]
+ * @returns {string}
+ */
+export function hypHomeFromEnv(env = process.env, homeDir) {
+  if (env.HYP_HOME) return env.HYP_HOME
+  return path.join(homeDir || os.homedir(), HYP_HOME_DIRNAME)
+}
+
+/**
+ * The kernel state root, `<HYP_HOME>/hypaware`.
+ * @param {string} hypHome
+ * @returns {string}
+ */
+export function stateRootOf(hypHome) {
+  return path.join(hypHome, STATE_ROOT_DIRNAME)
+}
+
+/**
+ * `stateRootOf(hypHomeFromEnv(env, homeDir))`, for the callers that have no
+ * booted kernel to ask (detach, uninstall, the update check).
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [homeDir]
+ * @returns {string}
+ */
+export function stateRootFromEnv(env = process.env, homeDir) {
+  return stateRootOf(hypHomeFromEnv(env, homeDir))
+}
+
+/**
+ * The user's local config layer, `<HYP_HOME>/hypaware-config.json`. Named
+ * here so the state tree below it and the config beside it come from one
+ * place; `config/schema.js` owns reading and writing it.
+ */
+export const LOCAL_CONFIG_BASENAME = 'hypaware-config.json'
+
+/** @param {string} hypHome @returns {string} */
+export function localConfigPath(hypHome) {
+  return path.join(hypHome, LOCAL_CONFIG_BASENAME)
+}
+
+/**
+ * Root of the capture spools, `<HYP_HOME>/spool`. Each client adapter that
+ * spools raw bodies owns one child directory.
+ * @ref LLP 0253#spool-location [implements]: a path under the HypAware home is what `hyp purge` and detach can find without being told
+ * @param {string} hypHome
+ * @returns {string}
+ */
+export function captureSpoolRoot(hypHome) {
+  return path.join(hypHome, 'spool')
+}
+
+/**
+ * Where `hyp ask` keeps its first-look evidence, `<HYP_HOME>/ask`.
+ * @param {string} hypHome
+ * @returns {string}
+ */
+export function askRoot(hypHome) {
+  return path.join(hypHome, 'ask')
+}
+
+/**
+ * The intrinsic query cache, `<stateRoot>/cache`.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function cacheRootOf(stateRoot) {
+  return path.join(stateRoot, 'cache')
+}
+
+/**
+ * Remote credentials (tokens for every enrolled server), mode 0600.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function credentialsPath(stateRoot) {
+  return path.join(stateRoot, 'remote-credentials.json')
+}
+
+/**
+ * The ledger of client assets HypAware itself wrote. A sibling of
+ * `config-control/`, not inside it: this is not a control-plane marker.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function clientAssetLedgerPath(stateRoot) {
+  return path.join(stateRoot, 'client-assets.json')
+}
+
+/**
+ * The central config-control directory: the applied slots, their etags, the
+ * active-slot pointer, the join seed, the apply state and the action marker.
+ * @ref LLP 0031#physical-layout [implements]: the central layer's files live together, off the user-facing config path
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function configControlDir(stateRoot) {
+  return path.join(stateRoot, 'config-control')
+}
+
+/**
+ * The apply engine's own state record.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function configControlStatePath(stateRoot) {
+  return path.join(configControlDir(stateRoot), 'state.json')
+}
+
+/**
+ * The active-slot pointer: a relative symlink at this path naming the live
+ * `config.{a,b}.json` slot. Kept inside `config-control/` so the user's local
+ * config is a plain file and the atomic symlink flip stays crash-safe.
+ * @ref LLP 0031#physical-layout [constrained-by]: active-slot pointer relocated into config-control/
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function configControlActivePath(stateRoot) {
+  return path.join(configControlDir(stateRoot), 'active')
+}
+
+/**
+ * The join seed: the initial central layer `hyp join` writes (mode 0600, it
+ * holds the policy token), retired by the first successful apply.
+ * @ref LLP 0031#physical-layout [implements]: dedicated central-seed file, not hypaware-config.json
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function configControlSeedPath(stateRoot) {
+  return path.join(configControlDir(stateRoot), 'seed.json')
+}
+
+/**
+ * An applied central config slot.
+ * @param {string} stateRoot
+ * @param {'a' | 'b'} slot
+ * @returns {string}
+ */
+export function configSlotPath(stateRoot, slot) {
+  return path.join(configControlDir(stateRoot), `config.${slot}.json`)
+}
+
+/**
+ * The etag recorded beside an applied slot.
+ * @param {string} stateRoot
+ * @param {'a' | 'b'} slot
+ * @returns {string}
+ */
+export function configSlotEtagPath(stateRoot, slot) {
+  return path.join(configControlDir(stateRoot), `config.${slot}.etag`)
+}
+
+/**
+ * The client-action marker: which central requests this host has completed.
+ * @ref LLP 0041#idempotency-and-completion-state [implements]: marker file config-control/client-actions.json
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function clientActionsPath(stateRoot) {
+  return path.join(configControlDir(stateRoot), 'client-actions.json')
+}
+
+/**
+ * Per-request lifecycle locks for client actions, one file per
+ * `(kind, requestKey)` while it is held. Released locks are deleted, so the
+ * directory holds only the keys someone is working on right now.
+ * @ref LLP 0523#two-locks [implements]: a per-key lock around the effect, a brief store lock around the marker write
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function clientActionLocksDir(stateRoot) {
+  return path.join(configControlDir(stateRoot), 'client-action-locks')
+}
+
+/**
+ * One of the four usage-policy records. Each is a `version` and one value,
+ * written by the same commands and read together at boot.
+ * @param {string} stateRoot
+ * @param {'first-sync-hold' | 'folder-ask' | 'local-only' | 'client-sync'} kind
+ * @returns {string}
+ */
+export function usagePolicyPath(stateRoot, kind) {
+  return path.join(stateRoot, 'usage-policy', `${kind}.json`)
+}
+
+/**
+ * Persistent session opt-outs, one marker file per ignored session.
+ * @ref LLP 0403#storage [implements]: independent markers persist opt-outs
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function sessionIgnoresDir(stateRoot) {
+  return path.join(stateRoot, 'session-ignores')
+}
+
+/**
+ * Product telemetry: the opt-in policy, the delivery record and the outbox
+ * queue, all below one root (`product_telemetry/outbox.js` names the children).
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function productTelemetryRoot(stateRoot) {
+  return path.join(stateRoot, 'product-telemetry')
+}
+
+/**
+ * `hyp sync-check` proofs, one file per server endpoint.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function syncCheckProofDir(stateRoot) {
+  return path.join(stateRoot, 'sync-check')
+}
+
+/**
+ * The local proxy certificate authority (`tls/ca.js` names the files).
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function tlsDir(stateRoot) {
+  return path.join(stateRoot, 'tls')
+}
+
+/**
+ * Dev-telemetry JSONL outputs, written only with `HYP_DEV_TELEMETRY=1`.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function devTelemetryDir(stateRoot) {
+  return path.join(stateRoot, 'dev-telemetry')
+}
+
+/**
+ * The daemon's runtime files (pid, status, control channel). The processing
+ * daemon keeps its own copy of this tree below `processingStateRoot`.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function daemonRunDir(stateRoot) {
+  return path.join(stateRoot, 'run')
+}
+
+/**
+ * The PID file. There is exactly one daemon per `HYP_HOME`, so a single fixed
+ * filename keeps `daemon stop` / `daemon status` simple.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function pidFilePath(stateRoot) {
+  return path.join(daemonRunDir(stateRoot), 'hypaware.pid')
+}
+
+/**
+ * The daemon status snapshot, rewritten at each lifecycle transition so a
+ * parallel `hyp daemon status --json` sees a consistent picture without
+ * walking the kernel.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function statusFilePath(stateRoot) {
+  return path.join(daemonRunDir(stateRoot), 'status.json')
+}
+
+/**
+ * The self-update check record (last check, latest version, boot failures).
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function selfUpdateStatePath(stateRoot) {
+  return path.join(daemonRunDir(stateRoot), 'self-update.json')
+}
+
+/**
+ * The daemon's line-oriented log directory. OTel logs land in
+ * `devTelemetryDir` or go over OTLP; this holds the sidecar a human tails.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function daemonLogDir(stateRoot) {
+  return path.join(stateRoot, 'logs')
+}
+
+/**
+ * The daemon's structured log. The name is fixed per `HYP_HOME` so
+ * `tail -F` survives restarts; the run id is inside each record.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function daemonLogPath(stateRoot) {
+  return path.join(daemonLogDir(stateRoot), 'daemon.log')
+}
+
+/**
+ * The state root the supervised processing daemon keeps its own runtime files
+ * under. Its pid, status, control and log paths are the ordinary ones rooted
+ * here, so a reader that wants the processor's copy of one derives it through
+ * this rather than repeating the segment. The gateway keeps the primary root.
+ * @ref LLP 0038#lifecycle-and-operator-behavior [implements]: the processor's runtime files live below `hypaware/processing`
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function processingStateRoot(stateRoot) {
+  return path.join(stateRoot, 'processing')
+}
+
+/**
+ * The gateway's supervisor control files for the processing child.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function processingSupervisorDir(stateRoot) {
+  return path.join(processingStateRoot(stateRoot), 'supervisor')
+}
+
+/**
+ * Per-sink-instance state (export progress, diagnostic history).
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function sinksRoot(stateRoot) {
+  return path.join(stateRoot, 'sinks')
+}
+
+/**
+ * A sink instance's retained failure diagnostics.
+ * @param {string} stateRoot
+ * @param {string} instance
+ * @returns {string}
+ */
+export function sinkOutboxDir(stateRoot, instance) {
+  return path.join(sinksRoot(stateRoot), instance, 'outbox')
 }

@@ -13,7 +13,8 @@ import { purgeCache, purgeCleanupFrom, purgeObservationsFrom, purgeSkipsFrom } f
 import { createSessionPurgeStore } from '../cache/session-purges.js'
 import { BUILTIN_ORIGIN_ALIASES, canonicalRemoteName, effectiveRemotes, legacyCredentialName } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, readCredentials, remoteTokenEnvVar, resolveAccessJwt } from '../remote/credentials.js'
-import { captureSpoolRoot, sweepCaptureSpool } from '../capture_spool.js'
+import { sweepCaptureSpool } from '../capture_spool.js'
+import { captureSpoolRoot } from '../runtime/paths.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/index.js'
 
 /**

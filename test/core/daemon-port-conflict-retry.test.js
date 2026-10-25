@@ -295,7 +295,7 @@ import fs from 'node:fs'
 import net from 'node:net'
 import { runDaemonRun } from ${JSON.stringify(moduleUrl('src/core/commands/daemon.js'))}
 import { collectHypAwareStatus, readStatusFile } from ${JSON.stringify(moduleUrl('src/core/daemon/status.js'))}
-import { pidFilePath } from ${JSON.stringify(moduleUrl('src/core/daemon/pid.js'))}
+import { pidFilePath } from ${JSON.stringify(moduleUrl('src/core/runtime/paths.js'))}
 const hypHome = ${JSON.stringify(hypHome)}
 const configPath = ${JSON.stringify(configPath)}
 const stateRoot = hypHome + '/hypaware'

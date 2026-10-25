@@ -12,7 +12,8 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { runDaemonStatus } from '../../src/core/commands/daemon.js'
-import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { statusFilePath } from '../../src/core/runtime/paths.js'
 import { DEFAULT_TELEMETRY_PORT } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
 import {
   runSessionIgnore,

@@ -27,7 +27,7 @@ import { listLiveDataFiles, physicalProjection } from '../cache/iceberg/store.js
 import { AI_GATEWAY_MESSAGES_DATASET } from '../backfill/scan_util.js'
 import { discoverSpoolTables, QUERY_FLUSH_FAILURE_COOLDOWN_MS, readFlushFailure } from '../cache/spool.js'
 import { resolveLayeredConfig } from '../config/merge.js'
-import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
+import { readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins, unloadableInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
@@ -42,7 +42,7 @@ import { sinkInstanceName } from '../registry/sinks.js'
 import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_history.js'
 import { readHeldDatasets } from '../sinks/held_datasets.js'
 import { instanceWatermarkStateDir } from '../sinks/incremental.js'
-import { pluginStateDir } from '../runtime/paths.js'
+import { cacheRootOf, daemonLogPath, devTelemetryDir, pluginStateDir, processingStateRoot, sinksRoot, statusFilePath } from '../runtime/paths.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { isEphemeralRecordedBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
@@ -63,7 +63,6 @@ import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
 import { BOOT_FAILED_WARNING_PREFIX, MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, SINK_MATERIALIZE_FAILED_WARNING_PREFIX, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
-import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
   isLaunchAgentInstalled,
@@ -74,8 +73,6 @@ import {
   systemdUnitStatus,
 } from './linux.js'
 import {
-  daemonRunDir,
-  processingStateRoot,
   processIsAlive,
   readPidFile,
 } from './pid.js'
@@ -105,17 +102,6 @@ import {
  * excludes this and every other non-capture plugin.
  */
 const CENTRAL_ENROLLMENT_PLUGIN = '@hypaware/central'
-
-/**
- * Path to the daemon status file. Written by the daemon at each
- * lifecycle transition so a parallel `hyp daemon status --json` call
- * sees a consistent snapshot without having to walk the kernel.
- *
- * @param {string} stateRoot
- */
-export function statusFilePath(stateRoot) {
-  return path.join(daemonRunDir(stateRoot), 'status.json')
-}
 
 /**
  * Write a status file atomically (write to `.tmp`, then rename). The
@@ -1959,8 +1945,8 @@ export async function collectHypAwareStatus(opts = {}) {
   // which. Same two paths `recent_errors` counts (LLP 0349), derived the same
   // way, so the pointer cannot drift from the store it points at.
   const activationLogGrep = reportedFailures.length === 0 ? ''
-    : `grep -s plugin_activate_failed ${path.join(daemonLogDir(stateRoot), 'daemon.log')} `
-      + `${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')}`
+    : `grep -s plugin_activate_failed ${daemonLogPath(stateRoot)} `
+      + `${daemonLogPath(processingStateRoot(stateRoot))}`
   // The daemon's *own* sink rows, not the `sinks` list this collector builds
   // further down: that one starts from `config.sinks`, where a request
   // instance names its plugin whether or not anything came of it, so it would
@@ -2079,7 +2065,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
   const sinkMaterializePrefix = `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: `
   // Also the first repair of the probation and recent-errors hints below.
-  const sinkMaterializeLogGrep = `grep -s sink_materialize_failed ${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')} ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`
+  const sinkMaterializeLogGrep = `grep -s sink_materialize_failed ${daemonLogPath(processingStateRoot(stateRoot))} ${daemonLogPath(stateRoot)}`
   const sinkMaterializeFailures = snapshotIsLive && Array.isArray(daemonStatusFile?.warnings)
     ? daemonStatusFile.warnings.filter((w) => typeof w === 'string' && w.startsWith(sinkMaterializePrefix))
     : []
@@ -2116,7 +2102,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // process records this door, because the manifest walk runs before any
   // plugin is selected and so sees the same set in both processes.
   const manifestLogGrep = unloadableManifests.length === 0 ? ''
-    : `grep -s plugin_manifest_unloadable ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`
+    : `grep -s plugin_manifest_unloadable ${daemonLogPath(stateRoot)}`
   for (const entry of unloadableManifests) {
     const rootDir = sanitizeLabel(entry.rootDir, MAX_ACTIVATION_MESSAGE_CHARS)
     if (rootDir === undefined) continue
@@ -2368,7 +2354,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const clients = []
   /** @type {CaptureHealthReport[]} */
   const captureHealth = []
-  const cacheRoot = opts.runtime?.storage?.cacheRoot ?? path.join(stateRoot, 'cache')
+  const cacheRoot = opts.runtime?.storage?.cacheRoot ?? cacheRootOf(stateRoot)
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
   let capturePid
   try { capturePid = readPidFile(stateRoot) } catch { /* Unreadable identity stays unconfirmed. */ }
@@ -4613,9 +4599,9 @@ async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, roll
     }
   }
   const [gatewayLog, processingLog, sinkOutbox, devTelemetry] = await Promise.all([
-    countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs, rollbackAtMs),
-    countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs, rollbackAtMs),
-    countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs, nowMs, lastSuccess),
+    countDaemonLogErrors(daemonLogPath(stateRoot), sinceMs, rollbackAtMs),
+    countDaemonLogErrors(daemonLogPath(processingStateRoot(stateRoot)), sinceMs, rollbackAtMs),
+    countSinkOutboxBatches(sinksRoot(stateRoot), sinceMs, nowMs, lastSuccess),
     countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
   ])
   const daemonLog = gatewayLog.count + processingLog.count

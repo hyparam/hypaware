@@ -68,10 +68,11 @@ Three things are wrong with it, in order of cost:
 1. **No single definition.** `src/core/runtime/paths.js` knows the plugin
    dirs and nothing else. The config-control dir name is a constant in two
    files; the usage-policy dir name is a constant in four; `HYP_HOME` is
-   resolved by hand in `activation.js`, `self_update.js`,
-   `client_asset_ledger.js`, `tls/ca.js`, `walkthrough.js`, `ask.js` and
-   `observability/env.js`. Any layout change today is a seventeen-file diff
-   with no test that checks the result is coherent.
+   resolved by hand in nine modules (`activation.js`, `self_update.js`,
+   `client_asset_ledger.js`, `tls/ca.js`, `walkthrough.js`, `ask.js`,
+   `commands/daemon.js`, `commands/config.js` and `observability/env.js`).
+   Any layout change today is a twenty-file diff with no test that checks
+   the result is coherent.
 2. **Inconsistent shape for the same kind of thing.** Four one-key JSON files
    in `usage-policy/` are written together and read together. Two session
    ignores are two files named by hash. `client-assets.json` is a bare file
@@ -228,44 +229,65 @@ Each phase is one PR. A phase must not start until the previous one is on
 Extend `src/core/runtime/paths.js`, the existing home for kernel path logic,
 with the remaining kernel paths. No new module.
 
-- `resolveHypHome(env, homeDir?)` and `stateRootOf(hypHome)`: the one place
-  `HYP_HOME` and the `hypaware` segment are resolved.
-  `readObservabilityEnv` calls them and keeps its shape.
-- `statePaths(stateRoot)`: returns the current (old) path of every file and
-  folder in the inventory above, by stable key. Pure, no IO.
-- The daemon helpers (`daemonRunDir`, `daemonLogDir`, `processingStateRoot`,
-  `pidFilePath`, `statusFilePath`) derive from it.
-- Each of the seventeen modules imports its path from here and drops its
-  local constant. The list: `config/apply.js`, `config/action_reconciler.js`,
-  `config/client_recording.js`, `config/apply_deps.js`,
-  `config/schema.js` (backup path), `usage-policy/{first_sync_hold,
-  folder_ask, local_only, client_sync}.js`, `product_telemetry/{policy,
-  outbox}.js`, `control/session_ignore_store.js`,
-  `runtime/client_asset_ledger.js`, `remote/credentials.js`,
-  `update/self_update.js`, `daemon/{pid,logs,status,gateway}.js`,
-  `capture_spool.js`, `tls/ca.js`, `runtime/activation.js`,
-  `cli/walkthrough.js`, `commands/ask.js`.
-- One test pins `statePaths` against the literal current layout, so phase 2
-  is a diff against a fixture rather than a hunt.
+- `hypHomeFromEnv(env, homeDir?)`, `stateRootOf(hypHome)` and
+  `stateRootFromEnv(env, homeDir?)`: the one place `HYP_HOME` and the
+  `hypaware` segment are resolved. `readObservabilityEnv` calls them and
+  keeps its shape. `homeDir` stands in for `os.homedir()` so the LLP 0300
+  callers pass `env.HOME` and an empty string still falls through.
+- One pure function per file or folder in the inventory above
+  (`configControlDir`, `configSlotPath(root, slot)`,
+  `usagePolicyPath(root, kind)`, `sessionIgnoresDir`, `statusFilePath`,
+  `sinkOutboxDir(root, instance)`, and so on). Functions rather than one
+  path bag, so a per-message caller allocates one string, as today, and
+  not an object of thirty.
+- The daemon helpers (`daemonRunDir`, `daemonLogDir`, `daemonLogPath`,
+  `processingStateRoot`, `pidFilePath`, `statusFilePath`,
+  `selfUpdateStatePath`), `devTelemetryDir` and `captureSpoolRoot` move
+  here from `daemon/pid.js`, `daemon/logs.js`, `daemon/status.js`,
+  `update/self_update.js`, `observability/env.js` and `capture_spool.js`;
+  their importers follow. No re-exports.
+- Domain helpers that many callers and tests already import by name
+  (`centralSeedPath`, `localOnlyListPath`, `remoteCredentialsPath`,
+  `clientAssetStateRoot`, `defaultStateRoot`, `productRoot`,
+  `walkthrough.resolveHypHome`) keep their names and delegate.
+- Every other module drops its local constant or inline join and calls
+  the helper: `config/apply.js`, `config/action_reconciler.js`,
+  `config/client_recording.js`, `config/schema.js` (the config basename,
+  as `LOCAL_CONFIG_BASENAME`), `usage-policy/{first_sync_hold, folder_ask,
+  local_only, client_sync}.js`, `product_telemetry/policy.js`,
+  `control/session_ignore_store.js`, `runtime/client_asset_ledger.js`,
+  `remote/credentials.js`, `update/self_update.js`,
+  `daemon/{pid,logs,status,gateway,runtime,control}.js`, `sinks/driver.js`,
+  `tls/ca.js`, `runtime/{activation,boot}.js`, `cli/{walkthrough,
+  dispatch}.js`, `commands/{ask,daemon,config,sync-check}.js`, and the
+  Claude plugin's `hook_command.js`, which reached into the plugin state
+  dir by literal path. `product_telemetry/outbox.js` keeps its children
+  relative to the root it is given; phase 2 splits that root.
+- `test/core/state-paths.test.js` pins every helper against the literal
+  current layout, so phase 2 is a diff against a fixture rather than a
+  hunt, and scans `src/` and the bundled plugins for any `path.join` of
+  a state-root identifier with a layout literal outside `paths.js`.
 
 Exit: `npm test` unchanged except the new test; `npm run typecheck` clean;
 `du`/`find` on a running install shows the same tree before and after.
+Landed on branch `state-layout`.
 
 ### Phase 2: flip the layout and move
 
-- `statePaths` returns the target layout. The phase 1 fixture becomes the
+- The helpers return the target layout. The phase 1 fixture becomes the
   old layout and a second fixture pins the new one.
 - `migrateStateLayout(stateRoot)` runs once per process before any reader
   opens a state file: at daemon start, and at CLI boot when no daemon pid is
   live. For each (old, new) pair in the fixture: if old exists and new does
   not, `mkdir -p` the parent and `rename`. Same filesystem, atomic, about
   twenty `stat` calls. A crash halfway resumes on the next boot. Each move
-  is logged at info with `component=state-layout`.
+  is logged at info with `component=state-layout`. The (old, new) table is
+  the two fixtures zipped by key, not a third list.
 - A live daemon from the previous release is not disturbed. For that one
   release, a CLI that finds a file at neither new path nor old path treats
   it as absent, as today, and a file found only at the old path is read
   from there. The fallback is one `stat` per cold file per boot and lives in
-  `statePaths`, not in the stores.
+  `paths.js`, not in the stores.
 - `run/` files are not moved. They are ephemeral; the new daemon writes
   under `run/gateway/` and `run/processing/` and removes the old `run/*`
   and `processing/` leftovers after claiming its pid.

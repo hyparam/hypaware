@@ -8,13 +8,13 @@
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { isEphemeralBinPath } from '../cli/global_install.js'
 import { warningsRecordBootFailure } from '../daemon/boot_failure.js'
-import { daemonRunDir, processIsAlive, readPidFile } from '../daemon/pid.js'
+import { processIsAlive, readPidFile } from '../daemon/pid.js'
+import { daemonRunDir, localConfigPath, selfUpdateStatePath, stateRootFromEnv, statusFilePath } from '../runtime/paths.js'
 import { LAUNCH_LABEL } from '../daemon/platform.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { isLoopbackHost } from '../util/loopback.js'
@@ -122,7 +122,7 @@ export function detectSupervisor(env) {
 function resolveLocalConfigPath(opts) {
   if (opts.configPath) return path.resolve(opts.configPath)
   if (opts.env.HYP_CONFIG) return path.resolve(opts.env.HYP_CONFIG)
-  return path.join(path.dirname(opts.stateRoot), CONFIG_BASENAME)
+  return localConfigPath(path.dirname(opts.stateRoot))
 }
 
 /**
@@ -159,16 +159,7 @@ export function readLocalConfigAutoUpdate(opts) {
  * @returns {string}
  */
 export function selfUpdateStateRoot(env) {
-  const hypHome = env.HYP_HOME || path.join(os.homedir(), '.hyp')
-  return path.join(hypHome, 'hypaware')
-}
-
-/**
- * @param {string} stateRoot
- * @returns {string}
- */
-export function selfUpdateStatePath(stateRoot) {
-  return path.join(daemonRunDir(stateRoot), 'self-update.json')
+  return stateRootFromEnv(env)
 }
 
 /**
@@ -561,7 +552,7 @@ export function shouldCheckNow({ state, nowMs, eager, jitter }) {
  */
 export function previousBootLooksStuck(stateRoot) {
   try {
-    const raw = readFileIfExistsSync(path.join(daemonRunDir(stateRoot), 'status.json'))
+    const raw = readFileIfExistsSync(statusFilePath(stateRoot))
     if (!raw) return false
     const parsed = JSON.parse(raw)
     if (parsed?.state === 'starting') return true

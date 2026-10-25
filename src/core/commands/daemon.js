@@ -1,7 +1,7 @@
 // @ts-check
 
-import os from 'node:os'
 import path from 'node:path'
+import { hypHomeFromEnv, stateRootOf } from '../runtime/paths.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
@@ -39,7 +39,7 @@ export async function runDaemonRun(argv, ctx, deps = {}) {
   const { waitBeforeBindRetry, BIND_RETRY_INTERVAL_MS } = gateway
   const runDaemon = deps.runDaemon ?? gateway.runGatewayDaemon
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would put the daemon's state root at ./.hyp)
-  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
+  const hypHome = hypHomeFromEnv(ctx.env, ctx.env.HOME)
   // A staged restart (config apply, rollback, reload) needs a fresh process
   // (LLP 0017). A service manager provides one; a foreground run nobody
   // relaunches (a container) used to exit 75 and take the gateway down with it
@@ -70,7 +70,7 @@ export async function runDaemonRun(argv, ctx, deps = {}) {
       env: ctx.env,
       stdout: ctx.stdout,
       stderr: ctx.stderr,
-      stagedConfigPath: () => resolveCentralLayerPath({ stateRoot: path.join(hypHome, 'hypaware') }) ?? resolveConfigPath({ explicit: parsed.configPath, env: ctx.env, hypHome }),
+      stagedConfigPath: () => resolveCentralLayerPath({ stateRoot: stateRootOf(hypHome) }) ?? resolveConfigPath({ explicit: parsed.configPath, env: ctx.env, hypHome }),
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -308,7 +308,8 @@ export async function runDaemonStatus(argv, ctx) {
  */
 async function clearStaleDaemonPidFiles(stateRoot) {
   try {
-    const { clearStalePidFile, processingStateRoot } = await import('../daemon/pid.js')
+    const { clearStalePidFile } = await import('../daemon/pid.js')
+    const { processingStateRoot } = await import('../runtime/paths.js')
     clearStalePidFile(stateRoot)
     clearStalePidFile(processingStateRoot(stateRoot))
   } catch { /* an unloadable pid module outlives this teardown */ }
@@ -437,7 +438,8 @@ export async function runDaemonRestart(argv, ctx) {
   if (!parsed.ok) return parsed.code
   if (parsed.params.processing === true) {
     const { readStatusFile } = await import('../daemon/status.js')
-    const { readPidFile, processIsAlive, processingStateRoot } = await import('../daemon/pid.js')
+    const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
+    const { processingStateRoot } = await import('../runtime/paths.js')
     const { writeControlRequest } = await import('../daemon/control.js')
     const stateRoot = readObservabilityEnv(ctx.env).stateDir
     const status = readStatusFile(stateRoot)

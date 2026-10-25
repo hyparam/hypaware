@@ -1,7 +1,6 @@
 // @ts-check
 
 import process from 'node:process'
-import path from 'node:path'
 import { createProductClient, productAdapters } from '../product_telemetry/client.js'
 import { productEvent } from '../product_telemetry/collection.js'
 
@@ -38,15 +37,14 @@ import {
 import {
   clearPidFile,
   clearStalePidFile,
-  pidFilePath,
   processIsAlive,
-  processingStateRoot,
   readPidFile,
   writePidFile,
 } from './pid.js'
 import { DAEMON_STOP_TIMEOUT_MS } from './service_ops.js'
 import { openDaemonLog } from './logs.js'
-import { readSourceIdentity, readStatusFile, sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { readSourceIdentity, readStatusFile, sourceHealth, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { pidFilePath, processingStateRoot, sinkOutboxDir, statusFilePath } from '../runtime/paths.js'
 import {
   detectSupervisor,
   readSelfPackageIdentity,
@@ -706,7 +704,7 @@ export async function runDaemon(opts = {}) {
   const historyNow = Date.now()
   for (const handle of boot.runtime.sinks.listHandles()) {
     const instance = sinkInstanceName(handle)
-    const dir = path.join(stateRoot, 'sinks', instance, 'outbox')
+    const dir = sinkOutboxDir(stateRoot, instance)
     const success = Date.parse(sinkSnapshots.get(instance)?.lastSuccessAt ?? '')
     const recoveredAt = Number.isFinite(success) && success <= historyNow ? success : -Infinity
     try {

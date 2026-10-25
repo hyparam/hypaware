@@ -1,7 +1,7 @@
 // @ts-check
 
 import { JsonlSpanExporter } from './jsonl_exporters.js'
-import { devTelemetryDir } from './env.js'
+import { devTelemetryDir } from '../runtime/paths.js'
 import { OtlpSpanExporter, OTLP_EXPORT_TIMEOUT_MS } from './otlp_exporters.js'
 import { trace, TracerProvider } from './runtime.js'
 
