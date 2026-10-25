@@ -17,6 +17,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { activatePlugins } from './loader.js'
 import { createKernelRuntime } from './activation.js'
+import { cacheRootOf, stateRootOf } from './paths.js'
 import { buildSourceWithholdResolver, ensureClientSyncMigration } from './source_withhold.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import {
@@ -61,8 +62,8 @@ export async function bootKernel(opts = {}) {
   const env = opts.env ?? process.env
   const obsEnv = readObservabilityEnv(env)
   const hypHome = opts.hypHome ?? obsEnv.hypHome
-  const stateRoot = path.join(hypHome, 'hypaware')
-  const cacheRoot = opts.cacheRoot ?? path.join(stateRoot, 'cache')
+  const stateRoot = stateRootOf(hypHome)
+  const cacheRoot = opts.cacheRoot ?? cacheRootOf(stateRoot)
   const mode = opts.mode ?? 'cli'
   const runId = opts.runId ?? obsEnv.devRunId ?? `boot-${process.pid}-${Date.now()}`
   const bootProfile = opts.bootProfile ?? 'config'

@@ -13,9 +13,9 @@ import { collectSinkSnapshots, recoverSinkSnapshots, runDaemon } from '../../src
 import {
   probeClientAttachFromDescriptor,
   readStatusFile,
-  statusFilePath,
   writeStatusFile,
 } from '../../src/core/daemon/status.js'
+import { statusFilePath } from '../../src/core/runtime/paths.js'
 import {
   ClientSettingsPathError,
   resolveClientSettingsPath,

@@ -16,7 +16,8 @@ import {
   writeControlRequest,
 } from '../../src/core/daemon/control.js'
 import { requestDaemonStop, runDaemon } from '../../src/core/daemon/runtime.js'
-import { pidFilePath, processIsAlive, processingStateRoot, writePidFile, readPidFile } from '../../src/core/daemon/pid.js'
+import { processIsAlive, writePidFile, readPidFile } from '../../src/core/daemon/pid.js'
+import { pidFilePath, processingStateRoot } from '../../src/core/runtime/paths.js'
 import { resolveHypHome } from '../../src/core/cli/walkthrough.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 

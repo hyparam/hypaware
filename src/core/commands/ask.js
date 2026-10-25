@@ -1,6 +1,7 @@
 // @ts-check
 
 import { collectHypAwareStatus } from '../daemon/status.js'
+import { askRoot, hypHomeFromEnv } from '../runtime/paths.js'
 import { buildWalkthroughClientDescriptorMap } from '../cli/walkthrough.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/stdio.js'
@@ -397,11 +398,11 @@ async function prepareEvidenceFromCtx(ctx, descriptors, client) {
   const runner = overviewRunnerFromCtx(ctx, firstLookNoticeSink(ctx.stderr))
   if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) return undefined
   const homeDir = ctx.env.HOME || os.homedir()
-  const hypHome = ctx.env.HYP_HOME || path.join(homeDir, '.hyp')
+  const hypHome = hypHomeFromEnv(ctx.env, homeDir)
   const descriptor = descriptors.get(client)
   return prepareFirstAskEvidence({
     runner,
-    root: path.join(hypHome, 'ask'),
+    root: askRoot(hypHome),
     homeDir,
     ...(descriptor?.skillDir ? { client: { skillDir: descriptor.skillDir, ...(descriptor.agentDir ? { agentDir: descriptor.agentDir } : {}) } } : {}),
     say: (line) => ctx.stdout.write(`${line}\n`),

@@ -1,7 +1,7 @@
 // @ts-check
 
-import os from 'node:os'
 import path from 'node:path'
+import { hypHomeFromEnv } from '../runtime/paths.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
@@ -80,6 +80,6 @@ function parseConfigValidateArgv(argv, env) {
   if (p.file) return { configPath: path.resolve(p.file) }
   if (env.HYP_CONFIG) return { configPath: path.resolve(env.HYP_CONFIG) }
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make `.hyp` cwd-relative)
-  const hypHome = env.HYP_HOME || path.join(env.HOME || os.homedir(), '.hyp')
+  const hypHome = hypHomeFromEnv(env, env.HOME)
   return { configPath: defaultConfigPath(hypHome) }
 }

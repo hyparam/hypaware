@@ -8,7 +8,7 @@ import test from 'node:test'
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
-import { devTelemetryDir } from '../../src/core/observability/env.js'
+import { devTelemetryDir } from '../../src/core/runtime/paths.js'
 import { installObservability, readObservabilityEnv } from '../../src/core/observability/index.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'

@@ -1,9 +1,9 @@
 // @ts-check
 
-import os from 'node:os'
 import path from 'node:path'
 
 import { Attr, getLogger } from '../observability/index.js'
+import { cacheRootOf, stateRootFromEnv } from './paths.js'
 import { createConfigRegistry } from '../config/schema.js'
 import { createCapabilityRegistry } from '../registry/capabilities.js'
 import { createClientRegistry } from '../registry/clients.js'
@@ -111,8 +111,7 @@ export function createKernelRuntime(opts = {}) {
  * still override it through `opts.cacheRoot`.
  */
 function defaultCacheRoot() {
-  const hypHome = process.env.HYP_HOME || path.join(os.homedir(), '.hyp')
-  return path.join(hypHome, 'hypaware', 'cache')
+  return cacheRootOf(stateRootFromEnv(process.env))
 }
 
 /**

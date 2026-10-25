@@ -5,12 +5,13 @@ import fs from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { MAX_CONFIG_DOCUMENT_BYTES, resolveCentralLayerPath } from '../config/apply.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { productTelemetryRoot } from '../runtime/paths.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { readSmallJson } from './outbox.js'
 
 /** @param {NodeJS.ProcessEnv} [env] */
 export function productRoot(env = process.env) {
-  return path.join(readObservabilityEnv(env).stateDir, 'product-telemetry')
+  return productTelemetryRoot(readObservabilityEnv(env).stateDir)
 }
 /** @param {unknown} value */
 function hash(value) {

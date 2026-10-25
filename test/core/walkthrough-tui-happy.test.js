@@ -15,7 +15,7 @@ import {
   installObservability,
   readObservabilityEnv,
 } from '../../src/core/observability/index.js'
-import { devTelemetryDir } from '../../src/core/observability/env.js'
+import { devTelemetryDir } from '../../src/core/runtime/paths.js'
 
 /**
  * Build a PassThrough pair that satisfies the TUI runtime's `isTTY` and

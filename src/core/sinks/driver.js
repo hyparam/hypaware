@@ -8,6 +8,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { sinkInstanceName, onSinkHandleClose } from '../registry/sinks.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { sinkOutboxDir } from '../runtime/paths.js'
 import { createDiagnosticHistory } from './diagnostic_history.js'
 
 /**
@@ -58,7 +59,7 @@ export function createSinkDriver(opts) {
   function diagnosticHistory(handle, instance) {
     let history = diagnosticHistories.get(handle)
     if (!history) {
-      history = createDiagnosticHistory(path.join(stateRoot, 'sinks', instance, 'outbox'), instance, code => {
+      history = createDiagnosticHistory(sinkOutboxDir(stateRoot, instance), instance, code => {
         log.warn('sink.outbox_cleanup_failed', { [Attr.SINK_INSTANCE]: instance, error_kind: code })
         try { opts.onDiagnosticCleanupFailure?.(instance, code) } catch (error) { logDispatchError(error) }
       })
@@ -452,7 +453,7 @@ export function createSinkDriver(opts) {
    */
   async function persistOutbox(handle, instance, batchId, partitions, error) {
     try {
-      const dir = path.join(stateRoot, 'sinks', instance, 'outbox')
+      const dir = sinkOutboxDir(stateRoot, instance)
       fs.mkdirSync(dir, { recursive: true })
       const filePath = path.join(dir, `${batchId}.json`)
       const payload = {

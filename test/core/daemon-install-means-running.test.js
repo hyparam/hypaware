@@ -13,7 +13,8 @@ import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDae
 import { defaultPlistDir } from '../../src/core/daemon/platform.js'
 import { DAEMON_STOP_TIMEOUT_MS } from '../../src/core/daemon/service_ops.js'
 import { runDaemonStop, runDaemonUninstall } from '../../src/core/commands/daemon.js'
-import { clearStalePidFile, pidFilePath, processIsAlive, processingStateRoot, writePidFile } from '../../src/core/daemon/pid.js'
+import { clearStalePidFile, processIsAlive, writePidFile } from '../../src/core/daemon/pid.js'
+import { pidFilePath, processingStateRoot } from '../../src/core/runtime/paths.js'
 
 /** @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 

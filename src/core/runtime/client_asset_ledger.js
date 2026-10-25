@@ -2,12 +2,12 @@
 
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 
 import { compareStrings } from '../util/compare_strings.js'
 import { atomicWriteJson, readJsonIfExists } from '../util/fs_atomic.js'
 import { errCode } from '../util/json_util.js'
+import { clientAssetLedgerPath, stateRootFromEnv } from './paths.js'
 
 /**
  * The record of which client-asset paths HypAware itself wrote, and of what it
@@ -50,9 +50,6 @@ import { errCode } from '../util/json_util.js'
  * @import { ClientAssetLedgerRecord } from '../../../src/core/runtime/types.js'
  */
 
-/** Basename under the state root. Sibling of `config-control/`, not inside it: this is not a control-plane marker. */
-const LEDGER_BASENAME = 'client-assets.json'
-
 /** Bumped only if the record shape changes incompatibly; an unknown version reads as an empty ledger. */
 const LEDGER_VERSION = 1
 
@@ -72,10 +69,7 @@ const LEDGER_VERSION = 1
  * @returns {string}
  */
 export function clientAssetStateRoot(env, homeDir) {
-  // Same two segments `readObservabilityEnv` joins (`.hyp` / `hypaware`), with
-  // `homeDir` in place of its `os.homedir()`.
-  const hypHome = env.HYP_HOME || path.join(homeDir.length > 0 ? homeDir : os.homedir(), '.hyp')
-  return path.join(hypHome, 'hypaware')
+  return stateRootFromEnv(env, homeDir)
 }
 
 /**
@@ -90,7 +84,7 @@ export async function readClientAssetLedger(stateRoot) {
   /** @type {unknown} */
   let raw
   try {
-    raw = await readJsonIfExists(path.join(stateRoot, LEDGER_BASENAME))
+    raw = await readJsonIfExists(clientAssetLedgerPath(stateRoot))
   } catch {
     return []
   }
@@ -144,7 +138,7 @@ export async function writeClientAssetLedger(stateRoot, records) {
   for (const record of records) unique.set(`${record.client}\n${record.dest}`, record)
   try {
     await atomicWriteJson(
-      path.join(stateRoot, LEDGER_BASENAME),
+      clientAssetLedgerPath(stateRoot),
       { version: LEDGER_VERSION, assets: [...unique.values()].sort(compareRecords) },
       { mkdir: true }
     )

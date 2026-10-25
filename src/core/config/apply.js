@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
+import { configControlActivePath, configControlDir, configControlSeedPath, configControlStatePath, configSlotEtagPath, configSlotPath } from '../runtime/paths.js'
 import { parseConfigShape } from './schema.js'
 
 /**
@@ -56,26 +57,6 @@ export const PROBATION_FLOOR_SECONDS = 120
  */
 export const UNCONFIRMED_RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000
 
-const CONTROL_DIRNAME = 'config-control'
-const STATE_BASENAME = 'state.json'
-
-/**
- * The active-slot pointer. A relative symlink under `config-control/`
- * pointing at the live `config.{a,b}.json` slot. Relocated here (off the
- * user-facing `hypaware-config.json` path) so the local layer can be a
- * plain user file: the atomic symlink-flip crash-safety is preserved.
- * @ref LLP 0031#physical-layout [constrained-by]: active-slot pointer relocated into config-control/
- */
-const ACTIVE_BASENAME = 'active'
-
-/**
- * The join seed: the initial central layer, written by `hyp join` (mode
- * 0600: it holds the policy token). Read once on the first apply to
- * preserve it as the rollback target, then retired.
- * @ref LLP 0031#physical-layout [implements]: dedicated central-seed file, not hypaware-config.json
- */
-const SEED_BASENAME = 'seed.json'
-
 /**
  * Path to the join seed (the initial central layer) under a host's
  * state root. `hyp join` writes here; the apply engine retires it after
@@ -85,7 +66,7 @@ const SEED_BASENAME = 'seed.json'
  * @returns {string}
  */
 export function centralSeedPath(stateRoot) {
-  return path.join(stateRoot, CONTROL_DIRNAME, SEED_BASENAME)
+  return configControlSeedPath(stateRoot)
 }
 
 /**
@@ -99,10 +80,9 @@ export function centralSeedPath(stateRoot) {
  * @ref LLP 0031#physical-layout [implements]: central = active slot else seed else none
  */
 export function resolveCentralLayerPath({ stateRoot }) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  const slot = readActiveSlot(controlDir)
-  if (slot) return path.join(controlDir, `config.${slot}.json`)
-  const seed = path.join(controlDir, SEED_BASENAME)
+  const slot = readActiveSlot(stateRoot)
+  if (slot) return configSlotPath(stateRoot, slot)
+  const seed = configControlSeedPath(stateRoot)
   if (fs.existsSync(seed)) return seed
   return null
 }
@@ -129,14 +109,13 @@ export function resolveCentralLayerPath({ stateRoot }) {
  * @ref LLP 0223 [implements]: the join converge wait's probe - applied slot, never the seed
  */
 export function hasAppliedCentralConfig({ stateRoot }) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  if (readActiveSlot(controlDir) !== null) return true
+  if (readActiveSlot(stateRoot) !== null) return true
   // Only on the not-converged answer, so the happy path stays one readlink:
   // re-read the pointer to separate a control directory that holds nothing
   // yet from one this process cannot read (EACCES, EIO, a pointer that is
   // not a symlink at all).
   try {
-    fs.readlinkSync(path.join(controlDir, ACTIVE_BASENAME))
+    fs.readlinkSync(configControlActivePath(stateRoot))
   } catch (err) {
     const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
     if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err
@@ -149,8 +128,18 @@ export function hasAppliedCentralConfig({ stateRoot }) {
  * *through*: the pointer it reads and the files it can name. Their presence
  * is the on-disk evidence that this host has a central layer, independent of
  * whether the resolution above managed to follow them.
+ *
+ * @param {string} stateRoot
+ * @returns {string[]}
  */
-const CENTRAL_LAYER_BASENAMES = [ACTIVE_BASENAME, SEED_BASENAME, 'config.a.json', 'config.b.json']
+function centralLayerBasenames(stateRoot) {
+  return [
+    configControlActivePath(stateRoot),
+    configControlSeedPath(stateRoot),
+    configSlotPath(stateRoot, 'a'),
+    configSlotPath(stateRoot, 'b'),
+  ].map((p) => path.basename(p))
+}
 
 /**
  * Why {@link resolveCentralLayerPath} returned `null`, for the two callers
@@ -181,7 +170,7 @@ const CENTRAL_LAYER_BASENAMES = [ACTIVE_BASENAME, SEED_BASENAME, 'config.a.json'
  * @ref LLP 0031#physical-layout [constrained-by]: same active-slot-else-seed layout, read for evidence of a layer rather than for a path to load
  */
 export function centralLayerResolutionFailure({ stateRoot }) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  const controlDir = configControlDir(stateRoot)
   if (resolveCentralLayerPath({ stateRoot }) !== null) return null
   /** @type {string[]} */
   let entries
@@ -197,7 +186,7 @@ export function centralLayerResolutionFailure({ stateRoot }) {
       message: `failed to read the central config directory ${controlDir}: ${err instanceof Error ? err.message : String(err)}`,
     }
   }
-  const residue = CENTRAL_LAYER_BASENAMES.filter((name) => entries.includes(name))
+  const residue = centralLayerBasenames(stateRoot).filter((name) => entries.includes(name))
   if (residue.length === 0) return null
   return {
     configPath: controlDir,
@@ -230,18 +219,17 @@ export function centralLayerResolutionFailure({ stateRoot }) {
  * @ref LLP 0031#physical-layout [implements]: re-join resets to seed mode so a stale active slot never shadows the fresh seed token
  */
 export function resetCentralLayerToSeed(stateRoot) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  const supersededActiveSlot = readActiveSlot(controlDir) !== null
-  for (const name of [
-    ACTIVE_BASENAME,
-    STATE_BASENAME,
-    'config.a.json',
-    'config.b.json',
-    'config.a.etag',
-    'config.b.etag',
+  const supersededActiveSlot = readActiveSlot(stateRoot) !== null
+  const activePath = configControlActivePath(stateRoot)
+  for (const target of [
+    activePath,
+    configControlStatePath(stateRoot),
+    configSlotPath(stateRoot, 'a'),
+    configSlotPath(stateRoot, 'b'),
+    configSlotEtagPath(stateRoot, 'a'),
+    configSlotEtagPath(stateRoot, 'b'),
   ]) {
-    const target = path.join(controlDir, name)
-    if (name === ACTIVE_BASENAME) {
+    if (target === activePath) {
       // `rmSync(..., { force: true })` first follows an existence check and
       // leaves a dangling or looping symlink untouched. The active pointer is
       // allowed to be exactly those damaged shapes, so unlink it as a directory
@@ -281,10 +269,10 @@ export function createConfigControl(opts) {
   const now = opts.now ?? Date.now
   const clientVersion = opts.clientVersion ?? 'unknown'
   const log = getLogger('config-control')
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  const statePath = path.join(controlDir, STATE_BASENAME)
-  const activePath = path.join(controlDir, ACTIVE_BASENAME)
-  const seedPath = path.join(controlDir, SEED_BASENAME)
+  const controlDir = configControlDir(stateRoot)
+  const statePath = configControlStatePath(stateRoot)
+  const activePath = configControlActivePath(stateRoot)
+  const seedPath = configControlSeedPath(stateRoot)
 
   /** @type {ConfigApplyDeps | null} */
   let applyDeps = null
@@ -304,17 +292,17 @@ export function createConfigControl(opts) {
 
   /** @param {ConfigSlot} slot */
   function slotPath(slot) {
-    return path.join(controlDir, `config.${slot}.json`)
+    return configSlotPath(stateRoot, slot)
   }
 
   /** @param {ConfigSlot} slot */
   function slotEtagPath(slot) {
-    return path.join(controlDir, `config.${slot}.etag`)
+    return configSlotEtagPath(stateRoot, slot)
   }
 
   /** @returns {ConfigSlot | null} */
   function activeSlot() {
-    return readActiveSlot(controlDir)
+    return readActiveSlot(stateRoot)
   }
 
   /**
@@ -329,13 +317,13 @@ export function createConfigControl(opts) {
    */
   function flipPointer(slot) {
     const tmp = `${activePath}.tmp.${process.pid}.${now()}`
-    fs.symlinkSync(`config.${slot}.json`, tmp)
+    fs.symlinkSync(path.basename(slotPath(slot)), tmp)
     fs.renameSync(tmp, activePath)
   }
 
   /** @returns {string | undefined} */
   function runningEtag() {
-    return readRunningEtag(controlDir)
+    return readRunningEtag(stateRoot)
   }
 
   /**
@@ -897,32 +885,32 @@ function readControlState(statePath) {
  * at, or null when no apply has flipped it yet (seed-config mode) or it
  * is missing.
  *
- * @param {string} controlDir
+ * @param {string} stateRoot
  * @returns {ConfigSlot | null}
  */
-function readActiveSlot(controlDir) {
-  const activePath = path.join(controlDir, ACTIVE_BASENAME)
+function readActiveSlot(stateRoot) {
+  const activePath = configControlActivePath(stateRoot)
   let target
   try {
     target = fs.readlinkSync(activePath)
   } catch {
     return null
   }
-  const resolved = path.resolve(controlDir, target)
-  if (resolved === path.join(controlDir, 'config.a.json')) return 'a'
-  if (resolved === path.join(controlDir, 'config.b.json')) return 'b'
+  const resolved = path.resolve(path.dirname(activePath), target)
+  if (resolved === configSlotPath(stateRoot, 'a')) return 'a'
+  if (resolved === configSlotPath(stateRoot, 'b')) return 'b'
   return null
 }
 
 /**
- * @param {string} controlDir
+ * @param {string} stateRoot
  * @returns {string | undefined}
  */
-function readRunningEtag(controlDir) {
-  const slot = readActiveSlot(controlDir)
+function readRunningEtag(stateRoot) {
+  const slot = readActiveSlot(stateRoot)
   if (!slot) return undefined
   try {
-    const etag = fs.readFileSync(path.join(controlDir, `config.${slot}.etag`), 'utf8').trim()
+    const etag = fs.readFileSync(configSlotEtagPath(stateRoot, slot), 'utf8').trim()
     return etag.length > 0 ? etag : undefined
   } catch {
     return undefined
@@ -939,11 +927,10 @@ function readRunningEtag(controlDir) {
  * @ref LLP 0025#last-known-good-rollback [implements]: operator-visible probation/rollback/bad-etag state without log spelunking
  */
 export function readConfigControlStatus({ stateRoot }) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
   /** @type {ConfigControlState} */
   let state = {}
   try {
-    state = readControlState(path.join(controlDir, STATE_BASENAME))
+    state = readControlState(configControlStatePath(stateRoot))
   } catch {
     // unreadable state surfaces as empty: status is best-effort
   }
@@ -951,7 +938,7 @@ export function readConfigControlStatus({ stateRoot }) {
     probation: state.probation ?? null,
     lastRollback: state.last_rollback ?? null,
     badEtag: state.bad_etag ?? null,
-    runningEtag: readRunningEtag(controlDir) ?? null,
+    runningEtag: readRunningEtag(stateRoot) ?? null,
   }
 }
 

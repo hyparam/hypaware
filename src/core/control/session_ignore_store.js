@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
+import { sessionIgnoresDir } from '../runtime/paths.js'
 
 /** @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js' */
 
@@ -17,7 +18,7 @@ export class SessionIgnoreSet extends Set {
   /** @param {string} stateDir @param {PluginLogger} [log] */
   constructor(stateDir, log) {
     super()
-    this.directory = path.join(stateDir, 'session-ignores')
+    this.directory = sessionIgnoresDir(stateDir)
     this.bytes = 0
     this.log = log
     /** @type {string | undefined} */

@@ -7,6 +7,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { pluginStateDir, stateRootOf } from '../../../../src/core/runtime/paths.js'
 import { appendSessionContext } from './session_context.js'
 import {
   DEFAULT_SPOOL_MAX_BYTES,
@@ -300,7 +301,7 @@ function legacyStateFile(env) {
   const home = env.HOME
   const hypHome = env.HYP_HOME || (home ? path.join(home, '.hyp') : undefined)
   if (!hypHome) return undefined
-  return path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'claude', 'session-context.jsonl')
+  return path.join(pluginStateDir(stateRootOf(hypHome), '@hypaware/claude'), 'session-context.jsonl')
 }
 
 /**

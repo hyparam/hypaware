@@ -6,6 +6,7 @@ import path from 'node:path'
 import { Attr, getLogger } from '../observability/index.js'
 import { withFileLock } from '../util/file_lock.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
+import { clientActionLocksDir, clientActionsPath } from '../runtime/paths.js'
 
 /**
  * @import {
@@ -23,30 +24,6 @@ import { atomicWriteJsonSync } from '../util/fs_atomic.js'
  *   ReconcileReport,
  * } from '../../../src/core/config/types.js'
  */
-
-/**
- * The kernel state subdirectory the reconciler shares with the apply
- * engine. Must match `CONTROL_DIRNAME` in `apply.js`: the marker is kernel
- * surface and belongs beside `state.json`, not in a plugin state dir
- * (LLP 0041: "the action marker belongs here too, not in a plugin state
- * dir, the reconciler is kernel surface").
- */
-const CONTROL_DIRNAME = 'config-control'
-
-/**
- * The action-marker file. Namespaced per handler kind and keyed by request
- * key; written atomically (tmp+rename, mode 0600) exactly like `state.json`.
- * @ref LLP 0041#idempotency-and-completion-state [implements]: marker file config-control/client-actions.json, atomic tmp+rename, namespaced per handler kind
- */
-const CLIENT_ACTIONS_BASENAME = 'client-actions.json'
-
-/**
- * The per-key lifecycle locks, one file per `(kind, requestKey)` while it is
- * held, under `config-control/`. Released locks are deleted, so the directory
- * holds only the keys someone is working on right now.
- * @ref LLP 0523#two-locks [implements]: a per-key lock around the effect, a brief store lock around the marker write
- */
-const ACTION_LOCKS_DIRNAME = 'client-action-locks'
 
 /**
  * The re-arm generation this build stamps on every `refused` marker it writes.
@@ -86,8 +63,7 @@ export function createActionReconciler(opts) {
   const { stateRoot, handlers } = opts
   const now = opts.now ?? Date.now
   const log = opts.log ?? getLogger('action-reconciler')
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  const markerPath = path.join(controlDir, CLIENT_ACTIONS_BASENAME)
+  const markerPath = clientActionsPath(stateRoot)
 
   /** @returns {ActionMarkerStore} */
   function readStore() {
@@ -724,7 +700,7 @@ function deleteMarker(store, kind, requestKey) {
  * @ref LLP 0065#d1 [constrained-by]: a dead holder is detected by age, not by probing its pid
  */
 export async function withClientActionLock({ stateRoot, kind, requestKey, onWait, staleMs }, fn) {
-  const lockDir = path.join(stateRoot, CONTROL_DIRNAME, ACTION_LOCKS_DIRNAME)
+  const lockDir = clientActionLocksDir(stateRoot)
   fs.mkdirSync(lockDir, { recursive: true, mode: 0o700 })
   const lockPath = path.join(lockDir, `${encodeURIComponent(kind)}-${encodeURIComponent(requestKey)}.lock`)
   return withFileLock(lockPath, fn, { onWait, staleMs })
@@ -803,7 +779,7 @@ export function markerRecordsPriorDone(marker) {
  * @ref LLP 0041#idempotency-and-completion-state [implements]: read-only marker view for the status surface, no engine construction
  */
 export function readClientActionStatus({ stateRoot }) {
-  const markerPath = path.join(stateRoot, CONTROL_DIRNAME, CLIENT_ACTIONS_BASENAME)
+  const markerPath = clientActionsPath(stateRoot)
   /** @type {ActionMarkerStore} */
   let store = {}
   try {
@@ -841,7 +817,7 @@ export function readClientActionStatus({ stateRoot }) {
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker so the single core undo's two call sites (CLI + reconciler reverse) cannot drift; the marker never outlives its own effect being reversed (#217)
  */
 export async function clearClientActionMarker({ stateRoot, kind, requestKey, lockStaleMs }) {
-  const markerPath = path.join(stateRoot, CONTROL_DIRNAME, CLIENT_ACTIONS_BASENAME)
+  const markerPath = clientActionsPath(stateRoot)
   // An unlocked look first, so a host with no such marker (never joined, or
   // already detached) takes no lock and creates no directory. The callers
   // hold this key's lock, so no other writer can add the key meanwhile.
@@ -897,7 +873,7 @@ export async function clearClientActionMarker({ stateRoot, kind, requestKey, loc
  * @ref LLP 0250 [constrained-by]: the re-arm is deliberately left reading only the asset half, so an assetless marker carrying `prior_done` is still dropped here
  */
 export async function rearmRefusedActionMarker({ stateRoot, kind, requestKey, now = Date.now, lockStaleMs }) {
-  const markerPath = path.join(stateRoot, CONTROL_DIRNAME, CLIENT_ACTIONS_BASENAME)
+  const markerPath = clientActionsPath(stateRoot)
   if (readMarkerStore(markerPath)[kind]?.[requestKey]?.status !== 'refused') return false
   return updateMarkerStore(
     markerPath,

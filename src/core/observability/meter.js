@@ -1,7 +1,7 @@
 // @ts-check
 
 import { JsonlMetricExporter } from './jsonl_exporters.js'
-import { devTelemetryDir } from './env.js'
+import { devTelemetryDir } from '../runtime/paths.js'
 import { MeterProvider, metrics } from './runtime.js'
 import { OtlpMetricExporter, OTLP_EXPORT_TIMEOUT_MS } from './otlp_exporters.js'
 

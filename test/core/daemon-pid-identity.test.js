@@ -12,12 +12,12 @@ import { claimDaemonStart } from '../../src/core/daemon/gateway.js'
 import {
   clearStalePidFile,
   isDaemonProcess,
-  pidFilePath,
   processIsAlive,
   readPidFile,
   readProcessCmdline,
   writePidFile,
 } from '../../src/core/daemon/pid.js'
+import { pidFilePath } from '../../src/core/runtime/paths.js'
 
 const GATEWAY_URL = pathToFileURL(path.resolve('src/core/daemon/gateway.js')).href
 

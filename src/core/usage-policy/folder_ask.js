@@ -1,16 +1,14 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
-import path from 'node:path'
 
 import { atomicWriteJson, readFileIfExists } from '../util/fs_atomic.js'
+import { usagePolicyPath } from '../runtime/paths.js'
 
 /**
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  */
 
-const FOLDER_ASK_SUBDIR = 'usage-policy'
-const FOLDER_ASK_FILENAME = 'folder-ask.json'
 
 export const FOLDER_ASK_VERSION = 1
 
@@ -68,7 +66,7 @@ export class FolderAskUnreadableError extends Error {
  */
 export function folderAskPath(stateDir) {
   if (!stateDir) throw new Error('folderAskPath: stateDir is required')
-  return path.join(stateDir, FOLDER_ASK_SUBDIR, FOLDER_ASK_FILENAME)
+  return usagePolicyPath(stateDir, 'folder-ask')
 }
 
 /**
