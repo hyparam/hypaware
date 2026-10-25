@@ -68,13 +68,6 @@ const EAGER_CHECK_MS = 60 * 60 * 1000
  */
 export const SELF_UPDATE_RESTART_EXIT_CODE = 75
 
-/**
- * Must equal `CONFIG_BASENAME` in `src/core/config/schema.js`.
- * Duplicated rather than imported for the same reason as the exit code
- * above; a test asserts the two stay in sync.
- */
-const CONFIG_BASENAME = 'hypaware-config.json'
-
 // How many consecutive boots on a freshly installed version may fail to
 // reach the kernel before the pre-boot lane reinstalls the version it
 // replaced. One is not enough: the first relaunch after a power loss
