@@ -221,6 +221,42 @@ test('state layout: a live daemon from the previous release holds the CLI on the
   fs.rmSync(hypHome, { recursive: true, force: true })
 })
 
+test('state layout: a move that fails keeps that file on its legacy path', { skip: process.getuid?.() === 0 }, () => {
+  const { hypHome, root } = tmpTree()
+  put(path.join(root, 'remote-credentials.json'), '{"t":1}')
+  put(path.join(root, 'config-control', 'state.json'), '{}')
+  // A read-only state root: no rename out of it or into a new `state/` can happen.
+  fs.chmodSync(root, 0o555)
+  try {
+    /** @type {string[]} */
+    const warns = []
+    const log = { info() {}, warn(/** @type {string} */ event) { warns.push(event) } }
+    assert.equal(paths.settleStateLayout(root, { log }), 'current')
+    assert.ok(warns.length > 0, 'the failed moves are logged')
+    assert.equal(paths.credentialsPath(root), path.join(root, 'remote-credentials.json'))
+    assert.equal(fs.readFileSync(paths.credentialsPath(root), 'utf8'), '{"t":1}')
+    assert.equal(paths.configControlStatePath(root), path.join(root, 'config-control', 'state.json'))
+    // A file that had nothing to move still names its current path.
+    assert.equal(paths.clientAssetLedgerPath(root), path.join(root, 'state', 'client-assets.json'))
+  } finally {
+    fs.chmodSync(root, 0o755)
+  }
+  // Once the root is writable the daemon's settle moves it and the fallback clears.
+  assert.equal(paths.settleStateLayout(root, { daemon: true }), 'current')
+  assert.equal(paths.credentialsPath(root), path.join(root, 'credentials.json'))
+  assert.equal(fs.readFileSync(paths.credentialsPath(root), 'utf8'), '{"t":1}')
+  fs.rmSync(hypHome, { recursive: true, force: true })
+})
+
+test('state layout: a second daemon settle of the same root is the cached answer', () => {
+  const { hypHome, root } = tmpTree()
+  assert.equal(paths.settleStateLayout(root, { daemon: true }), 'current')
+  put(path.join(root, 'remote-credentials.json'), '{}')
+  assert.equal(paths.settleStateLayout(root, { daemon: true }), 'current')
+  assert.ok(fs.existsSync(path.join(root, 'remote-credentials.json')), 'no second migration ran')
+  fs.rmSync(hypHome, { recursive: true, force: true })
+})
+
 test('state layout: config backups are pruned to the newest five', () => {
   const { hypHome, root } = tmpTree()
   const dir = paths.configBackupsDir(root)

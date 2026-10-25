@@ -301,6 +301,22 @@ export const CONFIG_BACKUPS_KEEP = 5
 const layoutByRoot = new Map()
 
 /**
+ * The roots a daemon has settled in this process, so a second daemon-mode
+ * settle (the daemon's own `bootKernel`) is the cached lookup too.
+ * @type {Set<string>}
+ */
+const daemonSettledRoots = new Set()
+
+/**
+ * Per root, the table keys whose move failed and whose file still sits at
+ * its legacy path. Those keys keep reading the legacy side, so a move that
+ * cannot happen (a read-only home, a permission error) never hides a file
+ * the previous layout still holds.
+ * @type {Map<string, Set<string>>}
+ */
+const stuckByRoot = new Map()
+
+/**
  * @param {string} stateRoot
  * @returns {'current' | 'legacy'}
  */
@@ -315,7 +331,8 @@ function layoutOf(stateRoot) {
  */
 function movedPath(stateRoot, key) {
   const entry = MOVED[key]
-  return path.join(stateRoot, layoutOf(stateRoot) === 'legacy' ? entry.legacy : entry.current)
+  const legacy = layoutOf(stateRoot) === 'legacy' || stuckByRoot.get(stateRoot)?.has(key) === true
+  return path.join(stateRoot, legacy ? entry.legacy : entry.current)
 }
 
 /** @param {string} p */
@@ -369,7 +386,7 @@ function previousReleaseDaemonIsLive(stateRoot) {
  */
 export function settleStateLayout(stateRoot, opts = {}) {
   const settled = layoutByRoot.get(stateRoot)
-  if (settled && !opts.daemon) return settled
+  if (settled && (!opts.daemon || daemonSettledRoots.has(stateRoot))) return settled
   /** @type {'current' | 'legacy'} */
   let mode = 'current'
   if (!opts.daemon && previousReleaseDaemonIsLive(stateRoot)) {
@@ -378,6 +395,7 @@ export function settleStateLayout(stateRoot, opts = {}) {
     migrateStateLayout(stateRoot, { log: opts.log, markCurrent: opts.daemon === true })
   }
   layoutByRoot.set(stateRoot, mode)
+  if (opts.daemon) daemonSettledRoots.add(stateRoot)
   return mode
 }
 
@@ -385,9 +403,11 @@ export function settleStateLayout(stateRoot, opts = {}) {
  * Move every file the table names from its legacy path to its current one.
  * Same filesystem, one `rename` per file, so each move is atomic and a crash
  * halfway resumes on the next call. A file already at its current path is
- * left alone, as is a legacy file whose current path is taken. Config
- * backups beside `hypaware-config.json` move under `state/config-backups`
- * and are pruned to the newest {@link CONFIG_BACKUPS_KEEP}. The legacy
+ * left alone, as is a legacy file whose current path is taken. A move that
+ * fails is logged, and this process keeps reading that file at its legacy
+ * path; the next settle tries again. Config backups beside
+ * `hypaware-config.json` move under `state/config-backups` and are pruned
+ * to the newest {@link CONFIG_BACKUPS_KEEP}. The legacy
  * `config-control/` directory is removed once it is empty.
  *
  * `state/` itself is only created when something moves into it or
@@ -408,7 +428,9 @@ export function migrateStateLayout(stateRoot, opts = {}) {
   const mkdir = (/** @type {string} */ dir) => fsSync.mkdirSync(dir, { recursive: true, mode: 0o700 })
   if (opts.markCurrent) mkdir(stateDir)
 
-  for (const entry of Object.values(MOVED)) {
+  /** @type {Set<string>} */
+  const stuck = new Set()
+  for (const [key, entry] of Object.entries(MOVED)) {
     const from = path.join(stateRoot, entry.legacy)
     const to = path.join(stateRoot, entry.current)
     if (!lexists(from) || lexists(to)) continue
@@ -425,9 +447,12 @@ export function migrateStateLayout(stateRoot, opts = {}) {
       }
       moved.push({ from, to })
     } catch (err) {
+      stuck.add(key)
       log.warn('state_layout.move_failed', { from, to, message: err instanceof Error ? err.message : String(err) })
     }
   }
+  if (stuck.size > 0) stuckByRoot.set(stateRoot, stuck)
+  else stuckByRoot.delete(stateRoot)
 
   // Backups are a family of files rather than one path: every
   // `hypaware-config.json.bak-<ts>` beside the local config moves in, then
