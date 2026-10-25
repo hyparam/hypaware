@@ -77,13 +77,13 @@ test('legacy client boot persists grep once, preserves config and exposes the MC
   assert.ok(boot.runtime.commands.get('query grep'))
   assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')), { ...original, plugins: [...original.plugins, grep] })
   assert.equal((await fs.stat(f.configPath)).mode & 0o777, 0o600)
-  const backups = (await fs.readdir(f.hypHome)).filter((name) => name.includes('.bak-'))
+  const backups = (await fs.readdir(path.join(f.hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((name) => name.includes('.bak-'))
   assert.equal(backups.length, 1)
-  assert.equal(await fs.readFile(path.join(f.hypHome, backups[0]), 'utf8'), before)
+  assert.equal(await fs.readFile(path.join(f.hypHome, 'hypaware', 'state', 'config-backups', backups[0]), 'utf8'), before)
   const stat = await fs.stat(f.configPath)
   await bootKernel({ hypHome: f.hypHome, env: f.env })
   assert.equal((await fs.stat(f.configPath)).mtimeMs, stat.mtimeMs)
-  assert.deepEqual((await fs.readdir(f.hypHome)).filter((name) => name.includes('.bak-')), backups)
+  assert.deepEqual((await fs.readdir(path.join(f.hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((name) => name.includes('.bak-')), backups)
   const mcp = createMcpServer({
     verbs: boot.runtime.verbs, query: boot.runtime.query, transport: 'stdio', allowOperator: false,
     runTool: (verb, params) => Promise.resolve(verb.operation(params, /** @type {any} */ ({ storage: boot.runtime.storage }))),
@@ -198,7 +198,7 @@ test('the migration does not mint the forged shape from an emptied config', asyn
   const result = await f.migrate()
   assert.deepEqual(result.local?.ok && result.local.config.plugins, [grep], 'search still applies in memory')
   assert.equal(await fs.readFile(f.configPath, 'utf8'), before, 'the file keeps recording its emptied answer')
-  assert.equal((await fs.readdir(f.hypHome)).some((name) => name.includes('.bak-')), false)
+  assert.equal((await fs.readdir(path.join(f.hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).some((name) => name.includes('.bak-')), false)
   assert.equal(configRecordsPickAnswer(JSON.parse(before)), true)
 })
 
@@ -211,7 +211,7 @@ test('existing enabled and disabled entries in either layer are untouched', asyn
       const before = await fs.readFile(f.configPath, 'utf8')
       await f.migrate()
       assert.equal(await fs.readFile(f.configPath, 'utf8'), before)
-      assert.equal((await fs.readdir(f.hypHome)).some((name) => name.includes('.bak-')), false)
+      assert.equal((await fs.readdir(path.join(f.hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).some((name) => name.includes('.bak-')), false)
       const resolved = await resolveLayeredConfigForDaemon(f)
       assert.equal(resolved.effective?.plugins?.find((p) => p.name === grep.name)?.enabled, enabled)
     }
@@ -229,7 +229,7 @@ test('read-only config retains search without modifying disk or making backups',
   const boot = await bootKernel({ hypHome: f.hypHome, env: f.env })
   assert.ok(boot.runtime.verbs.getByTool('grep_search'))
   assert.equal(await fs.readFile(f.configPath, 'utf8'), before)
-  assert.equal((await fs.readdir(f.hypHome)).some((name) => name.includes('.bak-')), false)
+  assert.equal((await fs.readdir(path.join(f.hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).some((name) => name.includes('.bak-')), false)
 })
 
 test('missing and malformed layers are not replaced', async (t) => {
@@ -257,7 +257,7 @@ test('an answer-less config keeps search without gaining a pick answer', async (
   assert.equal(boot.runtime.verbs.getByTool('grep_search')?.plugin, grep.name)
   assert.equal(await fs.readFile(f.configPath, 'utf8'), before)
   assert.equal(configRecordsPickAnswer(JSON.parse(await fs.readFile(f.configPath, 'utf8'))), false)
-  assert.equal((await fs.readdir(f.hypHome)).some((name) => name.includes('.bak-')), false)
+  assert.equal((await fs.readdir(path.join(f.hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).some((name) => name.includes('.bak-')), false)
 })
 
 test('concurrent migrations produce one entry and one backup', async (t) => {
@@ -267,7 +267,7 @@ test('concurrent migrations produce one entry and one backup', async (t) => {
     configPath: f.configPath, centralConfigPath: null, migrateGrep: true,
   })))
   assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')).plugins, [grep])
-  assert.equal((await fs.readdir(f.hypHome)).filter((name) => name.includes('.bak-')).length, 1)
+  assert.equal((await fs.readdir(path.join(f.hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((name) => name.includes('.bak-')).length, 1)
 })
 
 test('a disable written while migration waits for the lock wins', { timeout: 5000 }, async (t) => {
@@ -291,7 +291,7 @@ test('a disable written while migration waits for the lock wins', { timeout: 500
   })
   const result = await migration
   assert.deepEqual(result?.local?.ok && result.local.config.plugins, [{ ...grep, enabled: false }])
-  assert.equal((await fs.readdir(f.hypHome)).some((name) => name.includes('.bak-')), false)
+  assert.equal((await fs.readdir(path.join(f.hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).some((name) => name.includes('.bak-')), false)
 })
 
 test('a read-only config directory on a central-only install uses the memory fallback', async (t) => {

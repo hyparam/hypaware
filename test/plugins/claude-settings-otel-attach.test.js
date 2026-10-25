@@ -752,9 +752,9 @@ function reconcilerOver(r, registration) {
  * @param {string} reason
  */
 async function seedLegacyRefusedMarker(r, reason) {
-  await fsp.mkdir(path.join(r.stateRoot, 'config-control'), { recursive: true })
+  await fsp.mkdir(path.join(r.stateRoot, 'state'), { recursive: true })
   await fsp.writeFile(
-    path.join(r.stateRoot, 'config-control', 'client-actions.json'),
+    path.join(r.stateRoot, 'state', 'client-actions.json'),
     JSON.stringify({
       attach: {
         claude: {

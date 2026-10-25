@@ -72,9 +72,9 @@ function makeBuf() {
  * @param {Record<string, unknown>} state
  */
 async function writeControlState(hypHome, state) {
-  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  const controlDir = path.join(hypHome, 'hypaware', 'state')
   await fs.mkdir(controlDir, { recursive: true })
-  await fs.writeFile(path.join(controlDir, 'state.json'), JSON.stringify(state))
+  await fs.writeFile(path.join(controlDir, 'config-control.json'), JSON.stringify(state))
 }
 
 /** @param {string} hypHome */

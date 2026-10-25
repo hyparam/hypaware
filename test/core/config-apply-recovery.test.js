@@ -55,7 +55,7 @@ const REMOTE_CONFIG = {
 async function makeSeedlessFixture() {
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-config-recover-'))
   const stateRoot = path.join(tmp, 'hypaware')
-  await fsp.mkdir(path.join(stateRoot, 'config-control'), { recursive: true })
+  await fsp.mkdir(path.join(stateRoot, 'state'), { recursive: true })
   return { tmp, stateRoot }
 }
 
@@ -86,12 +86,12 @@ function makeControl({ stateRoot, now }) {
 }
 
 function readState(stateRoot) {
-  const p = path.join(stateRoot, 'config-control', 'state.json')
+  const p = path.join(stateRoot, 'state', 'config-control.json')
   return JSON.parse(fs.readFileSync(p, 'utf8'))
 }
 
 function writeState(stateRoot, state) {
-  const p = path.join(stateRoot, 'config-control', 'state.json')
+  const p = path.join(stateRoot, 'state', 'config-control.json')
   fs.writeFileSync(p, JSON.stringify(state, null, 2) + '\n')
 }
 
@@ -178,15 +178,15 @@ test('boot recovers a wedged active slot by falling back to the seed when one su
   // Wedged state where a seed still exists on disk: recovery should drop the
   // active pointer so boot resolves the central layer back to the seed.
   const { stateRoot } = await makeSeedlessFixture()
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
 
   // Author an applied slot 'b' (etag-1) that is the active pointer, plus a
   // surviving seed and a bad_etag matching the active slot.
-  fs.writeFileSync(path.join(controlDir, 'config.b.json'), JSON.stringify(REMOTE_CONFIG, null, 2) + '\n')
-  fs.writeFileSync(path.join(controlDir, 'config.b.etag'), 'etag-1\n')
+  fs.writeFileSync(path.join(controlDir, 'managed-config.b.json'), JSON.stringify(REMOTE_CONFIG, null, 2) + '\n')
+  fs.writeFileSync(path.join(controlDir, 'managed-config.b.etag'), 'etag-1\n')
   const tmpLink = path.join(controlDir, 'active.tmp')
-  fs.symlinkSync('config.b.json', tmpLink)
-  fs.renameSync(tmpLink, path.join(controlDir, 'active'))
+  fs.symlinkSync('managed-config.b.json', tmpLink)
+  fs.renameSync(tmpLink, path.join(controlDir, 'managed-config.active'))
   fs.writeFileSync(centralSeedPath(stateRoot), JSON.stringify(SEED_CONFIG, null, 2) + '\n')
   writeState(stateRoot, {
     bad_etag: { etag: 'etag-1', reason: 'probation_expired', recorded_at: new Date().toISOString() },

@@ -718,10 +718,10 @@ test('an unreadable config or status file is no answer, never a throw', async ()
     assert.equal(previousBootLooksStuck(stateRoot), false)
     // And the state file itself: `describeSelfUpdate` reads it inside
     // `hyp status`, which has no guard of its own around the call.
-    await fsp.mkdir(path.join(stateRoot, 'run', 'self-update.json'), { recursive: true })
+    await fsp.mkdir(path.join(stateRoot, 'state', 'self-update.json'), { recursive: true })
     assert.deepEqual(readSelfUpdateState(stateRoot), {})
     assert.equal(describeSelfUpdate({ stateRoot, env: {} }).json.auto_update, true)
-    await fsp.rmdir(path.join(stateRoot, 'run', 'self-update.json'))
+    await fsp.rmdir(path.join(stateRoot, 'state', 'self-update.json'))
 
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     const probe = fetchStub('9.9.9')
@@ -1099,9 +1099,9 @@ test('a state file with a non-string error renders instead of taking hyp status 
   // it would take the whole status report down with it.
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-bad-error-'))
   try {
-    await fsp.mkdir(path.join(dir, 'run'), { recursive: true })
+    await fsp.mkdir(path.join(dir, 'state'), { recursive: true })
     await fsp.writeFile(
-      path.join(dir, 'run', 'self-update.json'),
+      path.join(dir, 'state', 'self-update.json'),
       JSON.stringify({ error: 42 })
     )
     const described = describeSelfUpdate({ stateRoot: dir, env: {} })

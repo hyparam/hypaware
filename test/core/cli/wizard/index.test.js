@@ -154,10 +154,10 @@ function emptyCatalog() {
  * @param {string[]} plugins
  */
 async function seedCentralLayer(home, plugins) {
-  const control = path.join(home, '.hyp', 'hypaware', 'config-control')
+  const control = path.join(home, '.hyp', 'hypaware', 'state')
   await fs.mkdir(control, { recursive: true })
   const config = { version: 2, plugins: plugins.map((name) => ({ name, enabled: true, config: {} })) }
-  await fs.writeFile(path.join(control, 'seed.json'), JSON.stringify(config))
+  await fs.writeFile(path.join(control, 'managed-config.seed.json'), JSON.stringify(config))
 }
 
 /** A completed pick result the finale and configure stubs can consume. */
@@ -1321,9 +1321,10 @@ test('runInitWizard: an attended run overwrites an existing config without askin
   assert.equal(result.exitCode, 0)
   assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')), pickResult().config)
   assert.match(stdout.text(), /✓ Saved settings \(previous config backed up\)\n/)
-  const backups = (await fs.readdir(path.dirname(configPath))).filter((f) => f.startsWith('config.json.bak-'))
+  const backupsDir = path.join(path.dirname(configPath), 'hypaware', 'state', 'config-backups')
+  const backups = (await fs.readdir(backupsDir)).filter((f) => f.startsWith('config.json.bak-'))
   assert.equal(backups.length, 1, 'the previous config is kept on disk')
-  assert.equal(await fs.readFile(path.join(path.dirname(configPath), backups[0]), 'utf8'), '{"version":2,"plugins":["existing"]}\n')
+  assert.equal(await fs.readFile(path.join(backupsDir, backups[0]), 'utf8'), '{"version":2,"plugins":["existing"]}\n')
 })
 
 test('runInitWizard: a non-interactive commit over an existing config without --force exits 1 and leaves it untouched', async () => {

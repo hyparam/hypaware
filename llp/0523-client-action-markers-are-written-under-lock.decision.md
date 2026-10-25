@@ -3,6 +3,7 @@
 **Type:** Decision
 **Status:** Accepted
 **Systems:** Config, Daemon, CLI
+**Extended-by:** LLP 0557 (#two-locks: the per-key lock files live under `state/client-action-locks/` and the marker beside them under `state/`; the locking is unchanged)
 **Generated-by:** neutral
 **Author:** HypForge steward
 **Date:** 2026-10-17

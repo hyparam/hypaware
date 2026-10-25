@@ -47,7 +47,7 @@ const ANTHROPIC = { name: 'anthropic', base_url: 'https://api.anthropic.com', pa
  * @returns {Promise<string[]>}
  */
 async function backupsIn(dir) {
-  const names = await fs.readdir(dir)
+  const names = await fs.readdir(path.join(dir, 'hypaware', 'state', 'config-backups')).catch(() => [])
   return names.filter((n) => n.includes('.bak-'))
 }
 
@@ -308,7 +308,11 @@ test('a write the filesystem refuses fails the write step and changes nothing', 
   await fs.writeFile(configPath, before)
   const configDir = path.dirname(configPath)
   await fs.chmod(configDir, 0o555)
-  t.after(() => fs.chmod(configDir, 0o755))
+  await fs.chmod(configPath, 0o444)
+  t.after(async () => {
+    await fs.chmod(configDir, 0o755)
+    await fs.chmod(configPath, 0o644)
+  })
 
   const result = await enableGatewayProxyMode({
     ctx: makeCtx(hypHome),

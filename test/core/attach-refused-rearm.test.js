@@ -107,7 +107,7 @@ function fakeClientKernel({ throwOnAttach = false } = {}) {
 
 /** @param {string} stateRoot */
 function readMarkers(stateRoot) {
-  const p = path.join(stateRoot, 'config-control', 'client-actions.json')
+  const p = path.join(stateRoot, 'state', 'client-actions.json')
   return JSON.parse(fs.readFileSync(p, 'utf8'))
 }
 
@@ -120,7 +120,7 @@ function readMarkers(stateRoot) {
  * @param {string} requestKey
  */
 function seedRefusedMarker(stateRoot, requestKey) {
-  const dir = path.join(stateRoot, 'config-control')
+  const dir = path.join(stateRoot, 'state')
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
     path.join(dir, 'client-actions.json'),
@@ -151,7 +151,7 @@ function seedRefusedMarker(stateRoot, requestKey) {
  * @param {Record<string, unknown>} marker
  */
 function seedMarker(stateRoot, requestKey, marker) {
-  const dir = path.join(stateRoot, 'config-control')
+  const dir = path.join(stateRoot, 'state')
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
     path.join(dir, 'client-actions.json'),
@@ -405,7 +405,7 @@ test('hyp attach --dry-run never clears a refused marker', async () => {
   const stateRoot = path.join(home, 'hypaware')
   try {
     seedRefusedMarker(stateRoot, 'claude')
-    const before = fs.readFileSync(path.join(stateRoot, 'config-control', 'client-actions.json'), 'utf8')
+    const before = fs.readFileSync(path.join(stateRoot, 'state', 'client-actions.json'), 'utf8')
 
     const { registry, kernel } = fakeClientKernel()
     const result = await attach('claude', {
@@ -419,13 +419,13 @@ test('hyp attach --dry-run never clears a refused marker', async () => {
     assert.equal(result.status, 'ok')
 
     assert.equal(
-      fs.readFileSync(path.join(stateRoot, 'config-control', 'client-actions.json'), 'utf8'),
+      fs.readFileSync(path.join(stateRoot, 'state', 'client-actions.json'), 'utf8'),
       before,
       'a dry run must leave the marker store exactly as it found it'
     )
     assert.equal(readClientActionStatus({ stateRoot }).byKind.attach?.claude?.status, 'refused')
     // Nor does it take the key lock: a dry run creates no lock files (LLP 0523).
-    assert.equal(fs.existsSync(path.join(stateRoot, 'config-control', 'client-action-locks')), false)
+    assert.equal(fs.existsSync(path.join(stateRoot, 'state', 'client-action-locks')), false)
   } finally {
     await fsp.rm(home, { recursive: true, force: true })
   }

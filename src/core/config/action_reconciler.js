@@ -648,7 +648,7 @@ function readMarkerStore(markerPath) {
  */
 async function updateMarkerStore(markerPath, mutate, lockOpts = {}) {
   // `withFileLock` creates the lock's directory with no mode, so create
-  // `config-control/` first at the 0700 the marker write would give it.
+  // the marker's directory first at the 0700 the marker write would give it.
   fs.mkdirSync(path.dirname(markerPath), { recursive: true, mode: 0o700 })
   return withFileLock(
     `${markerPath}.lock`,

@@ -234,11 +234,11 @@ test('a joined host whose central seed cannot be parsed names the file', async (
 test('an unparseable applied slot is named through the active pointer', async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
-  const slotPath = path.join(controlDir, 'config.a.json')
+  const slotPath = path.join(controlDir, 'managed-config.a.json')
   await fs.writeFile(slotPath, 'truncated-garbage')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  await fs.symlink('managed-config.a.json', path.join(controlDir, 'managed-config.active'))
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/ai-gateway' }],
@@ -272,13 +272,13 @@ test('a readable central layer reports no unreadable-layer diagnostic', async ()
 test('an active-slot pointer naming a slot file that is gone reports the central layer unreadable', async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
-  const missingSlotPath = path.join(controlDir, 'config.b.json')
+  const missingSlotPath = path.join(controlDir, 'managed-config.b.json')
   // The pointer resolves (by name) to a slot the apply engine never wrote
   // here, or already rotated away - `readActiveSlot` only checks the target
   // name, not that the file exists.
-  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  await fs.symlink('managed-config.b.json', path.join(controlDir, 'managed-config.active'))
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/ai-gateway' }],
@@ -297,16 +297,16 @@ test('an active-slot pointer naming a slot file that is gone reports the central
 test('an active pointer replaced by a regular file reports the central layer unreadable', async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
   // The slot file still holds a central sink, but the pointer that would
   // name it is a plain file, not a symlink: `readActiveSlot` cannot follow it.
-  await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({
+  await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/central' }],
     sinks: { central: { plugin: '@hypaware/central', config: {} } },
   }) + '\n')
-  await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  await fs.writeFile(path.join(controlDir, 'managed-config.active'), 'managed-config.a.json')
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/ai-gateway' }],
@@ -327,9 +327,9 @@ test('an active pointer replaced by a regular file reports the central layer unr
 test('a central config directory that cannot be listed reports the central layer unreadable', async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
-  await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+  await fs.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify({ version: 2 }))
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/ai-gateway' }],
@@ -358,9 +358,9 @@ test('a central config directory that cannot be listed reports the central layer
 test('config_missing does not claim "neither a central layer" when the central layer is unreadable', async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
-  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  await fs.symlink('managed-config.b.json', path.join(controlDir, 'managed-config.active'))
   // No local config at all, and the central layer resolves to a slot file
   // that is gone: both `config_missing` and `config_central_unreadable` fire.
 
@@ -382,17 +382,17 @@ test('config_missing does not claim "neither a central layer" when the central l
 /** @type {Array<[string, (controlDir: string) => Promise<void>]>} */
 const UNREADABLE_CENTRAL_STATES = [
   ['an unparseable seed', async (controlDir) => {
-    await fs.writeFile(path.join(controlDir, 'seed.json'), '{ not json at all\n')
+    await fs.writeFile(path.join(controlDir, 'managed-config.seed.json'), '{ not json at all\n')
   }],
   ['an active pointer naming a gone slot', async (controlDir) => {
-    await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+    await fs.symlink('managed-config.b.json', path.join(controlDir, 'managed-config.active'))
   }],
   ['an active pointer that is a regular file', async (controlDir) => {
-    await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2 }) + '\n')
-    await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+    await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), JSON.stringify({ version: 2 }) + '\n')
+    await fs.writeFile(path.join(controlDir, 'managed-config.active'), 'managed-config.a.json')
   }],
   ['a control directory that cannot be listed', async (controlDir) => {
-    await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+    await fs.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify({ version: 2 }))
     await fs.chmod(controlDir, 0o000)
   }],
 ]
@@ -415,7 +415,7 @@ function renderBothViews(report) {
 for (const [label, arrange] of UNREADABLE_CENTRAL_STATES) {
   test(`${label} renders Unknown sharing in the compact and verbose views`, async () => {
     const hypHome = await makeHome()
-    const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+    const controlDir = path.join(hypHome, 'hypaware', 'state')
     await fs.mkdir(controlDir, { recursive: true })
     await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
       version: 2,

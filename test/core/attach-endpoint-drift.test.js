@@ -45,7 +45,7 @@ async function makeFixture() {
 }
 
 function markerPath(stateRoot) {
-  return path.join(stateRoot, 'config-control', 'client-actions.json')
+  return path.join(stateRoot, 'state', 'client-actions.json')
 }
 
 function readMarkerFile(stateRoot) {
@@ -141,7 +141,7 @@ test('a legacy done attach marker with no recorded endpoint re-attaches once (ba
   try {
     // Seed a pre-fix marker: done, but with no `endpoint` field (attached by an
     // older build). It must be treated as stale (re-attach once), never crash.
-    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.mkdirSync(path.join(stateRoot, 'state'), { recursive: true })
     fs.writeFileSync(
       markerPath(stateRoot),
       JSON.stringify({ attach: { claude: { status: 'done', request_key: 'claude', at: '2026-06-01T00:00:00.000Z' } } }, null, 2) + '\n'
@@ -165,7 +165,7 @@ test('a proxy-mode marker at the current endpoint re-attaches into otel mode', a
   const { tmp, stateRoot } = await makeFixture()
   try {
     const endpoint = 'http://127.0.0.1:55555'
-    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.mkdirSync(path.join(stateRoot, 'state'), { recursive: true })
     fs.writeFileSync(
       markerPath(stateRoot),
       JSON.stringify({
@@ -203,7 +203,7 @@ test('an otherwise-current Claude action marker without the current settings sch
   const { tmp, stateRoot } = await makeFixture()
   try {
     const endpoint = 'http://127.0.0.1:55555'
-    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.mkdirSync(path.join(stateRoot, 'state'), { recursive: true })
     fs.writeFileSync(
       markerPath(stateRoot),
       JSON.stringify({

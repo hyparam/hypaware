@@ -370,8 +370,8 @@ hyp join https://api.hypaware.ai --token-file "$HYP_HOME/.service-token" --no-da
 after the join. Join keeps its own private copy (mode `0600`) at
 `$HYP_HOME/hypaware/plugins/@hypaware/central/service-token`, which is what the
 daemon uses to sign in again on its own when its session expires. The join also
-writes the token into its private config seed under
-`$HYP_HOME/hypaware/config-control/`; the first config the host applies keeps
+writes the token into its private config seed,
+`$HYP_HOME/hypaware/state/managed-config.seed.json`; the first config the host applies keeps
 that seed as its rollback copy, and the next config update replaces it.
 HypAware never logs the token.
 
@@ -393,7 +393,7 @@ hyp query sql "select count(*) from ai_gateway_messages" --remote hypaware
 ```
 
 The login stores the token, with the short-lived session it exchanges it for, in
-`$HYP_HOME/hypaware/remote-credentials.json` (mode `0600`); `hyp remote remove
+`$HYP_HOME/hypaware/credentials.json` (mode `0600`); `hyp remote remove
 hypaware` removes it.
 
 When the token is revoked or the account is disabled, the host stops uploading

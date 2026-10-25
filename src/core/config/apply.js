@@ -153,7 +153,7 @@ function centralLayerBasenames(stateRoot) {
  * Resolution is lossy on purpose everywhere else. `readActiveSlot` swallows
  * every `readlink` error into `null` (the pointer replaced by a regular file,
  * a dangling or looping link, a target that is not a slot), and `existsSync`
- * swallows `EACCES` on `config-control/` into `false`. Boot is right to see
+ * swallows `EACCES` on the managed-config directory into `false`. Boot is right to see
  * one `null`: there is no layer to merge either way. A permission decision
  * and a report that has to name the layer are not, so this reports
  * resolution *failure* separately: the control directory could not be
@@ -253,7 +253,7 @@ export function resetCentralLayerToSeed(stateRoot) {
  * probation and last-known-good rollback.
  *
  * Persistence idiom: each applied config is written to its own slot
- * file under `<stateRoot>/config-control/`, with the served ETag in a
+ * file (`configSlotPath`), with the served ETag in a
  * per-slot sidecar written *before* the flip. The operative config
  * path becomes a symlink to the active slot, replaced atomically via
  * tmp+rename: so the config document and its etag transition together
@@ -309,11 +309,11 @@ export function createConfigControl(opts) {
    * Atomically point the active-slot pointer at `slot`. A relative
    * symlink is created at a tmp path and renamed over the pointer, so a
    * crash leaves either the old or the new pointer: never neither. The
-   * pointer lives inside `config-control/` (not at the user-facing
-   * config path), so the local layer is never a symlink.
+   * pointer lives beside the slots (not at the user-facing config path),
+   * so the local layer is never a symlink.
    *
    * @param {ConfigSlot} slot
-   * @ref LLP 0031#physical-layout [constrained-by]: pointer relocated into config-control/, atomic flip preserved
+   * @ref LLP 0031#physical-layout [constrained-by]: pointer beside the slots, never at the config path, atomic flip preserved
    */
   function flipPointer(slot) {
     const tmp = `${activePath}.tmp.${process.pid}.${now()}`
@@ -881,7 +881,7 @@ function readControlState(statePath) {
 }
 
 /**
- * Which slot the active-slot pointer (`config-control/active`) points
+ * Which slot the active-slot pointer (`managed-config.active`) points
  * at, or null when no apply has flipped it yet (seed-config mode) or it
  * is missing.
  *

@@ -81,7 +81,7 @@ export function writeControlRequest(stateRoot, kind, log) {
   const file = controlRequestPath(stateRoot, kind)
   // 0700, not the umask: the trust argument above is "writing here requires
   // owning the state dir", so the directory must not pick up group write
-  // from a permissive umask (same shape as the config-control dir).
+  // from a permissive umask (same shape as the state dir).
   ensureControlDir(path.dirname(file), log)
   fs.writeFileSync(
     file,

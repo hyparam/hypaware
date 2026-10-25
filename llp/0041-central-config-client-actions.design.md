@@ -5,7 +5,7 @@
 **Systems:** Config, Daemon, Onboarding, Sources
 **Generated-by:** neutral
 **Related:** LLP 0036, LLP 0037
-**Extended-by:** LLP 0044 (attach decision), LLP 0045 (attach implementation design, the reversible-instance counterpart to this doc), LLP 0086 (the marker gains an optional `isCurrent` freshness hook so a `done` action can re-fire when its input drifts: attach re-attaches on a gateway rebind), LLP 0186 (a terminal `refused` marker state: a handler refusal short-circuits like `done` and surfaces as attention-needed instead of retrying every boot), LLP 0523 (the marker file has writers in more than one process: every write merges one key into a freshly read store under a brief store lock, and reversible effects run under a per-key lifecycle lock)
+**Extended-by:** LLP 0044 (attach decision), LLP 0045 (attach implementation design, the reversible-instance counterpart to this doc), LLP 0086 (the marker gains an optional `isCurrent` freshness hook so a `done` action can re-fire when its input drifts: attach re-attaches on a gateway rebind), LLP 0186 (a terminal `refused` marker state: a handler refusal short-circuits like `done` and surfaces as attention-needed instead of retrying every boot), LLP 0523 (the marker file has writers in more than one process: every write merges one key into a freshly read store under a brief store lock, and reversible effects run under a per-key lifecycle lock), LLP 0557 (#idempotency-and-completion-state: the marker file is `state/client-actions.json`, beside the other cold state, and the lock directory is `state/client-action-locks/`)
 
 > [LLP 0036](./0036-central-config-driven-client-actions.decision.md) accepted a
 > single seam: a daemon-side, idempotent **action reconciler** that performs a

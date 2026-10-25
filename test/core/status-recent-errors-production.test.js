@@ -779,14 +779,14 @@ test('export warning: an unreadable central layer still warns about a failing si
 /** @type {Array<[string, (controlDir: string) => Promise<void>]>} */
 const UNREADABLE_CENTRAL_WITHOUT_PARSE = [
   ['an active pointer naming a gone slot', async (controlDir) => {
-    await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+    await fs.symlink('managed-config.b.json', path.join(controlDir, 'managed-config.active'))
   }],
   ['an active pointer that is a regular file', async (controlDir) => {
-    await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2, plugins: [] }))
-    await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+    await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), JSON.stringify({ version: 2, plugins: [] }))
+    await fs.writeFile(path.join(controlDir, 'managed-config.active'), 'managed-config.a.json')
   }],
   ['a central config directory that cannot be listed', async (controlDir) => {
-    await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2, plugins: [] }))
+    await fs.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify({ version: 2, plugins: [] }))
     await fs.chmod(controlDir, 0o000)
   }],
 ]

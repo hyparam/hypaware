@@ -173,7 +173,7 @@ export async function run({ harness, expect }) {
       (v) => v === true
     )
     const slotA = JSON.parse(
-      await fs.readFile(path.join(stateRoot, 'config-control', 'config.a.json'), 'utf8')
+      await fs.readFile(path.join(stateRoot, 'state', 'managed-config.a.json'), 'utf8')
     )
     expect.that(
       'apply: the seed survives in the rollback slot',

@@ -580,7 +580,7 @@ test('the consent copy names a hand-authored local central sink, not only the en
         },
       },
     })
-    const seedPath = path.join(stateDir, 'config-control', 'seed.json')
+    const seedPath = path.join(stateDir, 'state', 'managed-config.seed.json')
     writeJsonFile(seedPath, {
       version: 2,
       plugins: [{ name: '@hypaware/central' }],

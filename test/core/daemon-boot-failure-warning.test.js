@@ -40,9 +40,9 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 async function makeHomeThatFailsBoot() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-boot-failure-warning-'))
   const stateRoot = path.join(hypHome, 'hypaware')
-  await fs.mkdir(path.join(stateRoot, 'config-control'), { recursive: true })
+  await fs.mkdir(path.join(stateRoot, 'state'), { recursive: true })
   await fs.writeFile(
-    path.join(stateRoot, 'config-control', 'seed.json'),
+    path.join(stateRoot, 'state', 'managed-config.seed.json'),
     JSON.stringify({ version: 2, plugins: [] }) + '\n'
   )
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')

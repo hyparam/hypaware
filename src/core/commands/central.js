@@ -134,7 +134,7 @@ export async function runJoin(argv, ctx) {
   }
 
   // The seed is the initial *central* layer. It is written to a
-  // dedicated central-seed file under `config-control/`, never to
+  // dedicated central-seed file under `hypaware/state/`, never to
   // `hypaware-config.json`, which is the user-owned local layer. This is
   // the #111 fix: `join` augments a working install instead of
   // destroying it.

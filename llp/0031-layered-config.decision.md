@@ -7,6 +7,7 @@
 **Extended-by:** LLP 0433 (#local-layer-writers: an attended setup run no longer prompts before overwriting; it backs up and saves)
 **Extended-by:** LLP 0503 (central and local export-redaction expressions are additive)
 **Extended-by:** LLP 0547 (#secret-file: an `hsa_` service secret is kept beside the identity after seed retirement)
+**Extended-by:** LLP 0557 (#physical-layout: the central layer's files move from `config-control/` to `state/` as `managed-config.{a,b}.json`, their etags, `managed-config.active`, `managed-config.seed.json` and `config-control.json`; the A/B slots and the atomic pointer flip are unchanged)
 **Author:** Phil / Claude
 **Date:** 2026-06-16
 **Related:** LLP 0003, LLP 0004, LLP 0009, LLP 0010, LLP 0011, LLP 0013, LLP 0014, LLP 0017, LLP 0025; hypaware-server LLP 0009 (out of tree, design authority)

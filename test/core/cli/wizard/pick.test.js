@@ -630,9 +630,10 @@ test('commitWizardPickedConfig: writes the config, backing up an existing one fi
   assert.equal(stdout.text(), '✓ Saved settings (previous config backed up)\n')
   const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
   assert.ok(written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/otel'))
-  const backups = (await fs.readdir(path.dirname(configPath))).filter((f) => f.startsWith('config.json.bak-'))
+  const backupsDir = path.join(path.dirname(configPath), 'hypaware', 'state', 'config-backups')
+  const backups = (await fs.readdir(backupsDir)).filter((f) => f.startsWith('config.json.bak-'))
   assert.equal(backups.length, 1, 'the existing config is backed up before the write')
-  assert.equal(await fs.readFile(path.join(path.dirname(configPath), backups[0]), 'utf8'), '{"version":2,"plugins":[]}\n')
+  assert.equal(await fs.readFile(path.join(backupsDir, backups[0]), 'utf8'), '{"version":2,"plugins":[]}\n')
 })
 
 test('commitWizardPickedConfig: an unattended run without --force refuses without touching the config', async () => {

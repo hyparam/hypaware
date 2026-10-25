@@ -127,7 +127,7 @@ async function makeFixture() {
 
 /** @param {string} stateRoot */
 function storePath(stateRoot) {
-  return path.join(stateRoot, 'config-control', 'client-actions.json')
+  return path.join(stateRoot, 'state', 'client-actions.json')
 }
 
 /**
@@ -150,7 +150,7 @@ function readStore(stateRoot) {
  * @param {string} requestKey
  */
 function keyLockPath(stateRoot, kind, requestKey) {
-  return path.join(stateRoot, 'config-control', 'client-action-locks', `${kind}-${requestKey}.lock`)
+  return path.join(stateRoot, 'state', 'client-action-locks', `${kind}-${requestKey}.lock`)
 }
 
 /** A reconcile pass whose run-once backfill blocks at a barrier mid-perform. */

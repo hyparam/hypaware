@@ -134,9 +134,9 @@ test('an empty HYP_CONFIG reads the default config path, as boot does', async ()
  * @param {string} body
  */
 async function writeCentral(hypHome, body) {
-  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  const controlDir = path.join(hypHome, 'hypaware', 'state')
   await fs.mkdir(controlDir, { recursive: true })
-  await fs.writeFile(path.join(controlDir, 'seed.json'), body)
+  await fs.writeFile(path.join(controlDir, 'managed-config.seed.json'), body)
 }
 
 test('a bad local layer keeps the wait even when the central layer is transcript-only', async () => {

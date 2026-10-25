@@ -347,7 +347,7 @@ test('runWizardJoin: missing org config returns an empty lock set without a wait
 test('runWizardJoin: real disk check never polls and locks only an applied config', async (t) => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-join-check-'))
   t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
-  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  const controlDir = path.join(hypHome, 'hypaware', 'state')
   await fs.mkdir(controlDir, { recursive: true })
   // A nonzero budget must fail immediately rather than make this test wait.
   t.mock.method(globalThis, 'setTimeout', () => {
@@ -360,11 +360,11 @@ test('runWizardJoin: real disk check never polls and locks only an applied confi
   })
   assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [], lockedResolved: false })
 
-  await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify(cfg(['@hypaware/central'])))
+  await fs.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify(cfg(['@hypaware/central'])))
   assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [], lockedResolved: false })
 
-  await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(cfg(['@hypaware/claude'])))
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), JSON.stringify(cfg(['@hypaware/claude'])))
+  await fs.symlink('managed-config.a.json', path.join(controlDir, 'managed-config.active'))
   assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: ['claude'], lockedResolved: true, managed: true })
   assert.doesNotMatch(opts.stdout.text(), /Applying your org's configuration|Didn't hear back/)
 })

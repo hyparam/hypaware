@@ -1,8 +1,11 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+
+import { getLogger } from '../observability/logger.js'
 
 /**
  * @import { PluginName, PluginPaths } from '../../../hypaware-plugin-kernel-types.js'
@@ -249,34 +252,317 @@ export function cacheRootOf(stateRoot) {
   return path.join(stateRoot, 'cache')
 }
 
+// ---------------------------------------------------------------------------
+// Cold state and the move that put it there
+//
+// Everything the kernel writes on a user action or a server sync, and never on
+// a timer, shares `<stateRoot>/state`; the one secret stays alone at the
+// root so a backup or a diagnostic bundle can skip it by a single path. Each
+// entry below
+// names where the file lived before the move (`legacy`) and where it lives now
+// (`current`). The table is both the path definition and the migration:
+// `migrateStateLayout` walks it, and a process that finds a daemon from the
+// previous release still running reads the legacy side, so the CLI and that
+// daemon never disagree about where a file is.
+// @ref LLP 0557#phase-2-cold-state-into-state [implements]: one table names every moved file on both sides, and nothing under `state/` is written on a timer
+// ---------------------------------------------------------------------------
+
+const COLD_STATE_DIRNAME = 'state'
+
+/** @type {Record<string, { legacy: string, current: string, kind?: 'dir' | 'symlink' }>} */
+const MOVED = {
+  credentials: { legacy: 'remote-credentials.json', current: 'credentials.json' },
+  clientAssets: { legacy: 'client-assets.json', current: 'state/client-assets.json' },
+  configControlState: { legacy: 'config-control/state.json', current: 'state/config-control.json' },
+  configControlActive: { legacy: 'config-control/active', current: 'state/managed-config.active', kind: 'symlink' },
+  configControlSeed: { legacy: 'config-control/seed.json', current: 'state/managed-config.seed.json' },
+  configSlotA: { legacy: 'config-control/config.a.json', current: 'state/managed-config.a.json' },
+  configSlotB: { legacy: 'config-control/config.b.json', current: 'state/managed-config.b.json' },
+  configSlotEtagA: { legacy: 'config-control/config.a.etag', current: 'state/managed-config.a.etag' },
+  configSlotEtagB: { legacy: 'config-control/config.b.etag', current: 'state/managed-config.b.etag' },
+  clientActions: { legacy: 'config-control/client-actions.json', current: 'state/client-actions.json' },
+  clientActionLocks: { legacy: 'config-control/client-action-locks', current: 'state/client-action-locks', kind: 'dir' },
+  selfUpdate: { legacy: 'run/self-update.json', current: 'state/self-update.json' },
+  syncCheckProofs: { legacy: 'sync-check', current: 'state/sync-check', kind: 'dir' },
+}
+
+/** The directory the legacy central-layer files shared; removed once empty. */
+const LEGACY_CONTROL_DIRNAME = path.dirname(MOVED.configControlState.legacy)
+
+/** How many timestamped config backups `prepareLocalConfigWrite` keeps. */
+export const CONFIG_BACKUPS_KEEP = 5
+
 /**
- * Remote credentials (tokens for every enrolled server), mode 0600.
+ * Which side of the table each state root reads, decided once per process
+ * and root. Settled lazily by the first helper that needs it, or explicitly
+ * by a boot that wants the moves logged.
+ * @type {Map<string, 'current' | 'legacy'>}
+ */
+const layoutByRoot = new Map()
+
+/**
+ * @param {string} stateRoot
+ * @returns {'current' | 'legacy'}
+ */
+function layoutOf(stateRoot) {
+  return layoutByRoot.get(stateRoot) ?? settleStateLayout(stateRoot)
+}
+
+/**
+ * @param {string} stateRoot
+ * @param {keyof typeof MOVED} key
+ * @returns {string}
+ */
+function movedPath(stateRoot, key) {
+  const entry = MOVED[key]
+  return path.join(stateRoot, layoutOf(stateRoot) === 'legacy' ? entry.legacy : entry.current)
+}
+
+/** @param {string} p */
+function lexists(p) {
+  try {
+    fsSync.lstatSync(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * True while a daemon from before the move is still running against this
+ * root: its pid file names a live process, nothing has marked the tree
+ * current, and at least one file still sits at a legacy path. A CLI in that
+ * window reads and writes the legacy side rather than moving files out from
+ * under the daemon; the daemon's own restart performs the move.
+ * @param {string} stateRoot
+ */
+function previousReleaseDaemonIsLive(stateRoot) {
+  if (lexists(path.join(stateRoot, COLD_STATE_DIRNAME))) return false
+  /** @type {unknown} */
+  let pid
+  try {
+    pid = JSON.parse(fsSync.readFileSync(pidFilePath(stateRoot), 'utf8')).pid
+  } catch {
+    return false
+  }
+  if (typeof pid !== 'number' || !Number.isFinite(pid)) return false
+  try {
+    process.kill(pid, 0)
+  } catch (err) {
+    // EPERM is a pid some process still holds.
+    if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'EPERM') return false
+  }
+  return Object.values(MOVED).some((entry) => lexists(path.join(stateRoot, entry.legacy)))
+}
+
+/**
+ * Decide which layout this process reads for `stateRoot`, and perform the
+ * move when it is safe to. The daemon always moves: it has just claimed the
+ * pid file, so no older daemon can be reading the legacy paths. Anything else
+ * defers to a live daemon from the previous release and reads what that
+ * daemon reads. Idempotent and cheap to repeat: a settled root costs a map
+ * lookup, an unsettled one a handful of `lstat` calls.
+ *
+ * @param {string} stateRoot
+ * @param {{ daemon?: boolean, log?: { info(event: string, fields?: Record<string, unknown>): void, warn(event: string, fields?: Record<string, unknown>): void } }} [opts]
+ * @returns {'current' | 'legacy'}
+ */
+export function settleStateLayout(stateRoot, opts = {}) {
+  const settled = layoutByRoot.get(stateRoot)
+  if (settled && !opts.daemon) return settled
+  /** @type {'current' | 'legacy'} */
+  let mode = 'current'
+  if (!opts.daemon && previousReleaseDaemonIsLive(stateRoot)) {
+    mode = 'legacy'
+  } else {
+    migrateStateLayout(stateRoot, { log: opts.log, markCurrent: opts.daemon === true })
+  }
+  layoutByRoot.set(stateRoot, mode)
+  return mode
+}
+
+/**
+ * Move every file the table names from its legacy path to its current one.
+ * Same filesystem, one `rename` per file, so each move is atomic and a crash
+ * halfway resumes on the next call. A file already at its current path is
+ * left alone, as is a legacy file whose current path is taken. Config
+ * backups beside `hypaware-config.json` move under `state/config-backups`
+ * and are pruned to the newest {@link CONFIG_BACKUPS_KEEP}. The legacy
+ * `config-control/` directory is removed once it is empty.
+ *
+ * `state/` itself is only created when something moves into it or
+ * `markCurrent` asks for it (the daemon does, so a CLI started beside a
+ * fresh daemon can tell it from one of the previous release). A preview boot
+ * on a fresh tree therefore still leaves the tree as it found it.
+ *
+ * @param {string} stateRoot
+ * @param {{ log?: { info(event: string, fields?: Record<string, unknown>): void, warn(event: string, fields?: Record<string, unknown>): void }, markCurrent?: boolean }} [opts]
+ * @returns {Array<{ from: string, to: string }>} the moves performed
+ */
+export function migrateStateLayout(stateRoot, opts = {}) {
+  /** @type {Array<{ from: string, to: string }>} */
+  const moved = []
+  if (!lexists(stateRoot)) return moved
+  const log = opts.log ?? getLogger('kernel')
+  const stateDir = path.join(stateRoot, COLD_STATE_DIRNAME)
+  const mkdir = (/** @type {string} */ dir) => fsSync.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  if (opts.markCurrent) mkdir(stateDir)
+
+  for (const entry of Object.values(MOVED)) {
+    const from = path.join(stateRoot, entry.legacy)
+    const to = path.join(stateRoot, entry.current)
+    if (!lexists(from) || lexists(to)) continue
+    try {
+      mkdir(path.dirname(to))
+      if (entry.kind === 'symlink') {
+        // The pointer is a relative symlink naming a slot by basename; the
+        // slot was renamed too, so the link is recreated against the new name
+        // rather than carried over dangling.
+        fsSync.symlinkSync(currentBasenameOf(fsSync.readlinkSync(from)), to)
+        fsSync.unlinkSync(from)
+      } else {
+        fsSync.renameSync(from, to)
+      }
+      moved.push({ from, to })
+    } catch (err) {
+      log.warn('state_layout.move_failed', { from, to, message: err instanceof Error ? err.message : String(err) })
+    }
+  }
+
+  // Backups are a family of files rather than one path: every
+  // `hypaware-config.json.bak-<ts>` beside the local config moves in, then
+  // the family is capped like a fresh write would cap it.
+  const hypHome = path.dirname(stateRoot)
+  const backupsDir = configBackupsDir(stateRoot)
+  /** @type {string[]} */
+  let names = []
+  try {
+    names = fsSync.readdirSync(hypHome).filter((name) => name.startsWith(`${LOCAL_CONFIG_BASENAME}.bak-`))
+  } catch { /* an unreadable home has nothing to move */ }
+  for (const name of names) {
+    const from = path.join(hypHome, name)
+    const to = path.join(backupsDir, name)
+    if (lexists(to)) continue
+    try {
+      mkdir(backupsDir)
+      fsSync.renameSync(from, to)
+      moved.push({ from, to })
+    } catch (err) {
+      log.warn('state_layout.move_failed', { from, to, message: err instanceof Error ? err.message : String(err) })
+    }
+  }
+  if (names.length > 0) pruneConfigBackups(backupsDir, LOCAL_CONFIG_BASENAME)
+
+  try {
+    fsSync.rmdirSync(path.join(stateRoot, LEGACY_CONTROL_DIRNAME))
+  } catch { /* absent, or still holding something that is not ours to move */ }
+
+  for (const move of moved) log.info('state_layout.moved', { component: 'state-layout', ...move })
+  return moved
+}
+
+/**
+ * The basename a legacy symlink target takes after the move, or the target
+ * unchanged when it is not one the table knows.
+ * @param {string} target
+ */
+function currentBasenameOf(target) {
+  for (const entry of Object.values(MOVED)) {
+    if (path.basename(entry.legacy) === target) return path.basename(entry.current)
+  }
+  return target
+}
+
+/**
+ * Keep the newest {@link CONFIG_BACKUPS_KEEP} backups of `basename` in
+ * `dir` and remove the rest. The stamp is an ISO time with its separators
+ * flattened, so name order is time order.
+ * @param {string} dir
+ * @param {string} basename
+ */
+export function pruneConfigBackups(dir, basename) {
+  const prefix = `${basename}.bak-`
+  /** @type {string[]} */
+  let names
+  try {
+    names = fsSync.readdirSync(dir).filter((name) => name.startsWith(prefix)).sort()
+  } catch {
+    return
+  }
+  for (const name of names.slice(0, Math.max(0, names.length - CONFIG_BACKUPS_KEEP))) {
+    try {
+      fsSync.unlinkSync(path.join(dir, name))
+    } catch { /* a backup that cannot be removed is not worth failing the write for */ }
+  }
+}
+
+/**
+ * The cold-state directory, `<stateRoot>/state`.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function coldStateDir(stateRoot) {
+  return path.join(stateRoot, COLD_STATE_DIRNAME)
+}
+
+/**
+ * Where `prepareLocalConfigWrite` keeps the timestamped copies it takes
+ * before replacing the local config.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function configBackupsDir(stateRoot) {
+  return path.join(coldStateDir(stateRoot), 'config-backups')
+}
+
+/**
+ * The backup path for one rewrite of the config at `targetPath`. The state
+ * root is the one beside the config, so the default config backs up under
+ * `<HYP_HOME>/hypaware/state/config-backups` and a config given by path
+ * backs up under the same relative tree beside it. While a daemon from the
+ * previous release is live the copy lands beside the config, as it used to.
+ * @param {string} targetPath
+ * @param {string} stamp
+ * @returns {string}
+ */
+export function configBackupPath(targetPath, stamp) {
+  const name = `${path.basename(targetPath)}.bak-${stamp}`
+  const stateRoot = stateRootOf(path.dirname(targetPath))
+  if (layoutOf(stateRoot) === 'legacy') return path.join(path.dirname(targetPath), name)
+  return path.join(configBackupsDir(stateRoot), name)
+}
+
+/**
+ * Remote credentials (tokens for every enrolled server), mode 0600. Alone at
+ * the state root on purpose: the one path a backup or a bundle must skip.
  * @param {string} stateRoot
  * @returns {string}
  */
 export function credentialsPath(stateRoot) {
-  return path.join(stateRoot, 'remote-credentials.json')
+  return movedPath(stateRoot, 'credentials')
 }
 
 /**
- * The ledger of client assets HypAware itself wrote. A sibling of
- * `config-control/`, not inside it: this is not a control-plane marker.
+ * The ledger of client assets HypAware itself wrote.
  * @param {string} stateRoot
  * @returns {string}
  */
 export function clientAssetLedgerPath(stateRoot) {
-  return path.join(stateRoot, 'client-assets.json')
+  return movedPath(stateRoot, 'clientAssets')
 }
 
 /**
- * The central config-control directory: the applied slots, their etags, the
- * active-slot pointer, the join seed, the apply state and the action marker.
+ * The directory holding the managed (central) config files: the applied
+ * slots, their etags, the active-slot pointer, the join seed and the apply
+ * state. They share `state/` with the other cold files under one
+ * `managed-config.` prefix; this is the directory to create before the first
+ * write and to list for leftovers.
  * @ref LLP 0031#physical-layout [implements]: the central layer's files live together, off the user-facing config path
  * @param {string} stateRoot
  * @returns {string}
  */
 export function configControlDir(stateRoot) {
-  return path.join(stateRoot, 'config-control')
+  return path.dirname(movedPath(stateRoot, 'configControlState'))
 }
 
 /**
@@ -285,19 +571,19 @@ export function configControlDir(stateRoot) {
  * @returns {string}
  */
 export function configControlStatePath(stateRoot) {
-  return path.join(configControlDir(stateRoot), 'state.json')
+  return movedPath(stateRoot, 'configControlState')
 }
 
 /**
  * The active-slot pointer: a relative symlink at this path naming the live
- * `config.{a,b}.json` slot. Kept inside `config-control/` so the user's local
- * config is a plain file and the atomic symlink flip stays crash-safe.
- * @ref LLP 0031#physical-layout [constrained-by]: active-slot pointer relocated into config-control/
+ * slot by basename. Kept beside the slots so the user's local config is a
+ * plain file and the atomic symlink flip stays crash-safe.
+ * @ref LLP 0031#physical-layout [constrained-by]: the pointer sits beside the slots, never at the user-facing config path
  * @param {string} stateRoot
  * @returns {string}
  */
 export function configControlActivePath(stateRoot) {
-  return path.join(configControlDir(stateRoot), 'active')
+  return movedPath(stateRoot, 'configControlActive')
 }
 
 /**
@@ -308,7 +594,7 @@ export function configControlActivePath(stateRoot) {
  * @returns {string}
  */
 export function configControlSeedPath(stateRoot) {
-  return path.join(configControlDir(stateRoot), 'seed.json')
+  return movedPath(stateRoot, 'configControlSeed')
 }
 
 /**
@@ -318,7 +604,7 @@ export function configControlSeedPath(stateRoot) {
  * @returns {string}
  */
 export function configSlotPath(stateRoot, slot) {
-  return path.join(configControlDir(stateRoot), `config.${slot}.json`)
+  return movedPath(stateRoot, slot === 'a' ? 'configSlotA' : 'configSlotB')
 }
 
 /**
@@ -328,29 +614,31 @@ export function configSlotPath(stateRoot, slot) {
  * @returns {string}
  */
 export function configSlotEtagPath(stateRoot, slot) {
-  return path.join(configControlDir(stateRoot), `config.${slot}.etag`)
+  return movedPath(stateRoot, slot === 'a' ? 'configSlotEtagA' : 'configSlotEtagB')
 }
 
 /**
  * The client-action marker: which central requests this host has completed.
- * @ref LLP 0041#idempotency-and-completion-state [implements]: marker file config-control/client-actions.json
+ * @ref LLP 0041#idempotency-and-completion-state [implements]: one marker file per host, now `state/client-actions.json`
  * @param {string} stateRoot
  * @returns {string}
  */
 export function clientActionsPath(stateRoot) {
-  return path.join(configControlDir(stateRoot), 'client-actions.json')
+  return movedPath(stateRoot, 'clientActions')
 }
 
 /**
  * Per-request lifecycle locks for client actions, one file per
  * `(kind, requestKey)` while it is held. Released locks are deleted, so the
- * directory holds only the keys someone is working on right now.
+ * directory holds only the keys someone is working on right now. It sits
+ * beside the marker it guards, written at the same cadence, so a client
+ * action never depends on the daemon's `run/` directory being writable.
  * @ref LLP 0523#two-locks [implements]: a per-key lock around the effect, a brief store lock around the marker write
  * @param {string} stateRoot
  * @returns {string}
  */
 export function clientActionLocksDir(stateRoot) {
-  return path.join(configControlDir(stateRoot), 'client-action-locks')
+  return movedPath(stateRoot, 'clientActionLocks')
 }
 
 /**
@@ -390,7 +678,7 @@ export function productTelemetryRoot(stateRoot) {
  * @returns {string}
  */
 export function syncCheckProofDir(stateRoot) {
-  return path.join(stateRoot, 'sync-check')
+  return movedPath(stateRoot, 'syncCheckProofs')
 }
 
 /**
@@ -444,11 +732,13 @@ export function statusFilePath(stateRoot) {
 
 /**
  * The self-update check record (last check, latest version, boot failures).
+ * Written once a day and read by `hyp status`: cold, so it lives with the
+ * cold state and not in `run/`.
  * @param {string} stateRoot
  * @returns {string}
  */
 export function selfUpdateStatePath(stateRoot) {
-  return path.join(daemonRunDir(stateRoot), 'self-update.json')
+  return movedPath(stateRoot, 'selfUpdate')
 }
 
 /**

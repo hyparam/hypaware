@@ -140,7 +140,7 @@ function reconcileInput(home, clients) {
 
 /** @param {string} stateRoot */
 function readMarkers(stateRoot) {
-  const p = path.join(stateRoot, 'config-control', 'client-actions.json')
+  const p = path.join(stateRoot, 'state', 'client-actions.json')
   return JSON.parse(fs.readFileSync(p, 'utf8'))
 }
 
@@ -245,7 +245,7 @@ test('manual `hyp detach` retracts the attach marker so a later join re-attaches
  * @param {string} requestKey
  */
 function seedStaleMarker(stateRoot, kind, requestKey) {
-  const dir = path.join(stateRoot, 'config-control')
+  const dir = path.join(stateRoot, 'state')
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
     path.join(dir, 'client-actions.json'),
@@ -391,7 +391,7 @@ test('detach fails, naming the marker, when the marker retraction throws (LLP 05
     // file belongs makes its readFileSync fail (EISDIR). A marker the detach
     // cannot retract would make a later attach skip, so the detach reports it
     // as a failure instead of swallowing it.
-    fs.mkdirSync(path.join(stateRoot, 'config-control', 'client-actions.json'), { recursive: true })
+    fs.mkdirSync(path.join(stateRoot, 'state', 'client-actions.json'), { recursive: true })
 
     const { registry, kernel } = fakeKernel()
     const stdout = makeBuf()
@@ -424,7 +424,7 @@ test('detach fails, naming the marker, when the marker retraction throws (LLP 05
  * @param {string[]} installedAssets
  */
 function seedMarkerWithAssets(stateRoot, requestKey, installedAssets) {
-  const dir = path.join(stateRoot, 'config-control')
+  const dir = path.join(stateRoot, 'state')
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
     path.join(dir, 'client-actions.json'),

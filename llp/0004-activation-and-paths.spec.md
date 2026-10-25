@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0005, LLP 0006, LLP 0012
-**Extended-by:** LLP 0420 (#the-activation-context: the per-plugin facade rule holds for `CommandRunContext` too, so a plugin-contributed command body reaches the registries through the same facades its `activate()` holds); LLP 0525 (#the-activation-context, #state-directories: a `hyp setup --dry-run` boot is a preview, whose context carries `preview: true` and whose durable plugin dirs are named but not created); LLP 0557 (#state-directories: the kernel's own small state files are named in one module and, from its phase 2, grouped by write pattern under `state/`, `run/` and `spool/`)
+**Extended-by:** LLP 0420 (#the-activation-context: the per-plugin facade rule holds for `CommandRunContext` too, so a plugin-contributed command body reaches the registries through the same facades its `activate()` holds); LLP 0525 (#the-activation-context, #state-directories: a `hyp setup --dry-run` boot is a preview, whose context carries `preview: true` and whose durable plugin dirs are named but not created); LLP 0557 (#state-directories: the kernel's own small state files are named in one module and, from its phase 2, grouped by write pattern under `state/` and `run/`)
 
 > How a plugin is activated and what the kernel hands it. Decomposed from
 > `hypaware-design.md` (Activation, Sources).

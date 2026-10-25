@@ -79,7 +79,7 @@ test('a stop for another credential or destination raises nothing; one for this 
     const { home, recordPath } = await joined()
     const record = JSON.parse(await fs.readFile(recordPath, 'utf8'))
     await fs.writeFile(recordPath, JSON.stringify({ ...record, stopped_code: 'service_token_revoked' }))
-    const seedPath = path.join(home, 'hypaware', 'config-control', 'seed.json')
+    const seedPath = path.join(home, 'hypaware', 'state', 'managed-config.seed.json')
     await change({ home, seedPath, identityPath: path.join(path.dirname(recordPath), 'identity.json') })
     return stopped(home)
   }

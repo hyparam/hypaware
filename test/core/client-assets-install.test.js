@@ -210,7 +210,7 @@ test('update-mode skills install respects attachment, client filtering, and a su
     assert.equal(await dispatch(['skills', 'install', '--attached'], opts), 0)
     await assert.rejects(fs.stat(path.join(home, '.claude')), { code: 'ENOENT' })
     await assert.rejects(fs.stat(path.join(home, '.codex')), { code: 'ENOENT' })
-    await assert.rejects(fs.stat(path.join(stateRoot, 'client-assets.json')), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(path.join(stateRoot, 'state', 'client-assets.json')), { code: 'ENOENT' })
     assert.match(stdout.text(), /no attached clients/)
 
     await fs.mkdir(path.dirname(settingsPath), { recursive: true })
@@ -229,7 +229,7 @@ test('update-mode skills install respects attachment, client filtering, and a su
     assert.equal(await fs.readFile(agentPath, 'utf8'), 'current agent\n')
 
     // Seed the org attach's undo record so the real detach removes both assets.
-    const actionsPath = path.join(stateRoot, 'config-control', 'client-actions.json')
+    const actionsPath = path.join(stateRoot, 'state', 'client-actions.json')
     await fs.mkdir(path.dirname(actionsPath), { recursive: true })
     const actions = JSON.stringify({ attach: { claude: {
       status: 'done', request_key: 'claude', installed_assets: [skillDir, agentPath],
@@ -238,13 +238,13 @@ test('update-mode skills install respects attachment, client filtering, and a su
     assert.equal(await dispatch(['detach', 'claude'], opts), 0, stderr.text())
     await assert.rejects(fs.stat(skillDir), { code: 'ENOENT' })
     await assert.rejects(fs.stat(agentPath), { code: 'ENOENT' })
-    const ledger = await fs.readFile(path.join(stateRoot, 'client-assets.json'), 'utf8')
+    const ledger = await fs.readFile(path.join(stateRoot, 'state', 'client-assets.json'), 'utf8')
     // Even a leftover control-plane marker cannot override the settings probe.
     await fs.writeFile(actionsPath, actions)
     assert.equal(await dispatch(['skills', 'install', '--attached'], opts), 0)
     await assert.rejects(fs.stat(skillDir), { code: 'ENOENT' })
     await assert.rejects(fs.stat(agentPath), { code: 'ENOENT' })
-    assert.equal(await fs.readFile(path.join(stateRoot, 'client-assets.json'), 'utf8'), ledger)
+    assert.equal(await fs.readFile(path.join(stateRoot, 'state', 'client-assets.json'), 'utf8'), ledger)
     await assert.rejects(fs.stat(path.join(home, '.codex')), { code: 'ENOENT' })
 
     await fs.writeFile(settingsPath, '{malformed')

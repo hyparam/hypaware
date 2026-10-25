@@ -119,7 +119,7 @@ test('stage applies a document: slot persisted, pointer flipped, etag staged, pr
 
   // The active-slot pointer (inside config-control/, not the user config)
   // is now a symlink resolving to the new doc.
-  const pointer = path.join(stateRoot, 'config-control', 'active')
+  const pointer = path.join(stateRoot, 'state', 'managed-config.active')
   const stat = await fsp.lstat(pointer)
   assert.ok(stat.isSymbolicLink())
   assert.deepEqual(readCentralLayer(stateRoot).plugins, REMOTE_CONFIG.plugins)
@@ -127,7 +127,7 @@ test('stage applies a document: slot persisted, pointer flipped, etag staged, pr
   // The seed was preserved as the rollback target, and retired from its
   // own file once the apply succeeded.
   const slotA = JSON.parse(
-    await fsp.readFile(path.join(stateRoot, 'config-control', 'config.a.json'), 'utf8')
+    await fsp.readFile(path.join(stateRoot, 'state', 'managed-config.a.json'), 'utf8')
   )
   assert.deepEqual(slotA, SEED_CONFIG)
   assert.equal(fs.existsSync(centralSeedPath(stateRoot)), false)
@@ -195,7 +195,7 @@ test('validation failure remembers the bad etag and leaves the central layer unt
   assert.deepEqual(restarts, [])
 
   // Still the seed, no pointer flipped, no slot written.
-  assert.equal(fs.existsSync(path.join(stateRoot, 'config-control', 'active')), false)
+  assert.equal(fs.existsSync(path.join(stateRoot, 'state', 'managed-config.active')), false)
   assert.equal(resolveCentralLayerPath({ stateRoot }), seedPath)
   assert.deepEqual(readCentralLayer(stateRoot), SEED_CONFIG)
   const status = await control.status()
@@ -414,7 +414,7 @@ test('evaluateAtBoot discards a probation marker whose flip never committed', as
 
   // Simulate a crash between the marker write and the pointer flip by
   // pointing the marker at the slot that is NOT active.
-  const statePath = path.join(stateRoot, 'config-control', 'state.json')
+  const statePath = path.join(stateRoot, 'state', 'config-control.json')
   const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
   state.probation.slot = 'a'
   fs.writeFileSync(statePath, JSON.stringify(state))
@@ -436,7 +436,7 @@ test('the probation watchdog rolls back and requests a restart on expiry', async
   assert.deepEqual(restarts, ['config_applied'])
 
   // Shrink the live marker's window so the real timer fires fast.
-  const statePath = path.join(stateRoot, 'config-control', 'state.json')
+  const statePath = path.join(stateRoot, 'state', 'config-control.json')
   const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
   state.probation.until = new Date(Date.now() + 20).toISOString()
   fs.writeFileSync(statePath, JSON.stringify(state))
@@ -457,7 +457,7 @@ test('a confirmed poll disarms the watchdog before it fires', async () => {
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
 
-  const statePath = path.join(stateRoot, 'config-control', 'state.json')
+  const statePath = path.join(stateRoot, 'state', 'config-control.json')
   const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
   state.probation.until = new Date(Date.now() + 30).toISOString()
   fs.writeFileSync(statePath, JSON.stringify(state))

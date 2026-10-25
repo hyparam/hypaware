@@ -433,6 +433,7 @@ test('a failed accepted migration warns and the attach still succeeds', async ()
     const hypDir = path.join(home, '.hyp')
     const { chmodSync } = await import('node:fs')
     chmodSync(hypDir, 0o555)
+    chmodSync(localConfigPath(home), 0o444)
     try {
       const code = await runAttach([PROXY_CLIENT], ctx)
       assert.equal(code, 0, 'the attach exit code is untouched by the migration failure')
@@ -442,6 +443,7 @@ test('a failed accepted migration warns and the attach still succeeds', async ()
       assert.equal(attached.endpoint, 'http://127.0.0.1:60680', 'base-URL attach still ran')
     } finally {
       chmodSync(hypDir, 0o755)
+      chmodSync(localConfigPath(home), 0o644)
     }
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before, 'the config on disk is untouched')
   })

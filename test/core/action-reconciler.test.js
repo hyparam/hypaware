@@ -47,7 +47,7 @@ const INPUT = {
 }
 
 function markerPath(stateRoot) {
-  return path.join(stateRoot, 'config-control', 'client-actions.json')
+  return path.join(stateRoot, 'state', 'client-actions.json')
 }
 
 function readMarkerFile(stateRoot) {
@@ -279,7 +279,7 @@ test('a corrupt marker file does not wedge reconcile (treated as empty, pass sti
     // already swallows this (readClientActionStatus), but reconcile() read
     // it through a bare JSON.parse: a corrupt marker wedged ALL actions
     // while status reported clean. It must now degrade to an empty store.
-    const controlDir = path.join(stateRoot, 'config-control')
+    const controlDir = path.join(stateRoot, 'state')
     fs.mkdirSync(controlDir, { recursive: true })
     fs.writeFileSync(path.join(controlDir, 'client-actions.json'), '{ this is not: json,,,')
 
@@ -376,7 +376,7 @@ test('a failed reverse keeps the marker in the store (probe-less attach is never
     // missing attachProbe and returns `failed` rather than a marker-dropping
     // no-op, so the reconciler must KEEP the marker. Dropping it would orphan
     // the on-disk settings: present, but invisible to a later detach.
-    const controlDir = path.join(stateRoot, 'config-control')
+    const controlDir = path.join(stateRoot, 'state')
     fs.mkdirSync(controlDir, { recursive: true })
     fs.writeFileSync(
       markerPath(stateRoot),
@@ -433,7 +433,7 @@ test('a failed marker that recorded an effect is reversed, not dropped (LLP 0138
     // - an attach that went `done`, re-performed unsuccessfully, and carried
     // the field into its `failed` rewrite. Nothing else on disk names those
     // copies, so dropping the marker would orphan them.
-    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.mkdirSync(path.join(stateRoot, 'state'), { recursive: true })
     fs.writeFileSync(
       markerPath(stateRoot),
       JSON.stringify({
@@ -793,9 +793,9 @@ test('a refused marker below the build re-arm generation is re-performed exactly
     const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
 
     // The marker an earlier release wrote: terminal, and with no generation.
-    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.mkdirSync(path.join(stateRoot, 'state'), { recursive: true })
     fs.writeFileSync(
-      path.join(stateRoot, 'config-control', 'client-actions.json'),
+      path.join(stateRoot, 'state', 'client-actions.json'),
       JSON.stringify({
         attach: {
           openclaw: { status: 'refused', request_key: 'openclaw', reason: 'legacy', at: 'T0' },
@@ -815,7 +815,7 @@ test('a refused marker below the build re-arm generation is re-performed exactly
     // A second legacy marker, this time over a precondition that has cleared:
     // the one re-perform is what lands the effect the host has been missing.
     fs.writeFileSync(
-      path.join(stateRoot, 'config-control', 'client-actions.json'),
+      path.join(stateRoot, 'state', 'client-actions.json'),
       JSON.stringify({
         attach: {
           openclaw: { status: 'refused', request_key: 'openclaw', reason: 'legacy', at: 'T0' },

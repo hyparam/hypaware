@@ -198,8 +198,8 @@ test('invalid/self upstreams and corrupt current configuration fail without repl
 
 test('organization gateway ownership refuses an inert local upstream change', async t => {
   const f = await installFixture(t)
-  await fs.mkdir(path.join(f.state, 'config-control'), { recursive: true })
-  await fs.writeFile(path.join(f.state, 'config-control/seed.json'), JSON.stringify(f.config))
+  await fs.mkdir(path.join(f.state, 'state'), { recursive: true })
+  await fs.writeFile(path.join(f.state, 'state/managed-config.seed.json'), JSON.stringify(f.config))
   const before = await fs.readFile(f.configPath, 'utf8')
   const result = await setupCommand(f, ['--upstream', 'http://localhost:22500/new'])
   assert.equal(result.code, 1)

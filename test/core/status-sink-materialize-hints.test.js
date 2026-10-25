@@ -64,9 +64,9 @@ async function writeProcessingLog(stateRoot, records) {
  * @param {string} [reason]
  */
 async function writeExpiredRollback(stateRoot, agoMs, reason = 'probation_expired') {
-  const dir = path.join(stateRoot, 'config-control')
+  const dir = path.join(stateRoot, 'state')
   await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(path.join(dir, 'state.json'), JSON.stringify({
+  await fs.writeFile(path.join(dir, 'config-control.json'), JSON.stringify({
     last_rollback: { etag: 'W/"rev-7"', reason, at: new Date(Date.now() - agoMs).toISOString() },
   }))
 }

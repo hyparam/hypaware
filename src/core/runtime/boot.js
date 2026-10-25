@@ -17,7 +17,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { activatePlugins } from './loader.js'
 import { createKernelRuntime } from './activation.js'
-import { cacheRootOf, stateRootOf } from './paths.js'
+import { cacheRootOf, settleStateLayout, stateRootOf } from './paths.js'
 import { buildSourceWithholdResolver, ensureClientSyncMigration } from './source_withhold.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import {
@@ -65,6 +65,11 @@ export async function bootKernel(opts = {}) {
   const stateRoot = stateRootOf(hypHome)
   const cacheRoot = opts.cacheRoot ?? cacheRootOf(stateRoot)
   const mode = opts.mode ?? 'cli'
+  // Before any reader opens a cold state file. The daemon settled its root
+  // when it claimed the pid file; here the call is for the CLI, and for the
+  // daemon it is a cached lookup.
+  // @ref LLP 0557#phase-2-cold-state-into-state [implements]: the move runs once per process before the first cold read
+  settleStateLayout(stateRoot, { daemon: mode === 'daemon', log: getLogger('kernel') })
   const runId = opts.runId ?? obsEnv.devRunId ?? `boot-${process.pid}-${Date.now()}`
   const bootProfile = opts.bootProfile ?? 'config'
 
