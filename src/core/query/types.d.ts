@@ -246,6 +246,30 @@ export interface FirstAskCandidate {
   ending?: { date: string; text: string }
 }
 
+/**
+ * How strong the evidence behind the recommendation is (LLP 0398
+ * #record-floor): `habit` clears RECORD_FLOOR, `repeated` and `procedure`
+ * recommend under it, `none` has nothing recorded to recommend from.
+ */
+export type FirstAskTier = 'habit' | 'repeated' | 'procedure' | 'none'
+
+/**
+ * What the agent ran across the newest sessions, read when no typed line
+ * repeats: the recommendation's fallback signal (LLP 0398 #record-floor).
+ */
+export interface FirstAskProcedure {
+  /** Sessions sampled, newest first. */
+  sessions: number
+  /** Sessions whose tool calls the shared row budget reached. */
+  sessionsWithCalls: number
+  /** Procedure commands, most sessions first. */
+  steps: { command: string; sessions: number }[]
+  /** Other tool activity, for context. */
+  other: { head: string; sessions: number }[]
+  /** Lines typed in sessions that ran the top step, newest first: what a trigger phrase would read like. */
+  examples: { date: string; text: string }[]
+}
+
 /** What `prepareFirstAskEvidence` produced. */
 export interface FirstAskEvidence {
   /** The folder the client is started in. */
@@ -253,7 +277,11 @@ export interface FirstAskEvidence {
   from: string
   files: string[]
   record?: { sessions: number; sessionDays: number }
-  /** Whether the record cleared RECORD_FLOOR; false means the answer stops at "not enough yet". */
+  /** How strong the evidence is; only `none` stops the answer at "nothing to recommend from yet". */
+  tier?: FirstAskTier
+  /** `tier !== 'none'`: there is something to recommend from. */
   enough?: boolean
   candidates?: FirstAskCandidate[]
+  /** The fallback signal, read only when no line repeats. */
+  procedure?: FirstAskProcedure
 }

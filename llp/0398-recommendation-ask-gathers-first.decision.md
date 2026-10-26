@@ -200,10 +200,26 @@ seconds against 80 and 116 for the routed one, with three files read
 instead of eight, from 400 lines of code instead of 1,050. The other
 signals are not wrong. They are later questions.
 
-<a id="record-floor"></a>**Below the floor the answer says so and stops.**
-Fewer than 20 sessions recorded, or no line typed in 5 sessions on 3
-days, and the client is told to say how much was recorded and that there
-is not enough yet. A skill proposed from three sessions is a guess.
+<a id="record-floor"></a>**The floor grades the answer; only an empty
+record closes it.** Twenty sessions with a line typed in 5 of them on 3
+days is a habit, and the skill is a finding. Under that the answer still
+recommends and says how strong the evidence is: a line that repeats in 2
+sessions on 2 days is early evidence and the skill is a first guess to
+confirm; when no line repeats at all, the gather reads what the agent ran
+across the newest 40 sessions and the skill automates that procedure, with
+its trigger phrase taken from lines typed in those sessions. Only a record
+with no sessions, or with sessions holding neither typed lines nor tool
+calls, is told as nothing to recommend from yet.
+
+The floor used to stop the answer, and measured across every enrolled
+machine on 2026-10-22 it stopped most of them: of 43 with rows in the
+window, 11 cleared it, 18 had twenty or more sessions and no line typed in
+five of them, and on 7 of the 11 the top candidate was a turn Claude Code
+injects as user text ("Tool loaded.", "Skill /x is already loaded above"),
+which the client then rightly declined to call a task. People paraphrase
+their requests; their agents repeat their procedures. A skill is offered
+whenever something was recorded, and the grade says which offers are
+measured habits.
 
 <a id="human-turns"></a>**User text means human turns, deduplicated.**
 Every query excludes `conversation_source = 'claude_code'`, which is how
@@ -222,7 +238,9 @@ than the label both producers share is the better answer and needs a
 column neither lane carries today. Every user-text
 query keeps only rows that are not sidechains and whose `user_type` is
 null, `external`, or `user`, and drops injected preambles (the AGENTS.md
-block Codex prepends, compaction summaries, skill invocations). The first
+block Codex prepends, compaction summaries, skill invocations, and the
+turns Claude Code itself stores as user text: "Tool loaded.", "Skill /x is
+already loaded above", "Re-invocation of /x"). The first
 org run without these filters found "assess the exact planned action
 below" typed in 86 sessions: a Codex guardian review, not a person.
 
@@ -438,7 +456,9 @@ same value as `suggest_skill` in place of `first_ask`. `launched` against
 `declined` is whether the offer is one people take; `no-rows` is the rate
 of installs finishing with an empty cache.
 
-`wizard.first_ask` gains `evidence_enough` on a recommendation launch
-(false when the record was under the floor) and `evidence_error` when
-the gather failed and nothing was started. The rate of `false` is how
-many machines are asked too early.
+`wizard.first_ask` gains `evidence_tier` on a recommendation launch
+(`habit`, `repeated`, `procedure`, or `none`), `evidence_enough` beside it
+(false only for `none`), and `evidence_error` when the gather failed and
+nothing was started. The share under `habit` is how many machines are
+asked before a habit shows; `none` is the rate of records with nothing
+typed and nothing run.

@@ -428,6 +428,7 @@ export async function runWizardFirstAsk(opts) {
             if (evidence) {
               cwd = evidence.dir
               span.setAttribute('evidence_enough', evidence.enough !== false)
+              if (evidence.tier) span.setAttribute('evidence_tier', evidence.tier)
             }
           } catch (err) {
             span.setAttribute('evidence_error', err instanceof Error ? err.name : 'unknown')

@@ -10,12 +10,14 @@ import { asyncRow } from 'squirreling'
 
 import { executeQuerySql } from '../../src/core/query/sql.js'
 import {
+  CANDIDATE_CUT,
   RECORD_FLOOR,
   askInstructions,
   buildCandidates,
+  buildProcedure,
   commandHeads,
-  enoughRecorded,
   evidenceSql,
+  evidenceTier,
   frontMatterDescription,
   onDiskListing,
   prepareFirstAskEvidence,
@@ -54,7 +56,14 @@ test('evidenceSql: every statement excludes the duplicate OTEL lane; user text i
     assert.ok(stmt.includes("not like 'Message Type:%'"), 'a pasted relay header is not a typed request')
     assert.ok(stmt.includes("not like '# AGENTS.md instructions%'"))
   }
-  assert.ok(sql.lines.includes('having count(distinct session_id) >= 3 and count(distinct date) >= 3'))
+  assert.ok(sql.lines.includes(`having count(distinct session_id) >= ${CANDIDATE_CUT.sessions} and count(distinct date) >= ${CANDIDATE_CUT.days}`))
+  assert.deepEqual([CANDIDATE_CUT.sessions, CANDIDATE_CUT.days], [2, 2], 'a line typed again on another day is a candidate, graded under the habit floor')
+  for (const stmt of [sql.lines, sql.triggers(['x']), sql.openerTimes(['a']), sql.openers([{ id: 'a', at: 0 }])]) {
+    assert.ok(stmt.includes("not like 'Tool loaded.%'"), 'a deferred tool load is not a person')
+    assert.ok(stmt.includes("not like 'Skill /% is already loaded%'"))
+    assert.ok(stmt.includes("not like 'Re-invocation of %'"))
+  }
+  assert.ok(sql.recent.includes("part_type = 'tool_call'") && sql.recent.includes('order by last desc limit 40'), 'the fallback samples the newest sessions that ran tools, bounded')
   for (const stmt of [sql.lines, sql.triggers(['x'])]) {
     assert.ok(stmt.includes('length(content_text) between 12 and 160'), 'the occurrences counted are the same messages the candidate was found from')
   }
@@ -137,8 +146,8 @@ test('a run of symbols with no letter or digit is no candidate and does not sati
   ]
   // The control, and the direction this must not break: a request in a
   // script with no ASCII letters is a candidate. Three sessions on three
-  // days, which clears the candidate cut and not the record floor, so
-  // `enough` below reports the symbol run alone.
+  // days, which clears the candidate cut and not the habit floor, so the
+  // tier below is decided by the symbol run alone.
   const request = 'закоммить на нужную ветку и открыть пиар'
   // Enough recorded for the record half of the floor to clear, so the gate
   // below is decided by the lines and not by the size of the record.
@@ -160,11 +169,12 @@ test('a run of symbols with no letter or digit is no candidate and does not sati
     const evidence = await prepareFirstAskEvidence({ runner, root, homeDir: home, now: new Date('2026-09-07T05:00:00Z') })
 
     assert.deepEqual(evidence.candidates?.map((c) => c.line), [keyOf(request)], `a run of ${what} is no candidate; the non-Latin request still is`)
-    assert.equal(evidence.enough, false, `a run of ${what} does not satisfy the record floor on its own`)
-    assert.equal(evidence.record?.sessions, RECORD_FLOOR.sessions, 'the record half of the floor cleared, so the lines decided the gate')
+    assert.equal(evidence.tier, 'repeated', `a run of ${what} does not lift the evidence to a habit on its own`)
+    assert.equal(evidence.record?.sessions, RECORD_FLOOR.sessions, 'the record half of the floor cleared, so the lines decided the grade')
     const page = await fsp.readFile(path.join(root, 'candidates.md'), 'utf8')
     assert.ok(!page.includes(symbols.slice(0, 2)), `the run of ${what} is not on the page`)
-    assert.ok(page.includes('Nothing is typed often enough yet'), 'the ask refuses, as it did before the fold was widened')
+    assert.ok(page.includes('Evidence: early.'), 'the page grades the request as early evidence rather than refusing')
+    assert.ok(page.includes(`## 1. "${request}"`), 'and the non-Latin request is the candidate')
   }
 })
 
@@ -433,24 +443,81 @@ test('buildCandidates: a procedure command past the eight kept is not reported a
   assert.deepEqual(c.other, [], 'the ninth is a step that did not fit, not context')
 })
 
-test('enoughRecorded: the record floor and the line floor both have to clear', () => {
+test('evidenceTier: the floor grades the answer and only an empty record closes it', () => {
+  // @ref LLP 0398#record-floor [tests]: habit above the floor, early evidence under it, the procedure when no line repeats, nothing only when nothing was recorded
   const [c] = buildCandidates(commitRows())
-  assert.equal(enoughRecorded({ sessions: 3 }, [c]), false, 'three sessions is not a record')
-  assert.equal(enoughRecorded({ sessions: 100 }, [c]), false, 'a line typed in two sessions is not a habit')
-  assert.equal(enoughRecorded({ sessions: 100 }, [{ ...c, sessions: RECORD_FLOOR.lineSessions, days: RECORD_FLOOR.lineDays }]), true)
-  assert.equal(enoughRecorded({ sessions: 100 }, []), false)
+  const procedure = buildProcedure({ anchors: [{ id: 'sA', at: 0, triggers: 1 }], calls: commitRows().calls, openers: [] })
+  assert.equal(evidenceTier({ sessions: 3 }, [c]), 'repeated', 'three sessions is not a record, and the line typed twice is still a recommendation')
+  assert.equal(evidenceTier({ sessions: 100 }, [c]), 'repeated', 'a line typed in two sessions is early evidence, not a habit')
+  assert.equal(evidenceTier({ sessions: 100 }, [{ ...c, sessions: RECORD_FLOOR.lineSessions, days: RECORD_FLOOR.lineDays }]), 'habit')
+  assert.equal(evidenceTier({ sessions: RECORD_FLOOR.sessions - 1 }, [{ ...c, sessions: RECORD_FLOOR.lineSessions, days: RECORD_FLOOR.lineDays }]), 'repeated', 'both halves of the floor make a habit')
+  assert.equal(evidenceTier({ sessions: 100 }, [], procedure), 'procedure', 'no line repeats, so what the agent ran is the evidence')
+  assert.equal(evidenceTier({ sessions: 100 }, [], { ...procedure, sessionsWithCalls: 0 }), 'none', 'a procedure with no calls read is not evidence')
+  assert.equal(evidenceTier({ sessions: 100 }, []), 'none')
+  assert.equal(evidenceTier({ sessions: 0 }, []), 'none')
+})
+
+test('buildProcedure: the steps across the sampled sessions, with lines typed where the top step ran', () => {
+  // @ref LLP 0398#record-floor [tests]: the fallback is a procedure plus the requests it served
+  const rows = commitRows()
+  const p = buildProcedure({
+    anchors: [{ id: 'sA', at: 0, triggers: 1 }, { id: 'sB', at: 0, triggers: 1 }, { id: 'sC', at: 0, triggers: 1 }],
+    calls: rows.calls,
+    openers: [
+      { session_id: 'sA', date: '2026-08-12', example: 'ship the login fix' },
+      { session_id: 'sB', date: '2026-08-14', example: 'wrap up and open the PR' },
+      { session_id: 'sC', date: '2026-08-15', example: 'what did we do yesterday' },
+      { session_id: 'sB', date: '2026-08-14', example: '----' },
+    ],
+  })
+  assert.equal(p.sessions, 3)
+  assert.equal(p.sessionsWithCalls, 2, 'sC returned no calls')
+  const unnamed = buildProcedure({ anchors: [{ id: 'h1', at: 0, triggers: 1 }], calls: [{ session_id: 'h1', at: 0, tool_name: null, args: null }], openers: [] })
+  assert.equal(unnamed.sessionsWithCalls, 0, 'a call with no tool name is not a procedure')
+  assert.deepEqual(unnamed.steps, [])
+  const shell = buildProcedure({ anchors: [{ id: 'c1', at: 0, triggers: 1 }], calls: [{ session_id: 'c1', at: 0, tool_name: 'Shell', args: '{"command":"git status --short","description":"d"}' }], openers: [] })
+  assert.deepEqual(shell.steps, [{ command: 'git status --short', sessions: 1 }], "Cursor's Shell is read like Bash")
+  const housework = buildProcedure({
+    anchors: [{ id: 'k1', at: 0, triggers: 1 }, { id: 'k2', at: 0, triggers: 1 }],
+    calls: [
+      { session_id: 'k1', at: 0, tool_name: 'ToolSearch', args: '{"query":"select:Read"}' },
+      { session_id: 'k2', at: 0, tool_name: 'ToolSearch', args: '{"query":"select:Read"}' },
+      { session_id: 'k2', at: 1, tool_name: 'UpdateCurrentStep', args: '{"current_step":"x"}' },
+      { session_id: 'k2', at: 2, tool_name: 'mcp__6f4fa324-816e-4b8f-a998-3a6af17d0c90__slack_read_channel', args: '{"channel":"c"}' },
+      { session_id: 'k1', at: 3, tool_name: 'mcp__claude_ai_PostHog__exec', args: '{}' },
+    ],
+    openers: [],
+  })
+  assert.deepEqual(housework.steps.map((s) => s.command), ['mcp: slack_read_channel', 'mcp claude_ai_PostHog: exec'], 'the harness keeping house is not a step; an MCP tool is, named without its server id')
+  assert.equal(housework.sessionsWithCalls, 2)
+  assert.deepEqual(p.steps.slice(0, 2).map((s) => [s.command, s.sessions]), [['git checkout -b', 2], ['gh pr create', 2]])
+  assert.ok(p.steps.some((s) => s.command === 'Read: README.md'), 'with no line to say what the task was, a read is a step too, ranked by sessions')
+  assert.deepEqual(p.other, [], 'nothing past the eighth head')
+  assert.deepEqual(p.examples, [{ date: '2026-08-14', text: 'wrap up and open the PR' }, { date: '2026-08-12', text: 'ship the login fix' }], 'newest first, from sessions that ran the top step, and a line with no letter is not one')
 })
 
 test('renderCandidates: a reader-ready page, or the not-enough sentence', () => {
   const cands = buildCandidates(commitRows())
-  const page = renderCandidates({ sessions: 100, sessionDays: 120 }, cands, true)
+  const page = renderCandidates({ sessions: 100, sessionDays: 120 }, cands, 'habit')
+  assert.ok(!page.includes('Evidence:'), 'a habit needs no grade')
   assert.ok(page.includes('Recorded: 100 sessions over 120 session-days.'))
   assert.ok(page.includes('## 1. "commit on appropriate branch and make a PR"'), 'headed by a typing as written, not by the key')
   assert.ok(page.includes('- `git checkout -b` (2)'))
   assert.ok(page.includes('How one ended (2026-08-12): "Committed on topic'))
-  const thin = renderCandidates({ sessions: 3, sessionDays: 3 }, cands, false)
-  assert.ok(thin.includes('Nothing is typed often enough yet to recommend a skill.'))
-  assert.ok(!thin.includes('## 1.'))
+  const early = renderCandidates({ sessions: 3, sessionDays: 3 }, cands, 'repeated')
+  assert.ok(early.includes('Evidence: early. No line reaches the habit floor of 5 sessions on 3 days yet'))
+  assert.ok(early.includes('## 1. "commit on appropriate branch and make a PR"'), 'the candidate is still shown under the floor')
+  const procedure = buildProcedure({ anchors: [{ id: 'sA', at: 0, triggers: 1 }, { id: 'sB', at: 0, triggers: 1 }], calls: commitRows().calls, openers: [{ session_id: 'sA', date: '2026-08-12', example: 'ship it' }] })
+  const steps = renderCandidates({ sessions: 30, sessionDays: 31 }, [], 'procedure', procedure)
+  assert.ok(steps.includes('Evidence: a procedure, not a phrase.'))
+  assert.ok(steps.includes('## Procedure, across the 2 newest sessions'))
+  assert.ok(steps.includes('- `git checkout -b` (2)'))
+  assert.ok(steps.includes('Lines typed in sessions that ran `git checkout -b`:\n- 2026-08-12: "ship it"'))
+  const empty = renderCandidates({ sessions: 0, sessionDays: 0 }, [], 'none')
+  assert.ok(empty.includes('Nothing recorded yet.'))
+  const idle = renderCandidates({ sessions: 3, sessionDays: 3 }, [], 'none')
+  assert.ok(idle.includes('Nothing to recommend from yet: the recorded sessions hold no typed lines and no named tool calls.'))
+  assert.ok(!idle.includes('## '))
 })
 
 test('askInstructions: one skill, from the record, in a colleague\'s voice, no queries', () => {
@@ -459,6 +526,9 @@ test('askInstructions: one skill, from the record, in a colleague\'s voice, no q
   assert.ok(text.startsWith('# What to do with this folder\n\nHypAware keeps your AI agents'), 'a cold session is told what HypAware is first')
   assert.ok(text.includes('over the last 30 days for this machine'))
   assert.ok(text.includes('Run no queries and no commands.'))
+  assert.ok(text.includes('Always recommend one skill.'), 'the answer never stops at not enough while something was recorded')
+  assert.ok(text.includes('When candidates.md shows a procedure instead of lines, the skill automates those steps.'))
+  assert.ok(!text.includes('that there is not enough yet, and stop'))
   assert.ok(text.includes('~/.claude/skills/<name>/SKILL.md, under 25 lines'))
   assert.ok(text.includes('no headings, no bold, no em dashes'))
   assert.ok(!text.includes('\u2014'), 'no em dash in the instructions')
@@ -512,9 +582,11 @@ test('prepareFirstAskEvidence: five queries, three files, one user-only folder r
     },
   }
   const evidence = await prepareFirstAskEvidence({ runner, root, homeDir: home, now: new Date('2026-09-07T05:00:00Z') })
-  assert.equal(seen.length, 5)
+  assert.equal(seen.length, 5, 'a candidate was found, so the fallback statements never run')
   assert.equal(evidence.dir, root)
   assert.equal(evidence.enough, true)
+  assert.equal(evidence.tier, 'habit')
+  assert.equal(evidence.procedure, undefined)
   assert.equal(evidence.candidates?.[0].steps[0].command, 'git checkout -b')
   assert.deepEqual((await fsp.readdir(root)).sort(), ['ASK.md', 'candidates.md', 'on_disk.txt'], 'the stale file is gone')
   assert.equal((await fsp.stat(root)).mode & 0o777, 0o700)
@@ -528,11 +600,63 @@ test('prepareFirstAskEvidence: an empty record writes the not-enough page and ru
   let queries = 0
   const runner = { hasDataset: () => true, async run() { queries += 1; return { columns: [], rows: [] } } }
   const evidence = await prepareFirstAskEvidence({ runner, root, homeDir: home })
-  assert.equal(queries, 2, 'the record probe and the lines probe only')
+  assert.equal(queries, 2, 'the record probe and the lines probe only: an empty record has no procedure to read')
   assert.equal(evidence.enough, false)
+  assert.equal(evidence.tier, 'none')
   const page = await fsp.readFile(path.join(root, 'candidates.md'), 'utf8')
   assert.ok(page.includes('Recorded: 0 sessions over 0 session-days.'))
-  assert.ok(page.includes('Nothing is typed often enough yet'))
+  assert.ok(page.includes('Nothing recorded yet.'))
+})
+
+test('prepareFirstAskEvidence: when no line repeats, the newest sessions\' procedure is gathered and graded as such', async () => {
+  // @ref LLP 0398#record-floor [tests]: three more bounded statements, run only when the lines came back empty
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-runs-'))
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  const rows = commitRows()
+  /** @type {string[]} */
+  const seen = []
+  const runner = {
+    hasDataset: () => true,
+    async run(sql) {
+      seen.push(sql)
+      if (sql.includes('as session_days')) return { columns: [], rows: [{ session_days: 41, sessions: 39 }] }
+      if (sql.includes('as typed')) return { columns: [], rows: [] }
+      if (sql.includes('as last')) return { columns: [], rows: [{ session_id: 'sA', at: '2026-08-12T09:00:00Z', date: '2026-08-12', last: '2026-08-12T10:05:00Z' }, { session_id: 'sB', at: '2026-08-14T10:00:00Z', date: '2026-08-14', last: '2026-08-14T10:02:00Z' }] }
+      if (sql.includes("part_type = 'tool_call'")) return { columns: [], rows: rows.calls }
+      if (sql.includes('min(message_created_at) as at from')) return { columns: [], rows: [{ session_id: 'sB', at: '2026-08-14T09:58:00Z' }, { session_id: 'sA', at: 'not a time' }] }
+      if (sql.includes('as example')) return { columns: [], rows: [{ session_id: 'sB', date: '2026-08-14', example: 'wrap up and open the PR' }] }
+      return { columns: [], rows: [] }
+    },
+  }
+  const evidence = await prepareFirstAskEvidence({ runner, root, homeDir: home, now: new Date('2026-09-07T05:00:00Z') })
+  assert.equal(seen.length, 6, 'record, lines, recent sessions, their calls, the instant of each first typed line, the lines at those instants')
+  assert.ok(seen[2].includes('order by last desc limit 40'))
+  assert.ok(seen[3].includes("session_id in ('sA', 'sB')") && seen[3].includes('limit 120'), 'the calls are read for the sampled sessions under the per-trigger budget')
+  assert.ok(seen[4].includes("session_id in ('sA', 'sB')"))
+  assert.ok(seen[5].includes("(session_id = 'sB' and message_created_at = timestamp '2026-08-14T09:58:00.000Z')") && seen[5].endsWith('limit 1'), 'one row a session, at the instant found; an unplaceable instant is dropped')
+  assert.ok(!seen[5].includes("'sA'"))
+  assert.equal(evidence.tier, 'procedure')
+  assert.equal(evidence.enough, true)
+  assert.deepEqual(evidence.candidates, [])
+  assert.equal(evidence.procedure?.steps[0].command, 'git checkout -b')
+  assert.deepEqual(evidence.procedure?.examples, [{ date: '2026-08-14', text: 'wrap up and open the PR' }])
+  const page = await fsp.readFile(path.join(root, 'candidates.md'), 'utf8')
+  assert.ok(page.includes('Recorded: 39 sessions over 41 session-days.'))
+  assert.ok(page.includes('Evidence: a procedure, not a phrase.'))
+  assert.ok(page.includes('- `gh pr create` (2)'))
+})
+
+test('candidate lines: Claude Code\'s injected user turns are not requests, through the engine', async () => {
+  // @ref LLP 0398#human-turns [tests]: a tool load, a loaded-skill notice, and a re-invocation echo are typed in more sessions than any request and are not one
+  /** @type {Record<string, SqlPrimitive>[]} */
+  const rows = []
+  const injected = ['Tool loaded.', 'Skill /neutral-reconcile is already loaded above. Follow its instructions.', 'Re-invocation of /commit: the skill instructions are above.']
+  for (const [i, text] of injected.entries()) {
+    for (const [j, s] of ['a', 'b', 'c', 'd', 'e'].entries()) rows.push({ ...typedRow(`inj-${i}-${s}`, 10 + j, i, text), user_type: i === 0 ? null : 'external' })
+  }
+  rows.push(typedRow('real-1', 10, 9, 'commit and push'), typedRow('real-2', 11, 9, 'Commit and push'))
+  const found = await candidateLines(rows)
+  assert.deepEqual(found.rows.map((r) => r.line), [keyOf('commit and push')], 'the request typed twice is the one candidate')
 })
 
 test('evidenceSql: the duplicate-lane exclusion is null-safe', () => {
@@ -605,7 +729,7 @@ test('the gather is bounded in sessions and in rows, not only by the window', ()
   assert.equal(c.sessions, 500, 'the line is still reported as typed in every session that typed it')
   assert.equal(c.sessionsWithCalls, 40, 'the procedure was read from the sample, and the page says so')
   assert.deepEqual(c.steps.map((step) => [step.command, step.sessions]), [['git checkout -b', 40]], 'the count beside a step is the sample, not every session')
-  assert.ok(renderCandidates({ sessions: 500, sessionDays: 600 }, [c], true).includes('of the 40 sampled sessions whose procedure was read'))
+  assert.ok(renderCandidates({ sessions: 500, sessionDays: 600 }, [c], 'habit').includes('of the 40 sampled sessions whose procedure was read'))
 
   const anchors = sessionAnchors(sample)
   const sql = evidenceSql('2026-08-08')
@@ -761,7 +885,7 @@ test('a candidate reports the sessions whose procedure was read, not the session
   const [c] = buildCandidates({ lines: [{ line, sessions: 6, days: 6, typed: 6 }], triggers, calls, replies: [] })
   assert.equal(c.sessionsWithCalls, 2, 'four of the six returned no rows, and the page does not claim them')
   assert.deepEqual(c.steps.map((step) => [step.command, step.sessions]), [['git commit -m', 2]])
-  assert.ok(renderCandidates({ sessions: 60, sessionDays: 90 }, [c], true).includes('(sessions that ran it, of the 2 sampled sessions whose procedure was read)'))
+  assert.ok(renderCandidates({ sessions: 60, sessionDays: 90 }, [c], 'habit').includes('(sessions that ran it, of the 2 sampled sessions whose procedure was read)'))
 })
 
 test('the trigger statement is bounded by the sessions of a window, not by what those sessions typed', async () => {

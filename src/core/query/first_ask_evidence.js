@@ -38,7 +38,7 @@
  * @ref LLP 0398#one-signal [implements]: the lines the person types most, and what ran after them
  *
  * @import { OverviewQueryRunner } from '../../../src/core/query/types.js'
- * @import { FirstAskCandidate, FirstAskEvidence } from '../../../src/core/query/types.js'
+ * @import { FirstAskCandidate, FirstAskEvidence, FirstAskProcedure, FirstAskTier } from '../../../src/core/query/types.js'
  */
 
 import fsp from 'node:fs/promises'
@@ -72,10 +72,24 @@ export const RECOMMEND_COLD_PROMPT =
   + 'Recommend one skill, show one real example with its date, and offer to write it.'
 
 /**
- * The gate. Below it the answer says how much was recorded and stops:
- * a skill proposed from three sessions is a guess dressed as a finding.
+ * The habit floor. At or above it the recommendation is a measured habit.
+ * Below it the answer still recommends, graded as what it is: a line that
+ * repeats in fewer sessions is early evidence, and a record where no line
+ * repeats at all is read for the procedure the agent ran instead. The
+ * floor used to close the gate, and measured across every enrolled machine
+ * it closed on most of them: people paraphrase, their agents repeat.
+ *
+ * @ref LLP 0398#record-floor [implements]: the floor grades the answer and never closes it; only an empty record says nothing
  */
 export const RECORD_FLOOR = Object.freeze({ sessions: 20, lineSessions: 5, lineDays: 3 })
+
+/**
+ * The cut a line has to clear to be a candidate at all: typed in two
+ * sessions on two days. Two, not three, because under the habit floor the
+ * question is only whether the line was typed again, and the page says
+ * how early such evidence is.
+ */
+export const CANDIDATE_CUT = Object.freeze({ sessions: 2, days: 2 })
 
 /** How many repeated lines the client is shown. */
 const CANDIDATES = 5
@@ -178,6 +192,15 @@ const HUMAN_TURN = [
   "content_text not like 'Base directory for this skill%'",
   "content_text not like 'From my HypAware history%'",
   "content_text not like 'Message Type:%'",
+  // Claude Code's own turns, stored as user text: a deferred tool load
+  // (no `user_type`), the harness saying a skill is already loaded, and a
+  // skill re-invocation echo (both `external`). Each is typed in more
+  // sessions than any request and was the top candidate on most machines
+  // that cleared the floor, where the client then rightly refused to call
+  // it a task. No column marks them, so the prefix is the exclusion.
+  "content_text not like 'Tool loaded.%'",
+  "content_text not like 'Skill /% is already loaded%'",
+  "content_text not like 'Re-invocation of %'",
 ].join(' and ')
 
 /**
@@ -384,6 +407,9 @@ function rowBudget(anchors) {
  *   triggers: (lines: string[]) => string,
  *   calls: (anchors: { id: string, at: number, triggers: number }[]) => string,
  *   replies: (anchors: { id: string, at: number, triggers: number }[]) => string,
+ *   recent: string,
+ *   openerTimes: (ids: string[]) => string,
+ *   openers: (points: { id: string, at: number }[]) => string,
  * }}
  */
 export function evidenceSql(from) {
@@ -396,7 +422,7 @@ export function evidenceSql(from) {
     // unrelated sessions into one candidate that then outranks the real
     // ones. A request in a non-Latin script is not one of them, since the
     // fold keeps its letters.
-    lines: `select ${TRIGGER_KEY} as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 and line <> '' order by sessions desc limit ${CANDIDATES + 3}`,
+    lines: `select ${TRIGGER_KEY} as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} group by 1 having count(distinct session_id) >= ${CANDIDATE_CUT.sessions} and count(distinct date) >= ${CANDIDATE_CUT.days} and line <> '' order by sessions desc limit ${CANDIDATES + 3}`,
     // The one statement here with no `limit`, because the `group by` is its
     // ceiling and a `limit` would not be one (hypaware #1715): the engine
     // builds every group before it yields a row, so a `limit` bounds only
@@ -418,6 +444,21 @@ export function evidenceSql(from) {
     // puts this text through `oneLine`, so trimming here would only change
     // excerpts the cut never split.
     replies: (anchors) => `select session_id, message_created_at as at, regexp_replace(substr(content_text, 1, 500), '${LONE_SURROGATE_TAIL}', '') as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
+    // The fallback signal, read only when no line repeats: the newest
+    // sessions that ran tools, each anchored at its first call so `calls`
+    // reads it whole under the same per-trigger budget a candidate line's
+    // sessions get. The sort here holds one entry a session, which is the
+    // bound the group by already paid for, and newest overall is the
+    // sample wanted: what the person does now is what a skill would automate.
+    // @ref LLP 0398#record-floor [implements]: when no line repeats, the newest sessions' procedure is the evidence
+    recent: `select session_id, min(message_created_at) as at, min(date) as date, max(message_created_at) as last from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} group by 1 order by last desc limit ${TRIGGER_SESSIONS}`,
+    // The first line typed in each sampled session, so the procedure has
+    // the request that started it as a phrase a skill could open with. In
+    // two statements because the engine has no arg-min: the instant per
+    // session, then the row at that instant. One row a session in each,
+    // so the sample is the bound.
+    openerTimes: (ids) => `select session_id, min(message_created_at) as at from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} and session_id in (${ids.map(sqlString).join(', ')}) group by 1`,
+    openers: (points) => `select session_id, date, substr(content_text, 1, 160) as example from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} and (${points.map((p) => `(session_id = ${sqlString(p.id)} and message_created_at = ${sqlTimestamp(p.at)})`).join(' or ')}) limit ${points.length}`,
   }
 }
 
@@ -434,7 +475,7 @@ export function commandHeads(calls) {
     const tool = String(r.tool_name ?? '?')
     const args = String(r.args ?? '')
     let key = tool
-    if (tool === 'Bash' || tool === 'exec') {
+    if (tool === 'Bash' || tool === 'exec' || tool === 'Shell') {
       // No match means `command` fell outside the 160-character slice the SQL
       // takes, which happens whenever the call's JSON serializes a long
       // `description` first. Falling back to the raw slice made the head a
@@ -455,6 +496,11 @@ export function commandHeads(calls) {
     } else if (tool === 'Skill') {
       const m = /"skill"\s*:\s*"([^"]{0,60})/.exec(args)
       key = `Skill: ${m ? m[1] : ''}`
+    } else if (tool.startsWith('mcp__')) {
+      // `mcp__<server>__<tool>`: the server is often an opaque id, and the
+      // tool name is what a reader would call the step.
+      const m = /^mcp__(.+?)__(.+)$/.exec(tool)
+      if (m) key = /^[0-9a-f-]{20,}$/i.test(m[1]) ? `mcp: ${m[2]}` : `mcp ${m[1]}: ${m[2]}`
     }
     const entry = heads.get(key) ?? { n: 0, sessions: new Set() }
     entry.n += 1
@@ -550,8 +596,16 @@ export function sessionAnchors(triggers) {
   return [...anchors].map(([id, a]) => ({ id, at: a.at, triggers: a.triggers }))
 }
 
-/** A command head that is a step of a procedure, not a read. */
-const STEP_HEAD = /^(Bash|exec): (git|gh|npm|node|hyp|make|pnpm|yarn|cargo|pytest|go|docker|curl) /
+/**
+ * Tools that are the harness keeping house rather than the agent doing the
+ * work: loading a deferred tool, keeping a task list, posting progress.
+ * Each runs in more sessions than any real step and says nothing a skill
+ * could automate, so the fallback procedure does not count them.
+ */
+const BOOKKEEPING = new Set(['ToolSearch', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TodoWrite', 'UpdateCurrentStep'])
+
+/** A command head that is a step of a procedure, not a read. `Shell` is Cursor's name for the same tool. */
+const STEP_HEAD = /^(Bash|exec|Shell): (git|gh|npm|node|hyp|make|pnpm|yarn|cargo|pytest|go|docker|curl) /
 
 /**
  * Build the candidates from the raw rows. Pure, so it is testable
@@ -631,7 +685,7 @@ export function buildCandidates(rows) {
       typed: num(l.typed),
       example: first ? { date: String(first.date ?? ''), text: oneLine(String(first.example ?? '')) } : undefined,
       sessionsWithCalls: read,
-      steps: steps.map((h) => ({ command: h.head.replace(/^(Bash|exec): /, ''), sessions: h.sessions })),
+      steps: steps.map((h) => ({ command: h.head.replace(/^(Bash|exec|Shell): /, ''), sessions: h.sessions })),
       other: other.map((h) => ({ head: h.head, sessions: h.sessions })),
       ending,
     })
@@ -640,15 +694,83 @@ export function buildCandidates(rows) {
 }
 
 /**
- * Whether there is enough recorded to recommend from.
+ * The fallback candidate: what the agent ran across the newest sessions,
+ * built the way a line's procedure is but with no trigger line, since none
+ * repeated. The example lines come from the sessions that ran the top
+ * step, so they are the requests the skill would have served. Pure.
  *
+ * @param {{
+ *   anchors: { id: string, at: number, triggers: number }[],
+ *   calls: Record<string, unknown>[],
+ *   openers: Record<string, unknown>[],
+ * }} rows
+ * @returns {FirstAskProcedure}
+ */
+export function buildProcedure(rows) {
+  // A call with no tool name (an agent runtime that records the call and
+  // not what it was) heads to '?', which names nothing a skill could do,
+  // so it is not read, and nor is the harness's own bookkeeping: a record
+  // of only such calls has no procedure.
+  const named = rows.calls.filter((c) => c.tool_name != null && String(c.tool_name) !== '' && !BOOKKEEPING.has(String(c.tool_name)))
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const bySession = new Map()
+  for (const c of named) {
+    const k = String(c.session_id ?? '')
+    const bucket = bySession.get(k)
+    if (bucket) bucket.push(c)
+    else bySession.set(k, [c])
+  }
+  // Every head is a step here, ranked by the sessions that ran it, with a
+  // procedure command ahead of a read or an MCP call at equal count. A
+  // line's procedure can keep the command whitelist because the line says
+  // what the task was; with no line, the tool the agent reached for in the
+  // most sessions is the task, whether it is `git` or a Slack read.
+  const heads = commandHeads(named).sort((a, b) => b.sessions - a.sessions
+    || Number(STEP_HEAD.test(b.head)) - Number(STEP_HEAD.test(a.head))
+    || b.n - a.n)
+  const steps = heads.slice(0, 8)
+  const other = heads.slice(8, 13)
+  const topHead = steps[0]?.head
+  /** @type {Set<string>} */
+  const ran = new Set()
+  if (topHead) {
+    for (const [sid, list] of bySession) {
+      if (commandHeads(list).some((h) => h.head === topHead)) ran.add(sid)
+    }
+  }
+  const examples = rows.openers
+    .filter((o) => ran.has(String(o.session_id ?? '')))
+    .map((o) => ({ date: String(o.date ?? ''), text: oneLine(String(o.example ?? '')) }))
+    .filter((e) => e.text !== '' && A_REQUEST.test(e.text))
+    .sort((a, b) => compareStrings(b.date, a.date))
+    .slice(0, 3)
+  return {
+    sessions: rows.anchors.length,
+    sessionsWithCalls: bySession.size,
+    steps: steps.map((h) => ({ command: h.head.replace(/^(Bash|exec|Shell): /, ''), sessions: h.sessions })),
+    other: other.map((h) => ({ head: h.head, sessions: h.sessions })),
+    examples,
+  }
+}
+
+/**
+ * How strong the evidence is. A habit clears the floor; a line that
+ * repeats under it is early evidence; a record where no line repeats is
+ * read for its procedure; and only a record with nothing typed and nothing
+ * run says there is nothing to recommend from.
+ *
+ * @ref LLP 0398#record-floor [implements]: the floor grades the answer and never closes it; only an empty record says nothing
  * @param {{ sessions: number }} record
  * @param {FirstAskCandidate[]} candidates
- * @returns {boolean}
+ * @param {FirstAskProcedure} [procedure]
+ * @returns {FirstAskTier}
  */
-export function enoughRecorded(record, candidates) {
-  return record.sessions >= RECORD_FLOOR.sessions
-    && candidates.some((c) => c.sessions >= RECORD_FLOOR.lineSessions && c.days >= RECORD_FLOOR.lineDays)
+export function evidenceTier(record, candidates, procedure) {
+  if (record.sessions >= RECORD_FLOOR.sessions
+    && candidates.some((c) => c.sessions >= RECORD_FLOOR.lineSessions && c.days >= RECORD_FLOOR.lineDays)) return 'habit'
+  if (candidates.length > 0) return 'repeated'
+  if (procedure && procedure.sessionsWithCalls > 0) return 'procedure'
+  return 'none'
 }
 
 /**
@@ -658,17 +780,39 @@ export function enoughRecorded(record, candidates) {
  *
  * @param {{ sessions: number, sessionDays: number }} record
  * @param {FirstAskCandidate[]} candidates
- * @param {boolean} enough
+ * @param {FirstAskTier} tier
+ * @param {FirstAskProcedure} [procedure]
  * @returns {string}
  */
-export function renderCandidates(record, candidates, enough) {
+export function renderCandidates(record, candidates, tier, procedure) {
   const head = [
     `# What you type again and again, last ${EVIDENCE_WINDOW_DAYS} days`,
     '',
     `Recorded: ${record.sessions} sessions over ${record.sessionDays} session-days.`,
     '',
   ]
-  if (!enough) return head.concat(['Nothing is typed often enough yet to recommend a skill.', '']).join('\n')
+  if (tier === 'none') {
+    const why = record.sessions === 0
+      ? 'Nothing recorded yet.'
+      : 'Nothing to recommend from yet: the recorded sessions hold no typed lines and no named tool calls.'
+    return head.concat([why, '']).join('\n')
+  }
+  if (tier === 'procedure' && procedure) {
+    head.push('Evidence: a procedure, not a phrase. No line is typed the same way in two sessions yet, so what follows is what the agent ran across the newest sessions, with lines typed in the sessions that ran it. Recommend the skill that automates those steps, and take its trigger phrase from those lines.', '')
+    return head.concat([
+      `## Procedure, across the ${procedure.sessions} newest sessions`,
+      `What ran, most sessions first (sessions that ran it, of the ${procedure.sessionsWithCalls} sessions whose tool calls were read):`,
+      ...(procedure.steps.length > 0 ? procedure.steps.map((s) => `- \`${s.command}\` (${s.sessions})`) : ['- (no tool calls read)']),
+      `Other activity: ${procedure.other.map((o) => `${o.head} (${o.sessions})`).join('; ') || 'none'}`,
+      ...(procedure.examples.length > 0
+        ? ['', `Lines typed in sessions that ran \`${procedure.steps[0]?.command ?? ''}\`:`, ...procedure.examples.map((e) => `- ${e.date}: "${e.text}"`)]
+        : []),
+      '',
+    ]).join('\n')
+  }
+  if (tier === 'repeated') {
+    head.push(`Evidence: early. No line reaches the habit floor of ${RECORD_FLOOR.lineSessions} sessions on ${RECORD_FLOOR.lineDays} days yet; the lines below repeat across sessions, so the skill is a first guess to confirm.`, '')
+  }
   const body = candidates.map((c, i) => [
     // A typing as the person wrote it, not the key: the key is case folded
     // and cut, and the skill's description has to open with the phrase as
@@ -708,12 +852,13 @@ export function askInstructions(meta) {
 HypAware keeps your AI agents' sessions, logs, and telemetry in one queryable history. This folder holds what the person typed again and again over the last ${days} days for ${meta.scope}, and what their agent then did, so you can recommend the one skill worth adding first.
 
 ## Files
-- \`candidates.md\`: the lines typed in the most sessions, each with the commands that ran after it and how one such session ended.
+- \`candidates.md\`: the lines typed in the most sessions, each with the commands that ran after it and how one such session ended; or, when no line repeats, the commands the agent ran across the newest sessions and lines typed in them.
 - \`on_disk.txt\`: skills and agents already installed, with what each is for.
 
 ## Rules
 - Pick the one candidate a skill would help most: a task done the same way each time that the agent currently works out from scratch. A line that is not a task (a check like "is claude working?", resuming a session, a one-word reply) is not a candidate.
-- If candidates.md says nothing is typed often enough, say how much was recorded and that there is not enough yet, and stop.
+- Always recommend one skill. candidates.md opens with how much was recorded and how strong the evidence is: when it says the evidence is early or a procedure, say so in your first sentence and call the skill a first guess to confirm. Only when it says nothing was recorded, or nothing to recommend from, do you say how much was recorded and stop.
+- When candidates.md shows a procedure instead of lines, the skill automates those steps. Its trigger phrase comes from the lines typed in those sessions; if none reads as a request, propose a short one and say it is proposed.
 - The skill goes in ~/${skillDir}/<name>/SKILL.md, under 25 lines. Its description opens with the phrase as the person types it. Its steps are the commands the file shows ran, in order, plus what the ending shows the person wanted reported.
 - If a skill on the subject already exists per on_disk.txt, change it rather than adding a second.
 - Run no queries and no commands. Read each file once. Standard commands need no testing.
@@ -857,16 +1002,32 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
     const replies = anchors.length > 0 ? (await runner.run(sql.replies(anchors))).rows : []
     candidates = buildCandidates({ lines, triggers, calls, replies })
   }
-  const enough = enoughRecorded(record, candidates)
+  // The fallback, read only when no line repeats and something was
+  // recorded: up to four more bounded statements, never run beside the five.
+  /** @type {FirstAskProcedure | undefined} */
+  let procedure
+  if (candidates.length === 0 && record.sessions > 0) {
+    const anchors = sessionAnchors((await runner.run(sql.recent)).rows)
+    if (anchors.length > 0) {
+      const calls = (await runner.run(sql.calls(anchors))).rows
+      const times = (await runner.run(sql.openerTimes(anchors.map((a) => a.id)))).rows
+        .map((r) => ({ id: String(r.session_id ?? ''), at: instant(r.at) }))
+        .filter((p) => p.id !== '' && placeable(p.at))
+      const openers = times.length > 0 ? (await runner.run(sql.openers(times))).rows : []
+      procedure = buildProcedure({ anchors, calls, openers })
+    }
+  }
+  const tier = evidenceTier(record, candidates, procedure)
+  const enough = tier !== 'none'
   const files = [
-    { name: 'candidates.md', content: renderCandidates(record, candidates, enough) },
+    { name: 'candidates.md', content: renderCandidates(record, candidates, tier, procedure) },
     { name: 'on_disk.txt', content: await onDiskListing({ homeDir, ...(client ? { client } : {}) }) },
     { name: 'ASK.md', content: askInstructions({ scope, windowDays, ...(client ? { client } : {}) }) },
   ]
   await fsp.rm(root, { recursive: true, force: true })
   await fsp.mkdir(root, { recursive: true, mode: 0o700 })
   for (const f of files) await fsp.writeFile(path.join(root, f.name), f.content, 'utf8')
-  return { dir: root, from, record, enough, candidates, files: files.map((f) => f.name) }
+  return { dir: root, from, record, tier, enough, candidates, ...(procedure ? { procedure } : {}), files: files.map((f) => f.name) }
 }
 
 /** @param {unknown} v */
