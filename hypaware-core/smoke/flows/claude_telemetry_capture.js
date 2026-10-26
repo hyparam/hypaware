@@ -477,9 +477,9 @@ export async function run({ harness, expect }) {
         (v) => v.producer === 'otel' && v.query_source === 'sdk',
       )
       expect.that(
-        `query: the ${row.part_type} ${row.role} row leaves the transcript-only columns null`,
+        `query: the ${row.part_type} ${row.role} row keeps native parent identity only after text settlement`,
         row,
-        (v) => (v.parent_uuid ?? null) === null && (v.permission_mode ?? null) === null,
+        (v) => (v.parent_uuid ?? null) === (v.message_id === assistantUuid ? userUuid : null) && (v.permission_mode ?? null) === null,
       )
       expect.that(
         `query: the ${row.part_type} ${row.role} row carries the app entrypoint`,
@@ -660,29 +660,9 @@ export async function run({ harness, expect }) {
     // no system text.
     // @ref LLP 0253#eviction-degrades [tests]: eviction degrades to backfill,
     //   never to loss
-    const payload2 = buildEvictedSessionBatch({
-      sessionId: session2,
-      userUuid: user2Uuid,
-      assistantUuid: assistant2Uuid,
-      requestId: request2Id,
-      promptText: prompt2Text,
-      responseText: response2Text,
-      requestBodyPath: evictedBodyPath,
-    })
-    const posted2 = await postJson(`${endpoint}/v1/logs`, payload2)
-    expect.that('listener: the evicted session\'s POST returned 200', posted2.status, (v) => v === 200)
-    const sql2 = sqlFor(session2)
-    const evictedRows = await queryRows({ sql: sql2, kernel, registry, env, expect, label: 'evicted session, events only' })
-    expect.that(
-      'query: the evicted session landed its two content events and nothing else',
-      evictedRows,
-      (v) => Array.isArray(v) && v.length === 2 &&
-        v.every((r) => r.part_type === 'text' && (r.system_text ?? null) === null),
-    )
-
-    // The recovery path: the transcript Claude Code wrote all along holds
-    // the tool content the evicted body held. Staged only now, so the
-    // earlier zero-rows backfill assertion stays meaningful.
+    // Stage the transcript Claude Code wrote before exporting the events.
+    // Its tool content is recovered by backfill below; staging after the
+    // earlier zero-rows assertion keeps that overlap check meaningful.
     await fs.writeFile(
       path.join(projectsDir, `${session2}.jsonl`),
       [
@@ -728,6 +708,26 @@ export async function run({ harness, expect }) {
       ].join('\n') + '\n',
       'utf8'
     )
+    const payload2 = buildEvictedSessionBatch({
+      sessionId: session2,
+      userUuid: user2Uuid,
+      assistantUuid: assistant2Uuid,
+      requestId: request2Id,
+      promptText: prompt2Text,
+      responseText: response2Text,
+      requestBodyPath: evictedBodyPath,
+    })
+    const posted2 = await postJson(`${endpoint}/v1/logs`, payload2)
+    expect.that('listener: the evicted session\'s POST returned 200', posted2.status, (v) => v === 200)
+    const sql2 = sqlFor(session2)
+    const evictedRows = await queryRows({ sql: sql2, kernel, registry, env, expect, label: 'evicted session, events only' })
+    expect.that(
+      'query: the evicted session landed its two content events and nothing else',
+      evictedRows,
+      (v) => Array.isArray(v) && v.length === 2 &&
+        v.every((r) => r.part_type === 'text' && (r.system_text ?? null) === null),
+    )
+
     const recoverOut = makeBuf()
     const recoverCode = await dispatch(
       ['backfill', 'claude', '--since', '2000-01-01T00:00:00.000Z', '--json'],

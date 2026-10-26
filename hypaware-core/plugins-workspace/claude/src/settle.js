@@ -14,7 +14,7 @@ import { sharedTranscriptLoader } from './transcript-cache.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
 import { getLogger } from '../../../../src/core/observability/index.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
-import { isPlainObject, stringValue } from 'hypaware/core/util'
+import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -189,19 +189,20 @@ export function createClaudeSettlementEnricher(opts) {
           if (index) {
             const key = readMatchKey(row.attributes)
             if (key) {
-              const toolMatch = findOtelToolMatch(row, index)
+              const frame = parseMaybeJson(row.raw_frame)
+              const eventText = isPlainObject(frame) && frame.type === 'assistant_response'
+              const identityMatch = eventText ? findOtelTextMatch(row, index, key) : findOtelToolMatch(row, index)
               // A uuid-less tool match knows less than the content key: fall
               // through instead of letting `match.provider_uuid` below reject
-              // the row outright. Keep this a ternary, not `??`: `toolMatch`
-              // is truthy even without a `provider_uuid`, so `??` would never
-              // reach the content-key fallback.
-              const match = toolMatch?.provider_uuid
-                ? toolMatch
+              // the row outright. Event text never falls through to a key
+              // from a different request when its explicit evidence disagrees.
+              const match = eventText || identityMatch?.provider_uuid
+                ? identityMatch
                 : index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
               if (match && match.provider_uuid) {
                 const agentBefore = stringValue(row.agent_id)
                 const idBefore = stringValue(row.message_id)
-                row = upgradeRow(row, match, match === toolMatch)
+                row = upgradeRow(row, match, match === identityMatch)
                 // A row chained to `idBefore` now names an id no row carries.
                 // `previous` is the link this row was projected with, which is
                 // what a successor inherits when the upgrade above moved this
@@ -279,6 +280,31 @@ export function createClaudeSettlementEnricher(opts) {
       return out
     },
   }
+}
+
+/**
+ * Resolve event text within its native response, including a tool uuid anchor
+ * and events whose agent.name is a display label rather than an agent id.
+ * Ambiguous or not-yet-written text stays provisional.
+ * @ref LLP 0559#assistant-identity: native content must confirm the event uuid
+ * @param {Record<string, unknown>} row
+ * @param {ReturnType<typeof indexTranscriptEntries>} index
+ * @param {string} key
+ * @returns {TranscriptEntry | undefined}
+ */
+function findOtelTextMatch(row, index, key) {
+  const frame = parseMaybeJson(row.raw_frame)
+  const uuid = isPlainObject(frame) ? stringValue(frame.uuid) : undefined
+  const requestId = stringValue(row.request_id)
+  const anchor = uuid ? index.byUuid.get(uuid) : undefined
+  if (anchor && requestId && anchor.request_id && anchor.request_id !== requestId) return undefined
+  const agrees = (/** @type {TranscriptEntry} */ entry) =>
+    entry.role === 'assistant' && entry.contentKey === key && !!entry.provider_uuid
+  if (anchor && agrees(anchor)) return anchor
+  const candidates = anchor?.messageId ? index.byMessageId.get(anchor.messageId)
+    : requestId ? index.byRequestId.get(requestId) : undefined
+  const matches = candidates?.filter(agrees) ?? []
+  return matches.length === 1 ? matches[0] : undefined
 }
 
 /**

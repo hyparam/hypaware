@@ -7,6 +7,8 @@
 **Date:** 2026-08-17
 **Related:** LLP 0012, LLP 0016, LLP 0030, LLP 0032, LLP 0262 (the RFC this
 decision realizes, accepted 2026-08-17), LLP 0253, LLP 0257, LLP 0258
+**Extended-by:** [LLP 0559](./0559-claude-recording-identity-and-usage.spec.md#assistant-identity)
+(assistant text events require native content confirmation)
 
 > The OTEL event stream is the primary producer: it arrives pre-deduplicated
 > and supplies identity, content, usage, and behavioral data. Raw body files

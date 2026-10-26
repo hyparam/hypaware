@@ -9,7 +9,9 @@
 RFC this decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257
 **Extended-by:** [LLP 0389](./0389-body-derived-rows-settle-at-flush.decision.md)
 (#identity-at-ingest holds for the rows a content event produces; a block that
-reaches the dataset only through a spooled body has no uuid and does settle)
+reaches the dataset only through a spooled body has no uuid and does settle);
+[LLP 0559](./0559-claude-recording-identity-and-usage.spec.md#assistant-identity)
+(assistant text events also require native content confirmation)
 
 > Events carry `message.uuid`, so a row's identity is known when it is written
 > and there is no provisional row to settle later. The usage-policy check runs

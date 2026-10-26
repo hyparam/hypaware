@@ -84,7 +84,8 @@ export async function run({ harness, expect }) {
         parentUuid: 'u-user-1',
         type: 'assistant',
         entrypoint: 'claude-desktop',
-        message: { role: 'assistant', content: [{ type: 'text', text: 'here they are' }] },
+        requestId: 'req-partial',
+        message: { id: 'msg-partial', role: 'assistant', content: [{ type: 'text', text: 'here they are' }], usage: { input_tokens: 12, output_tokens: 34 } },
         timestamp: assistantTs.toISOString(),
       }),
     ].join('\n') + '\n',
@@ -266,6 +267,28 @@ export async function run({ harness, expect }) {
       })
     }
 
+    // @ref LLP 0559#usage-carrier [tests]: a later block must not charge the
+    // already committed response again. Snapshots must not add content rows.
+    await runRoot('smoke.partial_response', {
+      [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'partial_response',
+      [Attr.DEV_RUN_ID]: harness.devRunId, status: 'ok',
+    }, async () => {
+      const block = { type: 'tool_use', id: 'toolu-partial', name: 'Bash', input: { command: 'ls' } }
+      await fs.appendFile(transcriptPath, [
+        { type: 'assistant', sessionId, uuid: 'u-tool-late', requestId: 'req-partial', entrypoint: 'claude-desktop',
+          timestamp: new Date(assistantTs.getTime() + 1).toISOString(),
+          message: { id: 'msg-partial', role: 'assistant', content: [block], usage: { input_tokens: 12, output_tokens: 34 } } },
+        { type: 'api-request-blob', sessionId, message: { role: 'assistant', content: [block] } },
+      ].map(row => JSON.stringify(row)).join('\n') + '\n')
+      const { result } = await tickAndAwait(new Date(tick3Now.getTime() + 4 * 5 * 60_000))
+      expect.that('partial response adds only its new native block', result, v => v?.ok && v.rowsWritten === 1)
+      const totals = await queryRows({ dispatch, kernel, registry, env, expect, label: 'partial response accounting',
+        sql: `select count(*) as parts, sum(COALESCE(CAST(JSON_EXTRACT(attributes, '$.usage.output_tokens') AS BIGINT), 0)) as output_tokens from ai_gateway_messages where session_id = '${sessionId}' and part_type IN ('text', 'tool_call')`,
+      })
+      expect.that('partial response remains three content parts and 34 output tokens', totals[0],
+        v => Number(v?.parts) === 3 && Number(v?.output_tokens) === 34)
+    })
+
     // ----- 4. Internal telemetry: dev_run_id + provider + row counts -----
     await obs.shutdown()
     const traces = await expect.traces()
@@ -305,6 +328,8 @@ export async function run({ harness, expect }) {
     )
 
     const logs = await expect.logs()
+    expect.that('logs: a second response usage carrier was suppressed', logs, v => v.some(l =>
+      l.body === 'ai_gateway.usage_carrier_retained' && Number(l.attributes?.suppressed_count) === 1))
     expect.that('logs: title capture is observable without title text', logs, v => v.some(l =>
       l.body === 'claude.backfill.session_projected' && l.attributes?.title_captured === true))
     const dueLogs = logs.filter(
@@ -313,7 +338,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'logs: backfill.sweep_due fired once per tick',
       dueLogs,
-      (v) => Array.isArray(v) && v.length === 6,
+      (v) => Array.isArray(v) && v.length === 7,
     )
     const finishedLogs = logs.filter(
       (/** @type {any} */ l) => l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'claude',
