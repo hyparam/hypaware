@@ -86,8 +86,8 @@ test('an issued identity shows its gateway id and never the JWT', async () => {
   for (const out of [compact, verbose, JSON.stringify(json)]) assert.ok(!out.includes(JWT))
 })
 
-test('a configured sink with no identity yet, or one for another server, is pending', async () => {
-  const hypHome = await makeHome({ central: { plugin: '@hypaware/central', config: { url: URL_A } } })
+test('a configured sink with no identity yet, or one a join token replaces, is pending', async () => {
+  const hypHome = await makeHome({ central: { plugin: '@hypaware/central', config: { url: URL_A, identity: { bootstrap_token: 'hyp_join_token' } } } })
   let { report, compact } = await renderAll(hypHome)
   assert.deepEqual(report.gateways, [{ sink: 'central', gatewayId: null, state: 'pending' }])
   assert.match(compact, /Gateway {4}Pending \(not issued yet\)\n/)
@@ -95,6 +95,18 @@ test('a configured sink with no identity yet, or one for another server, is pend
   await writeIdentity(defaultIdentityPath(hypHome), { jwt: JWT, expires_at: 1, gateway_id: 'GW_OTHER', central_url: 'https://elsewhere.example.com' })
   ;({ report } = await renderAll(hypHome))
   assert.deepEqual(report.gateways, [{ sink: 'central', gatewayId: null, state: 'pending' }])
+})
+
+test('an identity another server minted, with no join token to replace it, is not pending', async () => {
+  // The sink refuses this identity rather than minting a new one, so the
+  // gateway line must not read as if waiting would issue one.
+  const hypHome = await makeHome({ central: { plugin: '@hypaware/central', config: { url: URL_A } } })
+  await writeIdentity(defaultIdentityPath(hypHome), { jwt: JWT, expires_at: 9999999999, gateway_id: 'GW_OTHER', central_url: 'https://elsewhere.example.com' })
+  const { report, compact, verbose, json } = await renderAll(hypHome)
+  assert.deepEqual(report.gateways, [{ sink: 'central', gatewayId: null, state: 'other_server' }])
+  assert.match(compact, /Gateway {4}Enrolled with another server\n/)
+  assert.equal(json.identity.gateway_id, null)
+  for (const out of [compact, verbose, JSON.stringify(json)]) assert.ok(!out.includes(JWT) && !out.includes('GW_OTHER'))
 })
 
 test('a malformed identity file reads unreadable', async () => {

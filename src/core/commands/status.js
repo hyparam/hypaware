@@ -1673,6 +1673,7 @@ function describeGateways(gateways = []) {
   return gateways.map((g) => {
     const value = g.state === 'issued' ? printable(g.gatewayId)
       : g.state === 'pending' ? 'Pending (not issued yet)'
+      : g.state === 'other_server' ? 'Enrolled with another server'
       : 'Unreadable identity'
     return gateways.length > 1 ? `${value} (${printable(g.sink)})` : value
   }).join(', ')

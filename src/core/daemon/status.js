@@ -4900,7 +4900,9 @@ function centralIdentityPath(stateRoot, sinkConfig) {
  * `gateway_id` leaves this function; the JWT beside it is never read out.
  * `pending` is a configured sink with no identity for its server yet (the
  * sink mints on first activation, and an identity naming another server is
- * one the sink would replace); `unreadable` is a file that is not one.
+ * one a configured join token replaces); `other_server` is an identity
+ * another server minted with no join token to replace it, which the sink
+ * refuses; `unreadable` is a file that is not one.
  *
  * @param {string} stateRoot
  * @param {HypAwareV2Config | null} config
@@ -4927,7 +4929,12 @@ async function collectGateways(stateRoot, config) {
     if (gatewayId === null) {
       out.push({ sink, gatewayId: null, state: 'unreadable' })
     } else if (sinkUrl !== undefined && typeof persisted.central_url === 'string' && !sameCentralUrl(persisted.central_url, sinkUrl)) {
-      out.push({ sink, gatewayId: null, state: 'pending' })
+      // With no join token to re-mint from, the sink refuses an identity
+      // another server minted rather than waiting for one, so this is not
+      // pending: nothing is issued until `hyp join` or `hyp remote login`.
+      const identity = isPlainObject(raw.config) ? raw.config.identity : undefined
+      const token = isPlainObject(identity) ? identity.bootstrap_token : undefined
+      out.push({ sink, gatewayId: null, state: typeof token === 'string' && token.length > 0 ? 'pending' : 'other_server' })
     } else {
       out.push({ sink, gatewayId, state: 'issued' })
     }

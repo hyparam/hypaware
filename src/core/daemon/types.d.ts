@@ -781,10 +781,12 @@ export interface HypAwareStatusReport {
   /**
    * The gateway id each configured `@hypaware/central` sink forwards under,
    * read from its persisted identity. Empty on a host that never enrolled.
-   * `pending`: configured, but no identity for that server yet. `unreadable`:
+   * `pending`: configured, but no identity for that server yet.
+   * `other_server`: the identity was minted by another server and no join
+   * token is configured to replace it, so the sink refuses it. `unreadable`:
    * the identity file exists but names no gateway id.
    */
-  gateways?: { sink: string, gatewayId: string | null, state: 'issued' | 'pending' | 'unreadable' }[]
+  gateways?: { sink: string, gatewayId: string | null, state: 'issued' | 'pending' | 'other_server' | 'unreadable' }[]
 }
 
 export interface CollectStatusOptions {

@@ -96,8 +96,11 @@ sink's persisted identity (its `identity.persisted_path`, else the per-plugin
 default), the same file the sink and `hyp remote login` use. Only `gateway_id`
 is read out; the JWT beside it never is. A host with no central sink reads
 `Not enrolled`. A configured sink whose identity is absent, or names another
-server, reads `Pending (not issued yet)`: the sink mints on first activation.
-A file that names no gateway id reads `Unreadable identity`. Several central
+server while a join token is configured, reads `Pending (not issued yet)`: the
+sink mints on first activation. An identity another server minted, with no
+join token to replace it, reads `Enrolled with another server`, because the
+sink refuses it until `hyp join` or `hyp remote login` runs. A file that names
+no gateway id reads `Unreadable identity`. Several central
 sinks are each named. `--json` carries the same values under `identity`, with
 a null `gateway_id` when none is issued.
 
