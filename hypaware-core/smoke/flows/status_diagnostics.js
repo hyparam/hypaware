@@ -146,6 +146,11 @@ export async function run({ harness, expect }) {
       okText,
       (v) => v.includes('overall:  healthy')
     )
+    expect.that(
+      'healthy: text status names the install and an unenrolled gateway',
+      okText,
+      (v) => v.includes(`hyp_home: ${harness.hypHome}\n`) && v.includes('gateway:  Not enrolled\n')
+    )
     for (const expected of [
       'ai-gateway',
       'otlp',
@@ -222,6 +227,12 @@ export async function run({ harness, expect }) {
       (v) => Array.isArray(v) && v.some(
         (/** @type {any} */ c) => c.name === 'claude' && c.configured === true && c.attached === true
       )
+    )
+    expect.that(
+      'healthy json: identity names this install and no gateway (never enrolled)',
+      okJson?.identity,
+      (v) => v?.gateway_id === null && Array.isArray(v?.gateways) && v.gateways.length === 0 &&
+        v?.hyp_home === harness.hypHome && typeof v?.version === 'string' && v.version.length > 0
     )
 
     // V1 contract: no `central` or `gascity` references in JSON.

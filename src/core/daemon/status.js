@@ -3120,6 +3120,7 @@ export async function collectHypAwareStatus(opts = {}) {
     proxyTrust,
     selfUpdate: describeSelfUpdate({ stateRoot, env }),
     assetCoverage,
+    gateways: await collectGateways(stateRoot, config),
   }
 }
 
@@ -4840,9 +4841,7 @@ async function serviceTokenDiagnostics(stateRoot, config) {
   const out = []
   for (const [instance, raw] of Object.entries(config.sinks ?? {})) {
     if (!('plugin' in raw) || raw.plugin !== plugin) continue
-    const identity = raw.config?.identity
-    const configured = isPlainObject(identity) ? identity.persisted_path : undefined
-    const identityPath = typeof configured === 'string' ? configured : path.join(pluginStateDir(stateRoot, plugin), 'identity.json')
+    const identityPath = centralIdentityPath(stateRoot, raw.config)
     const recordPath = serviceTokenPath(identityPath)
     const read = await readKeptServiceToken(recordPath)
     const label = sanitizeLabel(instance) ?? 'unknown'
@@ -4861,6 +4860,69 @@ async function serviceTokenDiagnostics(stateRoot, config) {
         message: `${label}: stopped: ${what}`,
         repair: ['create a new token in HypAware and run `hyp join` again'],
       })
+    }
+  }
+  return out
+}
+
+/**
+ * Where a central sink keeps its persisted identity: its own
+ * `identity.persisted_path`, else the per-plugin state default, the same
+ * resolution the sink and `hyp remote login` use.
+ *
+ * @param {string} stateRoot
+ * @param {unknown} sinkConfig
+ * @returns {string}
+ */
+function centralIdentityPath(stateRoot, sinkConfig) {
+  const identity = isPlainObject(sinkConfig) ? sinkConfig.identity : undefined
+  const configured = isPlainObject(identity) ? identity.persisted_path : undefined
+  return typeof configured === 'string' ? configured : path.join(pluginStateDir(stateRoot, '@hypaware/central'), 'identity.json')
+}
+
+/**
+ * The gateway id each configured central sink forwards under, read from the
+ * identity the server minted at `hyp join` or `hyp remote login`. Only
+ * `gateway_id` leaves this function; the JWT beside it is never read out.
+ * `pending` is a configured sink with no identity for its server yet (the
+ * sink mints on first activation, and an identity naming another server is
+ * one a configured join token replaces); `other_server` is an identity
+ * another server minted with no join token to replace it, which the sink
+ * refuses; `unreadable` is a file that is not one.
+ *
+ * @param {string} stateRoot
+ * @param {HypAwareV2Config | null} config
+ * @returns {Promise<HypAwareStatusReport['gateways']>}
+ */
+async function collectGateways(stateRoot, config) {
+  const plugin = '@hypaware/central'
+  if (!config || (config.plugins ?? []).some((p) => p.name === plugin && p.enabled === false)) return []
+  /** @type {HypAwareStatusReport['gateways']} */
+  const out = []
+  for (const [sink, raw] of Object.entries(config.sinks ?? {})) {
+    if (!('plugin' in raw) || raw.plugin !== plugin) continue
+    const sinkUrl = isPlainObject(raw.config) && typeof raw.config.url === 'string' ? raw.config.url : undefined
+    let persisted
+    try {
+      persisted = JSON.parse(await fsp.readFile(centralIdentityPath(stateRoot, raw.config), 'utf8'))
+    } catch (err) {
+      out.push({ sink, gatewayId: null, state: errCode(err) === 'ENOENT' ? 'pending' : 'unreadable' })
+      continue
+    }
+    const gatewayId = isPlainObject(persisted) && typeof persisted.gateway_id === 'string' && persisted.gateway_id.length > 0
+      ? persisted.gateway_id
+      : null
+    if (gatewayId === null) {
+      out.push({ sink, gatewayId: null, state: 'unreadable' })
+    } else if (sinkUrl !== undefined && typeof persisted.central_url === 'string' && !sameCentralUrl(persisted.central_url, sinkUrl)) {
+      // With no join token to re-mint from, the sink refuses an identity
+      // another server minted rather than waiting for one, so this is not
+      // pending: nothing is issued until `hyp join` or `hyp remote login`.
+      const identity = isPlainObject(raw.config) ? raw.config.identity : undefined
+      const token = isPlainObject(identity) ? identity.bootstrap_token : undefined
+      out.push({ sink, gatewayId: null, state: typeof token === 'string' && token.length > 0 ? 'pending' : 'other_server' })
+    } else {
+      out.push({ sink, gatewayId, state: 'issued' })
     }
   }
   return out
