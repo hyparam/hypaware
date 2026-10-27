@@ -5,7 +5,7 @@ import fs from 'node:fs/promises'
 import { Attr, getActiveSpan, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
-import { applyContextControls, buildQuerySqlOutput } from '../query/format.js'
+import { buildQuerySqlOutput, renderResult } from '../query/format.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv, parseControlFlags, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
@@ -28,6 +28,11 @@ import { groupThousands } from '../util/format_number.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
+  const limitFlag = argv.find(arg => /^--max-(bytes|cell)(=|$)/.test(arg))
+  if (limitFlag !== undefined) {
+    ctx.stderr.write(`hyp query schema: ${limitFlag.split('=')[0]} is not supported; schema output is always complete\n`)
+    return 2
+  }
   const ctrl = parseControlFlags(argv)
   if (!ctrl.ok) {
     ctx.stderr.write(`hyp query schema: ${ctrl.error}\n`)
@@ -75,17 +80,15 @@ export async function runQuerySchema(argv, ctx) {
         return 0
       }
       const format = ctrl.controls.json && ctrl.controls.format === 'table' ? 'json' : ctrl.controls.format
-      const controls = { maxCell: ctrl.controls.maxCell, maxBytes: ctrl.controls.maxBytes }
       const full = { columns: ['name', 'type', 'nullable'], rows: schema.columns.map(c => ({ ...c })) }
-      // Preserve the familiar human listing; other formats and file output
-      // use the same lossless spill and display budgets as SQL queries.
-      if (format === 'table' && output === undefined) {
-        const capped = applyContextControls(full, controls)
-        ctx.stdout.write(renderSchema(dataset, /** @type {DatasetSchema} */ (/** @type {unknown} */ ({ columns: capped.result.rows }))))
-        if (capped.notice) ctx.stderr.write(`${capped.notice}\n`)
+      // A partial schema can mislead callers about which columns exist.
+      // Keep every definition and name intact in every output format.
+      if (output === undefined) {
+        ctx.stdout.write(format === 'table'
+          ? renderSchema(dataset, schema)
+          : renderResult(full, format))
       } else {
-        const rendered = buildQuerySqlOutput(full, { ...controls, format,
-          output: output === undefined ? undefined : String(output) })
+        const rendered = buildQuerySqlOutput(full, { maxCell: 0, maxBytes: 0, format, output })
         try {
           if (rendered.file) await fs.writeFile(rendered.file.path, rendered.file.content)
         } catch (err) {

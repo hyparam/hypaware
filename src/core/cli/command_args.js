@@ -1,6 +1,6 @@
 // @ts-check
 
-import { DEFAULT_QUERY_MAX_BYTES, DEFAULT_QUERY_MAX_CELL, parseCommandArgv } from './verb_codec.js'
+import { parseCommandArgv } from './verb_codec.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -123,7 +123,7 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'query schema': {
-    usage: 'hyp query schema <dataset> [--format <fmt>] [--json] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote [<target>] [--org <label|*>]]',
+    usage: 'hyp query schema <dataset> [--format <fmt>] [--json] [--output <file>] [--remote [<target>] [--org <label|*>]]',
     schema: {
       type: 'object',
       properties: {
@@ -131,8 +131,6 @@ export const CORE_COMMAND_ARGS = {
         format: { type: 'string', enum: ['table', 'json', 'jsonl', 'markdown'], default: 'table' },
         json: { type: 'boolean', default: false },
         output: { type: 'string' },
-        'max-cell': { type: 'integer', minimum: 0, default: DEFAULT_QUERY_MAX_CELL },
-        'max-bytes': { type: 'integer', minimum: 0, default: DEFAULT_QUERY_MAX_BYTES },
         remote: { type: 'string' },
         org: { type: 'string' },
       },

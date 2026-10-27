@@ -42,23 +42,37 @@ test('schema preserves the default listing and exposes column metadata as JSON',
   assert.equal(json.stderr.value, '')
 })
 
-test('schema byte budget preserves valid JSON, reports withholding, and zero lifts the cap', async () => {
-  const capped = context()
-  assert.equal(await runQuerySchema(['ai_gateway_messages', '--format=json', '--max-bytes=1'], capped.ctx), 0)
-  assert.equal(JSON.parse(capped.stdout.value).length, 1)
-  assert.match(capped.stderr.value, /showing 1 of 3 rows/)
-  const full = context()
-  assert.equal(await runQuerySchema(['ai_gateway_messages', '--json', '--max-bytes', '0'], full.ctx), 0)
-  assert.deepEqual(JSON.parse(full.stdout.value), columns)
+test('schema output keeps all definitions and long names beyond SQL display budgets', async () => {
+  const wide = Array.from({ length: 200 }, (_, i) => ({
+    name: `column_${i}_${'x'.repeat(250)}`, type: /** @type {const} */ ('STRING'), nullable: true,
+  }))
+  assert.ok(Buffer.byteLength(JSON.stringify(wide)) > 32768)
+  for (const format of ['table', 'json', 'jsonl', 'markdown']) {
+    const c = context(wide)
+    assert.equal(await runQuerySchema(['ai_gateway_messages', '--format', format], c.ctx), 0)
+    for (const column of wide) assert.ok(c.stdout.value.includes(column.name))
+    if (format === 'json') assert.deepEqual(JSON.parse(c.stdout.value), wide)
+    assert.equal(c.stderr.value, '')
+  }
 })
 
-test('schema output files contain every column despite display limits', async t => {
+for (const flag of ['--max-bytes', '--max-cell']) {
+  for (const args of [[flag, '1000'], [`${flag}=0`]]) {
+    test(`schema refuses ${args.join(' ')} instead of hiding column definitions`, async () => {
+      const c = context()
+      assert.equal(await runQuerySchema(['ai_gateway_messages', ...args], c.ctx), 2)
+      assert.equal(c.stdout.value, '')
+      assert.match(c.stderr.value, /schema output is always complete/)
+    })
+  }
+}
+
+test('schema output files contain every column', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-schema-'))
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
   const file = path.join(dir, 'schema.json')
   const c = context()
-  assert.equal(await runQuerySchema(['ai_gateway_messages', '--format', 'json', '--output', file,
-    '--max-bytes', '1', '--max-cell', '1'], c.ctx), 0)
+  assert.equal(await runQuerySchema(['ai_gateway_messages', '--format', 'json', '--output', file], c.ctx), 0)
   assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), columns)
   assert.match(c.stdout.value, /wrote 3 rows/)
   assert.equal(c.stderr.value, '')
