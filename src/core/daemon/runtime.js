@@ -44,7 +44,7 @@ import {
 import { DAEMON_STOP_TIMEOUT_MS } from './service_ops.js'
 import { openDaemonLog } from './logs.js'
 import { readSourceIdentity, readStatusFile, sourceHealth, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
-import { pidFilePath, processingStateRoot, sinkOutboxDir, statusFilePath } from '../runtime/paths.js'
+import { pidFilePath, processingStateRoot, settleStateLayout, sinkOutboxDir, stateRootOf, statusFilePath } from '../runtime/paths.js'
 import {
   detectSupervisor,
   readSelfPackageIdentity,
@@ -249,7 +249,7 @@ export async function runDaemon(opts = {}) {
   const env = opts.env ?? process.env
   const obsEnv = readObservabilityEnv(env)
   const hypHome = opts.hypHome ?? obsEnv.hypHome
-  const stateRoot = `${hypHome}/hypaware`
+  const stateRoot = stateRootOf(hypHome)
   const runtimeStateRoot = opts.runtimeStateRoot ?? stateRoot
   const tickIntervalMs = clampTickInterval(opts.tickIntervalMs)
   const installSignals = opts.installSignalHandlers !== false
@@ -341,6 +341,12 @@ export async function runDaemon(opts = {}) {
   writeStatusFile(runtimeStateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
+  // The pid file is ours, so no daemon from the previous release can still be
+  // reading the old paths: move what it left where it belongs and mark the
+  // tree current before the kernel opens its first cold file.
+  // @ref LLP 0557#phase-2-cold-state-into-state [implements]: the daemon performs the move and marks the tree; a CLI beside an older daemon defers to it
+  settleStateLayout(stateRoot, { daemon: true, log: fileLog })
+
   // What this process loaded. Read once, at boot: the global root can be
   // replaced underneath a running daemon, and the updater has to compare
   // the registry against the code that is actually running, not the code
@@ -359,7 +365,7 @@ export async function runDaemon(opts = {}) {
   // any plugin activates: a kernel-killing-but-valid config that
   // crashloops under the service manager may never live long enough
   // for an in-process timer to fire. The central-layer slots, pointer,
-  // and join seed all live under `<stateRoot>/config-control/`: the
+  // and join seed all live under `<stateRoot>/state/`: the
   // engine derives every path from `stateRoot` and never touches the
   // user-owned local layer (`hypaware-config.json`).
   // An apply can land while the daemon is still wiring up (the pull

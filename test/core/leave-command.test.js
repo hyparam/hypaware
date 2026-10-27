@@ -84,7 +84,7 @@ test('leave after join removes the seed and reports the server', async () => {
 
 test('leave clears an applied central slot, not just the seed', async () => {
   const { stateRoot, stdout, opts } = await makeDispatchOpts()
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
 
   // A joined host past its first apply: the seed is retired and the central
@@ -99,29 +99,29 @@ test('leave clears an applied central slot, not just the seed', async () => {
       },
     },
   }
-  await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(applied, null, 2) + '\n')
-  await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1\n')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), JSON.stringify(applied, null, 2) + '\n')
+  await fs.writeFile(path.join(controlDir, 'managed-config.a.etag'), 'etag-1\n')
+  await fs.symlink('managed-config.a.json', path.join(controlDir, 'managed-config.active'))
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
 
   assert.equal(resolveCentralLayerPath({ stateRoot }), null)
-  await assert.rejects(fs.lstat(path.join(controlDir, 'active')))
-  await assert.rejects(fs.stat(path.join(controlDir, 'config.a.json')))
+  await assert.rejects(fs.lstat(path.join(controlDir, 'managed-config.active')))
+  await assert.rejects(fs.stat(path.join(controlDir, 'managed-config.a.json')))
 })
 
 test('leave names the neutral destination when the central layer carries no sink URL (#2236)', async () => {
   const { stateRoot, stdout, opts } = await makeDispatchOpts()
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
   const applied = {
     version: 2,
     plugins: [{ name: '@hypaware/central' }],
     sinks: { central: { plugin: '@hypaware/central', config: { identity: {} } } },
   }
-  await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(applied, null, 2) + '\n')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), JSON.stringify(applied, null, 2) + '\n')
+  await fs.symlink('managed-config.a.json', path.join(controlDir, 'managed-config.active'))
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
@@ -153,7 +153,7 @@ test('leave reverses org-driven attaches and drops the forward identity', async 
       2
     ) + '\n'
   )
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.writeFile(
     path.join(controlDir, 'client-actions.json'),
     JSON.stringify(
@@ -278,16 +278,16 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
   // make that advice a dead end: the gate would refuse forever and leave would
   // claim there is nothing to disconnect.
   for (const [name, writePointer] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
-    ['a regular file where the pointer symlink should be', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
-    ['a pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
-    ['a pointer that is a symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
+    ['a regular file where the pointer symlink should be', (dir) => fs.writeFile(path.join(dir, 'managed-config.active'), 'managed-config.a.json')],
+    ['a pointer naming neither slot', (dir) => fs.symlink('managed-config.c.json', path.join(dir, 'managed-config.active'))],
+    ['a pointer that is a symlink loop', (dir) => fs.symlink('managed-config.active', path.join(dir, 'managed-config.active'))],
   ])) {
     const { stateRoot, stdout, opts } = await makeDispatchOpts()
-    const controlDir = path.join(stateRoot, 'config-control')
+    const controlDir = path.join(stateRoot, 'state')
     await fs.mkdir(controlDir, { recursive: true })
     // The slot file is intact and still names the org's server: this machine is
     // enrolled, only its pointer is damaged.
-    await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({
+    await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), JSON.stringify({
       version: 2,
       plugins: [{ name: '@hypaware/central' }],
       sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://central.example', identity: {} } } },
@@ -298,8 +298,8 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
     assert.equal(code, 0, `${name}: ${stdout.text()}`)
     assert.doesNotMatch(stdout.text(), /not connected to a HypAware server/, name)
     assert.match(stdout.text(), /removed the central config layer/, name)
-    await assert.rejects(fs.lstat(path.join(controlDir, 'active')), /ENOENT/, name)
-    await assert.rejects(fs.stat(path.join(controlDir, 'config.a.json')), /ENOENT/, name)
+    await assert.rejects(fs.lstat(path.join(controlDir, 'managed-config.active')), /ENOENT/, name)
+    await assert.rejects(fs.stat(path.join(controlDir, 'managed-config.a.json')), /ENOENT/, name)
   }
 })
 
@@ -308,9 +308,9 @@ test('leave reports a central layer it cannot remove instead of throwing (#623)'
   // on, so leave has to reach its later steps and name the problem rather than
   // aborting on an uncaught EACCES.
   const { stateRoot, stdout, stderr, opts } = await makeDispatchOpts()
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
-  await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+  await fs.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify({ version: 2 }))
   await fs.chmod(controlDir, 0o000)
   try {
     const code = await dispatch(['leave'], opts)
@@ -344,7 +344,7 @@ test('leave still tears down when only a stale attach marker survives a prior pa
       2
     ) + '\n'
   )
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
   await fs.writeFile(
     path.join(controlDir, 'client-actions.json'),
@@ -394,7 +394,7 @@ test('leave removes the assets its attach marker records, and leaves manual copi
   await fs.mkdir(manualSkill, { recursive: true })
   await fs.writeFile(path.join(manualSkill, 'SKILL.md'), 'mine\n', 'utf8')
 
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
   await fs.writeFile(
     path.join(controlDir, 'client-actions.json'),
@@ -459,7 +459,7 @@ test('leave reverses a settings-only attach whose marker was later rewritten to 
       2
     ) + '\n'
   )
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.writeFile(
     path.join(controlDir, 'client-actions.json'),
     JSON.stringify(
@@ -519,7 +519,7 @@ test('leave stays quiet about a marker whose client has nothing left to reverse'
       2
     ) + '\n'
   )
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.writeFile(
     path.join(controlDir, 'client-actions.json'),
     JSON.stringify(
@@ -567,7 +567,7 @@ test('leave self-heals an org attach whose plugin is gone: drops the marker, war
   )
   // A `done` attach marker for a client no installed/bundled plugin provides:
   // it cannot be reversed, so leave does the best it can and drops the marker.
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.writeFile(
     path.join(controlDir, 'client-actions.json'),
     JSON.stringify({ attach: { ghost: { status: 'done', request_key: 'ghost' } } }, null, 2) + '\n'

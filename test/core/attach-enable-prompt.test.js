@@ -81,7 +81,11 @@ function writeLocalConfig(home) {
 
 /** @param {string} dir */
 function backupsIn(dir) {
-  return readdirSync(dir).filter((n) => n.includes('.bak-'))
+  try {
+    return readdirSync(path.join(dir, 'hypaware', 'state', 'config-backups')).filter((n) => n.includes('.bak-'))
+  } catch {
+    return []
+  }
 }
 
 /**

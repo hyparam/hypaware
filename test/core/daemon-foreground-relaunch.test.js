@@ -65,7 +65,7 @@ function relaunchOpts(overrides) {
     env: { HOME: '/home/test' },
     stdout: buf(),
     stderr: buf(),
-    stagedConfigPath: () => '/state/config-control/config.b.json',
+    stagedConfigPath: () => '/hyp/hypaware/state/managed-config.b.json',
     command: '/usr/bin/node',
     args: ['/app/bin/hypaware.js', 'daemon', 'run', '--config', '/etc/hyp.json'],
     cwd: '/srv',
@@ -87,7 +87,7 @@ test('a config that fails every apply relaunches RELAUNCH_LIMIT times, then exit
   assert.equal(code, 75)
   assert.equal(calls.length, RELAUNCH_LIMIT, 'no hot loop past the cap')
   assert.deepEqual(waits, [1000, 2000, 4000, 8000])
-  assert.match(/** @type {any} */ (opts.stderr).text(), /restarted 5 times in 10 minutes without staying up; exiting 75\. Check the staged config: \/state\/config-control\/config\.b\.json\n$/)
+  assert.match(/** @type {any} */ (opts.stderr).text(), /restarted 5 times in 10 minutes without staying up; exiting 75\. Check the staged config: \/hyp\/hypaware\/state\/managed-config\.b\.json\n$/)
   // The child is the same command: argv, env, cwd, and inherited stdio.
   for (const call of calls) {
     assert.equal(call.command, '/usr/bin/node')
@@ -367,7 +367,7 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
     const pids = [...stdout.matchAll(/daemon: running \(pid=(\d+)\)/g)].map(match => Number(match[1]))
     assert.equal(pids[0], proc.pid)
     assert.notEqual(pids[1], proc.pid, 'the relaunch is a fresh process (LLP 0017)')
-    const applied = JSON.parse(await fs.readFile(path.join(stateRoot, 'config-control', 'config.b.json'), 'utf8'))
+    const applied = JSON.parse(await fs.readFile(path.join(stateRoot, 'state', 'managed-config.b.json'), 'utf8'))
     assert.equal(applied.sinks.central.config.identity.bootstrap_token, undefined, 'the served revision is the operative central layer')
 
     proc.kill('SIGTERM')

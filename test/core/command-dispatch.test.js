@@ -258,11 +258,11 @@ test('top-level help lists a local plugin addition on a fleet-joined host', asyn
   // addition (`@hypaware/context-graph`), so help would hide `graph`
   // commands that actually dispatch.
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-joined-'))
-  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  const controlDir = path.join(hypHome, 'hypaware', 'state')
   await fs.mkdir(controlDir, { recursive: true })
   // Central layer (authoritative, fleet-owned): does NOT include the graph.
   await fs.writeFile(
-    path.join(controlDir, 'seed.json'),
+    path.join(controlDir, 'managed-config.seed.json'),
     JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/local-fs' }] })
   )
   // Local layer (user-owned, additive) adds the graph.

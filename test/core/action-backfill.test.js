@@ -284,7 +284,7 @@ test('driven through the reconciler: a failed perform writes a failed marker, th
 
     const p1 = await reconciler.reconcile(input)
     assert.equal(p1.results[0].outcome, 'failed')
-    const markerPath = path.join(stateRoot, 'config-control', 'client-actions.json')
+    const markerPath = path.join(stateRoot, 'state', 'client-actions.json')
     let marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'))
     assert.equal(marker.backfill['@hypaware/claude'].status, 'failed')
     assert.equal(marker.backfill['@hypaware/claude'].attempts, 1)

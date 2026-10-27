@@ -1,9 +1,10 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { LOCAL_CONFIG_BASENAME, localConfigPath } from '../runtime/paths.js'
+import { LOCAL_CONFIG_BASENAME, configBackupPath, localConfigPath, pruneConfigBackups } from '../runtime/paths.js'
 import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
 import { BUILTIN_REMOTE_ALIASES, BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
@@ -122,7 +123,8 @@ const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'vers
  *
  * - **No existing config** → proceed.
  * - **Existing config**: refuse unless `force`; on `force`, copy the
- *   current file to `hypaware-config.json.bak-<ts>` first, then proceed.
+ *   current file to `hypaware-config.json.bak-<ts>` under the state tree's
+ *   `config-backups/` first, keep the newest few, then proceed.
  *   An attended setup run passes `force`: the user just answered every
  *   question, and the backup keeps the old file (LLP 0433).
  *
@@ -158,8 +160,14 @@ export async function prepareLocalConfigWrite({ targetPath, force, now, dryRun }
   }
 
   const stamp = new Date((now ?? Date.now)()).toISOString().replace(/[:.]/g, '-')
-  const backupPath = `${targetPath}.bak-${stamp}`
-  if (!dryRun) await fs.copyFile(targetPath, backupPath)
+  const backupPath = configBackupPath(targetPath, stamp)
+  if (!dryRun) {
+    await fs.mkdir(path.dirname(backupPath), { recursive: true, mode: 0o700 })
+    await fs.copyFile(targetPath, backupPath)
+    // Every rewrite used to leave one more file beside the config for good.
+    // @ref LLP 0557#config-backups-are-capped-and-moved [implements]: the backup is still taken before the write; only the newest few are kept
+    pruneConfigBackups(path.dirname(backupPath), path.basename(targetPath))
+  }
   return { proceed: true, backupPath }
 }
 

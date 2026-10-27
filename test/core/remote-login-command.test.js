@@ -69,7 +69,7 @@ function gatewaySession() {
  * @param {string} hypHome @param {string} url
  */
 async function writeCentralSeed(hypHome, url) {
-  const seedPath = path.join(hypHome, 'hypaware', 'config-control', 'seed.json')
+  const seedPath = path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json')
   await fs.mkdir(path.dirname(seedPath), { recursive: true })
   await fs.writeFile(seedPath, JSON.stringify({
     version: 2,
@@ -85,7 +85,7 @@ async function writeCentralSeed(hypHome, url) {
  * @param {string} hypHome
  */
 async function writeUnreadableCentralSeed(hypHome) {
-  const seedPath = path.join(hypHome, 'hypaware', 'config-control', 'seed.json')
+  const seedPath = path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json')
   await fs.mkdir(path.dirname(seedPath), { recursive: true })
   await fs.writeFile(seedPath, '{ "version": 2, "sinks": {')
 }
@@ -305,7 +305,7 @@ test('a login-minted gateway credential seeds the matching central sink (LLP 006
   })
 
   // Two scopes, two stores (D1): the query record carries no gateway fields.
-  const raw = await fs.readFile(path.join(hypHome, 'hypaware', 'remote-credentials.json'), 'utf8')
+  const raw = await fs.readFile(path.join(hypHome, 'hypaware', 'credentials.json'), 'utf8')
   assert.ok(!raw.includes('gw-jwt'))
   assert.ok(!raw.includes('gateway'))
 })
@@ -399,7 +399,7 @@ test('a gateway credential with no matching central sink provisions one, forward
   assert.doesNotMatch(out.join(''), /capturing /)
 
   // The sink was written to the central-seed layer (not the user's local config).
-  const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'config-control', 'seed.json'), 'utf8'))
+  const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json'), 'utf8'))
   assert.equal(seed.sinks.central.plugin, '@hypaware/central')
   assert.equal(seed.sinks.central.config.url, 'https://hyp.internal') // origin, not the /mcp target
   assert.ok(!('bootstrap_token' in (seed.sinks.central.config.identity ?? {}))) // login-minted identity, no token
@@ -605,7 +605,7 @@ test('waitForCentralConverge: a throwing probe is "not converged this tick", pol
 test('waitForCentralConverge: default probe converges on the active slot, never the seed', async () => {
   const hypHome = await tmpHome()
   const env = { HYP_HOME: hypHome }
-  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  const controlDir = path.join(hypHome, 'hypaware', 'state')
 
   // A host with no control directory at all (nothing enrolled yet) is a
   // clean "not converged", not a probe error the loop has to swallow.
@@ -614,12 +614,12 @@ test('waitForCentralConverge: default probe converges on the active slot, never 
 
   await fs.mkdir(controlDir, { recursive: true })
 
-  await fs.writeFile(path.join(controlDir, 'seed.json'), '{"version": 2}\n')
+  await fs.writeFile(path.join(controlDir, 'managed-config.seed.json'), '{"version": 2}\n')
   const seedOnly = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
   assert.deepEqual(seedOnly, { ok: false })
 
-  await fs.writeFile(path.join(controlDir, 'config.a.json'), '{"version": 2}\n')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), '{"version": 2}\n')
+  await fs.symlink('managed-config.a.json', path.join(controlDir, 'managed-config.active'))
   const applied = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
   assert.deepEqual(applied, { ok: true })
 })
@@ -632,7 +632,7 @@ test('waitForCentralConverge: an unreadable active pointer reaches the probe-err
   const hypHome = await tmpHome()
   const env = { HYP_HOME: hypHome }
   const stateRoot = path.join(hypHome, 'hypaware')
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
 
   // A control directory that simply holds nothing yet is the silent steady
@@ -641,7 +641,7 @@ test('waitForCentralConverge: an unreadable active pointer reaches the probe-err
 
   // An `active` that is not a symlink is a pointer this process cannot read
   // (readlink EINVAL), which the probe surfaces rather than swallows.
-  await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  await fs.writeFile(path.join(controlDir, 'managed-config.active'), 'managed-config.a.json')
   assert.throws(() => hasAppliedCentralConfig({ stateRoot }))
 
   // The wait still degrades to the unlocked-picker fallback, never an error.
@@ -659,7 +659,7 @@ test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3
   assert.match(out.join(''), /signed in for queries only/)
   assert.doesNotMatch(out.join(''), /provisioned/)
   // No sink and no forward identity were written.
-  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json')))
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json')))
 })
 
@@ -674,7 +674,7 @@ test('--no-forward=true is the same opt-out as the bare flag (LLP 0063 D3)', asy
   const code = await runRemoteLogin(['prod', '--no-forward=true'], ctx, { login })
   assert.equal(code, 0)
   assert.match(out.join(''), /signed in for queries only/)
-  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json')))
 })
 
 test('login to a different server than the one this machine is enrolled to is rejected before the browser (LLP 0063 D4)', async () => {
@@ -743,9 +743,9 @@ test('an active-slot pointer naming a file that is gone is unreadable, not absen
   // so a pointer whose slot is missing is an applied-to (enrolled) machine
   // whose layer was removed out of band, not a machine that never enrolled.
   // `hyp leave` calls it connected and tears it down; the gate must agree.
-  const control = path.join(hypHome, 'hypaware', 'config-control')
+  const control = path.join(hypHome, 'hypaware', 'state')
   await fs.mkdir(control, { recursive: true })
-  await fs.symlink('config.a.json', path.join(control, 'active'))
+  await fs.symlink('managed-config.a.json', path.join(control, 'managed-config.active'))
   let called = false
   const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
 
@@ -763,18 +763,18 @@ test('a central layer whose PATH cannot be resolved fails the D4 gate CLOSED too
   // though the slot file still names the org's server verbatim. Repairing the
   // pointer brings that enrollment straight back, so the gate must refuse.
   for (const [name, writePointer] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
-    ['pointer replaced by a regular file', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
-    ['pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
-    ['pointer symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
+    ['pointer replaced by a regular file', (dir) => fs.writeFile(path.join(dir, 'managed-config.active'), 'managed-config.a.json')],
+    ['pointer naming neither slot', (dir) => fs.symlink('managed-config.c.json', path.join(dir, 'managed-config.active'))],
+    ['pointer symlink loop', (dir) => fs.symlink('managed-config.active', path.join(dir, 'managed-config.active'))],
   ])) {
     const hypHome = await tmpHome()
     const { ctx, err } = await makeCtx({
       hypHome,
       remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
     })
-    const control = path.join(hypHome, 'hypaware', 'config-control')
+    const control = path.join(hypHome, 'hypaware', 'state')
     await fs.mkdir(control, { recursive: true })
-    await fs.writeFile(path.join(control, 'config.a.json'), JSON.stringify({
+    await fs.writeFile(path.join(control, 'managed-config.a.json'), JSON.stringify({
       version: 2,
       plugins: [{ name: '@hypaware/central' }],
       sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
@@ -786,7 +786,7 @@ test('a central layer whose PATH cannot be resolved fails the D4 gate CLOSED too
     assert.equal(await runRemoteLogin(['other'], ctx, { login }), 2, name)
     assert.equal(called, false, `${name}: rejected before any auth`)
     assert.match(err.join(''), /cannot be read/, name)
-    assert.match(err.join(''), /config-control/, name)
+    assert.match(err.join(''), /hypaware\/state/, name)
   }
 })
 
@@ -798,9 +798,9 @@ test('a central layer directory that cannot be listed fails the D4 gate CLOSED (
     hypHome,
     remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
   })
-  const control = path.join(hypHome, 'hypaware', 'config-control')
+  const control = path.join(hypHome, 'hypaware', 'state')
   await fs.mkdir(control, { recursive: true })
-  await fs.writeFile(path.join(control, 'seed.json'), JSON.stringify({
+  await fs.writeFile(path.join(control, 'managed-config.seed.json'), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/central' }],
     sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
@@ -824,8 +824,8 @@ test('an unresolvable pointer does not overshoot: control-dir residue that is no
   for (const [name, seedResidue] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
     ['empty control dir', async () => {}],
     ['apply state and an orphan etag', async (dir) => {
-      await fs.writeFile(path.join(dir, 'state.json'), '{}')
-      await fs.writeFile(path.join(dir, 'config.a.etag'), 'etag-1')
+      await fs.writeFile(path.join(dir, 'config-control.json'), '{}')
+      await fs.writeFile(path.join(dir, 'managed-config.a.etag'), 'etag-1')
     }],
   ])) {
     const hypHome = await tmpHome()
@@ -833,7 +833,7 @@ test('an unresolvable pointer does not overshoot: control-dir residue that is no
       hypHome,
       remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
     })
-    const control = path.join(hypHome, 'hypaware', 'config-control')
+    const control = path.join(hypHome, 'hypaware', 'state')
     await fs.mkdir(control, { recursive: true })
     await seedResidue(control)
     let called = false
@@ -930,7 +930,7 @@ test('a failure seeding the identity rolls the provisioned seed back so no crede
   assert.match(err.join(''), /enrollment failed/)
   // The seed must NOT be left committed on disk (rollback), or the daemon would
   // demand a bootstrap token the login user does not have.
-  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json')))
 })
 
 test('a session without a gateway credential seeds nothing and prints no forwarding output', async () => {
@@ -1356,7 +1356,7 @@ test('a --no-daemon login prints the durable hint and provisions the sink (LLP 0
   const hypHome = await tmpHome()
   const { ctx, out, err } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
-  const seedPath = path.join(hypHome, 'hypaware', 'config-control', 'seed.json')
+  const seedPath = path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json')
 
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
@@ -1434,7 +1434,7 @@ test('a machine enrolled under the built-in target\'s previous host re-logs in a
   assert.doesNotMatch(err.join(''), /this machine is connected to/)
   // A re-seed, not a second enrollment: the layer still names the one sink at
   // the URL it saved, and the login-minted gateway landed in its identity.
-  const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'config-control', 'seed.json'), 'utf8'))
+  const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json'), 'utf8'))
   assert.deepEqual(Object.keys(seed.sinks), ['central'])
   assert.equal(seed.sinks.central.config.url, 'https://hypaware.hyperparam.app')
   const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
@@ -1452,7 +1452,7 @@ test('a hand-joined sink at the built-in target\'s previous host is re-seeded, n
   const code = await runRemoteLogin([], ctx, { login })
   assert.equal(code, 0)
   // No enrollment happened (no central layer), and the existing sink got the gateway.
-  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'state', 'managed-config.seed.json')))
   const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
   assert.equal(persisted.jwt, 'gw-jwt')
 })

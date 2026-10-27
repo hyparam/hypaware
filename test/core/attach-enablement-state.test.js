@@ -204,9 +204,9 @@ async function withTempHome(fn) {
  * @param {object} config
  */
 function writeCentralConfig(home, config) {
-  const controlDir = path.join(home, '.hyp', 'hypaware', 'config-control')
+  const controlDir = path.join(home, '.hyp', 'hypaware', 'state')
   mkdirSync(controlDir, { recursive: true })
-  writeFileSync(path.join(controlDir, 'seed.json'), JSON.stringify(config))
+  writeFileSync(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify(config))
 }
 
 test('capability gate: a catalog-known client reports not_enabled, not cap_missing', async () => {

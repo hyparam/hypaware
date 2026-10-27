@@ -280,9 +280,9 @@ test('Cursor: a session after detach does not reach the cache; attach resumes', 
 test('detach refuses whole when the org config requires the client', async () => {
   const s = await stage()
   try {
-    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'config-control')
+    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'state')
     await fsp.mkdir(controlDir, { recursive: true })
-    await fsp.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] }))
+    await fsp.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] }))
     const before = await s.readLocal()
     const cli = cliCtx(s)
     assert.equal(await runDetach(['codex'], cli.ctx), 1)
@@ -299,9 +299,9 @@ test('a refused detach skips --purge and keeps the local CA', async () => {
   const platform = /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(process, 'platform'))
   Object.defineProperty(process, 'platform', { value: 'linux' })
   try {
-    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'config-control')
+    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'state')
     await fsp.mkdir(controlDir, { recursive: true })
-    await fsp.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] }))
+    await fsp.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] }))
     const caKey = path.join(s.env.HYP_HOME, 'hypaware', 'tls', 'ca-key.pem')
     await fsp.mkdir(path.dirname(caKey), { recursive: true })
     await fsp.writeFile(caKey, 'key')
@@ -413,9 +413,9 @@ test('a refused detach with --json still says on stderr that the purge was skipp
   const platform = /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(process, 'platform'))
   Object.defineProperty(process, 'platform', { value: 'linux' })
   try {
-    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'config-control')
+    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'state')
     await fsp.mkdir(controlDir, { recursive: true })
-    await fsp.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] }))
+    await fsp.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] }))
     const cli = cliCtx(s)
     assert.equal(await runDetach(['codex', '--purge', '--json'], cli.ctx), 1)
     assert.match(cli.err(), /Skipped --purge/)
@@ -448,9 +448,9 @@ test('attach all resumes Claude Desktop, which registers no adapter', async () =
 test('attach fails when the org config turns recording off', async () => {
   const s = await stage()
   try {
-    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'config-control')
+    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'state')
     await fsp.mkdir(controlDir, { recursive: true })
-    await fsp.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({
+    await fsp.writeFile(path.join(controlDir, 'managed-config.seed.json'), JSON.stringify({
       version: 2, plugins: [{ name: '@hypaware/claude-desktop', recording: false }],
     }))
     const cli = cliCtx(s, { clients: { getClient: () => undefined, listClients: () => [] } })

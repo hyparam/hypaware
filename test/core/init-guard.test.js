@@ -86,9 +86,9 @@ test('init --from-file --force backs up then overwrites', async () => {
   assert.deepEqual(after.plugins, INCOMING.plugins)
 
   // A timestamped backup of the old config exists with the old content.
-  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  const backups = (await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-'))
   assert.equal(backups.length, 1)
-  const backup = JSON.parse(await fs.readFile(path.join(hypHome, backups[0]), 'utf8'))
+  const backup = JSON.parse(await fs.readFile(path.join(path.join(hypHome, 'hypaware', 'state', 'config-backups'), backups[0]), 'utf8'))
   assert.deepEqual(backup.plugins, EXISTING.plugins)
   assert.match(stdout.text(), /backed up existing config/i)
 })
@@ -113,7 +113,7 @@ test('init --from-file --dry-run --force leaves the existing config and makes no
   assert.match(stdout.text(), /\(dry-run\) would back up existing config/)
   const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
   assert.deepEqual(after.plugins, EXISTING.plugins)
-  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  const backups = (await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-'))
   assert.equal(backups.length, 0)
 })
 
@@ -158,9 +158,9 @@ test('init <preset> --force backs up then overwrites', async () => {
   assert.notDeepEqual(after.plugins, EXISTING.plugins)
 
   // A timestamped backup of the old config exists with the old content.
-  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  const backups = (await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-'))
   assert.equal(backups.length, 1)
-  const backup = JSON.parse(await fs.readFile(path.join(hypHome, backups[0]), 'utf8'))
+  const backup = JSON.parse(await fs.readFile(path.join(path.join(hypHome, 'hypaware', 'state', 'config-backups'), backups[0]), 'utf8'))
   assert.deepEqual(backup.plugins, EXISTING.plugins)
   assert.match(stdout.text(), /backed up existing config/i)
 })
@@ -175,7 +175,7 @@ test('init <preset> --dry-run --force leaves the existing config and makes no ba
   // The dry run reports the backup it would make, never one it made.
   assert.match(stdout.text(), /\(dry-run\) would back up existing config/)
   assert.deepEqual(
-    (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-')),
+    (await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-')),
     []
   )
   const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
@@ -228,9 +228,9 @@ test('interactive init: an existing config is backed up then rewritten without a
   assert.equal(result.exitCode, 0, stderr.text())
   assert.match(stdout.text(), /Saved settings \(previous config backed up\)/)
   // A timestamped backup with the OLD content exists.
-  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  const backups = (await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-'))
   assert.equal(backups.length, 1)
-  const backup = JSON.parse(await fs.readFile(path.join(hypHome, backups[0]), 'utf8'))
+  const backup = JSON.parse(await fs.readFile(path.join(path.join(hypHome, 'hypaware', 'state', 'config-backups'), backups[0]), 'utf8'))
   assert.deepEqual(backup.plugins, EXISTING.plugins)
   // The config was rewritten (no longer the old content).
   const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
@@ -293,9 +293,9 @@ test('setup claude-and-otel-local --force=true backs up then overwrites', async 
 
   // The newly enabled overwrite still backs up first: one timestamped
   // .bak carrying the prior content.
-  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  const backups = (await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-'))
   assert.equal(backups.length, 1)
-  const backup = JSON.parse(await fs.readFile(path.join(hypHome, backups[0]), 'utf8'))
+  const backup = JSON.parse(await fs.readFile(path.join(path.join(hypHome, 'hypaware', 'state', 'config-backups'), backups[0]), 'utf8'))
   assert.deepEqual(backup.plugins, EXISTING.plugins)
   assert.match(stdout.text(), /backed up existing config/i)
 })
@@ -311,7 +311,7 @@ test('setup claude-and-otel-local --force=false refuses to clobber an existing c
   const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
   assert.deepEqual(after.plugins, EXISTING.plugins)
   assert.deepEqual(
-    (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-')),
+    (await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-')),
     []
   )
 })
@@ -339,7 +339,7 @@ for (const token of ['--force=TRUE', '--force=1']) {
     const code = await dispatch(['setup', 'claude-and-otel-local', token], opts)
     assert.equal(code, 2)
     assert.match(stderr.text(), /--force expects true\|false/)
-    assert.deepEqual((await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-')), [])
+    assert.deepEqual((await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-')), [])
     assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins, EXISTING.plugins)
   })
 }
@@ -354,7 +354,7 @@ test('setup claude-and-otel-local --dry-run=1 --force=true leaves an existing co
   const code = await dispatch(['setup', 'claude-and-otel-local', '--dry-run=1', '--force=true'], opts)
   assert.equal(code, 2)
   assert.match(stderr.text(), /--dry-run expects true\|false \(got 1\)/)
-  assert.deepEqual((await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-')), [])
+  assert.deepEqual((await fs.readdir(path.join(hypHome, 'hypaware', 'state', 'config-backups')).catch(() => [])).filter((n) => n.startsWith('hypaware-config.json.bak-')), [])
   assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins, EXISTING.plugins)
 })
 

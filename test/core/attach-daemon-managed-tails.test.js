@@ -142,7 +142,7 @@ function seedDaemonManagedAttach(home, port, mode = 'otel') {
  * @param {string} home
  */
 function seedRefusedMarker(home) {
-  const dir = path.join(stateRoot(home), 'config-control')
+  const dir = path.join(stateRoot(home), 'state')
   mkdirSync(dir, { recursive: true })
   writeFileSync(
     path.join(dir, 'client-actions.json'),
@@ -351,7 +351,7 @@ test('a done marker still survives that same daemon-managed attach', async () =>
   await withTempHome(async (home) => {
     writeLocalConfig(home)
     seedDaemonManagedAttach(home, 55555)
-    const dir = path.join(stateRoot(home), 'config-control')
+    const dir = path.join(stateRoot(home), 'state')
     mkdirSync(dir, { recursive: true })
     const installed = [path.join(home, '.claude', 'skills', 'org-helper')]
     writeFileSync(

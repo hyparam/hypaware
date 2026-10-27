@@ -229,7 +229,7 @@ test('reconciliation repairs a 1.32 processor hook once at an unchanged endpoint
   const broken = await r.read()
   broken._hypaware.settings_schema = 3
   await fsp.writeFile(r.settingsPath, JSON.stringify(broken))
-  const markerFile = path.join(r.stateRoot, 'config-control', 'client-actions.json')
+  const markerFile = path.join(r.stateRoot, 'state', 'client-actions.json')
   await fsp.mkdir(path.dirname(markerFile), { recursive: true })
   await fsp.writeFile(markerFile, JSON.stringify({ attach: { claude: {
     status: 'done', request_key: 'claude', at: '2026-09-08T00:00:00.000Z',

@@ -246,7 +246,7 @@ test('a retired skill the user edited is left in place and named, never deleted'
  * @returns {Promise<void>}
  */
 async function seedAttachMarker(home, installedAssets) {
-  const controlDir = path.join(home, '.hyp', 'hypaware', 'config-control')
+  const controlDir = path.join(home, '.hyp', 'hypaware', 'state')
   await fs.mkdir(controlDir, { recursive: true })
   await fs.writeFile(
     path.join(controlDir, 'client-actions.json'),
@@ -347,7 +347,7 @@ test('a ledger record whose digest is not a string never becomes an unconditiona
   // A corrupt (or hand-edited) ledger: the digest is there, but it is a number.
   // Reading it as "no digest recorded" and then treating a missing digest as a
   // match is what turns an unreadable record into an unconditional delete.
-  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'state', 'client-assets.json')
   const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
   for (const record of ledger.assets) {
     if (record.name === 'hypaware-ignore') record.digest = 12345
@@ -379,7 +379,7 @@ test('a ledger record with no digest at all is withheld and reported', async () 
 
   // Reachable without any corruption: the install records no digest when
   // `digestClientAsset` fails transiently on the copy it just made.
-  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'state', 'client-assets.json')
   const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
   for (const record of ledger.assets) {
     if (record.name === 'hypaware-ignore') delete record.digest
@@ -416,7 +416,7 @@ test('a retired asset that cannot be read is named and kept on the books', async
 
   const skillsDir = path.join(home, '.claude', 'skills')
   const retired = path.join(skillsDir, 'hypaware-ignore')
-  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'state', 'client-assets.json')
   /** @param {string} p @returns {Promise<any>} */
   const recordFor = async (p) =>
     JSON.parse(await fs.readFile(ledgerPath, 'utf8')).assets.find(
@@ -516,7 +516,7 @@ test('an ENOENT raised reading inside a retired asset, not at dest itself, is re
 
   const skillsDir = path.join(home, '.claude', 'skills')
   const retired = path.join(skillsDir, 'hypaware-ignore')
-  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'state', 'client-assets.json')
   /** @param {string} p @returns {Promise<any>} */
   const recordFor = async (p) =>
     JSON.parse(await fs.readFile(ledgerPath, 'utf8')).assets.find(
@@ -618,7 +618,7 @@ test('a recorded destination outside the client asset directories is refused out
   const precious = path.join(home, 'PRECIOUS')
   await fs.mkdir(precious, { recursive: true })
   await fs.writeFile(path.join(precious, 'notes.md'), 'mine\n', 'utf8')
-  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'state', 'client-assets.json')
   const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
   ledger.assets.push({ kind: 'skill', name: 'bogus', client: 'claude', dest: precious })
   await fs.writeFile(ledgerPath, JSON.stringify(ledger), 'utf8')
@@ -658,7 +658,7 @@ test('a recorded destination deeper than a direct child is refused, digest or no
   // does match it, so every other condition the prune checks is satisfied. What
   // must stop the delete is that no copy this module makes is ever deeper than
   // `<base>/<name>`, so a record this shape cannot be describing our own write.
-  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'state', 'client-assets.json')
   const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
   ledger.assets.push({
     kind: 'skill',
@@ -709,7 +709,7 @@ test('a recorded destination whose basename begins with ".." is refused, not rea
 
   // A corrupt record naming it, carrying a digest that really does match, so
   // every condition but the shape of the name is satisfied.
-  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'client-assets.json')
+  const ledgerPath = path.join(home, '.hyp', 'hypaware', 'state', 'client-assets.json')
   const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
   ledger.assets.push({
     kind: 'skill',

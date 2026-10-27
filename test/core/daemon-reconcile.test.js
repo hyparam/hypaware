@@ -222,19 +222,19 @@ test('runDaemon does not run the boot pass while probation is still active (fres
   let handle
   try {
     const stateRoot = path.join(hypHome, 'hypaware')
-    const controlDir = path.join(stateRoot, 'config-control')
+    const controlDir = path.join(stateRoot, 'state')
     await fs.mkdir(controlDir, { recursive: true })
 
     // An applied central slot 'a' under active, unexpired probation: the
     // running config has NOT been confirmed yet, so the boot pass must wait
     // for the confirmation edge rather than fire now.
     const central = JSON.stringify({ version: 2, plugins: [] }) + '\n'
-    await fs.writeFile(path.join(controlDir, 'config.a.json'), central)
-    await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1')
-    await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+    await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), central)
+    await fs.writeFile(path.join(controlDir, 'managed-config.a.etag'), 'etag-1')
+    await fs.symlink('managed-config.a.json', path.join(controlDir, 'managed-config.active'))
     const until = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
     await fs.writeFile(
-      path.join(controlDir, 'state.json'),
+      path.join(controlDir, 'config-control.json'),
       JSON.stringify({
         probation: {
           etag: 'etag-1',
@@ -283,18 +283,18 @@ test('the confirmation edge during active probation drives exactly one reconcile
   let handle
   try {
     const stateRoot = path.join(hypHome, 'hypaware')
-    const controlDir = path.join(stateRoot, 'config-control')
+    const controlDir = path.join(stateRoot, 'state')
     await fs.mkdir(controlDir, { recursive: true })
 
     // Applied central slot 'a' under active, unexpired probation (the
     // fresh-join case): the boot pass must NOT fire yet.
     const central = JSON.stringify({ version: 2, plugins: [] }) + '\n'
-    await fs.writeFile(path.join(controlDir, 'config.a.json'), central)
-    await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1')
-    await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+    await fs.writeFile(path.join(controlDir, 'managed-config.a.json'), central)
+    await fs.writeFile(path.join(controlDir, 'managed-config.a.etag'), 'etag-1')
+    await fs.symlink('managed-config.a.json', path.join(controlDir, 'managed-config.active'))
     const until = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
     await fs.writeFile(
-      path.join(controlDir, 'state.json'),
+      path.join(controlDir, 'config-control.json'),
       JSON.stringify({
         probation: {
           etag: 'etag-1',

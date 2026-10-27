@@ -55,7 +55,8 @@ CLI or daemon.
 - `<HYP_HOME>/hypaware/logs/daemon.{out,err}.log` - daemon stdout / stderr
 - `<HYP_HOME>/exports/` - local Parquet exports (when the local-fs sink is on)
 
-Enrolling writes a separate central layer under `config-control/` (mode `0600`),
+Enrolling writes a separate central layer, the `managed-config.*` files under
+`<HYP_HOME>/hypaware/state/` (mode `0600`),
 never into the local `hypaware-config.json`, so it augments an existing install
 rather than replacing it.
 

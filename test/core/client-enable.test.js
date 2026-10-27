@@ -54,7 +54,7 @@ const CLAUDE_ENTRIES = /** @type {any} */ ([
  * @returns {Promise<string[]>}
  */
 async function backupsIn(dir) {
-  const names = await fs.readdir(dir)
+  const names = await fs.readdir(path.join(dir, 'hypaware', 'state', 'config-backups')).catch(() => [])
   return names.filter((n) => n.includes('.bak-'))
 }
 
@@ -138,7 +138,7 @@ test('the enable write is additive: unrelated plugins and keys survive, and the 
   const backups = await backupsIn(hypHome)
   assert.equal(backups.length, 1)
   assert.match(backups[0], /hypaware-config\.json\.bak-/)
-  assert.equal(result.backupPath, path.join(hypHome, backups[0]))
+  assert.equal(result.backupPath, path.join(hypHome, 'hypaware', 'state', 'config-backups', backups[0]))
   assert.equal(await fs.readFile(result.backupPath ?? '', 'utf8'), raw)
 })
 

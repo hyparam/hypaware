@@ -196,7 +196,7 @@ export function detach(client = 'claude', opts = {}) {
 
 /**
  * Join a central hypaware server, writing the join seed under
- * `<HYP_HOME>/hypaware/config-control/`. With `noDaemon` (the default for
+ * `<HYP_HOME>/hypaware/state/`. With `noDaemon` (the default for
  * embedded hosts that own their own daemon) it performs no network call and
  * installs no launchd/systemd unit: the host's already-running daemon
  * picks up the seed and pulls its configuration.

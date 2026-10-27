@@ -112,7 +112,7 @@ test('join never touches an existing local config (#111 regression)', async () =
 test('join supersedes a stale active slot so the fresh token is honored (#139)', async () => {
   const { hypHome, stdout, opts } = await makeDispatchOpts()
   const stateRoot = path.join(hypHome, 'hypaware')
-  const controlDir = path.join(stateRoot, 'config-control')
+  const controlDir = path.join(stateRoot, 'state')
   await fs.mkdir(controlDir, { recursive: true })
 
   // Simulate a previously-joined host whose applied central config lost
@@ -131,9 +131,9 @@ test('join supersedes a stale active slot so the fresh token is honored (#139)',
       },
     },
   }
-  await fs.writeFile(path.join(controlDir, 'config.b.json'), JSON.stringify(staleSlot, null, 2) + '\n')
-  await fs.writeFile(path.join(controlDir, 'config.b.etag'), 'stale-etag\n')
-  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  await fs.writeFile(path.join(controlDir, 'managed-config.b.json'), JSON.stringify(staleSlot, null, 2) + '\n')
+  await fs.writeFile(path.join(controlDir, 'managed-config.b.etag'), 'stale-etag\n')
+  await fs.symlink('managed-config.b.json', path.join(controlDir, 'managed-config.active'))
 
   const code = await dispatch(
     ['join', 'https://central.example', 'fresh-token', '--no-daemon'],
@@ -151,8 +151,8 @@ test('join supersedes a stale active slot so the fresh token is honored (#139)',
   // The host is back in genuine seed-config mode: the active-slot pointer
   // and the stale slot artifacts are gone, so the apply engine's
   // first-apply path recreates the slots on the next pull.
-  await assert.rejects(fs.lstat(path.join(controlDir, 'active')))
-  await assert.rejects(fs.stat(path.join(controlDir, 'config.b.json')))
+  await assert.rejects(fs.lstat(path.join(controlDir, 'managed-config.active')))
+  await assert.rejects(fs.stat(path.join(controlDir, 'managed-config.b.json')))
   assert.match(stdout.text(), /superseded a stale applied config/)
 })
 

@@ -293,9 +293,9 @@ test('an unreadable settings file is refused without quoting it', async () => {
 // @ref LLP 0524#central [tests]: a central layer that names the gateway governs the proxy, so the local write is not checked
 test('a central layer that names the gateway lets the write through', async () => {
   const fx = await makeHome({ config: EXISTING, settings: claudeSettings('proxy') })
-  const control = path.join(fx.hypHome, 'hypaware', 'config-control')
+  const control = path.join(fx.hypHome, 'hypaware', 'state')
   await fs.mkdir(control, { recursive: true })
-  await fs.writeFile(path.join(control, 'seed.json'), JSON.stringify({
+  await fs.writeFile(path.join(control, 'managed-config.seed.json'), JSON.stringify({
     version: 2,
     plugins: [{ name: GATEWAY, enabled: true, config: { proxy_mode: true } }],
   }))

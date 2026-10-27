@@ -381,8 +381,8 @@ for (const applied of [false, true]) {
     const remote = remoteEnrollment(home, applied)
     const initial = effectivePolicy(root)
     if (applied) {
-      fs.renameSync(remote.configPath, path.join(path.dirname(remote.configPath), 'config.a.json'))
-      fs.symlinkSync('config.a.json', path.join(path.dirname(remote.configPath), 'active'))
+      fs.renameSync(remote.configPath, path.join(path.dirname(remote.configPath), 'managed-config.a.json'))
+      fs.symlinkSync('managed-config.a.json', path.join(path.dirname(remote.configPath), 'managed-config.active'))
     }
     assert.equal(productStatus(env).policy, 'enrolled_organization')
     assert.equal(effectivePolicy(root).binding, initial.binding)

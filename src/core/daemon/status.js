@@ -179,7 +179,7 @@ export async function collectHypAwareStatus(opts = {}) {
 
   // ----- config (LLP 0031: central ⊕ local) -----
   // The user-facing config path is the local layer; the central layer is
-  // resolved read-only from config-control/ (active slot or join seed).
+  // resolved read-only from the managed-config files (active slot or join seed).
   // Reading it never fires a config poll. What's "running" is the merge.
   // @ref LLP 0031#status-provenance [implements]: Restore inspectability: provenance tags + dropped-local section over the merged config
   const configPath = env.HYP_CONFIG
@@ -411,7 +411,7 @@ export async function collectHypAwareStatus(opts = {}) {
       repair: [
         'hyp join <url> <token>',
         'hyp leave, then hyp remote login',
-        'check the ownership and permissions of the config-control directory',
+        'check the ownership and permissions of the hypaware/state directory',
       ],
     })
   }
@@ -1846,7 +1846,7 @@ export async function collectHypAwareStatus(opts = {}) {
   if (remoteConfig?.lastRollback) {
     // The three values in this message are display-only, and none of them is
     // this build's own: the etag is whatever the joined server served, and
-    // all three come back through `config-control/state.json`, which is read
+    // all three come back through `state/config-control.json`, which is read
     // with no validation beyond "is an object". A diagnostic message is prose
     // assembled for a person, so its components are cleaned here, where the
     // prose is assembled, rather than in `readConfigControlStatus`.

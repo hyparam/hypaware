@@ -158,7 +158,9 @@ All paths below are relative to `HYP_HOME`:
 | Path | Purpose |
 | --- | --- |
 | `hypaware-config.json` | Local configuration |
-| `hypaware/config-control/` | Central enrollment and managed configuration |
+| `hypaware/credentials.json` | Sign-in tokens for enrolled servers (mode `0600`) |
+| `hypaware/state/` | Settings written on a user action or a server sync: the managed configuration (`managed-config.*`), client action markers, the update check record |
+| `hypaware/state/config-backups/` | The newest five timestamped copies of `hypaware-config.json` taken before a rewrite |
 | `hypaware/cache/` | Local query cache |
 | `hypaware/plugins/` | Per-plugin state |
 | `hypaware/sinks/` | Export progress and retained failure diagnostics |

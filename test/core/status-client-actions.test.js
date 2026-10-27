@@ -40,7 +40,7 @@ function env(hypHome) {
  * @param {Record<string, Record<string, object>>} byKind
  */
 async function writeMarkers(hypHome, byKind) {
-  const dir = path.join(hypHome, 'hypaware', 'config-control')
+  const dir = path.join(hypHome, 'hypaware', 'state')
   await fs.mkdir(dir, { recursive: true })
   await fs.writeFile(path.join(dir, 'client-actions.json'), JSON.stringify(byKind, null, 2) + '\n')
 }

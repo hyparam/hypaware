@@ -29,7 +29,7 @@ test('a second read with no change skips re-reading the file (parse cache)', asy
   const dir = await tmpState()
   await writeToken(dir, 'prod', 'sk-1') // creates the file and busts the cache
   const spy = t.mock.method(fsp, 'readFile')
-  const isCredFile = (/** @type {any} */ c) => String(c.arguments[0]).endsWith('remote-credentials.json')
+  const isCredFile = (/** @type {any} */ c) => String(c.arguments[0]).endsWith('credentials.json')
 
   await readCredentials(dir) // miss: reads + parses once
   await readCredentials(dir) // hit: served from cache, no read

@@ -83,7 +83,7 @@ The bundled `@hypaware/grep` plugin searches recorded messages. Standard capture
 setups enable it; an explicit `enabled: false` entry keeps it disabled. An
 existing configuration gains it automatically on startup. When the migration
 can save the change it backs the config up first, leaving a timestamped
-`.bak-` copy beside `hypaware-config.json`; otherwise search still works for
+`.bak-` copy under `hypaware/state/config-backups/`; otherwise search still works for
 that process, and a read-only config logs a warning that the change could not
 be saved.
 

@@ -187,10 +187,10 @@ test('dispatch miss on a plugin disabled by the central layer says it cannot be 
   // The fleet (central) layer disables the plugin. The whole central document
   // wins and locks, so a local add-back is dropped (collides_with_central):
   // the user cannot enable it locally (LLP 0031).
-  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  const controlDir = path.join(hypHome, 'hypaware', 'state')
   await fs.mkdir(controlDir, { recursive: true })
   await fs.writeFile(
-    path.join(controlDir, 'seed.json'),
+    path.join(controlDir, 'managed-config.seed.json'),
     JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity', enabled: false }] })
   )
   const configPath = path.join(hypHome, 'hypaware-config.json')
