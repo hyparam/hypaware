@@ -27,6 +27,7 @@ import {
   loadAgentMeta,
   matchKey,
   withToolUseResult,
+  withTurnOrigin,
 } from './transcripts.js'
 import { sharedTranscriptLoader } from './transcript-cache.js'
 import {
@@ -601,7 +602,7 @@ function applyTranscriptMatch(projected, match) {
   // differently from fallback rows. The native DAG parent lands in
   // `parent_uuid` via the shared identity copy.
   assignTranscriptIdentity(/** @type {any} */ (projected), match)
-  projected.attributes = /** @type {any} */ (withToolUseResult(projected.attributes, match))
+  projected.attributes = /** @type {any} */ (withTurnOrigin(withToolUseResult(projected.attributes, match), match))
 }
 
 /**

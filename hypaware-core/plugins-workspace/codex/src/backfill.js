@@ -19,6 +19,7 @@ import { redactRemoteUserinfo } from './git-remote.js'
 import { detach } from './settings.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import {
+  contentItemKinds,
   copyNumberAlias,
   firstString,
   netInputUsage,
@@ -1029,7 +1030,13 @@ function messageItemToProjected(payload) {
   const role = stringValue(payload.role) ?? 'user'
   const content = textBlocksFromContent(payload.content)
   if (content.length === 0) return undefined
-  return { role, content }
+  /** @type {AiGatewayProjectedMessage} */
+  const message = { role, content }
+  // Message-level `attributes.codex` deep-merges with the exchange-level
+  // namespace (`thread_source`, `originator`, ...) at materialization.
+  const kinds = contentItemKinds(payload)
+  if (kinds) message.attributes = { codex: { content_item_kinds: kinds } }
+  return message
 }
 
 // ---------------------------------------------------------------------

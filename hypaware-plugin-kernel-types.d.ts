@@ -2314,6 +2314,20 @@ export interface AiGatewaySettlementEnricher {
   name: string
   clientName: string
   settle(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Array<Record<string, unknown> | UsagePolicyDrop>>
+  /**
+   * Optional: name a row of this client that `settle` should see even though
+   * the gateway's own selection would not pick it (it is not a fallback row,
+   * its cwd is known, and it links to nothing being renamed). The gateway
+   * calls this once per row of the client at flush, with the row alone; the
+   * answer is not stored. A row answered `true` reaches `settle` in the same
+   * per-session group as the batch's fallback rows. Returning `true` for a
+   * row `settle` then leaves unchanged is allowed and costs only the call.
+   *
+   * The first use is the Claude OTEL prompt row (LLP 0560): native identity,
+   * so never a fallback, but its transcript line carries provenance the event
+   * does not, and only a flush-time look at that line can supply it.
+   */
+  wants?(row: Record<string, unknown>): boolean
 }
 
 /**

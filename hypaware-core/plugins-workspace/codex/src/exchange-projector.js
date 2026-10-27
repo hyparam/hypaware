@@ -9,6 +9,7 @@ import {
   copyNumberAlias,
   firstString,
   mergeJsonObjects,
+  contentItemKinds,
   netInputUsage,
   numberValue,
   reasoningMessageFromPayload,
@@ -570,7 +571,13 @@ function responsesInputMessages(input, skipInputIndex = -1) {
     const role = stringValue(item.role) ?? 'user'
     const blocks = textBlocksFromContent(item.content)
     if (blocks.length === 0) continue
-    out.push({ role, content: blocks })
+    /** @type {AiGatewayProjectedMessage} */
+    const message = { role, content: blocks }
+    // Same stamp the backfill puts on a rollout `message` item, so a
+    // live-captured turn and its backfilled twin carry the same attributes.
+    const kinds = contentItemKinds(item)
+    if (kinds) message.attributes = { codex: { content_item_kinds: kinds } }
+    out.push(message)
   }
   return out
 }
