@@ -211,8 +211,8 @@ For target configuration and query-only sign-in, see
 not a remote inventory. A remote can have different datasets, retention, and
 permissions; query it directly to establish what is available. To see a remote
 dataset's columns, add `--remote` to `hyp query schema`, which resolves the
-target the same way `hyp query sql` does. The remote enforces visibility and rejects
-`--include-local-only`.
+target the same way `hyp query sql` does. The remote enforces visibility and
+rejects `--include-local-only`.
 
 ## Follow relationships in the activity graph
 
