@@ -1,16 +1,19 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
+
 import { Attr, getActiveSpan, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
+import { buildQuerySqlOutput, renderResult } from '../query/format.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
-import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
+import { parseCommandArgv, parseControlFlags, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { groupThousands } from '../util/format_number.js'
 
 /**
- * @import { CommandRunContext, DatasetRegistration, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, DatasetRegistration, DatasetSchema, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CacheStatusPartition, CacheStatusReport } from '../../../src/core/cache/types.js'
  * @import { OverviewRows } from '../../../src/core/query/types.js'
  */
@@ -25,9 +28,24 @@ import { groupThousands } from '../util/format_number.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
-  const parsed = parseCoreCommandArgv('query schema', argv, ctx)
+  const limitFlag = argv.find(arg => /^--max-(bytes|cell)(=|$)/.test(arg))
+  if (limitFlag !== undefined) {
+    ctx.stderr.write(`hyp query schema: ${limitFlag.split('=')[0]} is not supported; schema output is always complete\n`)
+    return 2
+  }
+  const ctrl = parseControlFlags(argv)
+  if (!ctrl.ok) {
+    ctx.stderr.write(`hyp query schema: ${ctrl.error}\n`)
+    return 2
+  }
+  if (ctrl.controls.refreshExplicit) {
+    ctx.stderr.write('hyp query schema: --refresh is not supported for schema metadata\n')
+    return 2
+  }
+  const parsed = parseCoreCommandArgv('query schema', ctrl.rest, ctx)
   if (!parsed.ok) return parsed.code
   const dataset = String(parsed.params.dataset)
+  const { remote, org, output } = ctrl.controls
   return withSpan(
     'query.resolve_tables',
     {
@@ -37,13 +55,49 @@ export async function runQuerySchema(argv, ctx) {
       status: 'ok',
     },
     async () => {
-      const schema = schemaForDataset(ctx.query, dataset)
+      let schema
+      if (remote !== undefined) {
+        const { readRemoteSchema } = await import('../mcp/remote_verb.js')
+        const { effectiveDefaultRemote } = await import('../remote/builtin_remotes.js')
+        // @ref LLP 0062#bare-remote [implements]: schema uses the same default-target resolution as SQL
+        const target = remote === '' ? effectiveDefaultRemote(ctx.config) : remote
+        const result = await readRemoteSchema({ dataset, target, org, ctx })
+        if (!result.ok) {
+          ctx.stderr.write(`hyp query schema: ${result.error}\n`)
+          return result.exitCode ?? 1
+        }
+        schema = /** @type {DatasetSchema} */ (result.result)
+      } else {
+        schema = schemaForDataset(ctx.query, dataset)
+      }
       if (!schema) {
+        if (output !== undefined || ctrl.controls.format !== 'table' || ctrl.controls.json) {
+          ctx.stderr.write(`hyp query schema: unknown dataset '${dataset}'\n`)
+          return 1
+        }
         ctx.stdout.write(`dataset: ${dataset}\n`)
         ctx.stdout.write('  (no dataset registered - install a plugin that contributes it)\n')
         return 0
       }
-      ctx.stdout.write(renderSchema(dataset, schema))
+      const format = ctrl.controls.json && ctrl.controls.format === 'table' ? 'json' : ctrl.controls.format
+      const full = { columns: ['name', 'type', 'nullable'], rows: schema.columns.map(c => ({ ...c })) }
+      // A partial schema can mislead callers about which columns exist.
+      // Keep every definition and name intact in every output format.
+      if (output === undefined) {
+        ctx.stdout.write(format === 'table'
+          ? renderSchema(dataset, schema)
+          : renderResult(full, format))
+      } else {
+        const rendered = buildQuerySqlOutput(full, { maxCell: 0, maxBytes: 0, format, output })
+        try {
+          if (rendered.file) await fs.writeFile(rendered.file.path, rendered.file.content)
+        } catch (err) {
+          ctx.stderr.write(`hyp query schema: ${err instanceof Error ? err.message : String(err)}\n`)
+          return 1
+        }
+        ctx.stdout.write(rendered.stdout)
+        if (rendered.stderr) ctx.stderr.write(rendered.stderr)
+      }
       return 0
     },
     { component: 'query' }

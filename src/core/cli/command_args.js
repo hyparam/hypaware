@@ -123,10 +123,17 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'query schema': {
-    usage: 'hyp query schema <dataset>',
+    usage: 'hyp query schema <dataset> [--format <fmt>] [--json] [--output <file>] [--remote [<target>] [--org <label|*>]]',
     schema: {
       type: 'object',
-      properties: { dataset: { type: 'string' } },
+      properties: {
+        dataset: { type: 'string' },
+        format: { type: 'string', enum: ['table', 'json', 'jsonl', 'markdown'], default: 'table' },
+        json: { type: 'boolean', default: false },
+        output: { type: 'string' },
+        remote: { type: 'string' },
+        org: { type: 'string' },
+      },
       positional: ['dataset'],
       required: ['dataset'],
     },
