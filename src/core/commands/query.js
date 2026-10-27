@@ -1,8 +1,11 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
+
 import { Attr, getActiveSpan, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
+import { applyContextControls, buildQuerySqlOutput } from '../query/format.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
@@ -10,9 +13,9 @@ import { sanitizeLabel } from '../util/json_util.js'
 import { groupThousands } from '../util/format_number.js'
 
 /**
- * @import { CommandRunContext, DatasetRegistration, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, DatasetRegistration, DatasetSchema, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CacheStatusPartition, CacheStatusReport } from '../../../src/core/cache/types.js'
- * @import { OverviewRows } from '../../../src/core/query/types.js'
+ * @import { OverviewRows, QueryFormat } from '../../../src/core/query/types.js'
  */
 
 // `measureCacheRoot` / `walkCacheRoot` / `loadRetentionDays` moved into
@@ -28,6 +31,11 @@ export async function runQuerySchema(argv, ctx) {
   const parsed = parseCoreCommandArgv('query schema', argv, ctx)
   if (!parsed.ok) return parsed.code
   const dataset = String(parsed.params.dataset)
+  const { remote, org, output } = parsed.params
+  if (org !== undefined && remote === undefined) {
+    ctx.stderr.write('hyp query schema: --org requires --remote\n')
+    return 2
+  }
   return withSpan(
     'query.resolve_tables',
     {
@@ -37,13 +45,50 @@ export async function runQuerySchema(argv, ctx) {
       status: 'ok',
     },
     async () => {
-      const schema = schemaForDataset(ctx.query, dataset)
+      let schema
+      if (remote !== undefined) {
+        const { readRemoteSchema } = await import('../mcp/remote_verb.js')
+        const result = await readRemoteSchema({ dataset, target: String(remote),
+          org: org === undefined ? undefined : String(org), ctx })
+        if (!result.ok) {
+          ctx.stderr.write(`hyp query schema: ${result.error}\n`)
+          return result.exitCode ?? 1
+        }
+        schema = /** @type {DatasetSchema} */ (result.result)
+      } else {
+        schema = schemaForDataset(ctx.query, dataset)
+      }
       if (!schema) {
+        if (output !== undefined || parsed.params.format !== 'table' || parsed.params.json) {
+          ctx.stderr.write(`hyp query schema: unknown dataset '${dataset}'\n`)
+          return 1
+        }
         ctx.stdout.write(`dataset: ${dataset}\n`)
         ctx.stdout.write('  (no dataset registered - install a plugin that contributes it)\n')
         return 0
       }
-      ctx.stdout.write(renderSchema(dataset, schema))
+      const format = /** @type {QueryFormat} */ (parsed.params.json && parsed.params.format === 'table'
+        ? 'json' : parsed.params.format)
+      const controls = { maxCell: Number(parsed.params['max-cell']), maxBytes: Number(parsed.params['max-bytes']) }
+      const full = { columns: ['name', 'type', 'nullable'], rows: schema.columns.map(c => ({ ...c })) }
+      // Preserve the familiar human listing; other formats and file output
+      // use the same lossless spill and display budgets as SQL queries.
+      if (format === 'table' && output === undefined) {
+        const capped = applyContextControls(full, controls)
+        ctx.stdout.write(renderSchema(dataset, /** @type {DatasetSchema} */ (/** @type {unknown} */ ({ columns: capped.result.rows }))))
+        if (capped.notice) ctx.stderr.write(`${capped.notice}\n`)
+      } else {
+        const rendered = buildQuerySqlOutput(full, { ...controls, format,
+          output: output === undefined ? undefined : String(output) })
+        try {
+          if (rendered.file) await fs.writeFile(rendered.file.path, rendered.file.content)
+        } catch (err) {
+          ctx.stderr.write(`hyp query schema: ${err instanceof Error ? err.message : String(err)}\n`)
+          return 1
+        }
+        ctx.stdout.write(rendered.stdout)
+        if (rendered.stderr) ctx.stderr.write(rendered.stderr)
+      }
       return 0
     },
     { component: 'query' }

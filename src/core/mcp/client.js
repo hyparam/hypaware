@@ -110,6 +110,10 @@ export function createHttpMcpClient(opts) {
     async listTools() {
       return rpc('tools/list', {})
     },
+    /** @param {string} uri */
+    async readResource(uri) {
+      return rpc('resources/read', { uri }, { maxBytes: 1_048_576 })
+    },
   }
 }
 
