@@ -123,7 +123,7 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'query schema': {
-    usage: 'hyp query schema <dataset> [--format <fmt>] [--json] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]',
+    usage: 'hyp query schema <dataset> [--format <fmt>] [--json] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote [<target>] [--org <label|*>]]',
     schema: {
       type: 'object',
       properties: {

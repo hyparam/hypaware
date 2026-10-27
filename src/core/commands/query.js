@@ -7,7 +7,7 @@ import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { applyContextControls, buildQuerySqlOutput } from '../query/format.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
-import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
+import { parseCommandArgv, parseControlFlags, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { groupThousands } from '../util/format_number.js'
@@ -15,7 +15,7 @@ import { groupThousands } from '../util/format_number.js'
 /**
  * @import { CommandRunContext, DatasetRegistration, DatasetSchema, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CacheStatusPartition, CacheStatusReport } from '../../../src/core/cache/types.js'
- * @import { OverviewRows, QueryFormat } from '../../../src/core/query/types.js'
+ * @import { OverviewRows } from '../../../src/core/query/types.js'
  */
 
 // `measureCacheRoot` / `walkCacheRoot` / `loadRetentionDays` moved into
@@ -28,14 +28,19 @@ import { groupThousands } from '../util/format_number.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
-  const parsed = parseCoreCommandArgv('query schema', argv, ctx)
-  if (!parsed.ok) return parsed.code
-  const dataset = String(parsed.params.dataset)
-  const { remote, org, output } = parsed.params
-  if (org !== undefined && remote === undefined) {
-    ctx.stderr.write('hyp query schema: --org requires --remote\n')
+  const ctrl = parseControlFlags(argv)
+  if (!ctrl.ok) {
+    ctx.stderr.write(`hyp query schema: ${ctrl.error}\n`)
     return 2
   }
+  if (ctrl.controls.refreshExplicit) {
+    ctx.stderr.write('hyp query schema: --refresh is not supported for schema metadata\n')
+    return 2
+  }
+  const parsed = parseCoreCommandArgv('query schema', ctrl.rest, ctx)
+  if (!parsed.ok) return parsed.code
+  const dataset = String(parsed.params.dataset)
+  const { remote, org, output } = ctrl.controls
   return withSpan(
     'query.resolve_tables',
     {
@@ -48,8 +53,10 @@ export async function runQuerySchema(argv, ctx) {
       let schema
       if (remote !== undefined) {
         const { readRemoteSchema } = await import('../mcp/remote_verb.js')
-        const result = await readRemoteSchema({ dataset, target: String(remote),
-          org: org === undefined ? undefined : String(org), ctx })
+        const { effectiveDefaultRemote } = await import('../remote/builtin_remotes.js')
+        // @ref LLP 0062#bare-remote [implements]: schema uses the same default-target resolution as SQL
+        const target = remote === '' ? effectiveDefaultRemote(ctx.config) : remote
+        const result = await readRemoteSchema({ dataset, target, org, ctx })
         if (!result.ok) {
           ctx.stderr.write(`hyp query schema: ${result.error}\n`)
           return result.exitCode ?? 1
@@ -59,7 +66,7 @@ export async function runQuerySchema(argv, ctx) {
         schema = schemaForDataset(ctx.query, dataset)
       }
       if (!schema) {
-        if (output !== undefined || parsed.params.format !== 'table' || parsed.params.json) {
+        if (output !== undefined || ctrl.controls.format !== 'table' || ctrl.controls.json) {
           ctx.stderr.write(`hyp query schema: unknown dataset '${dataset}'\n`)
           return 1
         }
@@ -67,9 +74,8 @@ export async function runQuerySchema(argv, ctx) {
         ctx.stdout.write('  (no dataset registered - install a plugin that contributes it)\n')
         return 0
       }
-      const format = /** @type {QueryFormat} */ (parsed.params.json && parsed.params.format === 'table'
-        ? 'json' : parsed.params.format)
-      const controls = { maxCell: Number(parsed.params['max-cell']), maxBytes: Number(parsed.params['max-bytes']) }
+      const format = ctrl.controls.json && ctrl.controls.format === 'table' ? 'json' : ctrl.controls.format
+      const controls = { maxCell: ctrl.controls.maxCell, maxBytes: ctrl.controls.maxBytes }
       const full = { columns: ['name', 'type', 'nullable'], rows: schema.columns.map(c => ({ ...c })) }
       // Preserve the familiar human listing; other formats and file output
       // use the same lossless spill and display budgets as SQL queries.

@@ -98,11 +98,25 @@ test('remote schema reads the real MCP resource rather than the local registry',
     return response === null ? new Response(null, { status: 202 })
       : Response.json(response)
   }
-  const c = context()
-  c.ctx.query.getDataset = () => { throw new Error('must not read local schema') }
-  assert.equal(await runQuerySchema(['ai_gateway_messages', '--remote', 'prod', '--org', 'acme', '--format', 'json'], c.ctx), 0, c.stderr.value)
-  assert.deepEqual(JSON.parse(c.stdout.value), remoteColumns)
-  assert.deepEqual(methods, ['initialize', 'notifications/initialized', 'resources/read'])
+  for (const remote of [['--remote', 'prod'], ['--remote'], ['--remote=']]) {
+    for (const configuredDefault of [true, false]) {
+      const c = context()
+      c.ctx.query.getDataset = () => { throw new Error('must not read local schema') }
+      if (configuredDefault) c.ctx.config.query.default_remote = 'prod'
+      else {
+        c.ctx.config.query.remotes.hypaware = { url: 'https://schema.example' }
+        c.ctx.env.HYP_REMOTE_TOKEN_HYPAWARE = 'test-token'
+      }
+      methods.length = 0
+      assert.equal(await runQuerySchema(['ai_gateway_messages', ...remote, '--org', 'acme', '--format', 'json'], c.ctx), 0, c.stderr.value)
+      assert.deepEqual(JSON.parse(c.stdout.value), remoteColumns)
+      assert.deepEqual(methods, ['initialize', 'notifications/initialized', 'resources/read'])
+    }
+  }
+  const trailing = context()
+  trailing.ctx.config.query.default_remote = 'prod'
+  assert.equal(await runQuerySchema(['ai_gateway_messages', '--org', 'acme', '--format', 'json', '--remote'], trailing.ctx), 0, trailing.stderr.value)
+  assert.deepEqual(JSON.parse(trailing.stdout.value), remoteColumns)
 })
 
 for (const failure of ['missing', 'malformed', 'forbidden', 'oversized']) {
