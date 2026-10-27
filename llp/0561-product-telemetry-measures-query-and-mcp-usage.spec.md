@@ -50,6 +50,18 @@ A CLI and the daemon reaching different milestones at the same moment can still
 race; the worst case is one duplicate milestone, which the console can dedupe per
 gateway.
 
+## Hook runs {#hooks}
+
+Claude Code runs `hyp claude-hook session-context` and `hyp claude-hook
+classify-cwd` on every session start, so they are about four in five of all
+`cli.invocation` records. Each queued its own batch, and that volume filled the
+receiver's fleet-wide batch budget (`429 telemetry_capacity`), so other records
+were refused and queues backed up. They also say nothing about deliberate use.
+
+A successful hook run now queues nothing. A failed or cancelled one still sends
+its `cli.invocation` and `coded.failure`, because a broken hook is worth seeing.
+The console therefore cannot count successful hook runs from this channel.
+
 ## MCP tool calls {#mcp}
 
 A new event `mcp.tool_call` is sent once per `tools/call` handled by

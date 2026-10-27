@@ -1373,3 +1373,23 @@ test('the daemon reports first capture once rows are written, keeping the CLI ma
     ['first_capture', 'first_query']
   )
 })
+
+test('a successful claude-hook run queues no batch, a failed one still does', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  await invoke(env, 'claude-hook session-context')
+  await invoke(env, 'claude-hook classify-cwd')
+  assert.equal(createOutbox(root).entries().length, 0, 'hooks fire on every Claude session')
+  await invoke(env, 'claude-hook session-context', 1)
+  const records = createOutbox(root)
+    .entries()
+    .flatMap((e) => JSON.parse(e.wire).records)
+  assert.deepEqual(
+    records.filter((r) => r.name !== 'installation.inventory').map((r) => r.name),
+    ['cli.invocation', 'coded.failure']
+  )
+  await invoke(env, 'status')
+  assert.equal(createOutbox(root).entries().length, 2, 'other commands still queue a batch')
+})

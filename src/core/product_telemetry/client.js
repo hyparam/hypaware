@@ -139,7 +139,9 @@ export async function withProductInvocation(
       })
       if (failure) state.records.push(failure)
     }
-    client.emit(state.records)
+    // @ref LLP 0561#hooks [implements]: a successful hook run queues nothing
+    if (!(result === 'success' && state.command.startsWith('claude-hook ')))
+      client.emit(state.records)
     client.close()
   }
 }
