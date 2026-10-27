@@ -44,6 +44,26 @@ export function textBlocksFromContent(content) {
 }
 
 /**
+ * Codex labels every content block of a `message` item in
+ * `internal_chat_message_metadata_passthrough.content_item_kinds`:
+ * `user.text` / `user.image` are what the person submitted; everything
+ * else under the same user role (`agents_md.instructions`,
+ * `environments.environment_context`, `plugins.recommendations`,
+ * `shell.user_command`, ...) is harness-injected. Returned verbatim so a
+ * row can be classified without a text-prefix rule; `undefined` when the
+ * item carries no usable list (older rollouts, non-Codex producers).
+ *
+ * @param {Record<string, unknown>} item  a `message` response item
+ * @returns {string[] | undefined}
+ */
+export function contentItemKinds(item) {
+  const meta = item.internal_chat_message_metadata_passthrough
+  if (!isPlainObject(meta) || !Array.isArray(meta.content_item_kinds)) return undefined
+  const kinds = meta.content_item_kinds.filter((kind) => typeof kind === 'string')
+  return kinds.length > 0 ? kinds : undefined
+}
+
+/**
  * `function_call` (arguments as a JSON string) and `custom_tool_call`
  * (input string) both become a `tool_use` block keyed on the Codex
  * `call_id`, so the gateway can pair it with the matching output.

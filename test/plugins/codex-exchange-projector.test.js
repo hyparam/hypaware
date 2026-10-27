@@ -2758,3 +2758,33 @@ function exchange(overrides = {}) {
 function context() {
   return { log: { debug() {}, info() {}, warn() {}, error() {} } }
 }
+
+test('OpenAI Responses input items carry content_item_kinds onto the projected user message', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [
+        {
+          role: 'user',
+          content: [{ type: 'input_text', text: '<environment_context>cwd</environment_context>' }],
+          internal_chat_message_metadata_passthrough: { content_item_kinds: ['environments.environment_context'] },
+        },
+        {
+          role: 'user',
+          content: [{ type: 'input_text', text: 'fix the bug' }],
+          internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text'] },
+        },
+        { role: 'user', content: [{ type: 'input_text', text: 'no metadata' }] },
+      ],
+    }),
+    response_body: JSON.stringify({ id: 'resp_1', output_text: 'ok' }),
+  }), context()))
+
+  const users = projection.messages.filter((/** @type {any} */ m) => m.role === 'user')
+  assert.equal(users.length, 3)
+  assert.deepEqual(users[0].attributes, { codex: { content_item_kinds: ['environments.environment_context'] } })
+  assert.deepEqual(users[1].attributes, { codex: { content_item_kinds: ['user.text'] } })
+  assert.equal(users[2].attributes, undefined)
+})

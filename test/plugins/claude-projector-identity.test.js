@@ -1689,3 +1689,38 @@ function readAttrPath(row, path) {
     cur && typeof cur === 'object' && !Array.isArray(cur) ? cur : undefined
   )
 }
+
+test('transcript origin and promptSource are promoted onto the matched live row', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-origin', [
+      jsonlRow({
+        sessionId: 'sess-origin',
+        uuid: 'u-o-prompt',
+        parentUuid: null,
+        type: 'user',
+        origin: { kind: 'human' },
+        promptSource: 'typed',
+        message: { role: 'user', content: 'hello there' },
+        timestamp: '2026-10-20T10:00:00.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-origin' }) },
+        messages: [{ role: 'user', content: 'hello there' }],
+      },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].message_id, 'u-o-prompt')
+    const claude = readAttrPath(rows[0], ['attributes', 'claude'])
+    assert.deepEqual(claude?.origin, { kind: 'human' })
+    assert.equal(claude?.prompt_source, 'typed')
+  } finally {
+    await env.cleanup()
+  }
+})

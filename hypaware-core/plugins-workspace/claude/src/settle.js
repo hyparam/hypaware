@@ -8,7 +8,9 @@ import {
   defaultClaudeProjectsDir,
   indexTranscriptEntries,
   loadAgentMeta,
+  minimizedRawFrame,
   withToolUseResult,
+  withTurnOrigin,
 } from './transcripts.js'
 import { sharedTranscriptLoader } from './transcript-cache.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
@@ -91,6 +93,10 @@ export function createClaudeSettlementEnricher(opts) {
   return {
     name: 'claude-settlement',
     clientName,
+    // @ref LLP 0560#wants [implements]: the gateway's selection cannot see a
+    // provenance gap on a row whose identity is final, so the plugin names
+    // those rows itself. Answered from the row alone; nothing is stored.
+    wants: wantsProvenance,
     /**
      * @param {Record<string, unknown>[]} rows
      * @param {DatasetSettleContext} _ctx
@@ -145,8 +151,10 @@ export function createClaudeSettlementEnricher(opts) {
         // nothing consults - which, with `homeDir` armed below, is a Desktop
         // container sweep whose cost grows with every conversation the
         // machine has held. `.some` short-circuits, so a group that does need
-        // the index pays one extra key read.
-        if (indices.some((i) => readMatchKey(rows[i].attributes))) {
+        // the index pays one extra key read. An OTEL prompt row owed its
+        // provenance (LLP 0560) needs the index too, for its uuid lookup; in
+        // an agentic batch the tool rows' match keys already forced the load.
+        if (indices.some((i) => readMatchKey(rows[i].attributes) || wantsProvenance(rows[i]))) {
           try {
             const entries = await transcriptLoader.load({
               projectsDir,
@@ -229,6 +237,20 @@ export function createClaudeSettlementEnricher(opts) {
                   row.previous_message_id = previous ? [previous] : []
                 }
               }
+            } else if (wantsProvenance(row)) {
+              // 1b. Provenance late-stamp for an OTEL prompt row. The row was
+              // born with the transcript line's uuid, so this is a key lookup,
+              // not a match: no content key, no agent scope, and no identity
+              // rewrite. Only the line the row already names can be the source,
+              // and only a `user` line is accepted (a role mismatch would mean
+              // the uuid is not what the event said it was).
+              // @ref LLP 0560#provenance-at-flush [implements]: identity stays
+              // final at ingest; the line's provenance lands at flush
+              // @ref LLP 0560#identity-untouched [constrained-by]: message_id,
+              // part_id, previous_message_id, agent_id and is_sidechain are
+              // not copied, so the chain and twin logic never see this row move
+              const line = index.byUuid.get(/** @type {string} */ (stringValue(row.provider_uuid)))
+              if (line && line.role === 'user') row = stampProvenance(row, line)
             }
           }
 
@@ -522,11 +544,11 @@ function upgradeRow(row, match, resolveAgent = false) {
     upgraded.part_id = `${upgraded.message_id}#${partIndex}`
   }
   const cleaned = cleanAttributes(upgraded.attributes)
-  // Stamp the transcript's structured tool result like the live match
-  // path does, but never at the cost of an attributes column we could
-  // not parse into an object.
+  // Stamp the transcript's structured tool result and turn provenance
+  // like the live match path does, but never at the cost of an
+  // attributes column we could not parse into an object.
   upgraded.attributes = isPlainObject(cleaned) || cleaned === undefined
-    ? withToolUseResult(cleaned, match)
+    ? withTurnOrigin(withToolUseResult(cleaned, match), match)
     : cleaned
   return upgraded
 }
@@ -654,6 +676,82 @@ function cleanAttributes(attributes) {
     else next.claude = claude
   }
   return next
+}
+
+/**
+ * Whether a row is a Claude OTEL user-prompt row that has not yet taken its
+ * transcript line's provenance: role `user`, native `provider_uuid`, captured
+ * on the OTEL lane, no fallback match key, and no `claude.origin` yet. The
+ * last clause is what makes a stamp idempotent under any later pass that
+ * revisits committed rows; at flush each row is seen once anyway.
+ *
+ * Cheap checks first: role and uuid reject tool-result and assistant rows,
+ * and every non-OTEL row, before the attributes column is parsed.
+ *
+ * @ref LLP 0560#wants [implements]: the predicate is the plugin's, answered
+ * from the row alone, and nothing about the answer is written anywhere
+ * @param {Record<string, unknown>} row
+ */
+function wantsProvenance(row) {
+  if (row.role !== 'user') return false
+  if (!stringValue(row.provider_uuid)) return false
+  const attributes = row.attributes
+  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
+  if (!isPlainObject(parsed)) return false
+  const gateway = parsed.gateway
+  if (!isPlainObject(gateway) || gateway.source !== 'otel') return false
+  const claude = parsed.claude
+  if (!isPlainObject(claude)) return true
+  return claude.match_key === undefined && claude.origin === undefined
+}
+
+/**
+ * Copy of `row` carrying the provenance its transcript `line` records and the
+ * row lacks: `origin` and `prompt_source` into `attributes.claude`, and the
+ * transcript-only columns (`entrypoint`, `user_type`, `permission_mode`, the
+ * parent links, the native type/subtype, the compaction fields, the minimized
+ * frame) only where the row holds nothing. Identity and attribution columns
+ * are deliberately not copied. Returns the input row itself when the line adds
+ * nothing, so a no-op stamp is not mistaken for a change, and leaves an
+ * attributes column it could not parse exactly as it was (see
+ * {@link stampSpawnedBy}).
+ *
+ * @ref LLP 0560#provenance-at-flush [implements]
+ * @param {Record<string, unknown>} row
+ * @param {TranscriptEntry} line
+ * @returns {Record<string, unknown>}
+ */
+function stampProvenance(row, line) {
+  const attributes = row.attributes
+  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
+  if (attributes !== undefined && attributes !== null && !isPlainObject(parsed)) return row
+  const next = { ...row }
+  let changed = false
+  /** @param {string} column @param {unknown} value */
+  const fill = (column, value) => {
+    if (value === undefined || value === null || value === '') return
+    const current = next[column]
+    if (current !== undefined && current !== null && current !== '') return
+    next[column] = value
+    changed = true
+  }
+  fill('parent_uuid', line.parent_uuid)
+  fill('logical_parent_uuid', line.logical_parent_uuid)
+  fill('entrypoint', line.entrypoint)
+  fill('user_type', line.user_type)
+  fill('permission_mode', line.permission_mode)
+  fill('provider_type', line.provider_type)
+  fill('provider_subtype', line.provider_subtype)
+  fill('is_compact_summary', line.is_compact_summary)
+  fill('compact_metadata', line.compact_metadata)
+  fill('raw_frame', minimizedRawFrame(line))
+  const base = isPlainObject(parsed) ? parsed : undefined
+  const stamped = withTurnOrigin(base, line)
+  if (stamped !== base) {
+    next.attributes = stamped
+    changed = true
+  }
+  return changed ? next : row
 }
 
 /**
