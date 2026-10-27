@@ -290,17 +290,34 @@ sent). Search or output failures return `1`.
 ### `hyp query schema`
 
 ```text
-hyp query schema <dataset>
+hyp query schema <dataset> [--format <fmt>] [--json] [--output <file>] [--remote [<target>] [--org <label|*>]]
 ```
 
-Prints the registered columns for one local dataset. It doesn't activate a
-remote target, and it doesn't open the dataset's source. A dataset that
-declares no columns (an S3 query source with no `schema`, for example) prints
-`columns: none declared` rather than a count: SQL still resolves the source's
-columns when a query runs, and the output names a query that shows them.
+Prints the registered columns for one dataset. It doesn't open the dataset's
+source. A dataset that declares no columns (an S3 query source with no
+`schema`, for example) prints `columns: none declared` rather than a count:
+SQL still resolves the source's columns when a query runs, and the output
+names a query that shows them.
+
+Without `--remote` it reads this machine's registry. With `--remote` it reads
+the remote's schema for that dataset instead, resolving the target the same
+way `hyp query sql` does: a bare `--remote` selects the default target,
+`--remote TARGET` selects a named target, and `--org` (only with `--remote`)
+selects an organization. A failed remote lookup never falls back to the local
+registry: it prints nothing on stdout and exits with the same codes as a
+`hyp query sql --remote` failure.
+
+Formats are `table` (the default), `json`, `jsonl`, and `markdown`; `--json`
+is shorthand for `--format json`. `--output` writes the rows to a file and
+prints a receipt. Schema output is always complete, so `--max-bytes` and
+`--max-cell` are rejected with a usage error, as is `--refresh`. A dataset the
+remote doesn't serve is a remote failure. Locally, an unknown dataset returns
+`1` under `--format`, `--json`, or `--output`; the default table output prints
+a "no dataset registered" note and returns `0`.
 
 ```sh
 hyp query schema ai_gateway_messages
+hyp query schema ai_gateway_messages --remote team --format json
 ```
 
 ### `hyp query graph neighbors`
