@@ -821,10 +821,14 @@ test('attach output names the restart, the skills and subagent, and a missing in
     const client = runtime.clients.getClient('antigravity')
     assert.ok(client)
 
+    const dry = makeBuf()
+    await client.attach(/** @type {any} */ ({ stdout: dry, stderr: makeBuf(), dryRun: true, json: false }))
+    assert.match(dry.text(), /Dry run: nothing was written\.\n  Antigravity CLI not found at .*antigravity-cli\.\n$/)
+
     const first = makeBuf()
     await client.attach(/** @type {any} */ ({ stdout: first, stderr: makeBuf(), dryRun: false, json: false }))
     assert.match(first.text(), /Installed .*plugin\.json\. Restart Antigravity to load it\./)
-    assert.match(first.text(), /hypaware-query, hypaware-reference, hypaware-privacy skills and the hypaware-analyst subagent/)
+    assert.match(first.text(), /It adds the hypaware-query, hypaware-reference and hypaware-privacy skills and the hypaware-analyst subagent in .*hypaware\.\n/)
     assert.match(first.text(), /Antigravity CLI not found at .*antigravity-cli; the plugin will load once it is installed\./)
 
     await fs.mkdir(path.join(root, '.gemini', 'antigravity-cli'), { recursive: true })

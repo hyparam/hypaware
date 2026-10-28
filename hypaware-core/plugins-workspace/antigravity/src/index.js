@@ -131,7 +131,7 @@ export async function activateAntigravityVariant(ctx, variant = CLI_VARIANT) {
       } else if (result.changed) {
         attachCtx.stdout.write(
           `Installed ${result.settingsPath}. Restart Antigravity to load it.\n` +
-          `  It adds the ${SHARED_SKILLS.join(', ')} skills and the ${SHARED_AGENT} subagent from ${path.dirname(result.settingsPath)}.\n`
+          `  It adds the ${SHARED_SKILLS.slice(0, -1).join(', ')} and ${SHARED_SKILLS.at(-1)} skills and the ${SHARED_AGENT} subagent in ${path.dirname(result.settingsPath)}.\n`
         )
       } else {
         attachCtx.stdout.write(`Antigravity plugin already current at ${result.settingsPath}.\n`)
@@ -147,7 +147,8 @@ export async function activateAntigravityVariant(ctx, variant = CLI_VARIANT) {
         const detectFile = variant.entrypoint === 'cli' ? 'settings.json' : 'conversation_summaries.db'
         if (!(await pathExists(path.join(appDataDir, detectFile)))) {
           const label = variant.entrypoint === 'cli' ? 'Antigravity CLI' : 'Antigravity Desktop'
-          attachCtx.stdout.write(`  ${label} not found at ${appDataDir}; the plugin will load once it is installed.\n`)
+          const loads = attachCtx.dryRun === true ? '' : '; the plugin will load once it is installed'
+          attachCtx.stdout.write(`  ${label} not found at ${appDataDir}${loads}.\n`)
         }
       }
     },
