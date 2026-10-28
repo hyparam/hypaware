@@ -6,14 +6,19 @@ user-invocable: false
 
 # HypAware Query
 
-Query recorded activity with `hyp query`. Start with the narrowest query that answers the question; expand only when the evidence requires it.
+HypAware supports three ways to query recorded activity. Choose the narrowest one that answers the question:
 
-## Choose the query
+| Query type | Use it for | Command |
+| --- | --- | --- |
+| **Search (`grep`)** | Mentions of an error, file, PR, or topic | `hyp query grep "<text>" --from YYYY-MM-DD --to YYYY-MM-DD --limit 20 --format json` |
+| **SQL (`sql`)** | Filter messages, read conversations, count events, and measure usage | `hyp query sql "<SELECT>" --format json` |
+| **Graph (`graph`)** | Relationships among sessions, repositories, people, skills, and programs | `hyp query graph neighbors <ToolName> --type Tool --direction in --json` |
 
-- **Scope:** local for this machine; `--remote <target>` for a team or named remote. Discover targets with `hyp remote list --json`; bare `--remote` uses the configured default. Preserve the target across discovery and queries. Ask when ambiguous scope would change the answer. Local cache status/refresh cannot describe a remote.
-- **Mentions:** `hyp query grep "<text>" --from YYYY-MM-DD --to YYYY-MM-DD --limit 20 --format json` finds case-insensitive substrings. It searches message text and identifying fields, not `tool_args`, `attributes`, or `raw_frame`; use SQL for those. Read [search.md](search.md) for other fields, filters, and coverage notices.
-- **Counts, filters, transcripts:** `hyp query sql "<SELECT>" --format json`. Start with `ai_gateway_messages` for conversations and tool calls/results.
-- **Relationships, identities, skill/program inventories:** use the graph; read [graph.md](graph.md) for projection and traversal. Links are leads, not proof; never hand-edit the derived graph.
+Grep finds case-insensitive substrings in message text and identifying fields, not `tool_args`, `attributes`, or `raw_frame`; use SQL for those. Read [search.md](search.md) for other fields, filters, and coverage notices. Start SQL with `ai_gateway_messages` for conversations and tool calls/results. Before graph queries, read [graph.md](graph.md) for local projection and traversal. Links are leads, not proof; never hand-edit the derived graph.
+
+## Local or remote
+
+Commands read this machine by default. Add `--remote <target>` for a team or named remote. Discover targets with `hyp remote list --json`; bare `--remote` uses the configured default. Preserve the target across discovery and queries. Ask when ambiguous scope would change the answer. Local cache status/refresh cannot describe a remote.
 
 Connected HypAware MCP tools offer the same reads: `query_sql`, `grep_search`, and `graph_neighbors`. Use the available surface; a remote MCP endpoint reads that remote.
 
