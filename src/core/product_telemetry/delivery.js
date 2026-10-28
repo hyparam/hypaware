@@ -4,6 +4,9 @@ import { createOutbox } from './outbox.js'
 import { effectivePolicy, safeDestination } from './policy.js'
 import { validateBatch } from './contract.js'
 
+// @ref LLP 0562#cadence [implements]: one CLI upload an hour unless a batch is full
+export const CLI_SEND_INTERVAL_MS = 3600_000
+
 /** @param {string|null} value @param {number} now */
 export function retryAfterMs(value, now) {
   if (!value) return 0
@@ -18,7 +21,7 @@ export function retryAfterMs(value, now) {
 }
 
 /**
- * One batch per pass. Abort is synchronous and never waits for delivery on CLI
+ * One upload per pass. Abort is synchronous and never waits for delivery on CLI
  * exit. Persistent backoff applies across new CLI processes and daemon restarts.
  * @param {string} root @param {{fetchFn?:typeof fetch,now?:()=>number,random?:()=>number}} [options]
  */
@@ -53,7 +56,10 @@ export function createDelivery(
       const prior = outbox.readDelivery()
       const previous = prior?.binding === binding ? prior : {}
       if (previous.next_at > now()) return
-      const entry = outbox.next(binding)
+      const entry = outbox.next(
+        binding,
+        previous.cli_sent_at > now() - CLI_SEND_INTERVAL_MS
+      )
       if (!entry) return
       // Disk is a trust boundary too: corruption or an old writer must not
       // turn the exact-byte replay path into an arbitrary payload exporter.
@@ -76,7 +82,8 @@ export function createDelivery(
           state,
           attempt,
           next_at: now() + delay,
-          last_success_at: previous.last_success_at ?? null
+          last_success_at: previous.last_success_at ?? null,
+          cli_sent_at: previous.cli_sent_at ?? null
         })
       }
       let token = effective.identity.jwt
@@ -180,7 +187,9 @@ export function createDelivery(
             state: 'accepted',
             attempt: 0,
             next_at: 0,
-            last_success_at: now()
+            last_success_at: now(),
+            cli_sent_at:
+              entry.role === 'cli' ? now() : (previous.cli_sent_at ?? null)
           })
           return
         }
@@ -214,12 +223,8 @@ export function createDelivery(
       try {
         const effective = effectivePolicy(root)
         const previous = outbox.readDelivery()
-        const attempt = Math.min(
-          16,
-          (previous?.binding === effective.binding
-            ? (previous.attempt ?? 0)
-            : 0) + 1
-        )
+        const same = previous?.binding === effective.binding
+        const attempt = Math.min(16, (same ? (previous.attempt ?? 0) : 0) + 1)
         outbox.saveDelivery({
           binding: effective.binding,
           state: closed ? 'interrupted' : 'retry',
@@ -227,7 +232,8 @@ export function createDelivery(
           next_at:
             now() +
             Math.min(3600_000, 1000 * 2 ** attempt) * (0.5 + random() / 2),
-          last_success_at: previous?.last_success_at ?? null
+          last_success_at: previous?.last_success_at ?? null,
+          cli_sent_at: (same && previous.cli_sent_at) || null
         })
       } catch {}
     } finally {

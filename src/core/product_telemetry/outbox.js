@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomInt, randomUUID } from 'node:crypto'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
-import { MAX_BATCH_BYTES, validateBatch } from './contract.js'
+import { MAX_BATCH_BYTES, MAX_RECORDS, validateBatch } from './contract.js'
 
 export const QUEUE_BYTES = 5 * 1024 * 1024
 export const QUEUE_AGE_MS = 7 * 86400_000
@@ -38,6 +38,12 @@ export function readSmallJson(file, max = MAX_BATCH_BYTES) {
     return null
   }
 }
+
+/** @param {Record<string, any>} record */
+const isMetric = (record) => record?.kind === 'metric'
+/** The contract's one-interval-per-series key. @param {Record<string, any>} record */
+const seriesKey = (record) =>
+  JSON.stringify([record.name, Object.entries(record.attributes).sort()])
 
 /**
  * Only the sender takes a lock. CLI writers reserve a fixed slot with wx,
@@ -135,7 +141,13 @@ export function createOutbox(root, { now = Date.now } = {}) {
             wire: entry.wire,
             at,
             bytes: Buffer.byteLength(text),
-            id: batch.batch_id
+            id: batch.batch_id,
+            records: batch.records.length,
+            role: batch.resource?.['service.role'],
+            // Batches from different CLI processes of one version pack together.
+            group: JSON.stringify({ ...batch.resource, 'process.id': null }),
+            sealed: entry.sealed === true,
+            sources: Array.isArray(entry.sources) ? entry.sources : []
           }
       } catch {}
     }
@@ -153,18 +165,29 @@ export function createOutbox(root, { now = Date.now } = {}) {
   /** @param {string|null} binding */
   function maintain(binding) {
     let dropped = 0
-    /** @type {ReturnType<typeof entries>[number] | null} */
-    let next = null
+    // Metadata only: the wire is dropped so a pass holds one payload at a time.
+    /** @type {Omit<ReturnType<typeof entries>[number], 'wire'>[]} */
+    const live = []
     const validSlots = new Set()
-    for (const entry of scan()) {
+    const packed = new Set()
+    for (const { wire, ...entry } of scan()) {
       validSlots.add(entry.slot)
       if (entry.binding !== binding || entry.at < now() - QUEUE_AGE_MS) {
         remove(entry)
         dropped++
-      } else if (!next || entry.at < next.at) {
-        next = entry
+      } else {
+        live.push(entry)
+        for (const id of entry.sources) packed.add(id)
       }
     }
+    // A pack that crashed before unlinking its sources left copies of records
+    // it already holds. They go now, never into a second upload.
+    for (let i = live.length - 1; i >= 0; i--) {
+      if (live[i].sealed || !packed.has(live[i].id)) continue
+      remove(live[i])
+      live.splice(i, 1)
+    }
+    live.sort((a, b) => a.at - b.at || a.slot - b.slot)
     // An interrupted synchronous append leaves an invalid slot. Only reclaim
     // after a grace period; a live short append must never be read as corrupt.
     for (let slot = 0; slot < QUEUE_SLOTS; slot++) {
@@ -180,7 +203,120 @@ export function createOutbox(root, { now = Date.now } = {}) {
       } catch {}
     }
     if (dropped) noteDrop()
-    return { dropped, next }
+    return { dropped, live }
+  }
+  /** @param {{slot:number,id:string}} entry */
+  function load(entry) {
+    const current = readSmallJson(slotPath(entry.slot))
+    try {
+      const batch = JSON.parse(current.wire)
+      return batch.batch_id === entry.id
+        ? { batch, wire: /** @type {string} */ (current.wire) }
+        : null
+    } catch {
+      return null
+    }
+  }
+  /**
+   * The next upload for `binding`, or null when nothing is due. A sealed slot
+   * is frozen: it may have been sent, so it goes again byte for byte. Unsealed
+   * CLI batches were never sent, so they pack into one sealed upload. While
+   * `hold` is set they wait unless they already fill a batch.
+   * @ref LLP 0562#pack [implements]: pack unsent CLI batches, seal before the first send
+   * @param {string|null} binding @param {boolean} [hold]
+   */
+  function next(binding, hold = false) {
+    const { live } = maintain(binding)
+    const waiting = new Set()
+    for (const head of live) {
+      if (head.sealed || head.role !== 'cli') return withWire(head)
+      if (waiting.has(head.group)) continue
+      const members = live.filter(
+        (e) => !e.sealed && e.role === 'cli' && e.group === head.group
+      )
+      let records = 0
+      for (const member of members) records += member.records
+      // Slot sizes repeat the resource, so records, not bytes, say a pack is
+      // full. Half the slots held back is pressure enough to send early.
+      if (hold && records <= MAX_RECORDS && members.length < QUEUE_SLOTS / 2) {
+        waiting.add(head.group)
+        continue
+      }
+      return seal(/** @type {string} */ (binding), head, members)
+    }
+    return null
+  }
+  /** @template {{slot:number,id:string}} T @param {T} entry */
+  function withWire(entry) {
+    const loaded = load(entry)
+    return loaded ? { ...entry, wire: loaded.wire } : null
+  }
+  /**
+   * Greedy and bounded: one member payload is read at a time, and members that
+   * would break the record, byte or one-interval-per-series limit stay queued.
+   * @param {string} binding
+   * @param {{slot:number,id:string,at:number}} head
+   * @param {{slot:number,id:string,at:number,records:number}[]} members
+   */
+  function seal(binding, head, members) {
+    const loaded = load(head)
+    if (!loaded) return null
+    const first = loaded.batch
+    const series = new Set(first.records.filter(isMetric).map(seriesKey))
+    const records = [...first.records]
+    /** @type {{slot:number,id:string}[]} */
+    const sources = []
+    // Escaped size of the stored wrapper, kept exact for ASCII records.
+    let bytes = Buffer.byteLength(
+      JSON.stringify({ binding, wire: loaded.wire, sealed: true, sources: [] })
+    )
+    for (const member of members) {
+      if (member.id === head.id) continue
+      if (records.length + member.records > MAX_RECORDS) continue
+      const batch = load(member)?.batch
+      if (!batch) continue
+      const keys = batch.records.filter(isMetric).map(seriesKey)
+      if (keys.some((key) => series.has(key))) continue
+      let added = Buffer.byteLength(JSON.stringify(member.id)) + 1
+      for (const record of batch.records)
+        added += Buffer.byteLength(JSON.stringify(JSON.stringify(record))) - 1
+      if (bytes + added > MAX_BATCH_BYTES) continue
+      bytes += added
+      for (const key of keys) series.add(key)
+      records.push(...batch.records)
+      sources.push(member)
+    }
+    let wire = loaded.wire
+    if (sources.length) {
+      const merged = { ...first, batch_id: randomUUID(), records }
+      if (validateBatch(merged, now()) === null) wire = JSON.stringify(merged)
+      else sources.length = 0
+    }
+    let stored = JSON.stringify({
+      binding,
+      wire,
+      sealed: true,
+      sources: sources.map((s) => s.id)
+    })
+    if (Buffer.byteLength(stored) > MAX_BATCH_BYTES) {
+      wire = loaded.wire
+      sources.length = 0
+      stored = JSON.stringify({ binding, wire, sealed: true, sources: [] })
+    }
+    // Replace the head atomically, then drop the sources. A crash in between
+    // leaves sources that `maintain` recognizes and removes.
+    const temp = path.join(queue, 'seal.tmp')
+    fs.writeFileSync(temp, stored, { mode: 0o600 })
+    fs.renameSync(temp, slotPath(head.slot))
+    for (const source of sources) remove(source)
+    return {
+      slot: head.slot,
+      binding,
+      wire,
+      id: JSON.parse(wire).batch_id,
+      role: 'cli',
+      at: head.at
+    }
   }
   function claim() {
     try {
@@ -248,7 +384,7 @@ export function createOutbox(root, { now = Date.now } = {}) {
     entries,
     remove,
     prune: (/** @type {string|null} */ binding) => maintain(binding).dropped,
-    next: (/** @type {string|null} */ binding) => maintain(binding).next,
+    next,
     claim,
     status,
     noteDrop,
