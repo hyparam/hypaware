@@ -161,10 +161,11 @@ this one.
 
 ## Verification {#verification}
 
-Unit tests. Six were shown failing against the pre-fix source before being
+Unit tests. Seven were shown failing against the pre-fix source before being
 kept: `ESC` in a `table` cell, `ESC` and bidi in a `markdown` cell, a newline
 that cannot forge a row, tab/CR spellings, column alignment with an escaped
-cell, and the `--output` receipt. Two more pass pre-fix by construction and
+cell, column width measured on an escaped column name, and the `--output`
+receipt. Two more pass pre-fix by construction and
 guard preserved behaviour rather than the fix: `json`/`jsonl` byte-exactness
 (fails if the escape is ever applied to a machine format) and non-ASCII and
 emoji survival (fails if the display class is widened to the zero-width

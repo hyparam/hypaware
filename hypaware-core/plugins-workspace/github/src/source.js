@@ -1,6 +1,7 @@
 // @ts-check
 
 import { parseInterval } from './config.js'
+import { authorizedImports, readCursors } from './cursors.js'
 import { requireGithubRuntime } from './runtime.js'
 import { runCaptureTick } from './tick.js'
 
@@ -24,6 +25,9 @@ export async function startGithubSource() {
   let handle = null
   /** @type {Promise<unknown> | null} */
   let inFlight = null
+  /** The running tick's own stop; each tick gets a fresh one. */
+  /** @type {AbortController | null} */
+  let cancel = null
   /** @type {string | null} */
   let lastTickAt = null
   /** @type {string | null} */
@@ -33,7 +37,9 @@ export async function startGithubSource() {
   let lastRepoCount = 0
   let lastInventoryRepos = 0
   let rowsWritten = 0
-  let backlogPending = false
+  let backlogPending = durablePending()
+  /** @type {Set<string>} */
+  let seenImports = new Set()
   /** @type {string | undefined} */
   let lastError
   let generation = 0
@@ -41,11 +47,29 @@ export async function startGithubSource() {
   async function tick() {
     lastTickAt = new Date().toISOString()
     const started = Date.now()
+    const own = new AbortController()
+    cancel = own
     runtime.log.info('github.poll_tick_started', { operation: 'poll' })
     try {
-      const result = await runCaptureTick(runtime, { mode: 'poll' })
+      const result = await runCaptureTick(runtime, { mode: 'poll', signal: own.signal })
       rowsWritten += result.events
-      backlogPending = result.pending
+      if (result.cancelled) {
+        // Stopped, not finished and not failed: no success, no error, and the
+        // backlog verdict is whatever durable state now says.
+        backlogPending = durablePending()
+        runtime.log.info('github.poll_tick_cancelled', {
+          operation: 'poll',
+          repos: result.repos,
+          repos_visited: result.visited,
+          events: result.events,
+          requests: result.requests,
+          duration_ms: Date.now() - started,
+        })
+        return
+      }
+      // A tick's own `pending` is blind to work another process staged while
+      // it ran, so the sidecar gets the first word.
+      backlogPending = stagedImportPending() || result.pending
       // What the last tick reached, not the inventory: an exhausted budget can
       // stop a tick partway through it (LLP 0361#budget). The inventory it was
       // drawn from is published beside it, so a low count reads as the budget
@@ -66,6 +90,19 @@ export async function startGithubSource() {
         duration_ms: Date.now() - started,
       })
     } catch (err) {
+      // A tick that threw sized nothing of its own, so the staged-import report
+      // it was carrying is one-shot and does not survive it - leaving it
+      // standing would latch the source at BACKLOG_RETRY_MS for the whole
+      // outage instead of once per configured interval. Budgeted work an
+      // earlier tick sized and persisted is a different thing: that
+      // continuation is still due, and the recorded verdict keeps it on the
+      // backlog cadence LLP 0361#cadence promises it instead of pushing it back
+      // to a full poll interval. Reading that verdict rather than remembering
+      // one is also the only way a restart, or a retirement another process
+      // made while this one was failing, reaches this decision at all.
+      // @ref LLP 0360#cadence [implements]: a failure the source could not size retries on the ordinary cadence rather than in a busy loop
+      // @ref LLP 0361#cadence [constrained-by]: budgeted work a returning tick sized still resumes within BACKLOG_RETRY_MS
+      backlogPending = durablePending()
       lastError = err instanceof Error ? err.message : String(err)
       runtime.log.error('github.poll_tick_failed', {
         operation: 'poll',
@@ -73,7 +110,61 @@ export async function startGithubSource() {
         error_kind: /** @type {any} */ (err)?.hypErrorKind ?? 'github_poll_failed',
         duration_ms: Date.now() - started,
       })
+    } finally {
+      if (cancel === own) cancel = null
     }
+  }
+
+  /**
+   * The last capture verdict any process recorded in the cursor sidecar: what
+   * this source knows about backlog whenever it has none of its own, at start
+   * and after a tick that threw before it could size anything. A sidecar
+   * carrying no verdict reads as no backlog; the first tick that persists
+   * cursors supplies one.
+   *
+   * @returns {boolean}
+   */
+  // @ref LLP 0438#readers [implements]: the source derives backlog from durable state, not from a boolean only it holds
+  function durablePending() {
+    return readCursors(runtime.stateDir).pending === true
+  }
+
+  /**
+   * Whether the cursor sidecar gained a one-time-import authorization this
+   * source has not scheduled for yet. `hyp github backfill` commits one before
+   * any network work and a tick's closing write adopts one that landed
+   * mid-tick, both after that tick's `pending` was computed, so without this
+   * read the daemon waits a full poll interval for work the command reported
+   * as resuming on the next tick.
+   *
+   * Authorizations rather than bare `work` continuations: an authorization
+   * joins a later tick's repository set whatever the inventory holds and is
+   * retired when it completes or is excluded, while nothing prunes a
+   * continuation whose repository has left the inventory (LLP 0360#cursoring),
+   * so counting those reports backlog no tick can retire.
+   *
+   * New ones rather than every one: an authorization already carried through a
+   * tick had its say through that tick's `pending` or `errors`, and a failure
+   * retries on the ordinary cadence, so re-counting it would pin a daily source
+   * at the backlog cadence for as long as one repository keeps failing. Keeping
+   * that snapshot honest is why this runs on every tick, not only on a tick
+   * that reported nothing pending.
+   *
+   * @returns {boolean}
+   */
+  // @ref LLP 0361#cadence [implements]: durable work reaches the backlog cadence without pinning the source to it
+  // @ref LLP 0360#cadence [constrained-by]: a repository that keeps failing retries on the ordinary cadence
+  function stagedImportPending() {
+    const staged = authorizedImports(readCursors(runtime.stateDir))
+    let fresh = false
+    for (const repo of staged) {
+      if (!seenImports.has(repo)) {
+        fresh = true
+        break
+      }
+    }
+    seenImports = staged
+    return fresh
   }
 
   /** @param {number} delayMs @param {number} ownGeneration */
@@ -146,8 +237,13 @@ export async function startGithubSource() {
       stopTimer()
       startTimer()
     },
+    // Bounded by the GitHub work in flight, not the tick: the abort ends the
+    // current request or body read at once and no further request is sent,
+    // while an append or projection already running is awaited, because
+    // teardown closes the storage it is writing.
     async stop() {
       stopTimer()
+      cancel?.abort()
       if (inFlight) await inFlight.catch(() => {})
     },
   }

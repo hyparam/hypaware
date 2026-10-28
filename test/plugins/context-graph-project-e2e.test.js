@@ -319,14 +319,14 @@ test('projectGraph mints Skill/Program nodes and ran/invoked edges from all acti
     // 3 Session (alpha/beta/gamma) + 2 App (claude-code/codex) + 2 Model
     // (sonnet/gpt-5-codex) + 3 Tool (Skill/Bash/exec_command) + 2 Program
     // (git/cat) + 2 Skill (hypaware-query/hypaware-ai-improvement-report).
-    // No File/Repo/Commit: no file-touching tools, no captured
+    // The shell skill read now contributes one File and touched edge. No captured
     // git_remote/head_sha in this fixture.
-    assert.equal(first.nodes, 14)
+    assert.equal(first.nodes, 15)
     // 3 via + 3 used_model + 3 used (Tool) + 3 invoked (Program) + 3 ran
     // (Skill). No touched/in/at: same reason as above.
-    assert.equal(first.edges, 15)
-    assert.equal(first.nodesWritten, 14)
-    assert.equal(first.edgesWritten, 15)
+    assert.equal(first.edges, 16)
+    assert.equal(first.nodesWritten, 15)
+    assert.equal(first.edgesWritten, 16)
 
     const again = await projectGraph({ query: registry, storage, contracts: [contract] })
     assert.equal(again.nodesWritten, 0, 're-projecting the identical fixture is idempotent')

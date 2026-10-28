@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusText, renderStatusSummary } from '../../src/core/commands/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
@@ -88,6 +88,13 @@ test('a source reporting a failure says so on both planes', async (t) => {
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   const block = sourcesBlock(renderText(report))
+  const compact = makeBuf()
+  renderStatusSummary({ report, stdout: compact })
+  const verbose = renderText(report)
+  const attention = compact.text().split('\nAttention\n')[1].split('\nMore details:')[0]
+  assert.ok(attention.includes('  ! github: projection budget exhausted'))
+  assert.equal(verbose.split('\nAttention\n')[1].split('\n  active plugins:')[0], attention)
+  assert.ok(verbose.indexOf('\nAttention\n') < verbose.indexOf('\n  sources:'))
   assert.match(block, /github.*\[started\]/, 'the lifecycle verdict is unchanged')
   assert.match(block, /reports degraded: projection budget exhausted/, 'and the source is heard')
 

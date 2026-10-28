@@ -46,6 +46,7 @@ function srow({ ts, part, sid, msg = 'm', text = 'hello' }) {
 
 test('buildSessionAggregateQuery ranks the precise latest (ts, tiebreak) per session, applying the content filter', () => {
   const sql = buildSessionAggregateQuery(cfg())
+  assert.doesNotMatch(sql, /LIMIT/, 'session selection must not discard resumed sessions')
   // Outer query keeps the rn=1 row per session, carrying both tuple components.
   assert.match(sql, /SELECT session_id, last_ts, last_id FROM \(/)
   assert.match(sql, /message_created_at AS last_ts/)
@@ -68,13 +69,13 @@ test('buildSessionAggregateQuery omits the inner content filter when both filter
 
 // --- buildSessionPartsQuery (the full-session read) --------------------------
 
-test('buildSessionPartsQuery selects all transcript columns for one session, with no LIMIT', () => {
+test('buildSessionPartsQuery selects all transcript columns for one session, with a refusal-detection LIMIT', () => {
   const sql = buildSessionPartsQuery(cfg(), 'sess-1')
   assert.match(sql, /SELECT session_id, message_created_at, part_id, message_id, content_text FROM ai_gateway_messages/)
   assert.match(sql, /WHERE session_id = 'sess-1' AND/)
   assert.match(sql, /content_text IS NOT NULL AND content_text <> ''/)
   assert.match(sql, /part_type NOT IN \('tool_result'\)/)
-  assert.doesNotMatch(sql, /LIMIT/) // full session. The whole point
+  assert.match(sql, /LIMIT 10001$/) // refuse oversize sessions instead of truncating them
 })
 
 test("buildSessionPartsQuery escapes a single quote in the session id (no injection surface)", () => {
@@ -86,7 +87,7 @@ test('buildSessionPartsQuery for a custom source is the bare anchor predicate (n
   const c = cfg({ source_dataset: 'my_logs', text_column: 'body', id_column: 'row_id', anchor_key_column: 'thread', require_text: false })
   const sql = buildSessionPartsQuery(c, 'T1')
   assert.match(sql, /SELECT thread, message_created_at, part_id, row_id, body FROM my_logs/)
-  assert.match(sql, /WHERE thread = 'T1'$/)
+  assert.match(sql, /WHERE thread = 'T1' LIMIT 10001$/)
   assert.doesNotMatch(sql, /part_type/)
   assert.doesNotMatch(sql, /IS NOT NULL/)
 })
@@ -198,7 +199,7 @@ test('collectProspectRows dedups identical (type,label) within a session and sha
   const perSession = [
     {
       anchorKey: 'A',
-      keys: ['m1', 'm2'],
+      rows: [srow({ ts: 1, part: 'p1', sid: 'A', msg: 'm1', text: 'e' })],
       candidates: [
         { type: 'Decision', label: 'Use Redis', summary: 'cache', confidence: 0.7, evidence: 'e' },
         { type: 'Decision', label: 'Use Redis', summary: 'dup' },
@@ -213,14 +214,14 @@ test('collectProspectRows dedups identical (type,label) within a session and sha
   assert.deepEqual(r.props, { summary: 'cache' })
   assert.equal(r.anchor_type, 'Session')
   assert.equal(r.anchor_key, 'A')
-  assert.deepEqual(r.source_keys, { message_id: ['m1', 'm2'] })
+  assert.deepEqual(r.source_keys, { message_id: ['m1'], part_id: ['p1'] })
   assert.equal(r.extractor, 'enrich.t1')
 })
 
 test('collectProspectRows keeps the same label under different sessions as distinct prospects', () => {
   const perSession = [
-    { anchorKey: 'A', keys: ['m1'], candidates: [{ type: 'Concept', label: 'X' }] },
-    { anchorKey: 'B', keys: ['m2'], candidates: [{ type: 'Concept', label: 'X' }] },
+    { anchorKey: 'A', rows: [srow({ ts: 1, part: 'p1', sid: 'A', msg: 'm1', text: 'X' })], candidates: [{ type: 'Concept', label: 'X', evidence: 'X' }] },
+    { anchorKey: 'B', rows: [srow({ ts: 1, part: 'p2', sid: 'B', msg: 'm2', text: 'X' })], candidates: [{ type: 'Concept', label: 'X', evidence: 'X' }] },
   ]
   const out = collectProspectRows(perSession, cfg(), 'now')
   assert.equal(out.size, 2, 'prospect id includes the anchor, so different sessions do not collide')
@@ -274,7 +275,7 @@ function proposeRuntime({ cfg, stateDir, source, prospects = [], candidates, onC
       if (onComplete) await onComplete()
       return {
         stopReason: 'end_turn',
-        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'emit_prospects', input: { prospects: candidates } }] },
+        message: { role: 'assistant', content: [{ type: 'tool_use', name: 'emit_prospects', input: { prospects: candidates.map(c => ({ evidence: source[0]?.content_text, ...c })) } }] },
       }
     },
   }

@@ -9,11 +9,10 @@ import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * Build the kernel-side `BackfillRegistry`. Plugins call
- * `register(contribution)` during activation; `hyp backfill list`,
- * `hyp backfill plan`, and `hyp backfill <provider...>` enumerate
- * providers through `list()` / `get()`. The registry is intentionally
- * narrow. The runner owns lifecycle and telemetry; the contribution's
- * `plan()` / `run()` own native discovery.
+ * `register(contribution)` during activation; `hyp backfill list` and
+ * `hyp backfill <provider...>` enumerate providers through `list()` /
+ * `get()`. The registry is intentionally narrow. The runner owns lifecycle
+ * and telemetry; the contribution's `run()` owns native discovery.
  *
  * @returns {BackfillRegistry}
  */
@@ -68,9 +67,6 @@ export function createBackfillRegistry() {
     }
     if (typeof contribution.run !== 'function') {
       throw new TypeError(`BackfillRegistry.register: '${name}' missing run()`)
-    }
-    if (contribution.plan !== undefined && typeof contribution.plan !== 'function') {
-      throw new TypeError(`BackfillRegistry.register: '${name}' plan must be a function when supplied`)
     }
     if (contributions.has(name)) {
       throw new Error(`BackfillRegistry.register: duplicate provider '${name}'`)

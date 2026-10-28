@@ -215,6 +215,15 @@ export interface PluginClientManifest {
    * captured. Declared here rather than in a core table for the same
    * reason as `attach_probe`: the path is the client's business, and
    * core must be able to read it without importing plugin code.
+   *
+   * An mtime alone only nominates: when it would report a gap, core reads
+   * the tail of the newest files to confirm a real turn is behind the
+   * write. That read understands Claude Code's JSONL records (`type`,
+   * `isMeta`) and runs only for the built-in claude client (plugin
+   * `@hypaware/claude`, client name `claude`). Any other client that
+   * declares this probe gets the mtime pass and no confirmation read: a
+   * suspected gap is reported as unconfirmed (`unknown`), never as a
+   * confirmed gap and never as healthy, whatever its files contain.
    */
   activity_probe?: PluginActivityProbeManifest
   /**
@@ -239,8 +248,10 @@ export interface PluginClientManifest {
 }
 
 /**
- * A client-written directory core may stat (never parse) to answer
- * "when was this client last active?". Same home-relative contract as
+ * A client-written directory core reads to answer "when was this client
+ * last active?": every matching file's mtime, and, only when those mtimes
+ * would report a capture gap, the tail of the newest few (see
+ * `activity_probe` above). Same home-relative contract as
  * `attach_probe.settings_file`: relative to `$HOME`, first segment
  * relocatable by `$<CLIENT>_HOME`, absolute paths rejected.
  */
@@ -253,8 +264,9 @@ export interface PluginActivityProbeManifest {
 
 /**
  * A client's launch spec: the binary to look for on `$PATH` and the
- * argv to start it with. Exactly one `args` element must contain the
- * `{prompt}` placeholder, which is replaced with the user's question;
+ * argv to start it with. At least one `args` element must contain the
+ * `{prompt}` placeholder, and every occurrence is replaced literally with
+ * the user's question;
  * a spec without it would start the client mute, which looks like the
  * feature working (LLP 0198#split).
  */
@@ -466,6 +478,8 @@ export type PickerDetectProbe =
   | { settings_file: string } // reuses the `contributes.client.attach_probe` settings-file shape, home-relative likewise
   | { app_bundle: string } // stat-exists check on a macOS `.app` bundle path
   | { path: string } // stat-exists check on a directory (honors `$FOO_HOME`-style env overrides)
+  | { vscode_extension: string } // installed extension identifier in local VS Code extension metadata
+  | { project_dependencies: { npm?: string, python?: string } } // declarations in the caller's current project only
 
 export interface PluginCommandManifest {
   name: string
@@ -551,7 +565,7 @@ export interface PluginInitPresetManifest {
   summary?: string
 }
 
-export type PluginSkillClient = 'claude' | 'codex' | 'antigravity' | 'antigravity-desktop' | 'all'
+export type PluginSkillClient = 'claude' | 'codex' | 'pi' | 'droid' | 'opencode' | 'cursor' | 'openclaw' | 'hermes' | 'antigravity' | 'antigravity-desktop' | 'all'
 
 // =============================================================================
 // Plugin discovery, install, and lock
@@ -685,6 +699,14 @@ export interface PluginActivationContext {
    * and rollback.
    */
   configControl?: ConfigControlFacade
+  /**
+   * Present, and `true`, only when the boot serves a preview
+   * (`hyp setup --dry-run`). The kernel has resolved `paths.stateDir` and
+   * `paths.cacheDir` without creating them, and `activate` must not create
+   * or change persistent state either: register and provide as usual, but
+   * leave directories and files on disk for a real boot to make (LLP 0525).
+   */
+  preview?: true
   requireCapability<T = unknown>(name: CapabilityName, range?: SemverRange): T
   provideCapability<T = unknown>(name: CapabilityName, version: SemverVersion, value: T): void
 }
@@ -804,6 +826,12 @@ export interface HypAwareV2Config {
    * local when both layers set it.
    */
   auto_update?: boolean
+  /** Built-in export redaction is always applied; custom patterns add to it. */
+  redaction?: ExportRedactionConfig
+}
+
+export interface ExportRedactionConfig {
+  custom_patterns?: Array<{ pattern: string, flags?: string }>
 }
 
 /** Legacy alias retained only while the project rename completes. */
@@ -833,6 +861,15 @@ export interface PluginConfigInstance {
    * maps to its canonical git source.
    */
   source?: string
+  /**
+   * Whether HypAware records the client this plugin contributes
+   * (`contributes.client`). Absent means recording. `hyp client detach`
+   * writes `false` to the local entry and `hyp client attach` removes it;
+   * the backfill runner, the attach-on-join reconciler, `hyp setup`, and
+   * `hyp status` all read it. Ignored for a plugin that contributes no
+   * client.
+   */
+  recording?: boolean
 }
 
 /**
@@ -1054,12 +1091,29 @@ export interface CommandRegistration {
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }
 
+/**
+ * One plugin's activation outcome as a command body sees it: the loader's
+ * `ActivationResult` without the raw thrown message.
+ */
+export interface CommandActivationOutcome {
+  ok: boolean
+  plugin: ActivePlugin
+  /** Present only when `ok` is false: the loader's safe error-kind label. */
+  errorKind?: string
+}
+
 export interface CommandRunContext {
   stdout: WriteStream
   stderr: WriteStream
   stdin?: NodeJS.ReadStream
   env: NodeJS.ProcessEnv
   cwd: string
+  /**
+   * The whole effective config, not the plugin's slice `activate()`
+   * receives (LLP 0420 #split). A plugin-owned command body therefore
+   * reads every section, a neighbour's inline credentials included;
+   * narrowing it is issue #1978.
+   */
   config: HypAwareV2Config
   plugins: ActivePlugin[]
   /**
@@ -1078,6 +1132,24 @@ export interface CommandRunContext {
    * (LLP 0219 #incomplete-activation-prunes-nothing).
    */
   failedPlugins?: string[]
+  /**
+   * How each plugin that reached `activate()` on this boot came out
+   * (kernel-owned, populated by the dispatcher from `bootKernel`'s
+   * `activations`). Only the first of the four `failedPlugins` routes lands
+   * here, but it is the one that names its owner and its error kind, and the
+   * one whose partial registrations stay behind: a plugin that registered a
+   * client adapter and then threw still shows that adapter in `clients`. The
+   * loader's raw thrown message is withheld; `errorKind` is the safe label.
+   * Absent on a caller that pre-built the kernel, which a reader treats as
+   * "unknown", never as "every plugin activated". Read by the setup finale's
+   * attach lane so a picked client whose owner failed is reported as not
+   * attached rather than skipped as adapterless (issue #596).
+   */
+  activations?: CommandActivationOutcome[]
+  /**
+   * Capability registry. Per-plugin for a plugin-contributed command, raw
+   * for a core one: see `sinks` below for the rule and why it exists.
+   */
   capabilities: CapabilityRegistry
   /** Kernel-owned client lifecycle registry. Present on current hosts. */
   clients?: ClientRegistry
@@ -1143,15 +1215,33 @@ export interface CommandRunContext {
    */
   agents: AgentRegistry
   /**
-   * Source registry (kernel-owned). Populated by the dispatcher.
-   * `hyp status` and the Phase 9 walkthrough enumerate this to render
-   * the per-source breakdown and harvest source picks.
+   * Source registry. Per-plugin for a plugin-contributed command, raw for a
+   * core one: see `sinks` below for the rule and why it exists. `hyp status`
+   * and the wizard's pick phase are core, so they still enumerate every
+   * plugin's sources to render the breakdown and harvest source picks.
    */
   sources: SourceRegistry
   /**
-   * Sink registry (kernel-owned). Populated by the dispatcher.
-   * `hyp status` and the Phase 9 walkthrough enumerate this to render
-   * the per-sink breakdown and harvest sink picks.
+   * Sink registry. Which registry depends on who owns the command:
+   *
+   * - A command a **plugin** contributed gets that plugin's own
+   *   `ctx.sinks` facade, the one its `activate()` holds. Registering a
+   *   command is a plugin extension point, so the body of one is a second
+   *   context the same plugin reaches the kernel through, and it is
+   *   bracketed the way the first one is: a neighbour's configured instance
+   *   answers with no `config`, no live `exportBatch`, no `reader()`, no
+   *   writable `sink`, and `closeAll()` closes only this plugin's own.
+   * - A **core** command gets the kernel's registry unchanged. `hyp status`
+   *   and the wizard render every plugin's sinks, `hyp sink maintain`
+   *   drives them, and that is core's job.
+   *
+   * The owner is the plugin the registry recorded as registering the
+   * command, not `CommandRegistration.plugin`, which the plugin writes.
+   * The split scopes the command as registered: the stored record stays
+   * mutable through `get()`, and rewriting its `run` sidesteps the split
+   * (issue #1977).
+   *
+   * @see LLP 0420 #split
    */
   sinks: SinkRegistry
   /**
@@ -1270,6 +1360,12 @@ export interface SinkEncoder {
 
 export interface SinkEncodeContext {
   log: PluginLogger
+  /**
+   * Kernel-owned scratch for staging. It may be reclaimed once the
+   * `Sink.exportBatch` call that encoded the blob settles (a CLI-owned
+   * kernel deletes it at teardown), so nothing staged here may be read
+   * after that. See `Sink.exportBatch`.
+   */
   tempDir: string
   /**
    * Column schema for the partition's dataset. Provided by the blob
@@ -1298,6 +1394,10 @@ export interface SinkEncodeContext {
 export interface SinkEncodedBlob {
   /** Filename (without directory) the destination should write under. */
   filename: string
+  /**
+   * An `AsyncIterable` may be consumed lazily, but only within the
+   * `Sink.exportBatch` call that encoded it. See `Sink.exportBatch`.
+   */
   bytes: Uint8Array | AsyncIterable<Uint8Array>
   bytesWritten?: number
   rowCount?: number
@@ -1357,11 +1457,24 @@ export interface PutObjectResult {
 
 export interface GetObjectInput {
   key: string
+  /**
+   * Single HTTP byte range, e.g. bytes=0-7 or bytes=-8. Ends are inclusive.
+   * A range the object cannot satisfy, an empty object included, MUST throw
+   * with `error_kind=blob_range_unsatisfiable`, so a reader can tell it from
+   * any other storage failure and refetch the whole object.
+   */
+  range?: string
 }
 
 export interface GetObjectResult {
+  /** Caller owns the stream: consume it or destroy() it. A provider may hold
+   * an open file handle or socket until one of those happens, and a range
+   * reader makes many such reads per object. */
   body: NodeJS.ReadableStream
+  /** Length of the returned body, which may be only a range. */
   contentLength?: number
+  /** HTTP Content-Range when range was honored. Absent means a whole object. */
+  contentRange?: string
   etag?: string
 }
 
@@ -1462,6 +1575,7 @@ export type DatasetDisposition = 'forwards' | 'skips' | 'starts-from-now'
 /** One client's locally retained history, requested for an explicit replay. */
 export interface SourceHistoryReplayRequest {
   source: string
+  onProgress?: (progress: ExportProgress) => void
 }
 
 /** Read-only disclosure produced before a historical replay is confirmed. */
@@ -1478,11 +1592,33 @@ export interface SourceHistoryReplayResult {
   error?: string
 }
 
+/** A bounded explicit repair selected from a verified server inventory. */
+export interface MissingSyncRequest {
+  org: string
+  revision: string
+  rows: Record<string, unknown>[]
+  validate(): Promise<void>
+}
+
+export interface MissingSyncResult {
+  syncRestore: 1
+  status: 'accepted' | 'already_accepted'
+  restored?: number
+  present?: number
+  purged?: number
+}
+
 export interface Sink {
   /**
    * Called by the sink driver on the configured schedule. The driver
    * passes a batch of ready partitions from the cache; the sink writes
    * them to its destination in the configured format and acks.
+   *
+   * Before the returned promise settles, resolved or rejected, the sink
+   * has finished consuming every `SinkEncodedBlob` it encoded for the
+   * batch, or cancelled the work that depends on one, so nothing still
+   * reads `SinkEncodeContext.tempDir`. Streaming inside the call is
+   * fine; draining after it is not.
    */
   exportBatch(batch: ExportBatch, opts: ExportOptions): Promise<ExportResult>
   flush?(): Promise<void>
@@ -1517,6 +1653,7 @@ export interface Sink {
    */
   previewSourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayPreview>
   replaySourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayResult>
+  restoreMissingRows?(request: MissingSyncRequest): Promise<MissingSyncResult>
 }
 
 export interface ExportBatch {
@@ -1529,6 +1666,19 @@ export interface ExportBatch {
 export interface ExportOptions {
   format: string
   schedule: string
+  /** Incremental acknowledged counts, or a zero-count event announcing a retry wait. */
+  onProgress?: (progress: ExportProgress) => void
+}
+
+export interface ExportProgress {
+  rows: number
+  bytes: number
+  /** Rows covered by durable acknowledgements from an interrupted attempt. */
+  resumedRows?: number
+  /** Encoded bytes in acknowledged requests; excludes retries. */
+  wireBytes?: number
+  /** Announced retry/backpressure delay, with zero rows and bytes. */
+  waitMs?: number
 }
 
 export interface ExportResult {
@@ -1719,6 +1869,25 @@ export interface ReadRowsOptions {
  * long as those helpers keep their contract.
  */
 export interface QueryStorageService {
+  /** Reconcile a complete scoped snapshot, including removals, in the local cache. */
+  reconcileRows?(dataset: string, columns: ColumnSpec[], rows: Record<string, unknown>[], scope: { where: Record<string, string>; key: string }): Promise<number>
+  /**
+   * Reconcile a batch of complete scoped snapshots of one dataset in one pass:
+   * partitions are discovered, guarded and committed once for the batch, and
+   * each scope settles exactly as a lone `reconcileRows` would. Every scope
+   * names the same `where` columns and key; no two are equal. Returns the rows
+   * written across the batch.
+   */
+  reconcileRowsBatch?(dataset: string, columns: ColumnSpec[], snapshots: { rows: Record<string, unknown>[]; scope: { where: Record<string, string>; key: string } }[]): Promise<number>
+  /**
+   * Claim the cross-process guard for one reconcile scope (`client_name` and
+   * `session_id` required). Hold it from the authoritative source read
+   * through `reconcileRows`, then call the returned release. Throws an error
+   * with `error_kind: 'cache_partition_mutation_busy'` when another writer
+   * holds the scope; it never waits.
+   */
+  claimReconcileScope?(dataset: string, where: Record<string, string>): () => void
+
   cacheRoot: string
   cacheTablePath(dataset: string, partitionSegments?: string[]): string
   appendRows(tablePath: string, columns: ColumnSpec[], rows: Record<string, unknown>[]): Promise<void>
@@ -1815,8 +1984,13 @@ export type VerbExposure = 'cli+mcp' | 'cli-only' | 'local-only'
  * Gating only applies on an authed (remote/HTTP) transport: the local
  * stdio host is local-user trust and exposes both. See LLP 0034
  * §tool-auth-class.
+ *
+ * `write` is one bounded mutation admitted by a named credential scope: the
+ * verb must name `scope`, and is listed and dispatched only where the host
+ * admits that scope (`allowScopes`), on every transport. See LLP 0494
+ * #write-class.
  */
-export type VerbAuthClass = 'read' | 'operator'
+export type VerbAuthClass = 'read' | 'write' | 'operator'
 
 /**
  * A single typed input property. A deliberately small JSON-Schema subset:
@@ -1828,8 +2002,9 @@ export interface VerbInputProperty {
   type: 'string' | 'integer' | 'number' | 'boolean' | 'array'
   description?: string
   enum?: string[]
-  default?: string | number | boolean
+  default?: string | number | boolean | string[]
   minimum?: number
+  maximum?: number
   items?: { type: 'string' | 'integer' | 'number', enum?: string[] }
   /** CLI-only: the final string positional absorbs all remaining tokens (e.g. a SQL string). */
   greedy?: boolean
@@ -1853,6 +2028,28 @@ export interface McpToolInputSchema {
   type: 'object'
   properties: Record<string, Omit<VerbInputProperty, 'greedy'>>
   required?: string[]
+}
+
+/**
+ * A recommendation tool contract the client shares with the server
+ * (`REMOTE_TOOL_CONTRACTS` in `src/core/mcp/contracts.js`). It carries no
+ * operation: the server binds `operation` and `render` by `tool` name, and
+ * no host registers a tool from the contract alone. See LLP 0494
+ * #remote-contracts.
+ */
+export interface RemoteToolContract {
+  /** The MCP tool name, the key the server binds its operation by. */
+  tool: string
+  /** The display title (`tools/list` `title`). */
+  title: string
+  /** The MCP tool description. */
+  summary: string
+  inputSchema: VerbInputSchema
+  authClass: VerbAuthClass
+  /** The credential scope a write needs; absent on a read. */
+  scope?: string
+  /** The CLI command that does the same thing. */
+  cli: string
 }
 
 /**
@@ -1898,6 +2095,8 @@ export interface VerbRenderControls {
   output?: string
   maxCell: number
   maxBytes: number
+  /** True when stdout is a colour terminal and the render goes there, not to `--output`. */
+  color?: boolean
 }
 
 /** What a verb's `render` returns; the kernel performs the actual IO. */
@@ -1926,6 +2125,12 @@ export interface VerbRegistration {
   audience?: 'everyday' | 'operator' | 'developer' | 'machine'
   /** MCP tool name, e.g. `'graph_neighbors'`. */
   tool: string
+  /**
+   * Human-readable MCP tool name, e.g. `'Find related sessions'`. Advertised
+   * as the `tools/list` entry's `title` and `annotations.title`; a verb with
+   * none is listed under its `tool` name. Does not affect the CLI.
+   */
+  title?: string
   plugin?: PluginName
   summary: string
   /**
@@ -1945,10 +2150,15 @@ export interface VerbRegistration {
   exposure?: VerbExposure
   /** Default `'read'`. */
   authClass?: VerbAuthClass
+  /**
+   * The credential scope that admits a `write` verb, e.g. `'report-publish'`.
+   * Required, non-empty, on a `write` verb; not read on any other class.
+   */
+  scope?: string
   /** The shared core. Identical for the CLI and the MCP tool. */
   operation(params: Record<string, unknown>, ctx: VerbOperationContext): Promise<unknown> | unknown
   /** CLI-only: turn a structured result into stdout text + exit code. */
-  render(result: any, controls: VerbRenderControls): VerbRenderResult
+  render(result: any, controls: VerbRenderControls, params?: Record<string, unknown>): VerbRenderResult
 }
 
 export interface VerbRegistry {
@@ -2012,6 +2222,8 @@ export interface VerbRegistry {
  */
 export interface AiGatewayCapability {
   registerUpstreamPreset(preset: AiGatewayUpstreamPreset): void
+  /** Runtime-only scoped door, resolved once from an operator-owned upstream. */
+  registerUpstreamAlias(name: string, canonicalName: string, route: AiGatewayUpstreamAliasRoute): void
   registerClient(client: AiGatewayClientRegistration): void
   registerExchangeProjector(projector: AiGatewayExchangeProjector): void
   /**
@@ -2102,6 +2314,20 @@ export interface AiGatewaySettlementEnricher {
   name: string
   clientName: string
   settle(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Array<Record<string, unknown> | UsagePolicyDrop>>
+  /**
+   * Optional: name a row of this client that `settle` should see even though
+   * the gateway's own selection would not pick it (it is not a fallback row,
+   * its cwd is known, and it links to nothing being renamed). The gateway
+   * calls this once per row of the client at flush, with the row alone; the
+   * answer is not stored. A row answered `true` reaches `settle` in the same
+   * per-session group as the batch's fallback rows. Returning `true` for a
+   * row `settle` then leaves unchanged is allowed and costs only the call.
+   *
+   * The first use is the Claude OTEL prompt row (LLP 0560): native identity,
+   * so never a fallback, but its transcript line carries provenance the event
+   * does not, and only a flush-time look at that line can supply it.
+   */
+  wants?(row: Record<string, unknown>): boolean
 }
 
 /**
@@ -2147,6 +2373,17 @@ export interface AiGatewayUpstreamPathRewrite {
   to: string
 }
 
+// @ref LLP 0474#routes [implements]: aliases own a reserved door while canonical config owns transport
+export interface AiGatewayUpstreamAliasRoute {
+  path_prefix: string
+  provider?: string
+  priority?: number
+  match(input: AiGatewayRouteInput): boolean
+  rewrite: AiGatewayUpstreamPathRewrite
+  /** Forwarding-only discovery/control calls never acquire raw capture slots. */
+  captureMatch?(input: AiGatewayRouteInput): boolean
+}
+
 /**
  * Read-only view of the inbound request handed to a preset's
  * `match()`. Header names are lowercased; values are arrays so callers
@@ -2180,6 +2417,20 @@ export interface ClientRegistration {
   requiresEndpoint?: boolean
   attach(ctx: ClientAttachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
+  /**
+   * Read-only check setup runs once the client is picked, before any write
+   * (LLP 0532). Never throws; an adapter that cannot tell returns `{}`. The
+   * attach-time checks stay in `attach`, which still enforces them.
+   */
+  preflight?(): Promise<ClientPreflight>
+}
+
+/** A client's setup preflight verdict: at most one of the two is set. */
+export interface ClientPreflight {
+  /** Attach is known to refuse: the reason and the action that clears it. Setup skips this client's attach. */
+  refuse?: string
+  /** Attach will work with reduced capture: said once, and setup proceeds. */
+  warn?: string
 }
 
 export interface ClientRegistry {
@@ -2252,7 +2503,15 @@ export interface AiGatewayExchangeProjector {
     | undefined
 }
 
+/** Finite capture outcomes; payloads and upstream exception text never cross this seam. */
+export type AiGatewayCaptureReason = 'text' | 'media_omitted' | 'load_unload' | 'session_ignored' |
+  'invalid_request' | 'unsupported_shape' | 'invalid_response' | 'malformed_stream' | 'trailing_record' | 'missing_terminal' |
+  'transport_error' | 'upstream_unavailable' | 'http_error' | 'capture_limit' | 'processor_unavailable' | 'append_failure' |
+  'recording_disabled' | 'owner_absent' | 'owner_disabled' | 'policy_unreadable' | 'stale_generation' | 'recording_barrier_unconfirmed'
+
 export interface AiGatewayExchangeProjectorContext {
+  /** Adapter-owned semantic admission, independent of eventual append success. */
+  captureOutcome?(reason: AiGatewayCaptureReason): void
   log: PluginLogger
   /**
    * Read-only membership test against the gateway's in-memory
@@ -2320,6 +2579,11 @@ export interface AiGatewayProjectedExchange {
    * Partition key and session container, always present: the Claude
    * session id or Codex `metadata.session_id`. A session holds the main
    * loop plus N subagent / side-chat threads. (LLP 0030)
+   * On the live wire dispatcher, equality with a nonempty input.exchange_id
+   * and an absent/null conversation_id declares an exchange snapshot: row
+   * expansion uses temporary state without committed seeding or shared
+   * history/dedup. Other sessions and the projected writer/backfill retain
+   * their existing state contracts. (LLP 0469#exchange-scope)
    */
   session_id: string
   /**
@@ -2380,6 +2644,12 @@ export interface AiGatewayProjectedExchange {
 export interface AiGatewayProjectedMessage {
   role: string
   content: string | JsonObject[]
+  /**
+   * Optional zero-based position in the session for incremental producers.
+   * Must be a nonnegative INT32. Omission preserves the exchange-array index.
+   * Positions must agree across replay, filtering and live/recovery batches.
+   */
+  message_index?: number
   message_id?: string
   previous_message_id?: string[]
   message_created_at?: string
@@ -2785,11 +3055,11 @@ export interface InitPresetContribution {
 }
 
 // =============================================================================
-// Backfill (first-class client history import)
+// Backfill (first-class `hyp backfill`)
 // =============================================================================
 
 /**
- * Plugin-registered backfill providers. Each provider plans and yields
+ * Plugin-registered backfill providers. Each provider scans and yields
  * `BackfillItem` envelopes (and optional `BackfillEvent` lifecycle
  * signals) for one or more datasets. Core owns the runner, telemetry
  * envelope, dry-run behavior, and dataset materialization; providers
@@ -2810,12 +3080,6 @@ export interface BackfillContribution {
   datasets: string[]
   /** Short human-readable description for `hyp backfill list`. */
   summary?: string
-  /**
-   * Optional planning hook. Called by `hyp backfill plan` to surface
-   * what would be scanned without committing to writes. Returning
-   * `undefined` means the provider has no planning information.
-   */
-  plan?(ctx: BackfillPlanContext): Promise<BackfillPlan | undefined>
   /**
    * Stream `BackfillItem` envelopes (one per scanned record) and
    * optional `BackfillEvent` lifecycle signals. The runner consumes
@@ -2840,7 +3104,7 @@ export interface BackfillContribution {
   sweep?: { cron: string }
 }
 
-export interface BackfillPlanContext {
+export interface BackfillRunContext {
   env: NodeJS.ProcessEnv
   cacheRoot: string
   /** Effective lower bound for record timestamps (ISO string). */
@@ -2883,9 +3147,14 @@ export interface BackfillPlanContext {
    * while the shared-tree gate keeps its own fail-open rules.
    */
   isPluginConfigured?: (plugin: PluginName) => boolean
-}
-
-export interface BackfillRunContext extends BackfillPlanContext {
+  /**
+   * Whether a plugin's client is detached (`recording: false`, LLP 0466),
+   * read fresh by the runner. `isPluginConfigured` already answers false for
+   * a detached plugin; this is the narrower question a shared-tree provider
+   * asks about its own client, whose unclaimed sessions otherwise fail open.
+   * Absent means nothing is detached.
+   */
+  isPluginDetached?: (plugin: PluginName) => boolean
   storage: QueryStorageService
   /** True only for a daemon-scheduled provider pass. */
   sweep?: boolean
@@ -2928,6 +3197,9 @@ export interface BackfillRunContext extends BackfillPlanContext {
  * and asks the registered materializer to produce canonical rows.
  */
 export interface BackfillItem {
+  /** Authoritative local snapshot. Empty rows retract this exact scope; dry-run never writes. */
+  reconcile?: { where: Record<string, string>; key: string }
+
   type?: 'item'
   /** Target dataset (must match the materializer's `dataset`). */
   dataset: string
@@ -2950,19 +3222,16 @@ export interface BackfillProvenance {
 
 export interface BackfillEvent {
   type: 'event'
-  /** Free-form event name (e.g. `scan_started`, `unsupported_location`). */
+  /**
+   * Free-form event name (e.g. `scan_started`, `unsupported_location`).
+   * `import_unavailable` with a string `attributes.note` tells the person
+   * the import could not run (a missing CLI, say) rather than found nothing:
+   * the runner keeps the first such note, capped, for the setup and
+   * `hyp backfill` output.
+   */
   event: string
   /** Optional structured attributes. */
   attributes?: Record<string, unknown>
-}
-
-export interface BackfillPlan {
-  /** Provider-supplied estimate of records that would be scanned. */
-  estimated_items?: number
-  /** Free-form scan-location descriptors (e.g. file paths). */
-  sources?: string[]
-  /** Optional human-readable notes (`hyp backfill plan` surfaces these). */
-  notes?: string[]
 }
 
 /**

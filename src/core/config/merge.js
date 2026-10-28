@@ -91,6 +91,14 @@ export function mergeConfigLayers(central, local) {
   if (central.auto_update !== undefined) effective.auto_update = central.auto_update
   else if (local?.auto_update !== undefined) effective.auto_update = local.auto_update
 
+  // @ref LLP 0503#config [implements]: local custom patterns can strengthen central redaction but cannot remove its rules
+  if (central.redaction !== undefined || local?.redaction !== undefined) {
+    effective.redaction = { custom_patterns: [
+      ...(central.redaction?.custom_patterns ?? []),
+      ...(local?.redaction?.custom_patterns ?? []),
+    ] }
+  }
+
   return { effective, drops, centralQueryIgnored }
 }
 
@@ -145,6 +153,7 @@ export function resolveLayeredConfig({ central, local, validate }) {
   if (Object.keys(central.disambiguate ?? {}).length > 0) current.disambiguate = { ...central.disambiguate }
   if (base.effective.query !== undefined) current.query = base.effective.query
   if (base.effective.auto_update !== undefined) current.auto_update = base.effective.auto_update
+  if (base.effective.redaction !== undefined) current.redaction = base.effective.redaction
 
   /** @type {ConfigLayerDrop[]} */
   const drops = [...base.drops]
@@ -214,6 +223,7 @@ function cloneShallow(cfg) {
   if (cfg.disambiguate) out.disambiguate = { ...cfg.disambiguate }
   if (cfg.query !== undefined) out.query = cfg.query
   if (cfg.auto_update !== undefined) out.auto_update = cfg.auto_update
+  if (cfg.redaction !== undefined) out.redaction = cfg.redaction
   return out
 }
 

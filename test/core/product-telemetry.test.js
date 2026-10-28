@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { test } from 'node:test'
 import {
@@ -25,6 +25,7 @@ import {
 } from '../../src/core/product_telemetry/outbox.js'
 import {
   effectivePolicy,
+  safeDestination,
   writePolicy,
   productRoot
 } from '../../src/core/product_telemetry/policy.js'
@@ -36,6 +37,9 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { createProductClient } from '../../src/core/product_telemetry/client.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
+import { productStatus, runTelemetry } from '../../src/core/product_telemetry/commands.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
 
 /** @param {any} t */
 function temp(t) {
@@ -293,9 +297,39 @@ test('queue rejects oversized, malformed and non-allowlisted batches without thr
   )
 })
 
+// The state root has one derivation, and this is what keeps it that way: a
+// nuance added to readObservabilityEnv, or a local copy reintroduced in
+// productRoot, fails here on whichever spelling of HYP_HOME diverges.
+test('the product telemetry root is the shared state root, however HYP_HOME is spelled', () => {
+  for (const env of [
+    { HYP_HOME: path.join(os.tmpdir(), 'hyp-root-absolute') },
+    {},
+    { HYP_HOME: path.join('relative', 'state') },
+    { HYP_HOME: '' }
+  ])
+    assert.equal(
+      productRoot(env),
+      path.join(readObservabilityEnv(env).stateDir, 'product-telemetry')
+    )
+  // The loop above still passes if both sides move together, so pin the
+  // default spelling itself.
+  assert.equal(
+    productRoot({}),
+    path.join(os.homedir(), '.hyp', 'hypaware', 'product-telemetry')
+  )
+  // And pin a set HYP_HOME too: the default pin covers only the unset branch,
+  // so a helper-side change to the set branch would pass both halves above.
+  // The relative spelling also fails on added normalization (a path.resolve
+  // would rewrite it), which an absolute pin cannot see.
+  assert.equal(
+    productRoot({ HYP_HOME: path.join('relative', 'state') }),
+    path.join('relative', 'state', 'hypaware', 'product-telemetry')
+  )
+})
+
 // The default has to be pinned through the CLI, not only through the policy
-// reader: an installation nobody has opted in has no queue to preview later.
-test('an installation with no policy queues nothing and creates no telemetry state', async (t) => {
+// reader: a standalone installation has no queue to preview later.
+test('a standalone installation with no policy queues nothing and creates no telemetry state', async (t) => {
   const home = temp(t)
   const env = { HYP_HOME: home }
   const root = productRoot(env)
@@ -312,6 +346,341 @@ test('an installation with no policy queues nothing and creates no telemetry sta
   assert.equal(effectivePolicy(root).mode, 'off')
   assert.equal(fs.existsSync(root), false)
   assert.deepEqual(createOutbox(root).entries(), [])
+})
+
+/** @param {string} home @param {boolean} [customPath] */
+function remoteEnrollment(home, customPath = false) {
+  const stateRoot = path.join(home, 'hypaware')
+  const identityPath = customPath ? path.join(home, 'custom-identity.json') :
+    path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
+  const configPath = centralSeedPath(stateRoot)
+  const identity = {
+    central_url: 'https://example.invalid/',
+    gateway_id: randomUUID(),
+    jwt: `header.${Buffer.from(JSON.stringify({ org: 'org-a' })).toString('base64url')}.signature`
+  }
+  const config = {
+    version: 2,
+    sinks: { central: { plugin: '@hypaware/central', config: {
+      url: identity.central_url,
+      identity: customPath ? { persisted_path: identityPath } : {}
+    } } }
+  }
+  fs.mkdirSync(path.dirname(identityPath), { recursive: true })
+  fs.mkdirSync(path.dirname(configPath), { recursive: true })
+  fs.writeFileSync(identityPath, JSON.stringify(identity))
+  fs.writeFileSync(configPath, JSON.stringify(config))
+  return { identityPath, configPath, identity, config }
+}
+
+for (const applied of [false, true]) {
+  test(`enrolled users automatically collect and deliver with ${applied ? 'applied config and custom identity' : 'join seed'}`, async (t) => {
+    const home = temp(t)
+    const env = { HYP_HOME: home }
+    const root = productRoot(env)
+    const remote = remoteEnrollment(home, applied)
+    const initial = effectivePolicy(root)
+    if (applied) {
+      fs.renameSync(remote.configPath, path.join(path.dirname(remote.configPath), 'config.a.json'))
+      fs.symlinkSync('config.a.json', path.join(path.dirname(remote.configPath), 'active'))
+    }
+    assert.equal(productStatus(env).policy, 'enrolled_organization')
+    assert.equal(effectivePolicy(root).binding, initial.binding)
+    await dispatch(['--version'], { env, stdout: { write() {} }, stderr: { write() {} } })
+    assert.equal(fs.existsSync(path.join(root, 'policy.json')), false)
+    const queue = createOutbox(root)
+    assert.equal(queue.entries().length, 1)
+    const requests = []
+    const fetchFn = /** @type {typeof fetch} */ (async (url, options) => {
+      requests.push({ url, options })
+      assert.equal(url, 'https://example.invalid/v1/telemetry')
+      assert.equal(new Headers(options?.headers).get('authorization'), `Bearer ${remote.identity.jwt}`)
+      return options?.method === 'POST' ?
+        new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 }) : capability()
+    })
+    await createDelivery(root, { fetchFn }).drain()
+    assert.equal(requests.length, 2)
+    assert.equal(queue.entries().length, 0)
+  })
+}
+
+test('automatic reporting honors off, local and malformed saved preferences', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  remoteEnrollment(home)
+  const client = createProductClient({ env })
+  client.emit([/** @type {any} */ (productEvent('heartbeat', { uptime_s: 1 }))])
+  assert.equal(createOutbox(root).entries().length, 1)
+  await runTelemetry(['off'], /** @type {any} */ ({ env, stdout: { write() {} }, stderr: { write() {} } }))
+  assert.equal(effectivePolicy(root).mode, 'off')
+  assert.equal(createOutbox(root).entries().length, 0)
+  client.emit([/** @type {any} */ (productEvent('heartbeat', { uptime_s: 2 }))])
+  client.close()
+  assert.equal(createOutbox(root).entries().length, 0)
+  writePolicy(root, 'local')
+  assert.equal(effectivePolicy(root).mode, 'local')
+  fs.writeFileSync(path.join(root, 'policy.json'), '{broken')
+  assert.equal(effectivePolicy(root).mode, 'off')
+})
+
+// A failed opt-out must name what it left running, and only when collection
+// really survived it.
+for (const enrolled of [true, false]) {
+  test(`an opt-out whose preference write fails reports collection ${enrolled ? 'is still enabled' : 'is off'}`, {
+    skip: process.getuid?.() === 0 && 'root writes through a mode-500 directory anyway'
+  }, async (t) => {
+    const home = temp(t)
+    const env = { HYP_HOME: home }
+    const root = productRoot(env)
+    if (enrolled) remoteEnrollment(home)
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 })
+    assert.equal(productStatus(env).collection, enrolled ? 'organization' : 'off')
+    fs.chmodSync(root, 0o500)
+    let errors = ''
+    try {
+      await assert.rejects(runTelemetry(['off'], /** @type {any} */ ({
+        env,
+        stdout: { write() {} },
+        stderr: { write: (/** @type {string} */ text) => { errors += text } }
+      })), { code: 'EACCES' })
+    } finally {
+      // Restore before any assertion can fail: a mode-500 root also defeats
+      // the temp-home cleanup this test registered.
+      fs.chmodSync(root, 0o700)
+    }
+    assert.equal(fs.existsSync(path.join(root, 'policy.json')), false)
+    assert.equal(productStatus(env).collection, enrolled ? 'organization' : 'off')
+    assert.equal(/product telemetry remains enabled/.test(errors), enrolled, errors)
+  })
+}
+
+test('automatic bindings survive refresh and stop on leave or an organization change', async (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const remote = remoteEnrollment(home)
+  const before = effectivePolicy(root)
+  remote.identity.jwt = `header.${Buffer.from(JSON.stringify({ org: 'org-a', exp: 123 })).toString('base64url')}.signature`
+  fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+  assert.equal(effectivePolicy(root).binding, before.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (before.binding)))
+  remote.identity.jwt = `header.${Buffer.from(JSON.stringify({ org: 'org-b' })).toString('base64url')}.signature`
+  fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+  assert.notEqual(effectivePolicy(root).binding, before.binding)
+  let requests = 0
+  await createDelivery(root, { now: () => NOW, fetchFn: /** @type {typeof fetch} */ (async () => {
+    requests++
+    return capability()
+  }) }).drain()
+  assert.equal(requests, 0)
+  assert.equal(queue.entries().length, 0)
+  fs.unlinkSync(remote.configPath)
+  assert.equal(effectivePolicy(root).mode, 'off')
+})
+
+for (const broken of ['missing identity', 'invalid identity', 'wrong destination', 'unsafe destination', 'missing org', 'ambiguous sinks', 'invalid config', 'fragment destination', 'query destination']) {
+  test(`automatic reporting stays off with ${broken}`, (t) => {
+    const home = temp(t)
+    const remote = remoteEnrollment(home)
+    if (broken === 'missing identity') fs.unlinkSync(remote.identityPath)
+    if (broken === 'invalid identity') fs.writeFileSync(remote.identityPath, 'null')
+    if (broken === 'wrong destination') remote.config.sinks.central.config.url = 'https://other.invalid'
+    if (broken === 'unsafe destination') remote.config.sinks.central.config.url = 'http://example.invalid'
+    if (broken === 'missing org') {
+      remote.identity.jwt = 'header.e30.signature'
+      fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+    }
+    if (broken === 'ambiguous sinks') Object.assign(remote.config.sinks, { other: remote.config.sinks.central })
+    // A bare `#`/`?` suffix parses and leaves `hash`/`search` empty, so it
+    // survives a truthiness check while making the POST target the server root.
+    for (const [kind, suffix] of [['fragment destination', '#'], ['query destination', '?']])
+      if (broken === kind) {
+        remote.config.sinks.central.config.url = 'https://example.invalid' + suffix
+        remote.identity.central_url = 'https://example.invalid' + suffix
+        fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+      }
+    fs.writeFileSync(remote.configPath, broken === 'invalid config' ? '{bad' : JSON.stringify(remote.config))
+    assert.equal(effectivePolicy(productRoot({ HYP_HOME: home })).mode, 'off')
+  })
+}
+
+// The serialized destination becomes the POST target's prefix, so shapes a parse
+// accepts still move `/v1/telemetry` off the path: a bare `?`/`#` turns the
+// receiver path into a query or fragment, and a doubled trailing slash survives
+// a single-slash strip.
+for (const [shape, url, target] of /** @type {[string, string, string|null][]} */ ([
+  ['a fragment after a path', 'https://example.invalid/receiver#', null],
+  ['a query after a path', 'https://example.invalid/receiver?', null],
+  ['a doubled trailing slash', 'https://example.invalid//', 'https://example.invalid/v1/telemetry']
+])) {
+  test(`${shape} ${target ? 'normalizes to one receiver path' : 'is not a usable destination'}`, async (t) => {
+    const home = temp(t)
+    const root = productRoot({ HYP_HOME: home })
+    const remote = remoteEnrollment(home)
+    remote.config.sinks.central.config.url = url
+    remote.identity.central_url = url
+    fs.writeFileSync(remote.configPath, JSON.stringify(remote.config))
+    fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+    // Enrollment derives this destination with no opt-in, so the automatic and
+    // explicit paths must reach the same verdict, and a refusal must say which
+    // half of the opt-in it rejected.
+    assert.equal(effectivePolicy(root).mode, target ? 'organization' : 'off')
+    if (!target) {
+      assert.throws(
+        () => writePolicy(root, 'organization', { url, identityPath: remote.identityPath }),
+        /destination/
+      )
+      return
+    }
+    const explicit = writePolicy(root, 'organization', { url, identityPath: remote.identityPath })
+    assert.equal(explicit.mode, 'organization')
+    createOutbox(root, { now: () => NOW }).append(batch(), /** @type {string} */ (explicit.binding))
+    const seen = []
+    let unauthorized = true
+    const fetchFn = /** @type {typeof fetch} */ (async (requested, init) => {
+      seen.push(requested)
+      if (String(requested).endsWith('/v1/identity/refresh'))
+        return new Response(JSON.stringify({ jwt: remote.identity.jwt }), { status: 200 })
+      if (unauthorized) {
+        unauthorized = false
+        return new Response(null, { status: 401 })
+      }
+      return init?.method === 'POST'
+        ? new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+        : capability()
+    })
+    await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+    // Both routes carry the receiver path, and the 401 refresh inherits it.
+    assert.deepEqual(seen, [target, 'https://example.invalid/v1/identity/refresh', target, target])
+    assert.equal(createOutbox(root, { now: () => NOW }).entries().length, 0)
+  })
+}
+
+// The refusal must name the actual reason: `hyp join` persists the url as
+// typed, so a destination that merely spells itself differently from its parse
+// must not be accused of credentials, a query or a fragment it never carried.
+test('a refused destination is described by its actual defect', (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const remote = remoteEnrollment(home)
+  assert.throws(
+    () => writePolicy(root, 'organization', { url: 'https://example.invalid/receiver?', identityPath: remote.identityPath }),
+    /no credentials, query or fragment/
+  )
+  assert.throws(
+    () => writePolicy(root, 'organization', { url: 'https://Example.Invalid/receiver', identityPath: remote.identityPath }),
+    /the way the URL parser normalizes it/
+  )
+})
+
+// Both producers refuse a url that spells itself differently from its parse, so
+// a saved policy carrying one was hand-edited or foreign-written. The read guard
+// still accepts it by its parse, so delivery must send to the parse: the raw
+// string resolves to the doubled slash the receiver will not route.
+test('a saved destination that does not round-trip is delivered and reported where the guard accepted it', async (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const url = 'https://example.invalid/receiver\\'
+  const identityPath = path.join(home, 'identity.json')
+  const gatewayId = randomUUID()
+  fs.writeFileSync(
+    identityPath,
+    JSON.stringify({
+      central_url: url,
+      gateway_id: gatewayId,
+      jwt: `header.${Buffer.from(JSON.stringify({ org: 'org-a' })).toString('base64url')}.signature`
+    })
+  )
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'policy.json'),
+    JSON.stringify({
+      version: 1,
+      mode: 'organization',
+      generation: randomUUID(),
+      url,
+      identity_path: identityPath,
+      enrollment: createHash('sha256')
+        .update(JSON.stringify([url, gatewayId, 'org-a']))
+        .digest('hex')
+    })
+  )
+  const effective = effectivePolicy(root)
+  assert.equal(effective.mode, 'organization')
+  createOutbox(root, { now: () => NOW }).append(batch(), /** @type {string} */ (effective.binding))
+  const seen = []
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (requested, init) => {
+      seen.push(String(requested))
+      return init?.method === 'POST'
+        ? new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+        : capability()
+    }
+  )
+  await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+  const target = safeDestination(url) + '/v1/telemetry'
+  assert.equal(target, 'https://example.invalid/receiver/v1/telemetry')
+  assert.deepEqual(seen, [target, target])
+  assert.equal(createOutbox(root, { now: () => NOW }).entries().length, 0)
+  // Status names one place with delivery: the backslash form is not somewhere
+  // the batch this pass just delivered was ever sent.
+  const reported = productStatus({ HYP_HOME: home }).organization_destination
+  assert.equal(reported, 'https://example.invalid/receiver')
+  assert.equal(target, reported + '/v1/telemetry')
+})
+
+// Both producers require the saved string to equal its own parse apart from
+// trailing slashes, so that is the whole difference a legitimate policy can
+// show. One unconditional rule covers those too: a reported destination is
+// always the one the POST target is built from, never sometimes the saved
+// spelling, so reading the line needs no knowledge of which case it hit.
+test('a producer-written destination is reported as delivery resolves it', (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  const remote = remoteEnrollment(home)
+  assert.equal(remote.identity.central_url, 'https://example.invalid/')
+  const automatic = productStatus(env)
+  assert.equal(automatic.policy, 'enrolled_organization')
+  assert.equal(automatic.organization_destination, 'https://example.invalid')
+  const explicit = writePolicy(root, 'organization', {
+    url: remote.identity.central_url,
+    identityPath: remote.identityPath
+  })
+  assert.equal(explicit.mode, 'organization')
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(root, 'policy.json'), 'utf8')).url,
+    'https://example.invalid/'
+  )
+  assert.equal(
+    productStatus(env).organization_destination,
+    'https://example.invalid'
+  )
+})
+
+// A saved url the guard resolves to no destination is reported as none: the
+// neighbouring reason says why collection is off, and a url this far outside
+// the contract can carry the credentials `writePolicy` already refuses to echo.
+test('a destination that resolves to nothing is reported as none', (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'policy.json'),
+    JSON.stringify({
+      version: 1,
+      mode: 'organization',
+      generation: randomUUID(),
+      url: 'https://user:secret@example.invalid/receiver',
+      identity_path: path.join(home, 'missing.json'),
+      enrollment: 'a'.repeat(64)
+    })
+  )
+  const status = productStatus(env)
+  assert.equal(status.collection, 'off')
+  assert.equal(status.organization_destination, null)
 })
 
 // Local mode is a preview queue, not a network permission.
@@ -646,12 +1015,20 @@ test('a custom plugin command is other and whole invocation duration includes wo
   const root = productRoot(env)
   writePolicy(root, 'local')
   const registry = createCommandRegistry()
+  // The work is timed on the clock withProductInvocation reads, not taken as
+  // the 20 ms asked of setTimeout: Node timers can fire a fraction of a
+  // millisecond early, and a loaded CI runner recorded under 20 against `>= 20`.
+  // The invocation window opens before the command starts and closes after
+  // it returns, so it covers the measured work exactly, with no margin.
+  let workMs = 0
   registry.register({
     name: 'customer-private-command',
     summary: '',
     usage: '',
     run: async () => {
+      const workStart = performance.now()
       await new Promise((resolve) => setTimeout(resolve, 20))
+      workMs = performance.now() - workStart
       return 0
     }
   })
@@ -668,7 +1045,11 @@ test('a custom plugin command is other and whole invocation duration includes wo
     .flatMap((e) => JSON.parse(e.wire).records)
     .find((r) => r.name === 'cli.invocation')
   assert.equal(record.attributes.command, 'other')
-  assert(record.attributes.duration_ms >= 20)
+  assert(workMs > 0)
+  assert(
+    record.attributes.duration_ms >= workMs,
+    `invocation took ${record.attributes.duration_ms} ms, its work ${workMs} ms`
+  )
 })
 
 test('24-hour simulated receiver outage stays bounded and never starts a new retry window', async (t) => {
@@ -796,12 +1177,49 @@ test('organization startup and persisted backoff do not read queue payloads', as
   assert.equal(queueReads, 0, 'backoff must survive new senders without queue reads')
 })
 
-test('eligible delivery scans once and sends the oldest surviving batch', async (t) => {
+test('persisted backoff defers expiry only until the daemon five-minute flush', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  const policy = enroll(root)
+  assert(policy.binding)
+  const expired = NOW - 8 * 86400000
+  createOutbox(root, { now: () => expired }).append(batch(expired), policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  const stale = queue.entries()[0].id
+  queue.saveDelivery({ binding: policy.binding, next_at: NOW + 86400000 })
+  const delivery = createDelivery(root, {
+    now: () => NOW,
+    fetchFn: async () => { throw new Error('backoff must prevent requests') }
+  })
+  await delivery.drain()
+  delivery.close()
+  assert(
+    queue.entries().some((e) => e.id === stale),
+    'the gated drain leaves the expired slot during backoff'
+  )
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  let now = NOW
+  const client = createProductClient({ env, role: 'daemon', now: () => now })
+  t.after(() => client.close())
+  now += 300000
+  t.mock.timers.tick(30000)
+  assert(now < NOW + 86400000, 'the flush ran inside the backoff window')
+  assert.equal(
+    queue.entries().some((e) => e.id === stale),
+    false,
+    'the ungated daemon flush removes the expired slot'
+  )
+})
+
+test('eligible delivery scans once and packs the surviving batches oldest first', async (t) => {
   const root = temp(t)
   const policy = enroll(root)
   assert(policy.binding)
   const queue = createOutbox(root, { now: () => NOW })
-  queue.append(batch(NOW - 1000), policy.binding)
+  const newer = batch(NOW - 1000)
+  queue.append(newer, policy.binding)
   const oldest = batch(NOW - 2000)
   queue.append(oldest, policy.binding)
   queue.append(batch(), binding)
@@ -823,8 +1241,297 @@ test('eligible delivery scans once and sends the oldest surviving batch', async 
       return new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
     })
   }).drain()
-  assert.equal(sent?.batch_id, oldest?.batch_id)
-  // One enumeration plus identity checks before unlinking three copies.
-  assert.equal(queueReads, QUEUE_SLOTS + 3)
+  assert.deepEqual(sent?.records, [...(oldest?.records ?? []), ...(newer?.records ?? [])])
+  // One enumeration, identity checks before unlinking four copies, one read
+  // of each packed batch and the sealed write.
+  assert.equal(queueReads, QUEUE_SLOTS + 7)
+  assert.equal(queue.entries().length, 0)
+})
+
+// With telemetry off there is no queue directory, so the fixed slot sweep is
+// 160 failing opens on every `hyp status`. The reported status must not change
+// because they stopped happening.
+test('status reads no slot when the queue directory does not exist', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  const open = fs.openSync
+  let slotReads = 0
+  t.mock.method(fs, 'openSync', (...args) => {
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+      slotReads++
+    return Reflect.apply(open, fs, args)
+  })
+  assert.equal(fs.existsSync(path.join(root, 'queue-v1')), false)
+  let rendered = ''
+  await runTelemetry(
+    ['status'],
+    /** @type {any} */ ({
+      env,
+      stdout: { write: (/** @type {string} */ s) => (rendered += s) },
+      stderr: { write() {} }
+    })
+  )
+  // Byte-identical to the pre-guard rendering of the same rendered queue.
+  assert.equal(
+    rendered,
+    JSON.stringify(
+      {
+        collection: 'off',
+        policy: 'disabled',
+        organization_destination: null,
+        vendor_sharing: 'unavailable',
+        standalone_delivery: 'unavailable',
+        queue_bytes: 0,
+        queue_batches: 0,
+        oldest_age_seconds: 0,
+        dropped_lower_bound: 0,
+        delivery: null
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  assert.equal(JSON.stringify(productStatus(env), null, 2) + '\n', rendered)
+  assert.equal(slotReads, 0)
+
+  const policy = writePolicy(root, 'local')
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (policy.binding)))
+  const bytes = queue.entries()[0].bytes
+  slotReads = 0
+  const status = createOutbox(root, { now: () => NOW + 5000 }).status()
+  assert.equal(status.queue_batches, 1)
+  assert.equal(status.queue_bytes, bytes)
+  assert.equal(status.oldest_age_seconds, 5)
+  assert.equal(status.dropped_lower_bound, 0)
+  assert.equal(slotReads, QUEUE_SLOTS)
+  assert.equal(productStatus(env).collection, 'local')
+})
+
+/** @param {string} root */
+function queuedMilestones(root) {
+  return createOutbox(root)
+    .entries()
+    .flatMap((e) => JSON.parse(e.wire).records)
+    .filter((r) => r.name === 'installation.milestone')
+    .map((r) => r.attributes.milestone)
+}
+
+/** @param {NodeJS.ProcessEnv} env @param {string} command @param {number} [code] */
+async function invoke(env, command, code = 0) {
+  const { withProductInvocation, noteInvocation } = await import(
+    '../../src/core/product_telemetry/client.js'
+  )
+  return withProductInvocation(command.split(' '), env, async () => {
+    noteInvocation({ command, kind: 'execution' })
+    return code
+  })
+}
+
+test('the first successful query is a milestone once per consent generation', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  await invoke(env, 'query schema')
+  await invoke(env, 'query sql', 1)
+  assert.deepEqual(queuedMilestones(root), [], 'schema reads and failed queries are not a first query')
+  await invoke(env, 'query sql')
+  await invoke(env, 'query grep')
+  assert.deepEqual(queuedMilestones(root), ['first_query'])
+  writePolicy(root, 'local')
+  await invoke(env, 'query overview')
+  assert.deepEqual(queuedMilestones(root), ['first_query'], 'a new generation reports its own first query')
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(root, 'milestones.json'), 'utf8')).binding,
+    effectivePolicy(root).binding
+  )
+})
+
+test('the daemon reports first capture once rows are written, keeping the CLI marker', async (t) => {
+  const { noteProductPipeline } = await import('../../src/core/product_telemetry/client.js')
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  await invoke(env, 'query sql')
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  let now = NOW
+  const client = createProductClient({ env, role: 'daemon', now: () => now })
+  t.after(() => client.close())
+  now += 300000
+  t.mock.timers.tick(30000)
+  assert.equal(queuedMilestones(root).includes('first_capture'), false, 'no rows written, no capture milestone')
+  noteProductPipeline('write', { rows: 3, bytes: 100 })
+  now += 300000
+  t.mock.timers.tick(30000)
+  noteProductPipeline('write', { rows: 3, bytes: 100 })
+  now += 300000
+  t.mock.timers.tick(30000)
+  assert.deepEqual(queuedMilestones(root).sort(), ['first_capture', 'first_query'])
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(root, 'milestones.json'), 'utf8')).reached.sort(),
+    ['first_capture', 'first_query']
+  )
+})
+
+test('a successful claude-hook run queues no batch, a failed one still does', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  await invoke(env, 'claude-hook session-context')
+  await invoke(env, 'claude-hook classify-cwd')
+  assert.equal(createOutbox(root).entries().length, 0, 'hooks fire on every Claude session')
+  await invoke(env, 'claude-hook session-context', 1)
+  const records = createOutbox(root)
+    .entries()
+    .flatMap((e) => JSON.parse(e.wire).records)
+  assert.deepEqual(
+    records.filter((r) => r.name !== 'installation.inventory').map((r) => r.name),
+    ['cli.invocation', 'coded.failure']
+  )
+  await invoke(env, 'status')
+  assert.equal(createOutbox(root).entries().length, 2, 'other commands still queue a batch')
+})
+
+/**
+ * A receiver that acknowledges every POST and records each body.
+ * @param {string[]} posts @param {{lose?: number}} [options]
+ */
+function receiver(posts, { lose = 0 } = {}) {
+  return /** @type {typeof fetch} */ (
+    async (_, init) => {
+      if (!init?.method) return capability()
+      posts.push(String(init.body))
+      if (lose > 0) {
+        lose--
+        throw new Error('lost ack')
+      }
+      return new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+    }
+  )
+}
+
+test('many CLI invocations pack into a few full uploads', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  enroll(root)
+  /** @type {string[]} */
+  const posts = []
+  let offset = 0
+  // Each invocation is its own CLI process and sender, 80 of them in an hour.
+  const drain = async () => {
+    const delivery = createDelivery(root, {
+      now: () => Date.now() + offset,
+      fetchFn: receiver(posts)
+    })
+    await delivery.drain()
+    delivery.close()
+  }
+  const runs = 80
+  for (let i = 0; i < runs; i++) {
+    await drain()
+    await invoke(env, 'status')
+    offset += 45_000
+  }
+  assert(posts.length <= runs / 20, `${posts.length} uploads for ${runs} invocations`)
+  offset += 3600_000
+  for (let i = 0; i < 4; i++) await drain()
+  assert.equal(createOutbox(root).entries().length, 0, 'everything is delivered once the hold ends')
+  const bodies = posts.map((p) => JSON.parse(p))
+  assert.equal(
+    bodies.flatMap((b) => b.records).filter((r) => r.name === 'cli.invocation').length,
+    runs,
+    'every invocation is delivered exactly once'
+  )
+  assert.equal(new Set(bodies.map((b) => b.batch_id)).size, bodies.length)
+  for (const body of bodies) assert.equal(validateBatch(body, Date.now() + offset), null)
+  assert(posts.every((p) => Buffer.byteLength(p) <= 32768))
+  assert(bodies.some((b) => b.records.length > 90), 'a busy hour sends full batches')
+})
+
+test('a packed upload retries byte-identically and later batches never join it', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  assert(policy.binding)
+  let now = NOW
+  const queue = createOutbox(root, { now: () => now })
+  for (let i = 3; i > 0; i--) queue.append(batch(NOW - i * 1000), policy.binding)
+  /** @type {string[]} */
+  const posts = []
+  const fetchFn = receiver(posts, { lose: 1 })
+  await createDelivery(root, { fetchFn, now: () => now, random: () => 0 }).drain()
+  assert.equal(JSON.parse(posts[0]).records.length, 3)
+  assert.equal(queue.entries().length, 1, 'the packed upload replaced its sources')
+  queue.append(batch(now), policy.binding)
+  now += 10_000
+  await createDelivery(root, { fetchFn, now: () => now }).drain()
+  assert.equal(posts[1], posts[0], 'the retry reuses the batch id and bytes')
   assert.equal(queue.entries().length, 1)
+  now += 3600_000
+  await createDelivery(root, { fetchFn, now: () => now }).drain()
+  assert.equal(posts.length, 3)
+  assert.notEqual(JSON.parse(posts[2]).batch_id, JSON.parse(posts[0]).batch_id)
+  assert.equal(JSON.parse(posts[2]).records.length, 1)
+  assert.equal(queue.entries().length, 0)
+})
+
+test('a pack interrupted before unlinking its sources sends their records once', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  assert(policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  for (let i = 3; i > 0; i--) queue.append(batch(NOW - i * 1000), policy.binding)
+  const slots = path.join(root, 'queue-v1')
+  const before = new Map(
+    fs.readdirSync(slots).map((f) => [f, fs.readFileSync(path.join(slots, f))])
+  )
+  const packed = queue.next(policy.binding)
+  assert(packed)
+  // Put the unlinked sources back, as if the process died after the seal.
+  for (const [file, bytes] of before)
+    if (!fs.existsSync(path.join(slots, file))) fs.writeFileSync(path.join(slots, file), bytes)
+  assert.equal(queue.entries().length, 3)
+  /** @type {string[]} */
+  const posts = []
+  await createDelivery(root, { fetchFn: receiver(posts), now: () => NOW }).drain()
+  assert.deepEqual(posts, [packed.wire])
+  assert.equal(queue.entries().length, 0)
+})
+
+test('packing never mixes bindings, roles or versions', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  assert(policy.binding)
+  let now = NOW
+  const queue = createOutbox(root, { now: () => now })
+  const event = (/** @type {number} */ at) =>
+    /** @type {any} */ (productEvent('heartbeat', { uptime_s: 1 }, at))
+  const cli = batch(NOW - 4000)
+  const daemon = productBatch(createProductResource({ role: 'daemon' }), [event(NOW - 3000)], NOW)
+  const older = productBatch(createProductResource({ version: '1.0.0' }), [event(NOW - 2000)], NOW)
+  const other = batch(NOW - 5000)
+  for (const b of [cli, daemon, older]) assert(queue.append(b, policy.binding))
+  assert(queue.append(other, binding), 'a copy from another consent generation')
+  /** @type {string[]} */
+  const posts = []
+  for (let i = 0; i < 4; i++) {
+    await createDelivery(root, { fetchFn: receiver(posts), now: () => now }).drain()
+    now += 3600_000
+  }
+  const sent = posts.map((p) => JSON.parse(p))
+  assert.equal(sent.length, 3)
+  assert.deepEqual(
+    sent.map((b) => [b.resource['service.role'], b.resource['service.version'], b.records.length]),
+    [
+      ['cli', PRODUCT_VERSION, 1],
+      ['daemon', PRODUCT_VERSION, 1],
+      ['cli', '1.0.0', 1]
+    ]
+  )
+  assert(!posts.some((p) => p.includes(/** @type {any} */ (other).batch_id)))
 })

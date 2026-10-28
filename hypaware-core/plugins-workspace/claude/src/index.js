@@ -1,20 +1,32 @@
 // @ts-check
 
+import { registerSkills } from '../../../skills/index.js'
+
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
-import { defaultConfigPath } from '../../../../src/core/config/schema.js'
+import { defaultConfigPath, prepareLocalConfigWrite } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
-import { describeEphemeralBinPath, findInstalledHypawareBin, isEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
+import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
+import { booleanFlagValue } from '../../../../src/core/cli/verb_codec.js'
+import { presetUnhonoredArgError } from '../../../../src/core/cli/command_args.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
-import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
-import { resolveClaudeCodeVersion } from './claude_version.js'
+import {
+  MODE_OTEL,
+  MODE_PROXY,
+  attach,
+  defaultSettingsPath,
+  preflightOtelAttach,
+  previewOverrideWarnings,
+} from './settings.js'
+import { claudeVersionPreflight, resolveClaudeCodeVersion } from './claude_version.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
@@ -127,15 +139,9 @@ export async function activate(ctx) {
   // where the file never exists.
   const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
-  // One per-session drop set for the whole plugin: the telemetry listener
-  // hosts the control route that writes it (LLP 0256) and the transcript
-  // backfill reads it, so `hyp session ignore` binds every lane this process
-  // runs. Memory only, and a daemon restart drops it, which is what keeps
-  // LLP 0067's ephemerality contract intact.
-  // @ref LLP 0395#sweep-consults-the-set [implements]: one set per activation,
-  // shared by the recorder and the scheduled sweep
-  /** @type {Set<string>} */
-  const ignoredSessions = new Set()
+  // @ref LLP 0403#storage [implements]: load saved exclusions for both live
+  // recording and backfill, including a fresh manual importer.
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
 
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({
@@ -177,6 +183,12 @@ export async function activate(ctx) {
   gateway.registerClient({
     name: CLIENT_NAME,
     defaultUpstream: UPSTREAM_NAME,
+    // The same resolver attach uses, so the probe is `claude --version` with
+    // no shell and a 3 s timeout, or the HYP_CLAUDE_CODE_VERSION override.
+    // @ref LLP 0532#boundary [implements]: setup asks once the client is picked; attach keeps its own check
+    async preflight() {
+      return claudeVersionPreflight(await resolveClaudeCodeVersion(ctx.env))
+    },
     /** @param {AiGatewayClientAttachContext} attachCtx */
     async attach(attachCtx) {
       const homeDir = ctx.env.HOME ?? os.homedir()
@@ -213,6 +225,13 @@ export async function activate(ctx) {
             const claudeVersion = await resolveClaudeCodeVersion(ctx.env)
             preflightOtelAttach({ claudeVersion, telemetryPort, spoolDir })
             if (attachCtx.dryRun) {
+              // The override check is a pure read, so the plan can name the
+              // leftover export the real attach would warn about.
+              // @ref LLP 0271#attach-reads-the-process-environment [implements]
+              const overrideWarnings = await previewOverrideWarnings({
+                settingsPath,
+                processEnv: ctx.env,
+              })
               span.setAttribute('status', 'ok')
               span.setAttribute('restored', false)
               writeAttachOutput(attachCtx, {
@@ -226,6 +245,7 @@ export async function activate(ctx) {
                 mode: MODE_OTEL,
                 telemetryPort,
                 spoolDir,
+                warnings: overrideWarnings,
               })
               return
             }
@@ -291,12 +311,15 @@ export async function activate(ctx) {
             const malformedWarnings = result.changed && result.warnings !== undefined
               ? [...result.warnings]
               : []
-            // The spool warning rides the same user-facing list but is counted
-            // apart: `malformed_blocks_repaired` names one specific repair, and
-            // folding an unrelated warning into it would make the count lie.
-            const warnings = spoolWarning === undefined
-              ? [...malformedWarnings]
-              : [...malformedWarnings, spoolWarning]
+            // The per-signal override and spool warnings ride the same
+            // user-facing list but are counted apart: `malformed_blocks_repaired`
+            // names one specific repair, and folding an unrelated warning into
+            // it would make the count lie.
+            const warnings = [
+              ...malformedWarnings,
+              ...(result.changed ? result.overrideWarnings ?? [] : []),
+              ...(spoolWarning === undefined ? [] : [spoolWarning]),
+            ]
             // Nothing else will ever mention an ephemeral hook path: the hook
             // exits 0 and says nothing once its command is gone, so the first
             // symptom is columns that stopped arriving. Pushed onto a copy, so
@@ -331,6 +354,24 @@ export async function activate(ctx) {
                 hyp_client: CLIENT_NAME,
                 bin_path: hookBin.binPath,
               })
+            } else if (hookBin.repointedFrom !== undefined) {
+              // The walk's other outcome, and the one nothing else reports: a
+              // pinned project dependency traded for some other copy, on a
+              // path flagged durable because it is.
+              warnings.push(
+                describeRepointedBinPath(hookBin.binPath, hookBin.repointedFrom, 'the managed hook')
+              )
+              // The warning above is read once, by whoever attached; the skew
+              // it discloses is met later as a subcommand exiting 0, with the
+              // attach long gone. Recorded for the same reason the ephemeral
+              // arm records its own choice: so the machine can be asked
+              // afterwards which copy the hook was pointed at, and off what.
+              logger.warn('client.attach.repointed_hook_bin', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                bin_path: hookBin.binPath,
+                repointed_from: hookBin.repointedFrom,
+              })
             }
 
             // A prior proxy marker makes this attach a migration. The settings
@@ -348,6 +389,8 @@ export async function activate(ctx) {
             let launchdEnvRemoved
             /** @type {string[]} */
             const migrationNotes = []
+            /** @type {string | undefined} */
+            let migrationResidue
             if (migratedFrom !== undefined) {
               const unwind = await unwindProxyLaunchdEnv({ homeDir })
               launchdEnvRemoved = unwind.launchdEnvRemoved
@@ -365,7 +408,7 @@ export async function activate(ctx) {
               // a proxy attach whose keychain dialog was refused still ran and
               // still left the CA, so claiming a grant we never verified would
               // be the one false line in the migration's story.
-              migrationNotes.push(
+              migrationResidue = (
                 (process.platform === 'darwin'
                   ? 'The HypAware Local CA, and any login-keychain trust it was granted, ' +
                     'is still in place. '
@@ -422,6 +465,7 @@ export async function activate(ctx) {
               migratedFrom,
               launchdEnvRemoved,
               migrationNotes,
+              ...(migrationResidue !== undefined ? { migrationResidue } : {}),
               warnings,
             })
           } catch (err) {
@@ -494,26 +538,13 @@ export async function activate(ctx) {
   // session-context hook.
   ctx.commands.register({
     name: 'claude-hook classify-cwd',
-    summary: 'Internal Claude Code hook: prompt to classify an unclassified folder on an enrolled machine',
+    summary: 'Internal Claude Code hook: prompt to classify an unclassified folder on a machine that forwards',
     usage: 'hyp claude-hook classify-cwd',
     hidden: true,
     run: runClaudeClassifyHook,
   })
 
-  const skillsRoot = path.resolve(skillsRootDir(), 'skills')
-  // @ref LLP 0011#interactive-walkthrough [implements]: contributes client skills the first-run walkthrough installs
-  for (const skillName of [
-    'hypaware-query',
-    'hypaware-reference',
-    'hypaware-privacy',
-  ]) {
-    ctx.skills.register({
-      name: skillName,
-      plugin: PLUGIN_NAME,
-      clients: ['claude'],
-      sourceDir: path.join(skillsRoot, skillName),
-    })
-  }
+  registerSkills(ctx, PLUGIN_NAME, 'claude')
 
   const agentsRoot = path.resolve(skillsRootDir(), 'agents')
   ctx.agents.register({
@@ -554,7 +585,9 @@ export async function activate(ctx) {
  * and still runs, months later, from a working directory nobody has chosen
  * yet, and the recorded command is `cwd` and `git_branch` capture rather than
  * any version-pinned surface. An operator who does mean a particular copy says
- * so with `HYPAWARE_BIN`.
+ * so with `HYPAWARE_BIN`. `repointedFrom` carries the entrypoint the walk
+ * moved off, so the caller can disclose the swap instead of leaving it to be
+ * met later as a subcommand exiting 0 and doing nothing (issue #1623).
  *
  * With nothing installed, the ephemeral path still captures until npm removes
  * it, so it is written and flagged `ephemeral` rather than refused.
@@ -568,15 +601,19 @@ export async function activate(ctx) {
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {string} [cliBinPath]
- * @returns {{ binPath: string, ephemeral: boolean }}
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string }}
  */
 export function resolveHookBinPath(env, cliBinPath = CLI_BIN_PATH) {
   const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
   if (explicit) return { binPath: path.resolve(explicit), ephemeral: false }
   if (!isEphemeralBinPath(cliBinPath, env)) return { binPath: cliBinPath, ephemeral: false }
   const installed = findInstalledHypawareBin(env)
-  if (installed !== undefined) return { binPath: installed, ephemeral: false }
-  return { binPath: cliBinPath, ephemeral: true }
+  if (installed === undefined) return { binPath: cliBinPath, ephemeral: true }
+  return {
+    binPath: installed,
+    ephemeral: false,
+    ...(isSameBinFile(installed, cliBinPath) ? {} : { repointedFrom: cliBinPath }),
+  }
 }
 
 /**
@@ -590,6 +627,34 @@ function firstNonEmpty(...values) {
 }
 
 /**
+ * Read a boolean flag out of a preset's raw argv the way the CLI codec
+ * reads one: a bare `--flag` is true, `--flag=true` / `--flag=false`
+ * carry their value, and any other inline value is a usage error. A
+ * preset is dispatched before flag parsing (src/core/commands/init.js),
+ * so it reads argv itself, and a plain `argv.includes('--dry-run')`
+ * silently drops `--dry-run=true`: a spelling the CLI accepts everywhere
+ * else. Same class as src/core/cli/remote_commands.js's `--no-forward=true`.
+ * Reading `--dry-run=TRUE` as false here wrote the config the operator
+ * asked only to preview (issue #2440), so a malformed value refuses.
+ *
+ * @param {string[]} argv
+ * @param {string} name flag name without the leading dashes
+ * @returns {{ ok: true, value: boolean } | { ok: false, error: string }}
+ */
+function booleanFlag(argv, name) {
+  const bare = `--${name}`
+  const prefix = `${bare}=`
+  /** @type {{ ok: true, value: boolean } | { ok: false, error: string }} */
+  let read = { ok: true, value: false }
+  for (const token of argv) {
+    if (token !== bare && !token.startsWith(prefix)) continue
+    read = booleanFlagValue(name, token === bare ? undefined : token.slice(prefix.length))
+    if (!read.ok) return read
+  }
+  return read
+}
+
+/**
  * `hyp setup claude-and-otel-local`
  *
  * Writes a v2 config that picks: `@hypaware/ai-gateway`,
@@ -599,31 +664,42 @@ function firstNonEmpty(...values) {
  *
  * The preset never overwrites an existing config file silently (pass
  * `--force` to opt into overwrite); otherwise the existing file
- * stays and the command returns 1.
+ * stays and the command returns 1. On `--force` the old file is copied
+ * to `hypaware-config.json.bak-<ts>` first. `--dry-run` reports the path
+ * the preset would write and writes nothing, refusing on an existing
+ * config exactly as a real run would. Both flags are read the way the CLI
+ * codec reads a boolean, so `--force=true` / `--dry-run=true` and
+ * `--force=false` / `--dry-run=false` work as well as the bare flags, and
+ * any other inline value (`--dry-run=TRUE`, `--force=1`) exits 2 before
+ * anything is written, as it does on the no-preset form (issue #2440).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
-  const force = argv.includes('--force')
+  // Ahead of the backup below, so a refused run leaves nothing behind.
+  const unhonored = presetUnhonoredArgError(argv, 'claude-and-otel-local')
+  if (unhonored !== null) {
+    ctx.stderr.write(`${unhonored}\n`)
+    return 2
+  }
+  const dryRunFlag = booleanFlag(argv, 'dry-run')
+  if (!dryRunFlag.ok) {
+    ctx.stderr.write(`hyp setup: ${dryRunFlag.error}\n`)
+    return 2
+  }
+  const forceFlag = booleanFlag(argv, 'force')
+  if (!forceFlag.ok) {
+    ctx.stderr.write(`hyp setup: ${forceFlag.error}\n`)
+    return 2
+  }
+  const dryRun = dryRunFlag.value
+  const force = forceFlag.value
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   const configPath = ctx.env.HYP_CONFIG
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(hypHome)
-
-  if (!force) {
-    try {
-      await fs.access(configPath)
-      ctx.stderr.write(
-        `hyp setup: config already exists at ${configPath} (pass --force to overwrite)\n`
-      )
-      return 1
-    } catch (err) {
-      const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
-      if (code !== 'ENOENT') throw err
-    }
-  }
 
   /** @type {HypAwareV2Config} */
   const config = {
@@ -682,9 +758,33 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
     },
   }
 
-  await fs.mkdir(path.dirname(configPath), { recursive: true })
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
-  ctx.stdout.write(`✓ Wrote ${configPath}\n`)
+  // Ahead of the overwrite guard and its backup, so a refused run leaves
+  // nothing behind (the preset composes no proxy_mode, like the picker).
+  // @ref LLP 0524#check [implements]: the literal preset owes the same check as the picker fold
+  const { preflightLegacyProxyAttach } = await import('../../../../src/core/cli/walkthrough.js')
+  if (!(await preflightLegacyProxyAttach({ config, configPath, env: ctx.env, stderr: ctx.stderr }))) return 1
+
+  // A preset is a scripted non-interactive init (LLP 0011
+  // #non-interactive-entry), so it owes the same overwrite contract as every
+  // other local-layer writer: refuse an existing config, and back it up before
+  // replacing it under `--force`.
+  const guard = await prepareLocalConfigWrite({ targetPath: configPath, force, dryRun })
+  if (!guard.proceed) {
+    ctx.stderr.write(`hyp setup: ${guard.message}\n`)
+    return 1
+  }
+  if (guard.backupPath) {
+    // A dry run copied nothing, so it reports the backup it would have made.
+    ctx.stdout.write(dryRun
+      ? `(dry-run) would back up existing config to ${guard.backupPath}\n`
+      : `  backed up existing config to ${guard.backupPath}\n`)
+  }
+
+  if (!dryRun) {
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
+  }
+  ctx.stdout.write(dryRun ? `(dry-run) Would write ${configPath}\n` : `✓ Wrote ${configPath}\n`)
   ctx.stdout.write('  plugins: @hypaware/ai-gateway, @hypaware/otel, @hypaware/local-fs, @hypaware/format-parquet, @hypaware/claude\n')
   ctx.stdout.write('  next: hyp client attach claude\n')
   return 0
@@ -804,6 +904,7 @@ export async function unwindProxyLaunchdEnv({
  *   migratedFrom?: 'proxy',
  *   launchdEnvRemoved?: boolean,
  *   migrationNotes?: string[],
+ *   migrationResidue?: string,
  *   warnings?: string[],
  * }} fields
  */
@@ -850,6 +951,9 @@ function writeAttachOutput(attachCtx, fields) {
         ? `  Would set ${managedKey} to the local telemetry listener\n`
         : `  Would set ${managedKey} to the local gateway endpoint\n`
     )
+    for (const warning of fields.warnings ?? []) {
+      attachCtx.stdout.write(`  ! ${warning}\n`)
+    }
     return
   }
   attachCtx.stdout.write(`✓ Claude Code attached (${fields.settingsPath})\n`)
@@ -865,8 +969,11 @@ function writeAttachOutput(attachCtx, fields) {
   } else if (fields.port !== undefined) {
     attachCtx.stdout.write(`  ${managedKey} = http://127.0.0.1:${fields.port}\n`)
   }
+  // Marked `!`, like the residue below: the two lines here that report
+  // something the user did not do or still has to, which is what a caller
+  // that condenses this report (setup's finish step) keeps.
   if (fields.prevValue !== undefined) {
-    attachCtx.stdout.write(`  (previous ${managedKey} was ${fields.prevValue})\n`)
+    attachCtx.stdout.write(`  ! previous ${managedKey} was ${fields.prevValue}\n`)
   }
   // The migration story, told where the user is looking: what the switch
   // released, what was unwound, and the one residue that is theirs to end
@@ -875,6 +982,9 @@ function writeAttachOutput(attachCtx, fields) {
   // @ref LLP 0262#migration [implements]: the offer is a printed step, not an action
   for (const note of fields.migrationNotes ?? []) {
     attachCtx.stdout.write(`  ${note}\n`)
+  }
+  if (fields.migrationResidue !== undefined) {
+    attachCtx.stdout.write(`  ! ${fields.migrationResidue}\n`)
   }
   for (const warning of fields.warnings ?? []) {
     attachCtx.stdout.write(`  ! ${warning}\n`)

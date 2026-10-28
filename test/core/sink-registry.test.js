@@ -212,12 +212,15 @@ test('register touches the Map only after every plugin property has been read', 
   assert.deepEqual(reg.listContributions().map((e) => e.supports), [['queryable']])
 })
 
-test('instantiate attributes its span, its handle and its counter from one read of plugin', async () => {
+test('instantiate attributes its span, its handle and its counter from the owner the kernel resolved', async () => {
   // `instantiate` read `contribution.plugin` once per use, seven times on
-  // this path: both `sink.*` records name it twice each, and the span, the
-  // handle and the `hyp_sinks_registered` counter once. One instantiation
-  // could be spanned under one plugin, counted under another and returned as
-  // a third.
+  // this path, so one instantiation could be spanned under one plugin,
+  // counted under another and returned as a third (issue #1553). The count is
+  // zero now: every label comes from `args.plugin`, so a contribution
+  // renaming itself after `register` moves nothing (issue #1562). This is the
+  // one caller in the repo that passed an `args.plugin` deliberately
+  // differing from the contribution's, and it passed a bare string where
+  // `InstantiateArgs` declares an `ActivePlugin`.
   const reg = createSinkRegistry()
   let reads = 0
   const contribution = /** @type {any} */ ({
@@ -234,14 +237,40 @@ test('instantiate attributes its span, its handle and its counter from one read 
     instanceName: 'inst',
     contribution,
     config: {},
-    plugin: '@third-party/drifting-plugin',
+    plugin: { name: '@third-party/drifting-plugin', version: '1.0.0' },
     paths: { rootDir: '/', stateDir: '/', cacheDir: '/', tempDir: '/' },
     log: { info() {}, warn() {}, error() {}, debug() {} },
   }))
 
-  assert.equal(reads, 1, 'instantiate read the plugin\'s `plugin` more than once')
-  assert.equal(handle.plugin, 'R1')
-  assert.notEqual(contribution.plugin, 'R1', 'the fixture stopped drifting')
+  assert.equal(reads, 0, 'instantiate read the contribution\'s `plugin` at all')
+  assert.equal(handle.plugin, '@third-party/drifting-plugin')
+  assert.equal(reg.ownerOf('inst'), '@third-party/drifting-plugin', 'the owner record and the handle disagree')
+  assert.equal(contribution.plugin, 'R1', 'the fixture stopped drifting, so nothing was proved')
+  await reg.closeAll()
+})
+
+test('an instantiation with no resolved owner is unattributed rather than attributed to the contribution', async () => {
+  // `InstantiateArgs` requires `plugin`, so this is a caller outside the
+  // contract. With no `ActivePlugin` to resolve, the kernel has nothing to
+  // attribute the instance to, and answering `''` is the fail-closed reading
+  // `sinkInstanceName` and the facade's `shownName` already give: repeating a
+  // claim the kernel cannot check is how #1562 read in the first place.
+  const reg = createSinkRegistry()
+  const handle = await reg.instantiate(/** @type {any} */ ({
+    kind: 'request',
+    instanceName: 'orphan',
+    contribution: {
+      name: 'a-sink',
+      plugin: '@third-party/self-declared',
+      supports: [],
+      async create() { return { async exportBatch() { return {} }, async close() {} } },
+    },
+    config: {},
+    paths: { rootDir: '/', stateDir: '/', cacheDir: '/', tempDir: '/' },
+    log: { info() {}, warn() {}, error() {}, debug() {} },
+  }))
+  assert.equal(handle.plugin, '')
+  assert.equal(reg.ownerOf('orphan'), undefined)
   await reg.closeAll()
 })
 
@@ -266,13 +295,18 @@ test('instantiate resolves supports from one read of the encoder', async () => {
     writerPlugin: '@hypaware/format-parquet',
     encoder,
     config: {},
-    plugin: '@hypaware/local-fs',
+    plugin: { name: '@hypaware/local-fs', version: '1.0.0' },
     paths: { rootDir: '/', stateDir: '/', cacheDir: '/', tempDir: '/' },
     log: { info() {}, warn() {}, error() {}, debug() {} },
   }))
 
   assert.equal(reads, 1, 'resolveSupports read the encoder\'s `supports` more than once')
   assert.deepEqual(handle.supports, ['queryable'])
+  // The `ActivePlugin` `InstantiateArgs` declares, not the bare string this
+  // fixture carried: with no resolvable owner a blob handle labels itself
+  // `''` for both fields and nothing here would have noticed.
+  assert.equal(handle.plugin, '@hypaware/local-fs')
+  assert.equal(handle.destination, '@hypaware/local-fs')
   assert.deepEqual(encoder.supports, [], 'the fixture stopped drifting')
   await reg.closeAll()
 })
@@ -352,16 +386,23 @@ function supportsIsStillAnAccessor(contribution) {
 }
 
 /**
+ * `owner`, when given, stands in for the `ActivePlugin` record the kernel's
+ * materializer resolved out of the config row, which is what
+ * `src/core/sinks/materialize.js` passes. The default is the bare string the
+ * tests above have always passed: it names no plugin the registry can read,
+ * which is the host-driven shape.
+ *
  * @param {string} instanceName
  * @param {unknown} contribution
+ * @param {string} [owner]
  */
-function requestArgs(instanceName, contribution) {
+function requestArgs(instanceName, contribution, owner) {
   return /** @type {any} */ ({
     kind: 'request',
     instanceName,
     contribution,
     config: {},
-    plugin: '@third-party/drifting-supports',
+    plugin: owner ? { name: owner, version: '1.0.0' } : '@third-party/drifting-supports',
     paths: { rootDir: '/', stateDir: '/', cacheDir: '/', tempDir: '/' },
     log: { info() {}, warn() {}, error() {}, debug() {} },
   })
@@ -559,6 +600,79 @@ test('the sink.contribute, sink.resolved and sink.register records agree on supp
   await reg.closeAll()
 })
 
+// One contribution object, two registrations. `contribution.plugin` is a live
+// plugin-written property, so the registrar check `register` applies (#1565)
+// binds each registration to the plugin the kernel saw call it without forcing
+// the object to answer one name: two plugins sharing one contribution (a
+// shared module, or one handed over as a capability value) leave the registry
+// holding two wrappers with two separately validated tag sets. Resolving that
+// object by identity alone took the first wrapper, so the instance built for
+// the second plugin was handed the tags published in the first's
+// `sink.contribute`, and `sink.resolved`/`sink.register` contradicted the
+// `sink.contribute` for the instance they name (#1582).
+test('a contribution registered by two plugins resolves its own registration\'s tags', async () => {
+  const reg = createSinkRegistry()
+  let registrar = ''
+  const shared = /** @type {any} */ ({
+    name: 'shared',
+    get plugin() { return registrar },
+    get supports() { return registrar === '@third-party/first' ? ['queryable'] : [] },
+    async create() { return { async exportBatch() { return {} }, async close() {} } },
+  })
+
+  const records = await recordsFrom(async () => {
+    registrar = '@third-party/first'
+    reg.registeringAs(/** @type {any} */ ('@third-party/first'), () => { reg.register(shared) })
+    registrar = '@third-party/second'
+    reg.registeringAs(/** @type {any} */ ('@third-party/second'), () => { reg.register(shared) })
+
+    // Both of `shared`'s getters read `registrar`, so pointing it back at the
+    // first registration makes the live `plugin` and `supports` answer
+    // '@third-party/first' and ['queryable'] from here on. Only a lookup keyed
+    // on the kernel-resolved owner (passed below as '@third-party/second')
+    // still finds the second registration's own []; one keyed on
+    // `contribution.plugin` would find ['queryable'] instead and fail this
+    // test. The fallback-to-contribution-supports path is pinned by the other
+    // tests in this file, not this one, since this test's owner match always
+    // hits.
+    registrar = '@third-party/first'
+
+    // What `materializeRequest` does: select the registration whose `plugin`
+    // is the one the config row named, then instantiate it against that
+    // plugin's own activation record.
+    await reg.instantiate(requestArgs('second-inst', shared, '@third-party/second'))
+  })
+
+  // Non-vacuity: one object, two registrations, two different validated sets.
+  assert.deepEqual(
+    reg.listContributions().map((e) => [e.plugin, e.supports]),
+    [['@third-party/first', ['queryable']], ['@third-party/second', []]]
+  )
+  for (const entry of reg.listContributions()) assert.equal(entry.contribution, shared)
+
+  assert.deepEqual(
+    /** @type {any} */ (reg.get('second-inst'))?.supports,
+    [],
+    'the instance resolved the tags validated for the other plugin\'s registration'
+  )
+
+  const supportsFor = (/** @type {string} */ event, /** @type {string} */ plugin) => records
+    .filter((r) => r.body === event && r.attributes.hyp_plugin === plugin)
+    .map((r) => r.attributes.hyp_sink_supports)
+  assert.deepEqual(supportsFor('sink.contribute', '@third-party/second'), [''])
+  assert.deepEqual(
+    supportsFor('sink.resolved', '@third-party/second'),
+    [''],
+    'sink.resolved contradicted the sink.contribute for the same plugin'
+  )
+  assert.deepEqual(
+    supportsFor('sink.register', '@third-party/second'),
+    [''],
+    'sink.register contradicted the sink.contribute for the same plugin'
+  )
+  await reg.closeAll()
+})
+
 test('the shipped sink contributions resolve the supports they declare', async () => {
   // Honest-path equivalence: the three sinks HypAware ships declare plain
   // arrays, so the validated tags and a live read are the same value, and the
@@ -591,7 +705,7 @@ test('the shipped sink contributions resolve the supports they declare', async (
       writerPlugin: '@hypaware/format-parquet',
       encoder: { format: 'parquet', supports: encoderSupports, async encodePartition() { return {} } },
       config: { dir: path.join(dir, 'exports') },
-      plugin: '@hypaware/local-fs',
+      plugin: { name: '@hypaware/local-fs', version: '1.0.0' },
       paths: { rootDir: dir, stateDir: dir, cacheDir: dir, tempDir: dir },
       log: { info() {}, warn() {}, error() {}, debug() {} },
     })

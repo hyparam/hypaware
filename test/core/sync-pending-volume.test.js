@@ -14,6 +14,7 @@ import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createSourceWithholdResolver } from '../../src/core/cache/source-withhold.js'
 import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
+import { writeFirstSyncHoldMarker } from '../../src/core/usage-policy/first_sync_hold.js'
 
 // `hyp sync`'s plan is the consent surface: it is where a person decides
 // whether to let captured data leave the machine. Naming the destinations
@@ -230,7 +231,7 @@ const TWELVE_ROWS = Array.from({ length: 12 }, (_, i) => ({
   dropped: i + 1 === 5 || i + 1 === 9,
 }))
 
-test('the plan states pending rows, the resume point, and withheld rows per destination', async () => {
+test('the sharing plan states upload rows and excludes the accompanying copy from its totals', async () => {
   const hypHome = await makeHome('backlog')
   await writeWatermark({
     hypHome,
@@ -254,13 +255,13 @@ test('the plan states pending rows, the resume point, and withheld rows per dest
 
   assert.equal(code, 0)
   // Past watermark seq 3: nine entries, two of them withheld.
-  assert.match(stdout.text, /7 rows pending, captured since 2026-08-12T00:50Z/)
+  assert.match(stdout.text, /^Ready to upload 7 rows \(captured since 2026-08-12T00:50Z\) to hypaware\.example\.com\.\n/m)
   assert.match(stdout.text, /2 rows withheld by policy \(not sent\)/)
-  // No watermark for `local` at all, so its range is the whole local history.
-  assert.match(stdout.text, /10 rows pending, the full local history/)
+  // The accompanying copy has a different cursor; it is not another upload.
+  assert.doesNotMatch(stdout.text, /10 rows|\/home\/u\/exports/)
   // The withheld rows are stated apart from the pending ones, never added in.
-  assert.doesNotMatch(stdout.text, /9 rows pending/)
-  assert.doesNotMatch(stdout.text, /12 rows pending/)
+  assert.doesNotMatch(stdout.text, /\b9 rows/)
+  assert.doesNotMatch(stdout.text, /12 rows/)
 })
 
 test('a machine with no backlog renders differently from one with a backlog', async () => {
@@ -275,8 +276,8 @@ test('a machine with no backlog renders differently from one with a backlog', as
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /nothing pending/)
-  assert.doesNotMatch(stdout.text, /rows pending/)
+  assert.match(stdout.text, /^Nothing pending for hypaware\.example\.com\.\n/m)
+  assert.doesNotMatch(stdout.text, /Ready to upload/)
   assert.doesNotMatch(stdout.text, /withheld by policy/)
 
   // The same command on a machine that has a backlog must not print this.
@@ -288,7 +289,25 @@ test('a machine with no backlog renders differently from one with a backlog', as
   })
   await runSync(['--dry-run'], busyCtx)
   assert.notEqual(busyOut.text, stdout.text, 'a size-free plan is the defect: these must differ')
-  assert.doesNotMatch(busyOut.text, /nothing pending/)
+  assert.doesNotMatch(busyOut.text, /Nothing pending/)
+  assert.match(busyOut.text, /^Ready to upload 10 rows \(the full history\) to hypaware\.example\.com\.\n/m)
+})
+
+test('a held machine with no backlog still states the deadline a yes would end', async () => {
+  const hypHome = await makeHome('empty-held')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: fakeStorage({ hypHome, entries: [] }),
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  // Nothing is pending now, but confirming still clears the hold for every
+  // row recorded later, so the plan must say when it would have ended.
+  assert.match(stdout.text, /^Nothing pending for hypaware\.example\.com \(automatic by [^)]+\)\.\n/m)
 })
 
 test('rewinding a watermark changes what the dry-run plan discloses', async () => {
@@ -305,7 +324,7 @@ test('rewinding a watermark changes what the dry-run plan discloses', async () =
   })
   const before = makeCtx({ hypHome, sinks: [sink], storage })
   await runSync(['--dry-run'], before.ctx)
-  assert.match(before.stdout.text, /2 rows pending, captured since 2026-08-20T09:00Z/)
+  assert.match(before.stdout.text, /^Ready to upload 2 rows \(captured since 2026-08-20T09:00Z\) to /m)
 
   await writeWatermark({
     hypHome,
@@ -316,7 +335,7 @@ test('rewinding a watermark changes what the dry-run plan discloses', async () =
   })
   const after = makeCtx({ hypHome, sinks: [sink], storage })
   await runSync(['--dry-run'], after.ctx)
-  assert.match(after.stdout.text, /10 rows pending, captured since 2026-08-20T09:00Z/)
+  assert.match(after.stdout.text, /^Ready to upload 10 rows \(captured since 2026-08-20T09:00Z\) to /m)
   assert.notEqual(after.stdout.text, before.stdout.text)
 })
 
@@ -334,7 +353,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
   // direction load can only push it (#1105). Freezing the clock keeps every
   // deadline unreachable and leaves the row limit as the sole stop, which is
   // the shortfall this case exists to pin. Nothing here passes `rowLimit`, so
-  // the 200,000 below is the shipped limit and not a fixture's. A frozen clock
+  // the 2,000,000 below is the shipped limit and not a fixture's. A frozen clock
   // cannot also pin `DEFAULT_BUDGET_MS`: every budget above zero leaves the
   // deadline unreachable, so the same freeze that removes the flake removes
   // this case's hold on the budget. That default is pinned on its own injected
@@ -347,7 +366,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
     storage: /** @type {any} */ (fakeStorage({
       hypHome,
       entries: function* () {
-        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+        for (let seq = 1; seq <= 2500000; seq += 1) yield { seq }
       },
     })),
     stateRoot: stateDir(hypHome),
@@ -356,7 +375,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
 
   const volume = /** @type {any} */ (volumes.get('central'))
   assert.equal(volume.status, 'partial', 'a count stopped at its limit is a floor, not a total')
-  assert.equal(volume.rows, 200000, 'the floor is the row limit reached, never the 250,000 rows behind it')
+  assert.equal(volume.rows, 2000000, 'the floor is the row limit reached, never the 2,500,000 rows behind it')
 })
 
 test('`hyp sync` counts to the shipped scan limit, not to one its own call passed in', async () => {
@@ -381,7 +400,7 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
     storage: fakeStorage({
       hypHome,
       entries: function* () {
-        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+        for (let seq = 1; seq <= 2500000; seq += 1) yield { seq }
       },
     }),
   })
@@ -389,10 +408,10 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
   const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /at least 200,000 rows pending/, 'the command counts to the shipped limit, not to a caller\'s')
+  assert.match(stdout.text, /Ready to upload at least 2,000,000 rows \(/, 'the command counts to the shipped limit, not to a caller\'s')
   assert.doesNotMatch(
     stdout.text,
-    /250,000 rows pending/,
+    /2,500,000 rows/,
     'the floor is the limit the scan reached, never the rows behind it'
   )
 })
@@ -428,13 +447,13 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
   const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /1,234 rows pending, the full local history/)
+  assert.match(stdout.text, /Ready to upload 1,234 rows \(the full history\) to /)
   assert.doesNotMatch(
     stdout.text,
-    /1\.234 rows pending/,
+    /1\.234 rows/,
     'a count read off the ambient locale renders one backlog two ways across machines'
   )
-  assert.doesNotMatch(stdout.text, /1234 rows pending/, 'a count a person has to read is grouped, not a bare integer')
+  assert.doesNotMatch(stdout.text, /1234 rows/, 'a count a person has to read is grouped, not a bare integer')
 })
 
 test('the shipped wall-clock budget is the one that stops a long count, not a fixture\'s', async () => {
@@ -452,7 +471,7 @@ test('the shipped wall-clock budget is the one that stops a long count, not a fi
   ])
   let t = 0
   const now = () => t
-  // Comfortably past the stop below, and comfortably short of the 200,000-row
+  // Comfortably past the stop below, and comfortably short of the 2,000,000-row
   // limit, so the budget is the only thing that can end this count.
   const entries = function* () {
     for (let seq = 1; seq <= 6000; seq += 1) {
@@ -491,9 +510,9 @@ test('a count that cannot be taken says unknown, never zero', async () => {
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /pending volume unknown/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
-  assert.doesNotMatch(stdout.text, /0 rows pending/)
+  assert.match(stdout.text, /^Ready to upload to hypaware\.example\.com \(pending volume unknown: /m)
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
+  assert.doesNotMatch(stdout.text, /\b0 rows/)
 })
 
 test('a spent wall-clock budget yields unknown, not a floor built from one partial partition', async () => {
@@ -827,9 +846,9 @@ test('rows still buffered in the spool make the count a floor rather than a sile
   // scan-limit case above is counted through `previewPendingRows` on a frozen
   // clock precisely so it stops asserting how fast the machine is (#1105), and
   // this is where the string it used to check is pinned instead.
-  assert.match(stdout.text, /at least 10 rows pending, the full local history/)
-  assert.doesNotMatch(stdout.text, /^ +10 rows pending/m, 'a floor rendered as a total overstates what the scan saw')
-  assert.doesNotMatch(stdout.text, /nothing pending/)
+  assert.match(stdout.text, /^Ready to upload at least 10 rows \(the full history\) to hypaware\.example\.com\.\n/m)
+  assert.doesNotMatch(stdout.text, /Ready to upload 10 rows/, 'a floor rendered as a total overstates what the scan saw')
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
 })
 
 test('a plan still renders when the count itself throws: unknown, never a missing or zero line', async () => {
@@ -847,9 +866,8 @@ test('a plan still renders when the count itself throws: unknown, never a missin
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /central/)
-  assert.match(stdout.text, /pending volume unknown/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
+  assert.match(stdout.text, /^Ready to upload to hypaware\.example\.com \(pending volume unknown: /m)
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
 })
 
 test('previewPendingRows never rejects, even when storage itself throws on every call', async () => {
@@ -870,6 +888,193 @@ test('previewPendingRows never rejects, even when storage itself throws on every
   const volume = /** @type {any} */ (volumes.get('central'))
   assert.equal(volume.status, 'unknown')
   assert.equal(volume.rows, 0)
+})
+
+test('previewPendingRows never rejects on a thrown value that refuses to be described', async () => {
+  const hypHome = await makeHome('unprintable')
+  // The other half of rule 3, at the one place left that can raise. The outer
+  // `catch` turns every destination into `unknown`, but it builds that
+  // destination's reason out of the value the plugin threw, and a plugin picks
+  // its own value: `String(err)` runs that value's `toString`. The throw
+  // arrives from `handle.sink`, which the disposition pass reads outside
+  // `countForHandle`'s own guard, so the owner supplies both the throw and
+  // what the recovery tries to print with it.
+  const handle = fakeSink('central', {}, '@hypaware/central')
+  Object.defineProperty(handle, 'sink', {
+    get() { throw { toString() { throw new Error('unprintable') } } },
+  })
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([handle]),
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: [{ seq: 1 }] })),
+    stateRoot: stateDir(hypHome),
+  })
+
+  // Disclosed, not omitted and not zero: the destination keeps its line on the
+  // plan with an admitted gap, which is what rule 3 buys.
+  assert.deepEqual([...volumes.keys()], ['central'])
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown')
+  assert.equal(volume.rows, 0)
+})
+
+test('previewPendingRows never rejects on an Error whose message refuses to be described', async () => {
+  // The same refusal one frame further in. `message` is a writable own
+  // property on every `Error`, so a plugin can throw a value that passes
+  // `instanceof Error` and still carries the undescribable part: the reason
+  // text is built from `err.message`, and the destination's line is built by
+  // interpolating that reason. Describing the outer value but handing the
+  // inner one back unexamined moves the raise out of the guard rather than
+  // removing it, and the second caller moves it as far as the printer.
+  const unprintable = [
+    { toString() { throw new Error('unprintable') } },
+    Symbol('unprintable'),
+  ]
+  for (const message of unprintable) {
+    const hypHome = await makeHome('unprintable-message')
+    const handle = fakeSink('central', {}, '@hypaware/central')
+    Object.defineProperty(handle, 'sink', {
+      get() {
+        const err = new Error('outer')
+        // Defined rather than assigned only to get past `Error.message` being
+        // declared `string`, which is itself why nothing upstream had to
+        // examine it. An own data property is what a plugin would leave here.
+        Object.defineProperty(err, 'message', { value: message })
+        throw err
+      },
+    })
+
+    const volumes = await previewPendingRows({
+      handles: /** @type {any[]} */ ([handle]),
+      query: /** @type {any} */ (fakeQuery(hypHome)),
+      storage: /** @type {any} */ (fakeStorage({ hypHome, entries: [{ seq: 1 }] })),
+      stateRoot: stateDir(hypHome),
+    })
+
+    assert.deepEqual([...volumes.keys()], ['central'])
+    const volume = /** @type {any} */ (volumes.get('central'))
+    assert.equal(volume.status, 'unknown')
+    assert.equal(volume.rows, 0)
+    // A reason the plan can print. The other caller stores this one verbatim,
+    // and `renderVolume` interpolates it, so a non-string here is the same
+    // reject relocated to the printer.
+    assert.equal(typeof volume.reason, 'string')
+  }
+})
+
+// Rule 3 says `previewPendingRows` never rejects, and three reads used to sit
+// *above* the `try` that makes it true: the clock call that anchors the
+// budget, and the two capability probes on `query` and `storage`. Each is a
+// value its caller or a plugin owns - `activation.js` hands `ctx.query` and
+// `ctx.storage` to plugins raw and unfaceted, and the loader imports plugin
+// entrypoints into this same realm, so an accessor redefined on either is
+// reachable - and each raised out of the function instead of into its
+// recovery, taking the consent prompt down with it (issue #2096). The same
+// throw one frame later, out of the *call* rather than out of the read, was
+// caught all along. The three cases below pin each read inside the guard; the
+// fourth pins the plan that is the point of the guard still rendering.
+
+test('previewPendingRows never rejects on a clock that throws before the first count', async () => {
+  const hypHome = await makeHome('hostile-clock')
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: [{ seq: 1 }] })),
+    stateRoot: stateDir(hypHome),
+    // Anchoring the budget is the first thing the preview does, and it did it
+    // before the guard, so a clock that refuses took the whole preview with
+    // it. Every later reading of the same clock was already caught.
+    now: () => { throw new Error('the clock refused') },
+  })
+
+  assert.deepEqual([...volumes.keys()], ['central'])
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown')
+  assert.equal(volume.rows, 0)
+  assert.equal(typeof volume.reason, 'string')
+})
+
+test('previewPendingRows never rejects on a listDatasets accessor that throws', async () => {
+  const hypHome = await makeHome('hostile-listdatasets')
+  const query = fakeQuery(hypHome)
+  // A plugin's reach, not a test's: `ctx.query` is the kernel's own registry
+  // object, shared unfaceted with every activated plugin, so redefining the
+  // method the preview probes for is a property write away.
+  Object.defineProperty(query, 'listDatasets', {
+    configurable: true,
+    get() { throw new Error('the registry refused') },
+  })
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: [{ seq: 1 }] })),
+    stateRoot: stateDir(hypHome),
+  })
+
+  assert.deepEqual([...volumes.keys()], ['central'])
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown')
+  assert.equal(volume.rows, 0)
+  assert.equal(typeof volume.reason, 'string')
+})
+
+test('previewPendingRows never rejects on a readRowsSince accessor that throws', async () => {
+  const hypHome = await makeHome('hostile-readrowssince')
+  const storage = fakeStorage({ hypHome, entries: [{ seq: 1 }] })
+  // The same reach on the other contract object: a throwing `readRowsSince`
+  // *call* is already counted as a partition that could not be read, so a
+  // throwing read of the same name has no business being louder.
+  Object.defineProperty(storage, 'readRowsSince', {
+    configurable: true,
+    get() { throw new Error('storage refused') },
+  })
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+  })
+
+  assert.deepEqual([...volumes.keys()], ['central'])
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown')
+  assert.equal(volume.rows, 0)
+  assert.equal(typeof volume.reason, 'string')
+})
+
+test('a plan still renders when the capability probe itself throws, and nothing is sent', async () => {
+  const hypHome = await makeHome('hostile-probe')
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({ hypHome, entries: TWELVE_ROWS }),
+  })
+  Object.defineProperty(ctx.query, 'listDatasets', {
+    configurable: true,
+    get() { throw new Error('the registry refused') },
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  // The end-to-end half, and the half a unit case cannot state: the verb still
+  // exits, the plan still prints, and it prints the destination as an admitted
+  // gap rather than as nothing pending. A `reason` that refuses string
+  // coercion survives the preview and kills `renderVolume` instead, so a
+  // rendered line is also what proves the reason is printable (#2093); a
+  // non-string that coerces renders harmlessly and is pinned by the unit
+  // cases' `typeof` assertions instead.
+  assert.equal(code, 0)
+  assert.match(stdout.text, /^Ready to upload to hypaware\.example\.com \(pending volume unknown: /m)
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
+  assert.doesNotMatch(stdout.text, /Ready to upload (at least )?\d/)
+  // Fail-closed: a resolved preview is not a release. `--dry-run` stops short
+  // of the confirmation, and the run says so.
+  assert.match(stdout.text, /nothing was sent/)
 })
 
 test('a truncated count never claims a resume point it did not survey', async () => {
@@ -912,6 +1117,7 @@ test('a truncated count never claims a resume point it did not survey', async ()
     query: /** @type {any} */ (query),
     storage: /** @type {any} */ (storage),
     stateRoot: stateDir(hypHome),
+    rowLimit: 10,
   })
 
   const volume = /** @type {any} */ (volumes.get('central'))
@@ -923,7 +1129,7 @@ test('a truncated count never claims a resume point it did not survey', async ()
   assert.notEqual(volume.resume.kind, 'since')
 })
 
-test('a destination whose whole pending range is withheld never renders "at least 0 rows pending"', async () => {
+test('a destination whose whole pending range is withheld never renders "at least 0 rows"', async () => {
   const hypHome = await makeHome('allwithheld')
   const storage = fakeStorage({
     hypHome,
@@ -936,9 +1142,9 @@ test('a destination whose whole pending range is withheld never renders "at leas
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.doesNotMatch(stdout.text, /at least 0 rows pending/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
-  assert.match(stdout.text, /pending volume not fully counted/)
+  assert.doesNotMatch(stdout.text, /at least 0 rows/)
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
+  assert.match(stdout.text, /^Ready to upload to hypaware\.example\.com \(pending volume not fully counted/m)
   // The floor mark belongs on this line too, and this is the branch where it
   // carries the whole magnitude: the payload line has stood down to "not fully
   // counted", so the withheld tally is the only number on screen. An
@@ -1056,7 +1262,7 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   // produced it, so one shortfall proves the rendering for all of them. This
   // case uses the cheapest one to stage, an unflushed spool: `runSync` does not
   // plumb `rowLimit`/`budgetMs`/`now`, so reaching `partial` by scan limit through
-  // it would cost a 250,000-row fixture counted against a real clock, which is the
+  // it would cost a 2,500,000-row fixture counted against a real clock, which is the
   // wall-clock dependence the scan-limit case above was rewritten to shed (#1105).
   const short = await makeHome('withheld-floor')
   const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
@@ -1070,7 +1276,7 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   })
 
   assert.equal(await runSync(['--dry-run'], shortRun.ctx), 0)
-  assert.match(shortRun.stdout.text, /at least 10 rows pending/)
+  assert.match(shortRun.stdout.text, /Ready to upload at least 10 rows /)
   assert.match(shortRun.stdout.text, /at least 2 rows withheld by policy \(not sent\)/)
   assert.doesNotMatch(
     shortRun.stdout.text,
@@ -1200,9 +1406,15 @@ test('a local-only dataset counts for a local-fs destination and not for a centr
   const { ctx, stdout } = makeCtx({ hypHome, sinks: [central, local], storage })
   ctx.query = query
   assert.equal(await runSync(['--dry-run'], ctx), 0)
-  assert.match(stdout.text, /12 rows pending, the full local history/)
-  assert.match(stdout.text, /nothing pending/)
+  assert.doesNotMatch(stdout.text, /12 rows|\/home\/u\/exports/)
+  assert.match(stdout.text, /^Nothing pending for hypaware\.example\.com\.\n/m)
   assert.doesNotMatch(stdout.text, /withheld by policy/)
+
+  // Explicitly syncing the file target still previews its own rows.
+  const fileRun = makeCtx({ hypHome, sinks: [local], storage })
+  fileRun.ctx.query = query
+  assert.equal(await runSync(['--dry-run'], fileRun.ctx), 0)
+  assert.match(fileRun.stdout.text, /^Ready to export 12 rows \(the full history\) to \/home\/u\/exports\.\n/m)
 })
 
 // ---------------------------------------------------------------------------
@@ -1439,3 +1651,17 @@ for (const scenario of ['plain', 'withholding', 'legacy', 'absent-policy-columns
     }
   })
 }
+
+// The plan's count is taken before the prompt; the tick sends whatever is
+// pending when it runs, so the result line states no count of its own.
+test('the result line names where rows went, not the plan count', async () => {
+  const hypHome = await makeHome('result-no-count')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: fakeStorage({ hypHome, entries: TWELVE_ROWS }),
+  })
+  await runSync(['--yes'], ctx)
+  assert.match(stdout.text, /^Ready to upload 10 rows \(the full history\) to hypaware\.example\.com\.\n/m)
+  assert.match(stdout.text, /^✓ Uploaded to hypaware\.example\.com\n/m)
+})

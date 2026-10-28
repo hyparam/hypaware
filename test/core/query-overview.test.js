@@ -16,6 +16,7 @@ import {
   collectOverview,
   describeWindow,
   emptyOverview,
+  OVERVIEW_DEFAULT_COLUMNS,
   formatCount,
   missingSections,
   overviewRunnerFromCtx,
@@ -24,6 +25,7 @@ import {
   renderRepoMix,
 } from '../../src/core/query/overview.js'
 import { runQueryOverview } from '../../src/core/commands/query.js'
+import { displayWidth } from '../../src/core/cli/style.js'
 import { AUTO_REFRESH_FAILURE_MESSAGE, REFRESH_FAILURE_REASON_PREFIX } from '../../src/core/query/sql.js'
 
 /** @import { OverviewWindow } from '../../src/core/query/types.js' */
@@ -181,9 +183,10 @@ test('renderOverview: aligns columns, groups thousands, and bars the largest row
   const cells = (/** @type {string} */ line) => (line.match(/[▒█]/g) ?? []).length
   assert.ok(cells(opus) > cells(gpt))
   assert.equal(cells(gpt), 1)
-  // Each table says what its own bar charts, since they differ by section.
-  assert.match(out, /output\s+by input\+output/)
-  assert.match(out, /Token bars split ▒ input from █ output; cache is excluded/)
+  // The key line says what the token tables' `share` bar charts; a header
+  // that spelled it out would set a 15-column floor under the bar (#410).
+  assert.match(out, /output\s+share$/m)
+  assert.match(out, /Share bars split ▒ input from █ output; cache is excluded/)
 
   // An unlabelled group renders explicitly rather than as a blank column.
   assert.match(lines.find((l) => l.includes('1,200,000')) ?? '', /anthropic\s+\(model not recorded\)\s+1,200\s+1,200,000/)
@@ -330,10 +333,9 @@ test('renderOverview: the caller names the heading (setup milestone vs standing 
   assert.ok(!out.includes('What HypAware has recorded'))
 })
 
-test('renderOverview: no rows renders the empty state with what to do next', () => {
+test('renderOverview: no rows renders the empty state', () => {
   const out = renderOverview({ providerRows: [], dailyRows: [] })
   assert.match(out, /Nothing recorded yet/)
-  assert.match(out, /hyp query overview/)
   assert.ok(!out.includes('provider  '))
 })
 
@@ -346,7 +348,7 @@ test('renderOverview: folds the tail of a long provider list into a count line',
   assert.ok(!out.includes('m8'))
 })
 
-test('renderOverview: the caption and key wear the shades they describe', () => {
+test('renderOverview: the key wears the shades it describes', () => {
   const MAGENTA = '\x1b[35m'
   const CYAN = '\x1b[36m'
   const RESET = '\x1b[0m'
@@ -355,10 +357,6 @@ test('renderOverview: the caption and key wear the shades they describe', () => 
     dailyRows: [],
     color: true,
   })
-  // The header names each half in its own colour, so the table is its own
-  // key - matching the shades in the bar directly beneath it.
-  assert.ok(out.includes(`${MAGENTA}input${RESET}`))
-  assert.ok(out.includes(`${CYAN}output${RESET}`))
   // Legend glyph and word share a colour.
   assert.ok(out.includes(`${MAGENTA}▒ input${RESET}`))
   assert.ok(out.includes(`${CYAN}█ output${RESET}`))
@@ -368,8 +366,9 @@ test('renderOverview: the caption and key wear the shades they describe', () => 
 
   // A colour run must never sit inside a dim run: the reset that ends the
   // colour would end the dim too, leaving the rest of the row undimmed.
-  const header = out.split('\n').find((l) => l.includes('by ')) ?? ''
-  assert.ok(!/\x1b\[2m[^\x1b]*\x1b\[3[56]m/.test(header), `dim run swallows a colour: ${JSON.stringify(header)}`)
+  for (const line of out.split('\n').filter((l) => l.includes('share') || l.includes('Share'))) {
+    assert.ok(!/\x1b\[2m[^\x1b]*\x1b\[3[56]m/.test(line), `dim run swallows a colour: ${JSON.stringify(line)}`)
+  }
 })
 
 test('renderOverview: color=true wraps in ANSI, the default emits none', () => {
@@ -392,8 +391,8 @@ test('renderRepoMix: shortens paths, ranks by token volume, and counts repo-less
   // cached column would show a repo's cost as its 1.5% sliver.
   assert.match(out, /hypaware-3\/hypaware\s+73\s+255,403\s+488,328,729\s+1,993,041\s+▒+█+/)
   assert.match(out, /hypaware-2\/hypaware\s+26\s+235,507\s+173,399,157\s+1,243,332\s+▒+█+/)
-  // Same two-tone bar and caption as the other token tables.
-  assert.match(out, /output\s+by input\+output/)
+  // Same two-tone bar and header as the other token tables.
+  assert.match(out, /output\s+share$/m)
   assert.ok(!out.includes('/Users/x/'))
   // Stated, not silently dropped - and "no repo recorded" rather than
   // "outside a repo", which would be false for Codex rows (they never
@@ -846,8 +845,8 @@ test('hyp query overview: renders all four sections from real rows', async () =>
   assert.match(text, /2026-07-24\s+1\s+100\s+940\s+50/)
   // repos: path shortened, and the repo-less OpenAI session counted below
   assert.match(text, /acme\/api\s+2\s+300\s+940\s+75\s+▒+█+/)
-  // Every token table captions the same bar metric; tools charts its own.
-  assert.match(text, /output\s+by input\+output/)
+  // Every token table heads the same bar metric; tools charts its own.
+  assert.match(text, /output\s+share$/m)
   assert.match(text, /sessions\s+by calls/)
   assert.match(text, /\+ 1 session with no repo recorded/)
   // tools: only tool_call rows, most-called first
@@ -1107,4 +1106,207 @@ test('renderOverview escapes captured columns and keeps its own colour', () => {
   for (const found of out.match(/\u001b.{0,4}/g) ?? []) {
     assert.match(found, /^\u001b\[[0-9;]*m/, JSON.stringify(found))
   }
+})
+
+test('renderOverview clips a captured label before escaping it, so no escape is cut in half', () => {
+  // Escaping first would let the clip land inside `\u001b` and print a
+  // fragment such as `\u00…` (#766). Sliding the ESC across the clip point
+  // puts the boundary at every offset of its escape.
+  for (const columns of [100, 40]) {
+    for (let n = 20; n <= 34; n++) {
+      const label = 'm'.repeat(n) + '\u001b' + 'zzzz'
+      const out = renderOverview({
+        providerRows: [{ provider: 'p', model: label, input_tokens: 1, cached_tokens: 1, output_tokens: 1 }],
+        dailyRows: [],
+        toolRows: [{ tool_name: label, calls: 1, sessions: 1 }],
+        columns,
+      })
+      assert.equal(out.includes('\u001b'), false, `${columns}/${n}: raw ESC`)
+      // Every backslash printed starts a whole four-digit escape.
+      assert.equal(/\\(?!u[0-9a-f]{4})/.test(out), false, `${columns}/${n}: ${JSON.stringify(out)}`)
+    }
+  }
+})
+
+// #410: the block fits the width of the stream it is written to. Counts are
+// exact at every width; only labels and bars give ground, and a table that
+// cannot fit stacks its rows instead of overflowing.
+const WIDE_ROWS = {
+  providerRows: [
+    { provider: 'anthropic', model: 'claude-opus-4-1-20250805-extended-thinking', input_tokens: 1584212345, cached_tokens: 158420001234, output_tokens: 15842012 },
+    { provider: 'anthropic', model: '日本語のモデル名', input_tokens: 1200, cached_tokens: 1200000, output_tokens: 12000 },
+    { provider: 'openai', model: 'gpt-5.5', input_tokens: 512, cached_tokens: 64, output_tokens: 6 },
+  ],
+  dailyRows: DAILY_ROWS,
+  repoRows: [{ repo_root: '/w/acme/a-really-long-repository-name-that-goes-on', sessions: 3, input_tokens: 100, cached_tokens: 900, output_tokens: 50 }],
+  toolRows: [{ tool_name: 'Bash', calls: 40, sessions: 3 }, { tool_name: 'mcp__github__create_pull_request_review', calls: 4, sessions: 1 }],
+  window: WINDOW,
+}
+const EXACT_COUNTS = ['1,584,212,345', '158,420,001,234', '15,842,012', '1,200,000', '450,200', '4,502']
+
+/** @param {string} out */
+const widest = (out) => Math.max(...out.split('\n').map(displayWidth))
+
+test('renderOverview: fits 80 and 100 columns with every count exact, colour on or off', () => {
+  for (const columns of [80, 100]) {
+    for (const color of [false, true]) {
+      const out = renderOverview({ ...WIDE_ROWS, color, columns })
+      assert.ok(widest(out) <= columns, `${columns} cols, color=${color}: widest line is ${widest(out)}`)
+      for (const count of EXACT_COUNTS) assert.ok(out.includes(count), `${columns}: ${count} missing`)
+      // Still the aligned table at these widths, not the stacked fallback.
+      assert.match(out.replace(/\x1b\[[0-9;]*m/g, ''), /provider\s+model\s+input\s+cached\s+output\s+share/)
+    }
+  }
+})
+
+test('renderOverview: a long label is ellipsized for display, never the count beside it', () => {
+  const out = renderOverview({ ...WIDE_ROWS, columns: 80 })
+  assert.ok(!out.includes('extended-thinking'))
+  assert.match(out, /anthropic\s+claude-opus-4-1…\s+1,584,212,345\s+158,420,001,234\s+15,842,012/)
+  assert.match(out, /acme\/a-really-long[^\s]*…\s+3\s+100\s+900\s+50/)
+  assert.match(out, /mcp__github__create_pull_requ…\s+4\s+1/)
+})
+
+test('renderOverview: a wide-character label keeps the counts aligned', () => {
+  const out = renderOverview({ ...WIDE_ROWS, columns: 100 })
+  const lines = out.split('\n')
+  const cjk = lines.find((l) => l.includes('日本語')) ?? ''
+  const gpt = lines.find((l) => l.includes('gpt-5.5')) ?? ''
+  // The output column ends in the same terminal cell on both rows: measured
+  // in drawn cells, not UTF-16 units, which would put the CJK row 8 short.
+  // The bar holds no digits, so the last digit on a line ends the output.
+  const end = (/** @type {string} */ line) => displayWidth(line.match(/^.*\d/)?.[0] ?? '')
+  assert.equal(end(cjk), end(gpt))
+  assert.ok(end(gpt) > 0)
+})
+
+test('renderOverview: the share bar gives up cells before any label, and its header sets no floor', () => {
+  // 100 columns: the 30-cell model label stays whole; the bar is what shrank.
+  const wide = renderOverview({ ...WIDE_ROWS, columns: 100 })
+  assert.ok(wide.includes('claude-opus-4-1-20250805-exte…'))
+  const cells = (/** @type {string} */ line) => (line.match(/[▒█]/g) ?? []).length
+  const top = (/** @type {string} */ out) => cells(out.split('\n').find((l) => l.includes('1,584,212,345')) ?? '')
+  assert.ok(top(wide) < 18 && top(wide) >= 6, `bar was ${top(wide)} cells`)
+  // The header is `share`, five cells, so a bar can go under the old
+  // 15-cell caption without the column staying 15 wide.
+  const out = renderProviderMixAt(66)
+  assert.ok(widest(out) <= 66, `widest line is ${widest(out)}`)
+  const header = out.split('\n').find((l) => l.includes('share')) ?? ''
+  assert.ok(header.trimEnd().endsWith('share'))
+})
+
+/** Small counts, so the table fits narrow widths without stacking. */
+function renderProviderMixAt(/** @type {number} */ columns) {
+  return renderOverview({
+    providerRows: [{ provider: 'anthropic', model: 'claude-sonnet-4-5-20250929', input_tokens: 4502, cached_tokens: 450200, output_tokens: 4502 }],
+    dailyRows: [],
+    columns,
+  })
+}
+
+test('renderOverview: too narrow for a table, rows stack and keep every field', () => {
+  for (const columns of [60, 40]) {
+    const out = renderOverview({ ...WIDE_ROWS, columns })
+    for (const count of EXACT_COUNTS) assert.ok(out.includes(count), `${columns}: ${count} missing`)
+    // The provider table stacks: one field per line, named.
+    assert.match(out, /^ {4}cached\s+158,420,001,234$/m)
+    assert.match(out, /^ {4}share\s+▒*█+$/m)
+    // Prose wraps to the width; only an exact value too wide for it may
+    // overflow, and none here is.
+    assert.ok(widest(out) <= columns, `${columns}: widest line is ${widest(out)}`)
+  }
+  // A width no table could use still renders, and drops nothing.
+  const tiny = renderOverview({ ...WIDE_ROWS, columns: 1 })
+  for (const count of EXACT_COUNTS) assert.ok(tiny.includes(count))
+  assert.ok(tiny.includes('mcp__'))
+})
+
+test('hyp query overview: a pipe reports no width, so the block is laid out for the fixed default', async () => {
+  assert.equal(OVERVIEW_DEFAULT_COLUMNS, 100)
+  const piped = ctxWithRows()
+  assert.equal(await runQueryOverview([], piped.ctx), 0)
+  const sized = ctxWithRows()
+  Object.assign(sized.ctx.stdout, { columns: 100 })
+  assert.equal(await runQueryOverview([], sized.ctx), 0)
+  assert.equal(piped.stdout.text(), sized.stdout.text())
+  // A narrow terminal changes the rendered block...
+  const narrow = ctxWithRows()
+  Object.assign(narrow.ctx.stdout, { columns: 40 })
+  assert.equal(await runQueryOverview([], narrow.ctx), 0)
+  assert.notEqual(narrow.stdout.text(), piped.stdout.text())
+  assert.ok(widest(narrow.stdout.text()) <= 40)
+})
+
+test('hyp query overview --json: byte-identical whatever the terminal width', async () => {
+  const piped = ctxWithRows()
+  assert.equal(await runQueryOverview(['--json'], piped.ctx), 0)
+  const narrow = ctxWithRows()
+  Object.assign(narrow.ctx.stdout, { columns: 40 })
+  assert.equal(await runQueryOverview(['--json'], narrow.ctx), 0)
+  assert.equal(narrow.stdout.text(), piped.stdout.text())
+})
+
+test('renderOverview: a joiner between ordinary characters does not hide their width', () => {
+  // #2701 R1: a ZWJ outside an emoji sequence joins nothing, so a label
+  // full of them must be clipped by every character it draws.
+  const model = 'a\u200db'.repeat(30)
+  for (const columns of [80, 60]) {
+    const out = renderOverview({
+      providerRows: [{ provider: 'anthropic', model, input_tokens: 4502, cached_tokens: 450200, output_tokens: 4502 }],
+      dailyRows: [],
+      columns,
+    })
+    // Every drawn cell here is one column wide, and the joiner draws none.
+    for (const line of out.split('\n')) {
+      const cells = [...line.replace(/\u200d/g, '')].length
+      assert.ok(cells <= columns, `${columns}: ${cells} cells: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
+test('renderOverview: an escaped mark between pictographs is clipped as printed', () => {
+  // #2701 R2: U+200E prints as an escape, which ends the emoji sequence,
+  // so the joined pictograph after it is drawn and must be counted.
+  const model = '\u{1F600}\u200e\u200d\u{1F600}'.repeat(30)
+  for (const columns of [100, 80, 60]) {
+    const out = renderOverview({
+      providerRows: [{ provider: 'anthropic', model, input_tokens: 1584212345, cached_tokens: 158420001234, output_tokens: 15842012 }],
+      dailyRows: [],
+      columns,
+    })
+    for (const line of out.split('\n')) {
+      assert.ok(displayWidth(line) <= columns, `${columns}: ${displayWidth(line)}: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
+test('renderOverview: the no-count and no-repo sentences wrap to the width', () => {
+  // #2701 R1: these are prose, not a table, so they fold like every other
+  // sentence rather than overflow a narrow terminal.
+  for (const columns of [40, 60, 80]) {
+    const out = renderOverview({
+      providerRows: [{ provider: 'anthropic', model: 'claude-x', input_tokens: 0 }],
+      dailyRows: [],
+      repoRows: [{ repo_root: null, sessions: 30 }],
+      columns,
+    })
+    assert.match(out, /none\s+with\s+token\s+counts\./)
+    assert.match(out, /No\s+repo\s+was\s+recorded\s+on\s+any\s+session/)
+    for (const line of out.split('\n')) {
+      assert.ok(displayWidth(line) <= columns, `${columns}: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
+test('renderOverview: a label of marks that draw nothing is still clipped to a bounded size', () => {
+  // #2701 R1: a hundred thousand combining accents draw one column, so
+  // width alone would print them all; the clip bounds code units too.
+  const model = 'a' + '́'.repeat(100_000)
+  const out = renderOverview({
+    providerRows: [{ provider: 'anthropic', model, input_tokens: 1, cached_tokens: 2, output_tokens: 3 }],
+    dailyRows: [],
+    columns: 80,
+  })
+  assert.ok(out.length < 4000, `${out.length} code units`)
+  assert.match(out, /á+…/)
 })

@@ -1,7 +1,6 @@
 // @ts-check
 
 import { querySqlVerb } from '../query/verb.js'
-import { queryGrepVerb } from '../search/grep_verb.js'
 
 /**
  * @import { VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
@@ -13,13 +12,9 @@ import { queryGrepVerb } from '../search/grep_verb.js'
  * `hyp --help`), while the kernel verb registry registers them for the MCP
  * tool surface at boot.
  *
- * A server host displaces `query grep` with its archive-backed twin via
- * `unregister` (hypaware-server LLP 0178); the kernel ships the verb
- * anyway so every client host greps its own cache with no plugin needed.
- *
  * @type {VerbRegistration[]}
  */
-export const CORE_VERBS = [querySqlVerb, queryGrepVerb]
+export const CORE_VERBS = [querySqlVerb]
 
 /**
  * Register the intrinsic core verbs onto the kernel verb registry. Run

@@ -109,8 +109,8 @@ export async function text(spec) {
 }
 
 /**
- * @param {{ stdin?: NodeJS.ReadableStream, stdout?: NodeJS.WritableStream, env?: NodeJS.ProcessEnv, clearOnResolve?: boolean }} spec
- * @returns {{ stdin: NodeJS.ReadableStream, stdout: NodeJS.WritableStream, env?: NodeJS.ProcessEnv, clearOnResolve?: boolean }}
+ * @param {{ stdin?: NodeJS.ReadableStream, stdout?: NodeJS.WritableStream, env?: NodeJS.ProcessEnv, clearOnResolve?: boolean, signal?: AbortSignal }} spec
+ * @returns {{ stdin: NodeJS.ReadableStream, stdout: NodeJS.WritableStream, env?: NodeJS.ProcessEnv, clearOnResolve?: boolean, signal?: AbortSignal }}
  */
 function resolveIo(spec) {
   return {
@@ -118,5 +118,6 @@ function resolveIo(spec) {
     stdout: spec.stdout ?? process.stdout,
     ...(spec.env !== undefined ? { env: spec.env } : {}),
     ...(spec.clearOnResolve ? { clearOnResolve: true } : {}),
+    ...(spec.signal !== undefined ? { signal: spec.signal } : {}),
   }
 }

@@ -10,7 +10,10 @@
 switch and is still explicit in the file; what changes is who writes it)
 **Extended-by:** LLP 0262 (accepted 2026-08-17; the Claude row stops
 declaring `compose.gateway_proxy_mode`, because the client it composes for
-is no longer captured by proxy; the composition rule itself is unchanged)
+is no longer captured by proxy; the composition rule itself is unchanged);
+LLP 0524 (accepted 2026-10-17; a from-scratch re-init under `--force` is
+refused when a client's marker still records a proxy attach the new config
+would turn off)
 
 > A picker row that attaches its client by proxy declares
 > `compose.gateway_proxy_mode: true` in its manifest. The composition fold

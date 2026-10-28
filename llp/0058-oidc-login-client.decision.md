@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-06-29
 **Related:** LLP 0009, LLP 0011, LLP 0033, LLP 0044
+**Extended-by:** LLP 0547 (#remote-login: a third credential kind, `service`, exchanged under the same lock)
 
 > The server side of multi-tenant OIDC login already shipped: hypaware-server is
 > a rendezvous that runs the OIDC flow against a configurable provider and mints

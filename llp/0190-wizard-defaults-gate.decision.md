@@ -7,6 +7,7 @@
 **Date:** 2026-08-04
 **Related:** LLP 0188 (#never-silent: the sync-scope step this reshapes), LLP 0135 (#pick: the pick lane this reshapes), LLP 0129 (fork/join/pick order, unchanged), LLP 0011 (autodetect seeds the default), LLP 0130 (picker descriptors)
 **Extended-by:** [LLP 0201](./0201-express-defaults-gate.decision.md) (revised 2026-08-30: one express gate precedes the lanes and is the wizard's only accept-or-customize screen; the per-lane gates of #pick-gate and #sync-gate below are retired, the lanes open directly with their menus, and an auto-accepted lane prints its statement instead of prompting)
+**Extended-by:** [LLP 0410](./0410-fork-two-rows-sync-default.decision.md) (#eof-everywhere below: the fork menu no longer prints `default 3` and its default is no longer Quit, so that paragraph's worked example is withdrawn - the fork reads EOF as quit under LLP 0299 #eof-declines instead. The section's rule is unchanged for every other prompt.)
 **Extended-by:** [LLP 0274](./0274-pick-menu-keeps-its-checked-state.decision.md) (#sync-gate below: the `enterKeepsChecked` opt-in widens from "the sync menu" to any menu that arrives with a checked state, so the wizard pick menu sets it too; that section's line "the pick menus keep the historical semantics untouched" is corrected for that menu, and `runPickerWalkthrough` is untouched)
 
 > Extends [LLP 0188 §never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)
@@ -14,6 +15,8 @@
 > The policy (default-sync, per-client opt-out, the `client-sync.json`
 > store, seam enforcement) is untouched; what changes is how the two
 > wizard lanes ask.
+
+**Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
 
 ## Context {#context}
 
@@ -251,8 +254,8 @@ with `deferWrite`: the lane returns the composed config with
 (`commitWizardPickedConfig`: guard, backup notice, write) after the sync
 lane and before the acting phases, which is as late as it can go - the
 configure phase and the finale read and edit the file on disk. Order:
-pick questions, sync questions, overwrite confirm + write, configure,
-finale. A refusal keeps pick's old exit-1 (not cancelled) shape and, on
+pick questions, sync questions, write, configure, finale. (LLP 0433
+removed the overwrite confirm: an attended run backs up and saves.) A refusal keeps pick's old exit-1 (not cancelled) shape and, on
 the team pathway, narrates the enrolled state per #abort-narration. The
 sync lane's `client-sync.json` write still precedes the commit; a store
 entry for a source whose config never lands is inert and errs toward

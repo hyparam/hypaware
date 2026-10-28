@@ -19,7 +19,10 @@ two apart), [LLP 0164](./0164-status-names-recent-clients-from-gateway-entrypoin
 hyparam/hypaware#1391, PR #1388
 **Extended-by:** [LLP 0384](./0384-a-stopping-snapshot-that-stopped-ageing-is-a-stop-that-never-completed.decision.md)
 (#stopping-is-a-claim-with-an-expiry: a terminal `stopping` snapshot older than
-the heartbeat window is a stop that never finished, and raises as a crash does)
+the heartbeat window is a stop that never finished, and raises as a crash does),
+[LLP 0521](./0521-a-supervised-port-conflict-retries-once-a-minute.decision.md)
+(#status: a live process whose own snapshot records a failed boot is the
+port-conflict retry wait, and raises `daemon_boot_failed`)
 
 > `installed, loaded, not running` reported `overall: healthy`. It is the state
 > a daemon leaves when it dies under a unit the service manager is still

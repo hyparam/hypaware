@@ -26,8 +26,7 @@
       "activity_probe": {
         "dir": ".gemini/antigravity-cli/brain",
         "file_suffix": ".jsonl"
-      },
-      "transcript_entrypoints": ["cli"]
+      }
     },
     "picker": [
       {
@@ -49,12 +48,6 @@
       {
         "name": "antigravity",
         "description": "Poll ~/.gemini/antigravity-cli/conversation_summaries.db and brain transcripts, projecting changed conversations into ai_gateway_messages."
-      }
-    ],
-    "datasets": [
-      {
-        "name": "ai_gateway_messages",
-        "description": "Conversation turns projected from Antigravity CLI transcripts."
       }
     ],
     "skills": [

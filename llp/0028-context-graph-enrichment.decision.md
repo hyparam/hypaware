@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-15
 **Related:** LLP 0006, LLP 0008, LLP 0016, LLP 0023, LLP 0024
+**Extended-by:** LLP 0428 (precise evidence, bounded action derivation and explicit refresh)
 
 > A recall-tuned **proposer (T1)** over-proposes prospect knowledge from a
 > **full, DAG-ordered session** of source text, and a graph-and-source-aware

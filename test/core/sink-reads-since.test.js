@@ -385,8 +385,13 @@ test('a watermark prunes data files below it: an idle tick opens no data file', 
   for await (const pair of svc.readRowsSince(tablePath, {})) watermark = pair.after
   assert.ok(watermark)
 
-  // A second flush lands in a second data file, above the watermark.
-  await svc.appendRows(spoolPath, COLS, [{ id: 3, msg: 'c' }])
+  // A second flush lands in a second data file, above the watermark. Two
+  // distinct rows, so icebird cannot answer the file from manifest bounds
+  // without opening it.
+  await svc.appendRows(spoolPath, COLS, [
+    { id: 3, msg: 'c' },
+    { id: 4, msg: 'd' },
+  ])
   await svc.flushTable(spoolPath, { reason: 'manual' })
 
   /** @type {number[]} */
@@ -398,7 +403,7 @@ test('a watermark prunes data files below it: an idle tick opens no data file', 
       tip = pair.after
     }
   })
-  assert.deepEqual(fresh, [3])
+  assert.deepEqual(fresh, [3, 4])
   assert.equal(opened.length, 1, `only the file above the watermark is opened, got ${opened.join(', ')}`)
 
   /** @type {unknown[]} */
@@ -454,11 +459,13 @@ test('the pushed predicate agrees with the row filter at the exact watermark bou
     { name: 'id', type: 'INT64', nullable: false },
     INGEST_SEQ_COLUMN,
   ]
-  // One row per data file, at three consecutive seqs, so each file's manifest
+  // One seq per data file, at three consecutive seqs, so each file's seq
   // bounds are a single point and pruning has no slack to hide an off-by-one.
-  await appendRowsToTable(dir, cols, [{ id: 10, [INGEST_SEQ_COLUMN.name]: 10n }])
-  await appendRowsToTable(dir, cols, [{ id: 11, [INGEST_SEQ_COLUMN.name]: 11n }])
-  await appendRowsToTable(dir, cols, [{ id: 12, [INGEST_SEQ_COLUMN.name]: 12n }])
+  // Two distinct ids per file, so icebird cannot answer a file from manifest
+  // bounds without opening it.
+  await appendRowsToTable(dir, cols, [{ id: 10, [INGEST_SEQ_COLUMN.name]: 10n }, { id: 110, [INGEST_SEQ_COLUMN.name]: 10n }])
+  await appendRowsToTable(dir, cols, [{ id: 11, [INGEST_SEQ_COLUMN.name]: 11n }, { id: 111, [INGEST_SEQ_COLUMN.name]: 11n }])
+  await appendRowsToTable(dir, cols, [{ id: 12, [INGEST_SEQ_COLUMN.name]: 12n }, { id: 112, [INGEST_SEQ_COLUMN.name]: 12n }])
 
   // since = 10: seq 10 is NOT new (strictly `>`), 11 and 12 are. The seq-11
   // file sits exactly one above the watermark: it must still be opened.
@@ -469,7 +476,7 @@ test('the pushed predicate agrees with the row filter at the exact watermark bou
       above.push(Number(row.id))
     }
   })
-  assert.deepEqual(above.sort((a, b) => a - b), [11, 12], 'the row one seq above the watermark is never dropped')
+  assert.deepEqual(above.sort((a, b) => a - b), [11, 12, 111, 112], 'the row one seq above the watermark is never dropped')
   assert.equal(openedAbove.length, 2, `the seq-10 file is pruned and no other, got ${openedAbove.join(', ')}`)
 
   // since = 11: only seq 12 survives, and the two files at or below are pruned.
@@ -480,7 +487,7 @@ test('the pushed predicate agrees with the row filter at the exact watermark bou
       tail.push(Number(row.id))
     }
   })
-  assert.deepEqual(tail, [12])
+  assert.deepEqual(tail, [12, 112])
   assert.equal(openedTail.length, 1, `only the seq-12 file is opened, got ${openedTail.join(', ')}`)
 
   // since = 12: the tip. Nothing is new and nothing is opened.
@@ -562,9 +569,11 @@ test('the seq predicate is not pushed alongside a whereIn lookup', async () => {
     { name: 'tag', type: 'STRING', nullable: false },
     INGEST_SEQ_COLUMN,
   ]
-  await appendRowsToTable(dir, cols, [{ id: 10, tag: 'k', [INGEST_SEQ_COLUMN.name]: 10n }])
-  await appendRowsToTable(dir, cols, [{ id: 11, tag: 'k', [INGEST_SEQ_COLUMN.name]: 11n }])
-  await appendRowsToTable(dir, cols, [{ id: 12, tag: 'k', [INGEST_SEQ_COLUMN.name]: 12n }])
+  // Two distinct ids per file, so icebird cannot answer a file from manifest
+  // bounds without opening it.
+  await appendRowsToTable(dir, cols, [{ id: 10, tag: 'k', [INGEST_SEQ_COLUMN.name]: 10n }, { id: 110, tag: 'k', [INGEST_SEQ_COLUMN.name]: 10n }])
+  await appendRowsToTable(dir, cols, [{ id: 11, tag: 'k', [INGEST_SEQ_COLUMN.name]: 11n }, { id: 111, tag: 'k', [INGEST_SEQ_COLUMN.name]: 11n }])
+  await appendRowsToTable(dir, cols, [{ id: 12, tag: 'k', [INGEST_SEQ_COLUMN.name]: 12n }, { id: 112, tag: 'k', [INGEST_SEQ_COLUMN.name]: 12n }])
 
   /** @type {number[]} */
   const kept = []
@@ -572,7 +581,7 @@ test('the seq predicate is not pushed alongside a whereIn lookup', async () => {
     const opts = { since: 11n, includeLegacy: false, whereIn: { tag: ['k'] } }
     for await (const row of scanRowsFromTable(dir, undefined, opts)) kept.push(Number(row.id))
   })
-  assert.deepEqual(kept, [12], 'the row filter still resolves the watermark')
+  assert.deepEqual(kept, [12, 112], 'the row filter still resolves the watermark')
   assert.equal(opened.length, 3, `every file is read so the lookup clause survives, got ${opened.join(', ')}`)
 
   await fs.rm(root, { recursive: true, force: true })

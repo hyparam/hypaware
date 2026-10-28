@@ -2,6 +2,7 @@
 
 **Type:** design
 **Status:** Active
+**Extended-by:** LLP 0446 (remove backfill planning; use import dry runs)
 **Extended-by:** LLP 0167 (two-lane capture: the steering-plugin sections are retired with LLP 0168/0169/0170; the projector, settlement, and backfill sections remain the record of what shipped), LLP 0193 (the backfill allowlist living list is retired for a CLI-backend denylist)
 **Systems:** Plugins, Sources, Gateway, Observability
 **Generated-by:** neutral
@@ -10,6 +11,8 @@
 **Related:** LLP 0016, LLP 0027, LLP 0037, LLP 0044, LLP 0045, LLP 0049, LLP 0085,
 LLP 0103, LLP 0109, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0147, LLP 0148,
 LLP 0149, LLP 0150, LLP 0152, LLP 0157, LLP 0158, LLP 0159
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
+**Extended-by:** LLP 0441 (#settlement-enricher: the flush-time settle pass now selects a settled row's in-batch successors too; an already-native successor that already carries a `cwd` is excluded from Section 6's per-row loop rather than matched or cwd-resolved)
 
 > Technical design for the two deliverables and one removal LLP 0157 specifies:
 > the OpenClaw-side steering plugin, the `@hypaware/openclaw` adapter rework,
@@ -491,6 +494,16 @@ start from genuinely different message shapes.
 
 ## 6. The settlement enricher {#settlement-enricher}
 
+> **Extended-by [LLP 0441](./0441-settle-selects-a-renamed-rows-successors.decision.md):**
+> the settle pass now also hands this enricher the in-batch successors of
+> rows it can rename (LLP 0027 fallback rows). Steps 2 and 3's "applies it to
+> every row that session settles" and step 4's "independent of match
+> success" below hold only for a row this pass still reaches: an already
+> native row that already carries its own `cwd` is skipped outright, no
+> ordinal/time match attempted and no header `cwd` applied or resolved
+> against it. The read-once-per-file design and the match/cwd steps
+> themselves are otherwise unchanged.
+
 New module `hypaware-core/plugins-workspace/openclaw/src/settle.js`,
 `createOpenclawSettlementEnricher(opts)` returning
 `{ name: 'openclaw-settlement', clientName: 'openclaw', settle(rows, ctx) }`,
@@ -675,8 +688,11 @@ untouched.
 
 ## 9. Acceptance procedure {#acceptance}
 
-`docs/ACCEPTANCE.md` gains `## openclaw_capture`, mirroring
-`## codex_desktop_capture`'s exact heading structure (What it proves / What
+> **Retired (2026-09-23)** by [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md).
+> The repo no longer keeps written manual procedures. This section records its design.
+
+A manual OpenClaw capture procedure is written, mirroring
+the Codex Desktop procedure's exact heading structure (What it proves / What
 it does not prove / Requires / Related / `### Steps` / `### If it fails`).
 
 Differences from the Codex template, each because OpenClaw's mechanism
@@ -719,7 +735,7 @@ genuinely differs:
 
 @ref LLP 0157#acceptance [implements]: R12, the procedure must exist and
 must have been run by a human before the adapter ships; this section is
-that procedure's design, landing it in `docs/ACCEPTANCE.md` and running it
+that procedure's design; writing it down and running it
 is implementation work this document hands off, not something a design
 document can itself satisfy.
 

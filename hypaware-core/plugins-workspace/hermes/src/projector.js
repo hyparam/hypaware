@@ -61,11 +61,22 @@ const PROVIDER_HOST_MAP = {
  * never collides with another client's id space in `session_id` /
  * `parent_thread_id`. @ref LLP 0122#projection [implements]
  *
- * @param {number} id
+ * @param {string | number} id
  * @returns {string}
  */
 export function hermesScopeId(id) {
   return `hermes-${id}`
+}
+
+/**
+ * The reconcile scope one hermes session's snapshot replaces. The projected
+ * item and the read-commit guard both name it, so they cannot drift apart.
+ * @param {string} clientName
+ * @param {string | number} sessionId  `HermesSessionRow.id`
+ * @returns {{ client_name: string, session_id: string }}
+ */
+export function hermesReconcileScope(clientName, sessionId) {
+  return { client_name: clientName, session_id: hermesScopeId(sessionId) }
 }
 
 /**
@@ -149,7 +160,7 @@ export function normalizeHermesProvider(session) {
  * mints it, not the projector; see `message_projector.js#expandMessageParts`).
  *
  * @ref LLP 0120 [implements]: "session id + message id + part index".
- * @param {number} sessionId
+ * @param {string | number} sessionId
  * @param {number} messageId
  * @param {number} partIndex
  * @returns {string}
@@ -164,7 +175,7 @@ export function mintHermesMessageId(sessionId, messageId, partIndex) {
  * so dedupe appends it exactly once no matter how many times an ended
  * session is re-observed.
  *
- * @param {number} sessionId
+ * @param {string | number} sessionId
  * @returns {string}
  */
 export function mintHermesSessionEndId(sessionId) {
@@ -384,7 +395,7 @@ export async function projectHermesSession(args) {
   const endMessage = sessionEndMessage(session)
   if (endMessage) projectedMessages.push(endMessage)
 
-  if (projectedMessages.length === 0) return undefined
+  // An empty visible transcript is a reconciliation too (rewind of every turn).
 
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
@@ -395,7 +406,8 @@ export async function projectHermesSession(args) {
     session_id: hermesScopeId(session.id),
     conversation_source: clientName,
     client_name: clientName,
-    entrypoint: session.source,
+    // Hermes stores interactive surfaces as 'local'; created_source preserves the launch surface.
+    entrypoint: session.source === 'local' ? (session.created_source || session.source) : session.source,
     messages: projectedMessages,
   }
   const conversationStartedAt = hermesTimestampToIso(session.started_at)
@@ -428,5 +440,8 @@ export async function projectHermesSession(args) {
   const provenance = { client_name: clientName, native_id: String(session.id) }
   if (sourcePath) provenance.source_path = sourcePath
 
-  return projectedExchangeItem(exchange, provenance)
+  const item = projectedExchangeItem(exchange, provenance)
+  // @ref LLP 0449#reconciliation [implements]: only this client's session is replaced.
+  item.reconcile = { where: hermesReconcileScope(clientName, session.id), key: 'part_id' }
+  return item
 }

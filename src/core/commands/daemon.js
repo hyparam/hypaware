@@ -1,7 +1,7 @@
 // @ts-check
 
-import os from 'node:os'
 import path from 'node:path'
+import { hypHomeFromEnv, stateRootOf } from '../runtime/paths.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
@@ -11,51 +11,89 @@ import { sanitizeLabel } from '../util/json_util.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
- * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { DaemonInstallOptions, DaemonServiceOptions } from '../../../src/core/daemon/types.js'
  * @import { uninstallDaemon as uninstallDaemonFn } from '../../../src/core/daemon/install.js'
+ * @import { RunDaemonOptions } from '../../../src/core/daemon/types.js'
  */
 
 /**
- * `hyp daemon run --foreground [--config <path>]`: boot the kernel as a daemon and
- * tend it in the current process until SIGTERM/SIGINT. Phase 3
- * intentionally only supports `--foreground`; the detached run path
- * lands with the Phase 4 launchd/systemd installers, so a no-flag
- * call surfaces a deterministic error instead of attempting to
- * background ourselves and silently failing.
+ * `hyp daemon run [--config <path>]`: boot the kernel as a daemon and
+ * tend it in the current process until SIGTERM/SIGINT.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{
+ *   waitBeforeBindRetry?: () => Promise<'elapsed' | 'signalled'>,
+ *   runDaemon?: (opts: RunDaemonOptions) => Promise<{ done: Promise<number> }>,
+ *   hasLauncher?: () => boolean,
+ *   relaunch?: (opts: { env: NodeJS.ProcessEnv, stdout: { write(chunk: string): unknown }, stderr: { write(chunk: string): unknown }, stagedConfigPath: () => string }) => Promise<number>,
+ * }} [deps] Test seams for the retry wait, the gateway boot and the staged-restart relaunch.
  */
-export async function runDaemonRun(argv, ctx) {
+export async function runDaemonRun(argv, ctx, deps = {}) {
   const parsed = parseDaemonRunArgs(argv)
   if (parsed.error) {
     ctx.stderr.write(`hyp daemon run: ${parsed.error}\n`)
     return 2
   }
-  if (!parsed.foreground) {
-    ctx.stderr.write(
-      'hyp daemon run: --foreground is required in Phase 3 (detached run lands with the Phase 4 installer)\n'
-    )
-    return 2
-  }
-  const { runGatewayDaemon: runDaemon } = await import('../daemon/gateway.js')
+  const gateway = await import('../daemon/gateway.js')
+  const { waitBeforeBindRetry, BIND_RETRY_INTERVAL_MS } = gateway
+  const runDaemon = deps.runDaemon ?? gateway.runGatewayDaemon
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would put the daemon's state root at ./.hyp)
-  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
+  const hypHome = hypHomeFromEnv(ctx.env, ctx.env.HOME)
+  // A staged restart (config apply, rollback, reload) needs a fresh process
+  // (LLP 0017). A service manager provides one; a foreground run nobody
+  // relaunches (a container) used to exit 75 and take the gateway down with it
+  // (#2513), so it relaunches itself instead. Supervised runs and runs a Node
+  // parent launched keep exiting 75 to whoever relaunches them. Decided before
+  // the boot, because the gateway's stop deadline must not exit a run that
+  // relaunches itself.
+  // @ref LLP 0529#who-relaunches [implements]: detectSupervisor decides, and a Node parent with an IPC channel owns the relaunch
+  const { SELF_UPDATE_RESTART_EXIT_CODE, detectSupervisor } = await import('../update/self_update.js')
+  const relaunchModule = detectSupervisor(ctx.env) ? undefined : await import('../daemon/relaunch.js')
+  const relaunches = relaunchModule !== undefined && !(deps.hasLauncher ?? relaunchModule.hasLauncher)()
   try {
     const handle = await runDaemon({
       hypHome,
       ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
       env: ctx.env,
       runId: ctx.env.DEV_RUN_ID,
-      foreground: parsed.foreground,
+      foreground: true,
+      ...(relaunches ? { relaunchesOnRestart: true } : {}),
     })
     ctx.stdout.write(`daemon: running (pid=${process.pid})\n`)
     const exitCode = await handle.done
     ctx.stdout.write('daemon: stopped\n')
-    return exitCode
+    if (exitCode !== SELF_UPDATE_RESTART_EXIT_CODE || !relaunches || !relaunchModule) return exitCode
+    const { resolveCentralLayerPath } = await import('../config/apply.js')
+    const { resolveConfigPath } = await import('../runtime/boot.js')
+    return await (deps.relaunch ?? relaunchModule.relaunchForeground)({
+      env: ctx.env,
+      stdout: ctx.stdout,
+      stderr: ctx.stderr,
+      stagedConfigPath: () => resolveCentralLayerPath({ stateRoot: stateRootOf(hypHome) }) ?? resolveConfigPath({ explicit: parsed.configPath, env: ctx.env, hypHome }),
+    })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon run: ${message}\n`)
+    const { addressInUse } = await import('../daemon/port_owner.js')
+    const { detectSupervisor } = await import('../update/self_update.js')
+    // A service manager relaunches this process the moment it exits, so a
+    // port that stays taken would otherwise boot it every few seconds for as
+    // long as the conflict lasts (#137). Exiting is still how it retries: each
+    // attempt is a fresh process, so the updater's pre-boot lane and its
+    // stuck-boot re-probe see every one, and nothing of a failed boot
+    // survives into the next. A foreground run nobody relaunches fails fast.
+    // @ref LLP 0521#pacing [implements]: supervised port conflicts wait one interval before exiting into the relaunch
+    if (detectSupervisor(ctx.env) && addressInUse(err)) {
+      // A stop or restart the operator asked for ends the wait as the
+      // gateway's own SIGTERM handler would have ended a serving run. The
+      // wait's signal handlers go in before the line is written: whoever reads
+      // the line may signal at once, and the process can be descheduled
+      // between the write and a handler installed after it.
+      const waiting = (deps.waitBeforeBindRetry ?? waitBeforeBindRetry)()
+      ctx.stderr.write(`hyp daemon run: retrying in ${Math.round(BIND_RETRY_INTERVAL_MS / 1000)}s; 'hyp daemon restart' retries now\n`)
+      if (await waiting === 'signalled') return 0
+    }
     return 1
   }
 }
@@ -225,9 +263,17 @@ export async function runDaemonStatus(argv, ctx) {
   if (sources.length === 0) {
     ctx.stdout.write('    (none)\n')
   } else {
+    // The rule `hyp status` applies to the same file (#1410): a `started`
+    // left by a daemon that is gone, or by one whose pid the OS reissued, is
+    // a record, and `stopped` is what that source is now. `failed` claims
+    // nothing about now and stays as written. Text only: the `--json` copy
+    // above is the file's, byte for byte.
+    // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
+    const snapshotIsLive = running && snapshotIsThisProcess
     for (const source of sources) {
       const error = printable(source.error, MAX_ERROR_CHARS)
-      ctx.stdout.write(`    - ${printable(source.name)} (${printable(source.plugin)}): ${printable(source.state)}${error ? ' - ' + error : ''}\n`)
+      const state = snapshotIsLive || source.state !== 'started' ? source.state : 'stopped'
+      ctx.stdout.write(`    - ${printable(source.name)} (${printable(source.plugin)}): ${printable(state)}${error ? ' - ' + error : ''}\n`)
     }
   }
   ctx.stdout.write('  sinks:\n')
@@ -235,21 +281,112 @@ export async function runDaemonStatus(argv, ctx) {
     ctx.stdout.write('    (none)\n')
   } else {
     for (const sink of sinks) {
-      ctx.stdout.write(`    - ${printable(sink.instance)} (${printable(sink.plugin)}, ${printable(sink.kind)})\n`)
+      // Same rule as `hyp status`: a retained row with no live handle has no plugin or kind (issue #2494).
+      const meta = [printable(sink.plugin), printable(sink.kind)].filter(Boolean).join(', ')
+      ctx.stdout.write(`    - ${printable(sink.instance)}${meta ? ` (${meta})` : ''}\n`)
     }
   }
   return 0
 }
 
 /**
+ * Drop every stale pid file the daemon leaves under `stateRoot` - its own and
+ * the supervised processing child's, which is killed with it and gets no
+ * shutdown of its own either (#2288) - and leave a file whose pid is still
+ * running exactly as it is: the reconciliation `requestDaemonStop` performs on
+ * a confirmed exit, for the teardowns that go through the service manager
+ * instead of the control channel, which are the supervised stop and the
+ * uninstall (#2299).
+ *
+ * Best-effort through the module load too, because the teardown it follows
+ * already happened: a pid file this cannot read or unlink is
+ * `hyp daemon status`'s to report, and nothing in here is a reason to call a
+ * completed stop or uninstall a failure. Each file is reconciled on its own,
+ * so neither holds up the other.
+ *
+ * @param {string} stateRoot
+ */
+async function clearStaleDaemonPidFiles(stateRoot) {
+  try {
+    const { clearStalePidFile } = await import('../daemon/pid.js')
+    const { processingStateRoot } = await import('../runtime/paths.js')
+    clearStalePidFile(stateRoot)
+    clearStalePidFile(processingStateRoot(stateRoot))
+  } catch { /* an unloadable pid module outlives this teardown */ }
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ service?: DaemonServiceOptions }} [deps] test seam for the service manager
  */
-export async function runDaemonStop(argv, ctx) {
+export async function runDaemonStop(argv, ctx, deps = {}) {
   const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
   if (!parsed.ok) return parsed.code
-  const { requestDaemonStop, DAEMON_STOP_TIMEOUT_MS } = await import('../daemon/runtime.js')
+  // A daemon the service manager is supervising is stopped through that
+  // manager, never by signalling the pid: launchd's KeepAlive respawns a job
+  // that is merely killed, so the old SIGTERM reported a stop the machine
+  // undid seconds later. Both managers deliver SIGTERM themselves, so the
+  // daemon still shuts down through its own handler; what changes is who is
+  // told, and therefore whether the respawn policy is told with it. The plist
+  // / unit is preserved either way, so `hyp daemon start` reverses this.
+  //
+  // The gate is whether the service manager is currently supervising the
+  // daemon, which is neither "a unit is on disk" nor "a pid exists right now".
+  //
+  // Not the unit on disk: an installed service the manager is not running is
+  // not what a stop is aimed at, because the process to stop is then a
+  // foreground `hyp daemon run`, which has no respawn policy behind it, is
+  // reached only by the transport below, and is a shape the status collector
+  // supports outright. Gating on `installed` reported `daemon: stopped` and
+  // left that daemon running.
+  //
+  // Not a pid either: both managers are configured to respawn (`KeepAlive` in
+  // the plist, `Restart=always` with `RestartSec` in the unit), so a crashing
+  // daemon has no pid for the whole throttle gap while the manager is still
+  // going to bring it back. That gap is when an operator most wants a stop,
+  // and gating on the pid sent it to the control file, which found nothing
+  // alive and said `daemon: not running` seconds before the respawn.
+  //
+  // Supervision is a per-manager fact, so each platform answers it with its
+  // own: launchd holds a job or it does not, which is exactly what `loaded`
+  // reports there (`launchctl print` exits 113 once `hyp daemon stop` has
+  // booted it out); systemd leaves a stopped unit `loaded` and distinguishes
+  // the two by `ActiveState` instead.
+  // @ref LLP 0300#posix-keeps-signals [constrained-by]: the control file stays the transport for every daemon the service manager is not supervising, foreground sessions included
+  const { serviceDaemonStatus, stopServiceDaemon } = await import('../daemon/install.js')
+  const options = { homeDir: ctx.env.HOME, ...deps.service }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const status = await serviceDaemonStatus(options)
+  const supervised = status.platform === 'darwin' ? status.loaded : status.active === true
+  if (supervised) {
+    try {
+      await stopServiceDaemon(options)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`hyp daemon stop: ${message}\n`)
+      return 1
+    }
+    // A manager that had to hard-kill a wedged daemon (systemd's
+    // `TimeoutStopSec`, launchd's grace) left it no shutdown to run, so the pid
+    // file it clears for itself on an orderly stop still names a process that
+    // is gone while this reports `stopped` (#2266). The kill takes the
+    // supervised processing child with it, so its own pid file below
+    // `processing/` is stranded the same way (#2288).
+    //
+    // Not the gate above asked twice: that one is whether the manager is
+    // supervising the service, this one is whether the pid the file names is
+    // running. Only a pid nothing holds takes its file with it. Both managers
+    // return from the stop with the process already gone (`systemctl stop`
+    // blocks through `TimeoutStopSec`, the launchd path polls until the job
+    // unloads), so the live pid this guard keeps a file for is somebody else's:
+    // a foreground `hyp daemon run` that claimed it while the unit sat in its
+    // restart gap, or one the OS has reissued (`EPERM` reads as alive).
+    await clearStaleDaemonPidFiles(stateDir)
+    ctx.stdout.write('daemon: stopped\n')
+    return 0
+  }
+  const { requestDaemonStop, DAEMON_STOP_TIMEOUT_MS } = await import('../daemon/runtime.js')
   // The requester-side control-dir warnings (a chmod it could not apply)
   // land on stderr; they do not change the exit code.
   const outcome = await requestDaemonStop({
@@ -301,7 +438,8 @@ export async function runDaemonRestart(argv, ctx) {
   if (!parsed.ok) return parsed.code
   if (parsed.params.processing === true) {
     const { readStatusFile } = await import('../daemon/status.js')
-    const { readPidFile, processIsAlive, processingStateRoot } = await import('../daemon/pid.js')
+    const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
+    const { processingStateRoot } = await import('../runtime/paths.js')
     const { writeControlRequest } = await import('../daemon/control.js')
     const stateRoot = readObservabilityEnv(ctx.env).stateDir
     const status = readStatusFile(stateRoot)
@@ -331,7 +469,7 @@ export async function runDaemonRestart(argv, ctx) {
   const code = await runDaemonStop([], ctx)
   if (code !== 0) return code
   ctx.stdout.write('daemon restart: stopped. No installed service found;\n')
-  ctx.stdout.write('  re-run `hyp daemon run --foreground` to bring it back up,\n')
+  ctx.stdout.write('  re-run `hyp daemon run` to bring it back up,\n')
   ctx.stdout.write('  or `hyp daemon install` to set up the persistent service first.\n')
   return 0
 }
@@ -348,7 +486,7 @@ export async function runDaemonRestart(argv, ctx) {
 export async function runDaemonInstall(argv, ctx, opts = {}) {
   const parsed = parseDaemonInstallArgs(argv)
   if (parsed.help) {
-    ctx.stdout.write('usage: hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]\n')
+    ctx.stdout.write('usage: hyp daemon install [--config <path>] [--bin <path>] [--force] [--dry-run [--json]]\n')
     return 0
   }
   if (parsed.error) {
@@ -372,6 +510,8 @@ export async function runDaemonInstall(argv, ctx, opts = {}) {
     // into the _npx cache, so installDaemon upgrades it to a durable
     // global bin (LLP 0025: join stays a wrapper over this same path).
     binExplicit: parsed.binPath !== undefined,
+    force: parsed.force,
+    durableBin: { env: ctx.env, stdout: ctx.stdout, stderr: ctx.stderr, stdin: ctx.stdin },
     ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
     ...(homeDir !== undefined ? { homeDir } : {}),
     ...(parsed.platform !== undefined ? { platform: parsed.platform } : {}),
@@ -443,6 +583,16 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
     ctx.stderr.write(`hyp daemon uninstall: ${message}\n`)
     return 1
   }
+  // After the teardown, never before it: until the plist / unit is unlinked
+  // the manager still has a respawn policy, and a daemon sitting in its
+  // restart gap is about to be brought back (#2261). Afterwards nothing will
+  // ever rewrite either file, so the stop's reconciliation applies here with
+  // more force than it does there.
+  //
+  // Before the detach sweep, which fails on its own account: a client whose
+  // settings could not be reversed is no reason to leave two dead pids on
+  // disk.
+  await clearStaleDaemonPidFiles(readObservabilityEnv(ctx.env).stateDir)
   // Only reached once the service is actually gone: a failed uninstall leaves a
   // daemon still serving that port, and detaching from it would break capture
   // for no reason.
@@ -515,7 +665,7 @@ export async function runDaemonStart(argv, ctx) {
 
 /**
  * @param {string[]} argv
- * @returns {{ help?: boolean, error?: string, dryRun?: boolean, json?: boolean, configPath?: string, binPath?: string, platform?: NodeJS.Platform }}
+ * @returns {{ help?: boolean, error?: string, dryRun?: boolean, json?: boolean, force?: boolean, configPath?: string, binPath?: string, platform?: NodeJS.Platform }}
  */
 function parseDaemonInstallArgs(argv) {
   const parsed = parseCommandArgv(argv, {
@@ -526,13 +676,14 @@ function parseDaemonInstallArgs(argv) {
       config: { type: 'string' },
       bin: { type: 'string' },
       platform: { type: 'string', enum: ['darwin', 'linux'] },
+      force: { type: 'boolean', default: false },
     },
   })
   if ('help' in parsed) return { help: true }
   if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ 'dry-run': boolean, json: boolean, config?: string, bin?: string, platform?: NodeJS.Platform }} */ (parsed.params)
+  const p = /** @type {{ 'dry-run': boolean, json: boolean, force: boolean, config?: string, bin?: string, platform?: NodeJS.Platform }} */ (parsed.params)
   if (p.json && !p['dry-run']) return { error: '--json requires --dry-run' }
-  return { dryRun: p['dry-run'], json: p.json, configPath: p.config, binPath: p.bin, platform: p.platform }
+  return { dryRun: p['dry-run'], json: p.json, force: p.force, configPath: p.config, binPath: p.bin, platform: p.platform }
 }
 
 /**
@@ -543,11 +694,12 @@ function parseDaemonRunArgs(argv) {
   const parsed = parseCommandArgv(argv, {
     type: 'object',
     properties: {
-      foreground: { type: 'boolean', default: false },
+      // @ref LLP 0406#installed-services [implements]: older installed units still pass this unadvertised compatibility flag
+      foreground: { type: 'boolean', default: true },
       config: { type: 'string' },
     },
   }, { aliases: { '-f': '--foreground' } })
-  if ('help' in parsed) return { foreground: false, error: 'usage: hyp daemon run --foreground [--config <path>]' }
+  if ('help' in parsed) return { foreground: false, error: 'usage: hyp daemon run [--config <path>]' }
   if (!parsed.ok) return { foreground: false, error: parsed.error }
   const p = /** @type {{ foreground: boolean, config?: string }} */ (parsed.params)
   return { foreground: p.foreground, configPath: p.config }

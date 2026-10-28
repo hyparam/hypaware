@@ -9,8 +9,10 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusSummary, renderStatusText } from '../../src/core/commands/status.js'
 import { compareStrings } from '../../src/core/util/compare_strings.js'
+
+/** @import { HypAwareStatusReport } from '../../src/core/daemon/types.js' */
 
 // `hyp status` on a centrally-managed host must restore inspectability of
 // the merged config: per-entry provenance + the dropped-local section.
@@ -195,4 +197,276 @@ test('a never-joined host renders no provenance tags or layers block', async () 
   const stdout = makeBuf()
   renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /\[central · locked\]|\[local\]|local config \(not applied\)/)
+})
+
+// A central layer that is on disk but does not parse is not an absent one:
+// the collector collapses both to `centralConfig === null`, so without a
+// diagnostic of its own the report names the file nowhere (issue #2423).
+
+test('a joined host whose central seed cannot be parsed names the file', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, '{ not json at all\n')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'the unreadable central layer has a diagnostic of its own')
+  assert.equal(unreadable?.severity, 'warning')
+  // A JSON parse failure's own inner message does not repeat the path, so the
+  // diagnostic interpolates it explicitly; this is the exact case issue
+  // #2423 reproduced.
+  assert.ok(unreadable?.message.includes(seedPath), `message names the file: ${unreadable?.message}`)
+  assert.match(unreadable?.message ?? '', /is unreadable \(config is not valid JSON/)
+  // The local layer still carries the host, so the verdict is unchanged: the
+  // diagnostic is loud, not an outage signal.
+  assert.equal(report.overall, 'healthy')
+  // The merge itself is unchanged: there is nothing readable to merge.
+  assert.deepEqual(report.activePlugins, ['@hypaware/ai-gateway'])
+})
+
+test('an unparseable applied slot is named through the active pointer', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  const slotPath = path.join(controlDir, 'config.a.json')
+  await fs.writeFile(slotPath, 'truncated-garbage')
+  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'the unreadable applied slot has a diagnostic of its own')
+  // Same shape as the seed case: the inner JSON-parse message does not repeat
+  // the slot path, so the diagnostic interpolates it explicitly.
+  assert.ok(unreadable?.message.includes(slotPath), `message names the slot: ${unreadable?.message}`)
+  assert.match(unreadable?.message ?? '', /is unreadable \(config is not valid JSON/)
+})
+
+test('a readable central layer reports no unreadable-layer diagnostic', async () => {
+  const hypHome = await makeHome()
+  await joinedHomeForRender(hypHome)
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.ok(!report.diagnostics.some((d) => d.kind === 'config_central_unreadable'))
+})
+
+// The old gate (`!centralLoaded.ok && errorKind !== 'config_missing'`) missed
+// every state where `centralLoaded` never got as far as a load failure at
+// all: a pointer naming a slot that is gone, a pointer that is not a symlink,
+// and a control directory this process cannot even list. All three are a
+// central layer this host cannot read, not an absent one, and all three used
+// to report `overall: healthy`, `layered: null`, and zero config diagnostics
+// (issue #2423's wider form).
+
+test('an active-slot pointer naming a slot file that is gone reports the central layer unreadable', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  const missingSlotPath = path.join(controlDir, 'config.b.json')
+  // The pointer resolves (by name) to a slot the apply engine never wrote
+  // here, or already rotated away - `readActiveSlot` only checks the target
+  // name, not that the file exists.
+  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'a pointer naming a gone slot file has a diagnostic of its own')
+  assert.equal(unreadable?.severity, 'warning')
+  assert.ok(unreadable?.message.includes(missingSlotPath), `message names the missing slot file: ${unreadable?.message}`)
+  assert.equal(report.layered, null)
+  assert.equal(report.overall, 'healthy')
+})
+
+test('an active pointer replaced by a regular file reports the central layer unreadable', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  // The slot file still holds a central sink, but the pointer that would
+  // name it is a plain file, not a symlink: `readActiveSlot` cannot follow it.
+  await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'a non-symlink active pointer has a diagnostic of its own')
+  assert.ok(unreadable?.message.includes(controlDir), `message names the control directory: ${unreadable?.message}`)
+  // Resolution could not follow the pointer, so there is nothing to merge:
+  // the host still holds another org's sink verbatim in `config.a.json`, but
+  // `layered` reads `null`, same as a never-joined host.
+  assert.equal(report.layered, null)
+  assert.equal(report.overall, 'healthy')
+})
+
+test('a central config directory that cannot be listed reports the central layer unreadable', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+  await fs.chmod(controlDir, 0o000)
+
+  try {
+    const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+    const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+    assert.ok(unreadable, 'an unlistable control directory has a diagnostic of its own')
+    assert.match(unreadable?.message ?? '', /failed to read the central config directory/)
+    assert.ok(unreadable?.message.includes(controlDir), `message names the control directory: ${unreadable?.message}`)
+    assert.equal(report.layered, null)
+    assert.equal(report.overall, 'healthy')
+  } finally {
+    await fs.chmod(controlDir, 0o700)
+  }
+})
+
+// The `config_missing` message's "neither a central layer" clause is only
+// true when the central layer really is absent. When it is unreadable
+// instead, the two diagnostics used to contradict each other on the same
+// report (issue #2423).
+
+test('config_missing does not claim "neither a central layer" when the central layer is unreadable', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  // No local config at all, and the central layer resolves to a slot file
+  // that is gone: both `config_missing` and `config_central_unreadable` fire.
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const missing = report.diagnostics.find((d) => d.kind === 'config_missing')
+  assert.ok(missing, 'the no-config diagnostic still fires')
+  assert.doesNotMatch(missing?.message ?? '', /neither a central layer/)
+  assert.ok(missing?.message.includes('no config found'))
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'the central layer is reported unreadable too')
+})
+
+// Every unreadable state collapses to the same report shape as a never-joined
+// host (`layered` and `clientSync` null), so the text views must read the
+// collector's diagnostic rather than infer a solo host (issue #2431).
+
+/** @type {Array<[string, (controlDir: string) => Promise<void>]>} */
+const UNREADABLE_CENTRAL_STATES = [
+  ['an unparseable seed', async (controlDir) => {
+    await fs.writeFile(path.join(controlDir, 'seed.json'), '{ not json at all\n')
+  }],
+  ['an active pointer naming a gone slot', async (controlDir) => {
+    await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  }],
+  ['an active pointer that is a regular file', async (controlDir) => {
+    await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2 }) + '\n')
+    await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  }],
+  ['a control directory that cannot be listed', async (controlDir) => {
+    await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+    await fs.chmod(controlDir, 0o000)
+  }],
+]
+
+/** @param {HypAwareStatusReport} report */
+function renderBothViews(report) {
+  // The collector probes no clients here, so give the compact table one
+  // configured client to label.
+  const withClient = /** @type {HypAwareStatusReport} */ ({
+    ...report,
+    clients: [{ name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false }],
+  })
+  const compact = makeBuf()
+  renderStatusSummary({ report: withClient, stdout: compact })
+  const verbose = makeBuf()
+  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: verbose })
+  return { compact: compact.text(), verbose: verbose.text() }
+}
+
+for (const [label, arrange] of UNREADABLE_CENTRAL_STATES) {
+  test(`${label} renders Unknown sharing in the compact and verbose views`, async () => {
+    const hypHome = await makeHome()
+    const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+    await fs.mkdir(controlDir, { recursive: true })
+    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/ai-gateway' }],
+    }) + '\n')
+    await arrange(controlDir)
+
+    try {
+      const report = await collectHypAwareStatus({ env: env(hypHome) })
+      assert.ok(report.diagnostics.some((d) => d.kind === 'config_central_unreadable'))
+      // No new persistent field: JSON keeps its null shape and the diagnostic
+      // carries the evidence.
+      const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache' })
+      assert.equal(json.config_layers, null)
+      assert.equal(report.overall, 'healthy')
+
+      const { compact, verbose } = renderBothViews(report)
+      assert.match(compact, /Sharing\s+Unknown \(organization config could not be read\)/)
+      assert.match(compact, /codex\s+Recording\s+Unknown/)
+      assert.doesNotMatch(compact, /No organization sync|Local only/)
+      assert.match(verbose, /syncing: unknown - local-only: unknown \(organization config could not be read\)/)
+      assert.match(verbose, /\(none visible - organization config could not be read\)/)
+      assert.doesNotMatch(verbose, /keeping captured data local only/)
+      // The diagnostic says what the report cannot see, not that a running
+      // daemon stopped forwarding.
+      assert.doesNotMatch(compact + verbose, /stopped forwarding|no longer forward/)
+    } finally {
+      await fs.chmod(controlDir, 0o700)
+    }
+  })
+}
+
+test('an absent central layer still renders a solo host as no organization sync', async () => {
+  const hypHome = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const { compact, verbose } = renderBothViews(report)
+  assert.match(compact, /Sharing\s+No organization sync/)
+  assert.match(compact, /codex\s+Recording\s+Local only/)
+  assert.match(verbose, /\(none - keeping captured data local only\)/)
+  assert.doesNotMatch(compact + verbose, /Unknown|unknown|could not be read/)
+})
+
+test('a readable central layer renders organization sync, not unknown', async () => {
+  const hypHome = await makeHome()
+  await joinedHomeForRender(hypHome)
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const { compact } = renderBothViews(report)
+  assert.match(compact, /Sharing\s+Organization sync configured/)
+  assert.doesNotMatch(compact, /could not be read/)
 })

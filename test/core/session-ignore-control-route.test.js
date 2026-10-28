@@ -2,6 +2,11 @@
 
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 import net from 'node:net'
 import test from 'node:test'
 
@@ -144,6 +149,86 @@ test('413 when the request body exceeds the size bound', async () => {
     assert.equal(out.status, 413)
     assert.equal(set.size, 0, 'an oversized body records nothing')
   })
+})
+
+// A body not declared JSON would make the mutation a CORS simple request, which
+// a browser sends cross-origin with no preflight, so it never reaches the set.
+// @ref LLP 0507#json-only [tests]: POST/DELETE without application/json are 415
+// and leave the set untouched; JSON with parameters or another letter case passes
+for (const contentType of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x']) {
+  test(`415 for ${contentType}: neither verb mutates the set`, async () => {
+    const set = new Set(['sess-kept'])
+    await withControlServer(set, async (base) => {
+      const add = await rawRequest(base, 'POST', '/_hypaware/ignore/session', JSON.stringify({ session_id: 'sess-new' }), contentType)
+      assert.equal(add.status, 415)
+      assert.deepEqual(add.body, { error: 'content-type must be application/json' })
+      const del = await rawRequest(base, 'DELETE', '/_hypaware/ignore/session', JSON.stringify({ session_id: 'sess-kept' }), contentType)
+      assert.equal(del.status, 415)
+      assert.deepEqual([...set], ['sess-kept'], 'a refused request neither adds nor removes')
+    })
+  })
+}
+
+test('415 when the content-type is omitted, and the refusal keeps the connection reusable', async () => {
+  const set = new Set(['sess-kept'])
+  await withControlSockets(set, async (port) => {
+    const body = JSON.stringify({ session_id: 'sess-new' })
+    const [received, followUp] = await rawExchanges(port, [
+      `POST /_hypaware/ignore/session HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+      'GET /_hypaware/ignore/session?session_id=sess-new HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n',
+    ])
+    assert.match(received, /^HTTP\/1\.1 415 /, received.slice(0, 80))
+    assert.match(followUp, /^HTTP\/1\.1 200 /, followUp.slice(0, 80))
+    assert.match(followUp, /"ignored":false/)
+    assert.deepEqual([...set], ['sess-kept'])
+  })
+})
+
+test('JSON with a charset parameter or another letter case is accepted', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    for (const [i, contentType] of ['application/json; charset=utf-8', 'Application/JSON', ' application/json ;charset=UTF-8'].entries()) {
+      const out = await rawRequest(base, 'POST', '/_hypaware/ignore/session', JSON.stringify({ session_id: `s${i}` }), contentType)
+      assert.equal(out.status, 200, `expected 200 for ${contentType}`)
+    }
+    assert.equal(set.size, 3)
+  })
+})
+
+test('a refused media type emits a bounded, rate-limited warn log and no ignore log', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+  const set = /** @type {Set<string>} */ (new Set())
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logs = []
+  const log = {
+    debug() {}, error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    info(message, fields) { logs.push({ level: 'info', message, fields: fields ?? {} }) },
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn(message, fields) { logs.push({ level: 'warn', message, fields: fields ?? {} }) },
+  }
+  const handler = createControlHandler({ ignoredSessions: set, log })
+  const body = JSON.stringify({ session_id: 's' })
+  await withHandler(handler, async (base) => {
+    for (let i = 0; i < 20; i++) {
+      const out = await rawRequest(base, 'POST', '/_hypaware/ignore/session', body, `text/${'x'.repeat(500)}`)
+      assert.equal(out.status, 415)
+    }
+    assert.equal(logs.length, 1, 'a burst of refusals logs one line, not one per request')
+    t.mock.timers.tick(60 * 1000)
+    await rawRequest(base, 'DELETE', '/_hypaware/ignore/session', body, 'text/plain')
+  })
+  assert.equal(logs.length, 2, 'the next refusal past the interval logs again')
+  const [first, second] = logs
+  assert.equal(first.level, 'warn')
+  assert.equal(first.message, 'session_ignore_unsupported_media_type')
+  assert.equal(first.fields.error_kind, 'unsupported_media_type')
+  assert.equal(first.fields.method, 'POST')
+  assert.equal(String(first.fields.media_type).length, 64, 'the logged media type is bounded')
+  assert.equal(first.fields.rejected_total, 1)
+  assert.equal(second.fields.method, 'DELETE')
+  assert.equal(second.fields.rejected_total, 21, 'the swallowed burst is still counted')
+  assert.equal(set.size, 0)
 })
 
 test('a control request emits a structured ignore log carrying the running total', async () => {
@@ -448,11 +533,12 @@ function deleteSession(base, sessionId) {
  * @param {string} method
  * @param {string} path
  * @param {string} [reqBody]
+ * @param {string} [contentType]
  */
-async function rawRequest(base, method, path, reqBody) {
+async function rawRequest(base, method, path, reqBody, contentType = 'application/json') {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': contentType },
     body: reqBody,
   })
   const text = await res.text()
@@ -464,3 +550,36 @@ async function rawRequest(base, method, path, reqBody) {
   }
   return { status: res.status, headers: res.headers, body: parsed }
 }
+
+
+test('control writes survive a fresh gateway and DELETE survives another restart', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-route-'))
+  try {
+    const fresh = () => createGatewayState(new SessionIgnoreSet(root)).ignoredSessions
+    await withControlServer(fresh(), async (base) => {
+      assert.equal((await postSession(base, 'private')).body.ignored, true)
+    })
+    const restarted = fresh()
+    assert.equal(restarted.has('private'), true)
+    await withControlServer(restarted, async (base) => {
+      assert.equal((await deleteSession(base, 'private')).body.ignored, false)
+    })
+    assert.equal(fresh().has('private'), false)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('failed persistence returns HTTP 500 and retains the previous membership', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-route-'))
+  try {
+    const set = new SessionIgnoreSet(root)
+    set.add('keep')
+    fs.renameSync(set.directory, `${set.directory}-away`)
+    fs.writeFileSync(set.directory, 'unavailable')
+    await withControlServer(set, async (base) => {
+      assert.equal((await postSession(base, 'new')).status, 500)
+      assert.equal((await deleteSession(base, 'keep')).status, 500)
+      assert.equal(set.has('keep'), true)
+      assert.equal(set.has('new'), false)
+    })
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

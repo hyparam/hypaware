@@ -25,15 +25,19 @@ const FORK_INTRO =
 /**
  * The wizard's top-level pathway fork.
  *
- * Collect locally or collect shared, with quit as the safe default on a
- * bare enter or a cancelled prompt - the wizard never reconfigures by
- * accident. Every machine reaches this prompt, enrolled or not
- * (LLP 0182): a managed machine's Reconfigure comes through here too,
- * carrying its org rows in as a locked set.
+ * Sync to the cloud or keep everything local, with sync as the default
+ * on a bare enter. There is no quit row: ctrl+c, or a stdin that cannot
+ * answer, still quits, and the wizard writes nothing on that path. So
+ * does escape on a first run; under `allowBack` it steps back to the
+ * returning gate instead (LLP 0191, and the catch below).
+ * Every machine reaches this prompt, enrolled or not (LLP 0182): a
+ * managed machine's Reconfigure comes through here too, carrying its org
+ * rows in as a locked set.
  *
  * @ref LLP 0129#fork [implements]: the wizard's first question is the
- *   pathway fork (local vs shared collection); quit is the safe default
- *   on a bare enter.
+ *   pathway fork (local vs shared collection).
+ * @ref LLP 0410#two-rows [implements]: two rows, sync leads and is the
+ *   bare-enter default; quit is the cancel key, not a row.
  *
  * @param {RunWizardForkOptions} opts
  * @returns {Promise<WizardForkChoice>}
@@ -60,22 +64,20 @@ export async function runWizardFork(opts) {
 }
 
 /**
- * The fork's three rows, in display order. A plain data builder (no I/O)
+ * The fork's two rows, in display order. A plain data builder (no I/O)
  * so both the TUI and legacy prompts, and tests, share one source of
  * truth for the choices and their default.
  *
- * Shared leads: it is the pathway that pays off across machines and
- * harnesses, not just for teams, and a menu that lists it second reads
- * as the advanced option. (An explicit "recommended" tag is held back
- * while shared collection is in beta; the ordering and summaries do
- * the guiding.) Each real row carries a one-line summary because the
- * labels alone cannot both guide the choice and disclose its cost:
- * the shared row's summary states the value and the sign-in it will
- * ask for, the local row's states the boundary and that the choice is
- * revisitable. Quit stays bare.
+ * Sync leads and is the default: it is the pathway that pays off across
+ * machines and harnesses, not just for teams. Each row carries a
+ * one-line summary because the labels alone cannot both guide the
+ * choice and disclose its cost: the sync row's summary states the value
+ * and the sign-in it will ask for, the local row's states the boundary
+ * and that the choice is revisitable.
  *
- * @ref LLP 0211#collect-labels [implements]: shared first, with row
+ * @ref LLP 0211#collect-labels [implements]: sync first, with row
  *   summaries carrying the guidance and the sign-in disclosure.
+ * @ref LLP 0410#two-rows [implements]: no quit row.
  *
  * @returns {ConfiguredMenuOption[]}
  */
@@ -83,17 +85,18 @@ export function buildForkOptions() {
   return [
     {
       value: 'team',
-      label: 'Collect shared agent logs',
+      label: 'Sync to the cloud',
       summary: 'One history that follows you across machines and harnesses, and can be shared with your team. You will be asked to sign in.',
     },
     {
       value: 'local',
-      label: 'Collect agent logs locally',
-      summary: 'Everything stays on this machine. You can switch to shared later by re-running hyp setup.',
+      label: 'Local only',
+      summary: 'Everything stays on this machine. You can switch to sync later by re-running hyp setup.',
     },
-    { value: 'quit', label: 'Quit' },
   ]
 }
+
+const FORK_DEFAULT = 'team'
 
 /**
  * @param {RunWizardForkOptions} opts
@@ -106,7 +109,7 @@ async function promptForkChoice(opts, options) {
       const choice = await select({
         title: FORK_TITLE,
         options,
-        default: 'quit',
+        default: FORK_DEFAULT,
         clearOnResolve: true,
         ...(opts.allowBack ? { allowBack: true } : {}),
         stdin: opts.stdin ?? process.stdin,
@@ -128,15 +131,15 @@ async function promptForkChoice(opts, options) {
 /**
  * Numbered readline fallback for a non-TTY stdin or `HYP_NO_TUI=1`,
  * mirroring the returning gate's own legacy prompt shape below. An
- * empty answer takes the default (quit); an out-of-range answer also
- * quits rather than guessing.
+ * empty answer takes the default (sync); an out-of-range answer quits
+ * rather than guessing, and so does a stdin that ends without a line.
  *
  * @param {RunWizardForkOptions} opts
  * @param {ConfiguredMenuOption[]} options
  * @returns {Promise<WizardForkChoice>}
  */
 export async function legacyForkPrompt(opts, options) {
-  const choice = await legacyMenuPrompt(opts, options, FORK_TITLE, opts.allowBack === true)
+  const choice = await legacyMenuPrompt(opts, options, FORK_TITLE, FORK_DEFAULT, opts.allowBack === true)
   return /** @type {WizardForkChoice} */ (choice)
 }
 
@@ -271,7 +274,7 @@ async function promptReturningGateChoice(opts, options) {
  * @returns {Promise<ReturningGateAction>}
  */
 export async function legacyReturningGatePrompt(opts, options, title = 'What would you like to do?') {
-  const choice = await legacyMenuPrompt(opts, options, title)
+  const choice = await legacyMenuPrompt(opts, options, title, 'quit')
   return /** @type {ReturningGateAction} */ (choice)
 }
 
@@ -371,37 +374,38 @@ const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
  * Shared numbered-menu readline prompt behind both `legacyForkPrompt` and
  * `legacyReturningGatePrompt`: prints the title and each option (with its
  * summary indented beneath, when the option carries one), reads one
- * line, and resolves to `quit` on an empty, unparseable, or out-of-range
- * answer so a non-TTY caller never reconfigures by accident. With
- * `allowBack`, a `b` answer resolves to `back` (the readline form of the
- * TUI's escape, LLP 0191); any other stray answer still quits.
+ * line, and resolves to the named default on an empty answer and to
+ * `quit` on an unparseable or out-of-range one, so a non-TTY caller
+ * never reconfigures by guessing. With `allowBack`, a `b` answer
+ * resolves to `back` (the readline form of the TUI's escape, LLP 0191);
+ * any other stray answer still quits.
  *
  * A stdin that ends without a line is read through `queuedLineAsker`
  * rather than `rl.question`, whose promise is left permanently unsettled
  * at EOF - which on the wizard's first screen is the whole wizard
  * hanging, or dying on an unsettled top-level await, before it has asked
- * anything else. The EOF `null` is coalesced into the empty line rather
- * than branched on, so a spent stdin takes exactly the default the
- * prompt just printed (`default 3`, Quit) and the EOF answer cannot
- * drift from the advertised one. Quit here means exit 0 with nothing
- * written, which is also what the TUI path returns for a real ctrl+c at
- * this screen (`isPromptCancelledError` -> `quit` above), so the
- * fallback does not judge a dropped terminal more harshly than the TUI
- * judges a deliberate cancel.
+ * anything else. The EOF `null` is read as quit, not as the empty line:
+ * the fork's default opens a sign-in, and EOF is the proof nobody is
+ * there to want it. Quit here means exit 0 with nothing written, which
+ * is also what the TUI path returns for a real ctrl+c at this screen
+ * (`isPromptCancelledError` -> `quit` above), so the fallback does not
+ * judge a dropped terminal more harshly than the TUI judges a
+ * deliberate cancel.
  *
- * @ref LLP 0190#eof-everywhere [implements]: a spent stdin lands on the prompt's stated default; 130 is for prompts whose enter has no default, and this one prints its own
- * @ref LLP 0129#fork [constrained-by]: quit is the safe default at the fork, so the EOF answer is quit and the wizard reconfigures nothing by accident
+ * @ref LLP 0299#eof-declines [implements]: a stdin that cannot answer declines whatever default the prompt printed; the fork's default now acts, so EOF quits rather than signing in
+ * @ref LLP 0410#eof-quits [implements]: quit left the menu but stays the EOF and cancel answer
  *
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: RunWizardForkOptions['stdout'] }} opts
  * @param {ConfiguredMenuOption[]} options
  * @param {string} title
+ * @param {string} defaultValue
  * @param {boolean} [allowBack]
  * @returns {Promise<string>}
  */
-async function legacyMenuPrompt(opts, options, title, allowBack = false) {
+async function legacyMenuPrompt(opts, options, title, defaultValue, allowBack = false) {
   const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
   const output = /** @type {NodeJS.WritableStream} */ (/** @type {any} */ (opts.stdout))
-  const defaultIdx = Math.max(0, options.findIndex((o) => o.value === 'quit'))
+  const defaultIdx = Math.max(0, options.findIndex((o) => o.value === defaultValue))
   const rl = readline.createInterface({ input, output, terminal: false })
   const askLine = queuedLineAsker(rl, input, output)
   try {
@@ -413,7 +417,8 @@ async function legacyMenuPrompt(opts, options, title, allowBack = false) {
     const answer = await askLine(
       `Choose [1-${options.length}, default ${defaultIdx + 1}${allowBack ? ', b back' : ''}]: `
     )
-    const trimmed = (answer ?? '').trim()
+    if (answer === null) return 'quit'
+    const trimmed = answer.trim()
     if (allowBack && trimmed.toLowerCase() === 'b') return 'back'
     if (trimmed === '') return options[defaultIdx]?.value ?? 'quit'
     const n = Number.parseInt(trimmed, 10)

@@ -25,11 +25,11 @@ import { evaluateCwdClassification } from '../../../../src/core/usage-policy/cla
  * never wedges the session.
  *
  * Like every client hook, this MUST never interrupt Claude Code: malformed
- * input, a missing cwd, an unenrolled machine, a non-interactive run, an
- * already-classified folder, or any lookup error all degrade to "no prompt"
- * with exit 0 and no output.
+ * input, a missing cwd, a machine that forwards nowhere, a non-interactive
+ * run, an already-classified folder, or any lookup error all degrade to "no
+ * prompt" with exit 0 and no output.
  *
- * @ref LLP 0106 [implements]: enrolled + interactive + unclassified -> a SessionStart classification prompt; the Claude "force" is additionalContext injection
+ * @ref LLP 0106 [implements]: forwarding (LLP 0510) + interactive + unclassified -> a SessionStart classification prompt; the Claude "force" is additionalContext injection
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @param {{ evaluate?: typeof evaluateCwdClassification, isInteractive?: typeof isInteractiveClaudeSession }} [deps]
@@ -54,6 +54,9 @@ export async function runClaudeClassifyHook(argv, ctx, deps = {}) {
       return 0
     }
 
+    // @ref LLP 0399#coexistence: Cursor can inherit Claude hooks; those
+    // invocations must not inject Claude classification instructions.
+    if (ctx.env.CURSOR_VERSION || typeof event.cursor_version === 'string') return 0
     const cwd = str(event.new_cwd) ?? str(event.cwd)
     if (!cwd) return 0
 

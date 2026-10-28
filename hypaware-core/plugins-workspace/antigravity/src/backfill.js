@@ -21,7 +21,6 @@ import { listAntigravityConversations, statConversationTranscript } from './summ
  *   AiGatewayProjectedExchange,
  *   BackfillContribution,
  *   BackfillItem,
- *   BackfillPlan,
  *   BackfillRunContext,
  *   PluginPaths,
  * } from '../../../../hypaware-plugin-kernel-types.js'
@@ -55,7 +54,7 @@ const DEFAULT_VARIANT = /** @type {AntigravityVariantOptions} */ ({
  * }} [opts]
  * @returns {BackfillContribution & {
  *   target: string,
- *   plan: (planCtx?: { config?: Record<string, unknown> | null, env?: NodeJS.ProcessEnv, homeDir?: string, paths?: PluginPaths }) => Promise<BackfillPlan & {
+ *   plan: (planCtx?: { config?: Record<string, unknown> | null, env?: NodeJS.ProcessEnv, homeDir?: string, paths?: PluginPaths }) => Promise<{
  *     provider: string,
  *     plugin: string,
  *     available: boolean,

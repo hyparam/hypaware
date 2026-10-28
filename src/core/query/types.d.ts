@@ -223,3 +223,65 @@ export interface TimestampScope {
   /** The enclosing select's scope, for a correlated reference; absent at the top level. */
   outer?: TimestampScope
 }
+
+/**
+ * One line the person types again and again, with what the agent did
+ * after it (LLP 0398 #one-signal).
+ */
+export interface FirstAskCandidate {
+  /** The line, lower-cased, first 42 characters. */
+  line: string
+  sessions: number
+  days: number
+  typed: number
+  /** The earliest occurrence in the sampled sessions, as typed. */
+  example?: { date: string; text: string }
+  /** Sessions that returned tool calls after the line: drawn from the newest sample of them, not every session that typed it, and only those the shared row budget reached. */
+  sessionsWithCalls: number
+  /** Procedure commands that ran after it, most sessions first. */
+  steps: { command: string; sessions: number }[]
+  /** Other tool activity after it, for context. */
+  other: { head: string; sessions: number }[]
+  /** How one such session ended: the first substantial reply after the procedure. */
+  ending?: { date: string; text: string }
+}
+
+/**
+ * How strong the evidence behind the recommendation is (LLP 0398
+ * #record-floor): `habit` clears RECORD_FLOOR, `repeated` and `procedure`
+ * recommend under it, `none` has nothing recorded to recommend from.
+ */
+export type FirstAskTier = 'habit' | 'repeated' | 'procedure' | 'none'
+
+/**
+ * What the agent ran across the newest sessions, read when no typed line
+ * repeats: the recommendation's fallback signal (LLP 0398 #record-floor).
+ */
+export interface FirstAskProcedure {
+  /** Sessions sampled, newest first. */
+  sessions: number
+  /** Sessions whose tool calls the shared row budget reached. */
+  sessionsWithCalls: number
+  /** Procedure commands, most sessions first. */
+  steps: { command: string; sessions: number }[]
+  /** Other tool activity, for context. */
+  other: { head: string; sessions: number }[]
+  /** Lines typed in sessions that ran the top step, newest first: what a trigger phrase would read like. */
+  examples: { date: string; text: string }[]
+}
+
+/** What `prepareFirstAskEvidence` produced. */
+export interface FirstAskEvidence {
+  /** The folder the client is started in. */
+  dir: string
+  from: string
+  files: string[]
+  record?: { sessions: number; sessionDays: number }
+  /** How strong the evidence is; only `none` stops the answer at "nothing to recommend from yet". */
+  tier?: FirstAskTier
+  /** `tier !== 'none'`: there is something to recommend from. */
+  enough?: boolean
+  candidates?: FirstAskCandidate[]
+  /** The fallback signal, read only when no line repeats. */
+  procedure?: FirstAskProcedure
+}

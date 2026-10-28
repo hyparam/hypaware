@@ -180,8 +180,11 @@ test('local-fs incremental export: ranged filename, watermark advance, skip-empt
   const dir = path.join(exportsDir, 'out')
 
   // Tick 1: two new rows ⇒ one blob named with [0,2].
-  const r1 = await sink.exportBatch({ batchId: 'b1', partitions: [partition()] }, {})
+  const progress = []
+  const opts = { onProgress: (delta) => progress.push(delta) }
+  const r1 = await sink.exportBatch({ batchId: 'b1', partitions: [partition()] }, opts)
   assert.equal(r1.status, 'exported')
+  assert.deepEqual(progress, [{ rows: 2, bytes: r1.bytesWritten }])
   assert.equal(r1.partitionsExported, 1)
   let blobs = await listBlobs(dir)
   assert.deepEqual(blobs, ['all.0-2.jsonl'], 'first blob embeds [sinceSeq=0, lastSeq=2]')
@@ -192,14 +195,18 @@ test('local-fs incremental export: ranged filename, watermark advance, skip-empt
   assert.equal(wm.exportedRowCount, 2)
 
   // Tick 2: no new rows ⇒ no new blob (skip-empty), watermark unchanged.
-  const r2 = await sink.exportBatch({ batchId: 'b2', partitions: [partition()] }, {})
+  const r2 = await sink.exportBatch({ batchId: 'b2', partitions: [partition()] }, opts)
+  assert.equal(progress.length, 1, 'an empty export reports no acknowledged rows')
   assert.equal(r2.partitionsExported, 0, 'no new rows ⇒ nothing exported')
   blobs = await listBlobs(dir)
   assert.deepEqual(blobs, ['all.0-2.jsonl'], 'no second blob written')
 
-  // Tick 3: append a row ⇒ a new blob covering only (2, 5].
+  // Tick 3: append a row ⇒ a new blob covering only (2, 5]. Called with no
+  // options at all, which the progress report must tolerate: the export
+  // contract requires the argument, but reading a field off it is new here,
+  // and a bare read would turn an omitted argument into a failed batch.
   rows.push({ _seq: 5, id: 'c' })
-  const r3 = await sink.exportBatch({ batchId: 'b3', partitions: [partition()] }, {})
+  const r3 = await sink.exportBatch({ batchId: 'b3', partitions: [partition()] }, /** @type {any} */ (undefined))
   assert.equal(r3.partitionsExported, 1)
   blobs = await listBlobs(dir)
   assert.deepEqual(blobs, ['all.0-2.jsonl', 'all.2-5.jsonl'], 'second blob embeds [sinceSeq=2, lastSeq=5]')

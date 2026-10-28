@@ -2,12 +2,12 @@
 
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 
 import { compareStrings } from '../util/compare_strings.js'
 import { atomicWriteJson, readJsonIfExists } from '../util/fs_atomic.js'
 import { errCode } from '../util/json_util.js'
+import { clientAssetLedgerPath, stateRootFromEnv } from './paths.js'
 
 /**
  * The record of which client-asset paths HypAware itself wrote, and of what it
@@ -50,9 +50,6 @@ import { errCode } from '../util/json_util.js'
  * @import { ClientAssetLedgerRecord } from '../../../src/core/runtime/types.js'
  */
 
-/** Basename under the state root. Sibling of `config-control/`, not inside it: this is not a control-plane marker. */
-const LEDGER_BASENAME = 'client-assets.json'
-
 /** Bumped only if the record shape changes incompatibly; an unknown version reads as an empty ledger. */
 const LEDGER_VERSION = 1
 
@@ -72,10 +69,7 @@ const LEDGER_VERSION = 1
  * @returns {string}
  */
 export function clientAssetStateRoot(env, homeDir) {
-  // Same two segments `readObservabilityEnv` joins (`.hyp` / `hypaware`), with
-  // `homeDir` in place of its `os.homedir()`.
-  const hypHome = env.HYP_HOME || path.join(homeDir.length > 0 ? homeDir : os.homedir(), '.hyp')
-  return path.join(hypHome, 'hypaware')
+  return stateRootFromEnv(env, homeDir)
 }
 
 /**
@@ -90,7 +84,7 @@ export async function readClientAssetLedger(stateRoot) {
   /** @type {unknown} */
   let raw
   try {
-    raw = await readJsonIfExists(path.join(stateRoot, LEDGER_BASENAME))
+    raw = await readJsonIfExists(clientAssetLedgerPath(stateRoot))
   } catch {
     return []
   }
@@ -144,7 +138,7 @@ export async function writeClientAssetLedger(stateRoot, records) {
   for (const record of records) unique.set(`${record.client}\n${record.dest}`, record)
   try {
     await atomicWriteJson(
-      path.join(stateRoot, LEDGER_BASENAME),
+      clientAssetLedgerPath(stateRoot),
       { version: LEDGER_VERSION, assets: [...unique.values()].sort(compareRecords) },
       { mkdir: true }
     )
@@ -160,8 +154,8 @@ export async function writeClientAssetLedger(stateRoot, records) {
  *
  * Paths are hashed alongside the bytes so adding or renaming a file inside an
  * installed skill registers as a change; entries that are neither a file nor a
- * directory (a symlink someone dropped in) contribute their name only, so they
- * likewise cannot be mistaken for the tree we copied.
+ * directory (a symlink someone dropped in) are skipped, because `copyDir` skips
+ * them too and a source tree has to digest equal to the copy made of it.
  *
  * **The shape is hashed before anything else.** Without it the two branches
  * write into the same unframed byte stream and produce collisions across kinds:
@@ -170,7 +164,9 @@ export async function writeClientAssetLedger(stateRoot, records) {
  * bytes are `SKILL.md\nbody\n`. Either one is enough to let a file the user
  * authored inherit a digest we recorded for something else, and the digest is
  * the last thing standing between the prune and their files. Seeding the domain
- * (and marking each tree entry's own shape) makes the two spaces disjoint.
+ * (and marking each tree entry's own shape) makes the two spaces disjoint, and
+ * framing every variable-length run inside a tree with its own byte length
+ * makes the tree space injective (LLP 0402 #framed-entries).
  *
  * @param {string} dest
  * @returns {Promise<string | undefined>} `undefined` when the path is gone or
@@ -178,6 +174,8 @@ export async function writeClientAssetLedger(stateRoot, records) {
  * @ref LLP 0219#edited-assets-are-not-ours [implements]: a digest may only match
  *   what we actually wrote, so file-shaped and directory-shaped content are
  *   hashed in separate domains.
+ * @ref LLP 0401#edit-detection-narrows [constrained-by]: "what we wrote" is what
+ *   the copier carries, so an entry it cannot carry does not register as an edit.
  */
 export async function digestClientAsset(dest) {
   return (await inspectClientAsset(dest)).digest
@@ -209,16 +207,16 @@ export async function digestClientAsset(dest) {
  * error, a file `readdir` just listed that a concurrent actor removes before
  * the following `readFile` reaches it) falls into a second, narrower `try`
  * that always reports `missing: false`, so a failure below `dest` can never
- * be mistaken for `dest` itself being gone. A dangling symlink *inside* the
- * tree never reaches either `try`'s error path at all: `hashTree` reads
- * `Dirent` shape from `readdir` without following the entry, so a symlink
- * whose target is gone hashes as an opaque `o:` entry by name, the same as
- * one whose target exists.
+ * be mistaken for `dest` itself being gone. A symlink *inside* the tree never
+ * reaches either `try`'s error path at all: `hashTree` reads `Dirent` shape
+ * from `readdir` without following the entry, so it is skipped whether its
+ * target is gone or not.
  *
  * @param {string} dest
- * @returns {Promise<{ digest?: string, missing: boolean }>} `missing` is true
- *   only for a path that is not there; a digest is present only when the whole
- *   asset was read
+ * @returns {Promise<{ digest?: string, missing: boolean, errno?: string }>}
+ *   `missing` is true only for a path that is not there; a digest is present
+ *   only when the whole asset was read, and `errno` names why a read below
+ *   `dest` failed
  * @ref LLP 0226#unreadable-is-not-absent [implements]: an unreadable asset is
  *   reported and kept on the books, never read as one that is already gone,
  *   including when the read failure happens below `dest` rather than at it.
@@ -240,8 +238,8 @@ export async function inspectClientAsset(dest) {
       hash.update('file\n')
       hash.update(await fs.readFile(dest))
     }
-  } catch {
-    return { missing: false }
+  } catch (err) {
+    return { missing: false, errno: errCode(err) }
   }
   return { digest: hash.digest('hex'), missing: false }
 }
@@ -258,13 +256,27 @@ async function hashTree(root, dir, hash) {
   const entries = await fs.readdir(dir, { withFileTypes: true })
   entries.sort((a, b) => compareStrings(a.name, b.name))
   for (const entry of entries) {
+    // Exactly the set `copyDir` copies: an entry it skips must not reach the
+    // hash either, or a source tree holding one could never digest equal to
+    // the copy made of it, and the refresh would re-copy it on every boot.
+    // @ref LLP 0401#digest-covers-the-copy [implements]: the copier is the
+    //   authority on what a tree is, so the hash may never cover more.
+    if (!entry.isDirectory() && !entry.isFile()) continue
     const full = path.join(dir, entry.name)
     // The entry's shape leads its path, so a subdirectory named `x` and a file
     // named `x` cannot hash alike, and a file's bytes can never be read back as
     // the tree that would have followed a directory of the same name.
-    hash.update(`${entry.isDirectory() ? 'd' : entry.isFile() ? 'f' : 'o'}:${path.relative(root, full)}\n`)
+    // @ref LLP 0402#framed-entries [implements]: the path and the bytes are
+    //   each preceded by their own byte length, so nothing following an entry
+    //   can be read as part of it and two distinct trees cannot digest alike.
+    const rel = path.relative(root, full)
+    hash.update(`${entry.isDirectory() ? 'd' : 'f'}:${Buffer.byteLength(rel)}:${rel}\n`)
     if (entry.isDirectory()) await hashTree(root, full, hash)
-    else if (entry.isFile()) hash.update(await fs.readFile(full))
+    else {
+      const bytes = await fs.readFile(full)
+      hash.update(`${bytes.length}\n`)
+      hash.update(bytes)
+    }
   }
 }
 

@@ -15,7 +15,7 @@ import { createOpenclawAttach } from '../../hypaware-core/plugins-workspace/open
  * and ends by telling the user to restart the gateway.
  *
  * Three of the four cases here are the ones the design and plan singled out as
- * "worth a dedicated unit test rather than trusting the acceptance run":
+ * "worth a dedicated unit test rather than trusting a manual run":
  *
  * - the bare-origin (`anthropic`) vs `+/v1` (`openai`) asymmetry, because both
  *   spellings are schema-valid, so the wrong one produces a config OpenClaw

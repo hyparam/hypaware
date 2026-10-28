@@ -68,6 +68,33 @@ test('atomicWriteFile applies the requested file mode', { skip: process.platform
   }
 })
 
+test('every atomic write path sets the requested mode exactly under a restrictive umask (#2594)', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async () => {
+  const dir = await makeTmpDir()
+  const previous = process.umask(0o077)
+  try {
+    /** @type {Array<[string, (target: string, mode: number) => unknown]>} */
+    const writers = [
+      ['atomicWriteFile', (target, mode) => atomicWriteFile(target, '{}', { mode })],
+      ['atomicWriteFile fsync', (target, mode) => atomicWriteFile(target, '{}', { mode, fsync: true })],
+      ['atomicWriteFileSync', (target, mode) => atomicWriteFileSync(target, '{}', { mode })],
+      ['atomicWriteJson', (target, mode) => atomicWriteJson(target, {}, { mode })],
+      ['atomicWriteJsonSync', (target, mode) => atomicWriteJsonSync(target, {}, { mode })],
+    ]
+    for (const [name, write] of writers) {
+      for (const mode of [0o600, 0o640, 0o644]) {
+        const target = path.join(dir, `${name.replace(' ', '-')}-${mode.toString(8)}.json`)
+        // A rewrite of a file whose mode differs, as the Ollama setup does.
+        await fs.writeFile(target, 'old', { mode: 0o600 })
+        await write(target, mode)
+        assert.equal((await fs.stat(target)).mode & 0o777, mode, `${name} ${mode.toString(8)}`)
+      }
+    }
+  } finally {
+    process.umask(previous)
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('atomicWriteFile enforces expectedMtimeMs (CONCURRENT_EDIT)', async () => {
   const dir = await makeTmpDir()
   try {
@@ -157,4 +184,40 @@ test('readFileIfExists/readJsonIfExists return null only for ENOENT', async () =
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
+})
+
+// @ref LLP 0417#cache-reclamation [tests]: admission rejects failed directory durability
+test('durable publication syncs file before rename and the immediate parent directory afterward, and a failing parent sync propagates', async t => {
+  const dir = await makeTmpDir()
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const target = path.join(dir, 'new', 'nested', 'journal.json')
+  const events = []
+  let failDirectory = true
+  const io = { ...fs,
+    async rename(from, to) {
+      events.push('rename')
+      return fs.rename(from, to)
+    },
+    async open(file, flags, mode) {
+      const handle = await fs.open(file, flags, mode)
+      return {
+        writeFile: (data, encoding) => handle.writeFile(data, encoding),
+        async sync() {
+          events.push(flags === 'w' ? 'file-sync' : `dir-sync:${file}`)
+          if (flags === 'r' && failDirectory) throw new Error('injected directory sync failure')
+          await handle.sync()
+        },
+        async close() { await handle.close() },
+      }
+    },
+  }
+  const options = { fsync: true, fs: /** @type {typeof fs} */ (io) }
+  await assert.rejects(atomicWriteJson(target, { admitted: true }, options), /directory sync failure/)
+  assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
+  assert.deepEqual(await fs.readdir(path.dirname(target)), ['journal.json'])
+  failDirectory = false
+  events.length = 0
+  await atomicWriteJson(target, { admitted: true }, options)
+  // Exactly one directory sync, of the immediate parent only, not every ancestor.
+  assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
 })

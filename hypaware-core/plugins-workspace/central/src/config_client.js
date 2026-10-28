@@ -1,10 +1,11 @@
 // @ts-check
 
-import { RETRY_BACKOFF_SECONDS, parseRetryAfter } from './backoff.js'
+import { RETRY_BACKOFF_SECONDS, parseRetryAfter, readBodyCapped, readStopCode, discardBody } from './backoff.js'
+import { PRODUCT_VERSION } from '../../../../src/core/product_telemetry/collection.js'
 
 /**
  * @import { ConfigControlFacade, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { IdentityClient } from './identity_client.js'
+ * @import { IdentityClient } from '../../../../hypaware-core/plugins-workspace/central/src/identity_client.js'
  */
 
 /**
@@ -160,118 +161,128 @@ export function createConfigPullLoop(args) {
     const runningEtag = configControl.runningEtag()
 
     let response = await doFetch(url, runningEtag, signal)
-    if (response.status === 401) {
-      // One-shot refresh + retry; a second 401 escalates as an auth
-      // failure (proto.md "Refresh window").
-      await identityClient.refresh()
-      response = await doFetch(url, runningEtag, signal)
+    try {
       if (response.status === 401) {
-        consecutiveFailures += 1
-        log.error('central.config.poll_failed', {
-          error_kind: 'config_poll_auth_failed',
-          http_status: 401,
-        })
-        return 'retry_backoff'
+        // One-shot refresh + retry; a second 401 escalates as an auth
+        // failure (proto.md "Refresh window").
+        await discardBody(response)
+        await identityClient.refresh(signal)
+        response = await doFetch(url, runningEtag, signal)
+        if (response.status === 401) {
+          consecutiveFailures += 1
+          log.error('central.config.poll_failed', {
+            error_kind: 'config_poll_auth_failed',
+            http_status: 401,
+          })
+          return 'retry_backoff'
+        }
       }
-    }
 
-    if (response.status === 304) {
-      consecutiveFailures = 0
-      configControl.confirmPoll()
-      log.info('central.config.poll', {
-        hyp_operation: 'config.pull',
-        http_status: 304,
-        status: 'ok',
-      })
-      return 'ok'
-    }
+      if (response.status === 403) {
+        const code = await readStopCode(response, signal)
+        if (code) throw await identityClient.stopCurrent(code)
+      }
 
-    if (response.status === 200) {
-      const etag = response.headers.get('etag')
-      const read = await readBodyCapped(response, MAX_CONFIG_DOCUMENT_BYTES, signal)
-      if (!read.ok) {
-        consecutiveFailures += 1
-        log.error('central.config.poll_failed', {
-          error_kind: 'config_document_too_large',
-          http_status: 200,
-          body_bytes: read.bytesRead,
-        })
-        return 'retry_backoff'
-      }
-      const body = read.body
-      if (!etag) {
-        consecutiveFailures += 1
-        log.error('central.config.poll_failed', {
-          error_kind: 'config_missing_etag',
-          http_status: 200,
-        })
-        return 'retry_backoff'
-      }
-      /** @type {unknown} */
-      let document
-      try {
-        document = JSON.parse(body)
-      } catch (err) {
-        consecutiveFailures += 1
-        log.error('central.config.poll_failed', {
-          error_kind: 'config_invalid_json',
-          http_status: 200,
-          message: err instanceof Error ? err.message : String(err),
-        })
-        return 'retry_backoff'
-      }
-      consecutiveFailures = 0
-      // The 200 itself is a successful authenticated poll: it clears
-      // any active probation before the new revision stages its own.
-      // A probation-clearing poll returning a newer revision chains
-      // into the next apply by design.
-      configControl.confirmPoll()
-      const staged = await configControl.stage(document, etag)
-      log.info('central.config.poll', {
-        hyp_operation: 'config.pull',
-        http_status: 200,
-        config_etag: etag,
-        apply_action: staged.ok ? staged.action : 'failed',
-        ...(staged.ok ? {} : { error_kind: staged.errorKind }),
-        status: staged.ok ? 'ok' : 'failed',
-      })
-      return 'ok'
-    }
-
-    if (response.status === 404) {
-      // Legacy-only branch: servers that mint tokens without a config.
-      if (consecutiveFailures === 0) {
-        log.warn('central.config.poll', {
+      if (response.status === 304) {
+        consecutiveFailures = 0
+        configControl.confirmPoll()
+        log.info('central.config.poll', {
           hyp_operation: 'config.pull',
-          http_status: 404,
-          status: 'skipped',
-          hyp_reason: 'no_config_registered_legacy',
+          http_status: 304,
+          status: 'ok',
         })
+        return 'ok'
       }
-      consecutiveFailures += 1
-      return 'legacy_404'
-    }
 
-    if (response.status === 429 || response.status === 503) {
+      if (response.status === 200) {
+        const etag = response.headers.get('etag')
+        const read = await readBodyCapped(response, MAX_CONFIG_DOCUMENT_BYTES, signal)
+        if (!read.ok) {
+          consecutiveFailures += 1
+          log.error('central.config.poll_failed', {
+            error_kind: 'config_document_too_large',
+            http_status: 200,
+            body_bytes: read.bytesRead,
+          })
+          return 'retry_backoff'
+        }
+        const body = read.body
+        if (!etag) {
+          consecutiveFailures += 1
+          log.error('central.config.poll_failed', {
+            error_kind: 'config_missing_etag',
+            http_status: 200,
+          })
+          return 'retry_backoff'
+        }
+        /** @type {unknown} */
+        let document
+        try {
+          document = JSON.parse(body)
+        } catch (err) {
+          consecutiveFailures += 1
+          log.error('central.config.poll_failed', {
+            error_kind: 'config_invalid_json',
+            http_status: 200,
+            message: err instanceof Error ? err.message : String(err),
+          })
+          return 'retry_backoff'
+        }
+        consecutiveFailures = 0
+        // The 200 itself is a successful authenticated poll: it clears
+        // any active probation before the new revision stages its own.
+        // A probation-clearing poll returning a newer revision chains
+        // into the next apply by design.
+        configControl.confirmPoll()
+        const staged = await configControl.stage(document, etag)
+        log.info('central.config.poll', {
+          hyp_operation: 'config.pull',
+          http_status: 200,
+          config_etag: etag,
+          apply_action: staged.ok ? staged.action : 'failed',
+          ...(staged.ok ? {} : { error_kind: staged.errorKind }),
+          status: staged.ok ? 'ok' : 'failed',
+        })
+        return 'ok'
+      }
+
+      if (response.status === 404) {
+        // Legacy-only branch: servers that mint tokens without a config.
+        if (consecutiveFailures === 0) {
+          log.warn('central.config.poll', {
+            hyp_operation: 'config.pull',
+            http_status: 404,
+            status: 'skipped',
+            hyp_reason: 'no_config_registered_legacy',
+          })
+        }
+        consecutiveFailures += 1
+        return 'legacy_404'
+      }
+
+      if (response.status === 429 || response.status === 503) {
+        consecutiveFailures += 1
+        const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
+        log.warn('central.config.poll_failed', {
+          error_kind: 'config_poll_throttled',
+          http_status: response.status,
+          ...(retryAfter !== undefined ? { retry_after_seconds: retryAfter } : {}),
+        })
+        // Honor only a *positive* Retry-After. A legal `0` or a past HTTP-date
+        // parses to 0: rescheduling at 0s would re-poll immediately and spin;
+        // fall through to the ladder ('retry_backoff') instead.
+        return retryAfter ? retryAfter : 'retry_backoff'
+      }
+
       consecutiveFailures += 1
-      const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
       log.warn('central.config.poll_failed', {
-        error_kind: 'config_poll_throttled',
+        error_kind: 'config_poll_http_error',
         http_status: response.status,
-        ...(retryAfter !== undefined ? { retry_after_seconds: retryAfter } : {}),
       })
-      // Honor only a *positive* Retry-After. A legal `0` or a past HTTP-date
-      // parses to 0: rescheduling at 0s would re-poll immediately and spin;
-      // fall through to the ladder ('retry_backoff') instead.
-      return retryAfter ? retryAfter : 'retry_backoff'
+      return 'retry_backoff'
+    } finally {
+      await discardBody(response)
     }
-
-    consecutiveFailures += 1
-    log.warn('central.config.poll_failed', {
-      error_kind: 'config_poll_http_error',
-      http_status: response.status,
-    })
-    return 'retry_backoff'
   }
 
   /**
@@ -280,13 +291,15 @@ export function createConfigPullLoop(args) {
    * @param {AbortSignal} signal
    */
   async function doFetch(url, runningEtag, signal) {
-    const jwt = await identityClient.getCurrentJwt()
+    const jwt = await identityClient.getCurrentJwt(signal)
     return abortable(
       fetchFn(url, {
         method: 'GET',
         signal,
         headers: {
           authorization: `Bearer ${jwt}`,
+          // @ref LLP 0558#report [implements]: the loaded process version bypasses optional analytics and its backlog
+          'x-hyp-client-version': PRODUCT_VERSION,
           // If-None-Match always reflects the *running* config: the
           // server reads it as the fleet-convergence signal, so a
           // gateway mid-apply keeps presenting its old etag.
@@ -333,46 +346,6 @@ export function createConfigPullLoop(args) {
 }
 
 /**
- * Read a response body under a hard byte cap without ever buffering
- * past it: an oversized `Content-Length` is rejected before any read,
- * and a chunked body is streamed through a byte counter that cancels
- * the moment it crosses the cap. Responses without a readable stream
- * (e.g. test doubles) fall back to `text()` with a post-hoc check.
- *
- * @param {Response} response
- * @param {number} maxBytes
- * @param {AbortSignal} signal
- * @returns {Promise<{ ok: true, body: string } | { ok: false, bytesRead: number }>}
- */
-async function readBodyCapped(response, maxBytes, signal) {
-  const contentLength = Number(response.headers.get('content-length'))
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    if (response.body) await response.body.cancel().catch(() => {})
-    return { ok: false, bytesRead: contentLength }
-  }
-  if (!response.body) {
-    const text = await abortable(response.text(), signal)
-    const bytes = Buffer.byteLength(text, 'utf8')
-    return bytes > maxBytes ? { ok: false, bytesRead: bytes } : { ok: true, body: text }
-  }
-  const reader = response.body.getReader()
-  /** @type {Uint8Array[]} */
-  const chunks = []
-  let total = 0
-  for (;;) {
-    const { done, value } = await abortable(reader.read(), signal)
-    if (done) break
-    total += value.byteLength
-    if (total > maxBytes) {
-      reader.cancel().catch(() => {})
-      return { ok: false, bytesRead: total }
-    }
-    chunks.push(value)
-  }
-  return { ok: true, body: Buffer.concat(chunks).toString('utf8') }
-}
-
-/**
  * Await `promise`, but reject as soon as `signal` aborts, even when
  * the underlying promise never settles. A misbehaving `fetchFn` (or a
  * server that stalls mid-body) must not be able to wedge `stop()`,
@@ -407,10 +380,15 @@ function abortReason(signal) {
 }
 
 /**
+ * Redundant trailing slashes in the base collapse, so a url an operator typed
+ * as `https://host//` reaches the same single-slash route product telemetry's
+ * `safeDestination` targets, not the doubled-slash path the receiver will not
+ * route.
+ *
  * @param {string} base
  * @param {string} suffix
  */
 function joinUrl(base, suffix) {
-  const baseWithSlash = base.endsWith('/') ? base : `${base}/`
+  const baseWithSlash = `${base.replace(/\/+$/, '')}/`
   return new URL(suffix.replace(/^\//, ''), baseWithSlash).toString()
 }

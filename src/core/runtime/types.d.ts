@@ -68,6 +68,12 @@ export interface BootKernelOptions {
   env?: NodeJS.ProcessEnv
   /** Override OS temp root (tests). */
   tmpRoot?: string
+  /**
+   * A preview boot (`hyp setup --dry-run`): plugins activate as usual, but
+   * their durable state and cache dirs are not created and each activation
+   * context carries `preview: true` (LLP 0525).
+   */
+  preview?: boolean
   /** Apply-engine facade to expose on activation contexts (daemon only). */
   configControl?: ConfigControlFacade
 }
@@ -121,6 +127,19 @@ export interface BootKernelResult {
    */
   unsatisfiedRequirements: UnsatisfiedRequirement[]
   /**
+   * The plugin directories this boot found a manifest in but could not load
+   * one from, with the rejection `loadManifest` recorded. `unavailablePlugins`
+   * below folds these into the same flat list, as the directory alone, which
+   * is all the prune needs; a caller that must *say* why a directory
+   * contributed nothing needs the reason too, and the daemon's status snapshot
+   * is one (issue #1576).
+   *
+   * Directory-shaped on purpose and for the whole of its life: a manifest that
+   * did not parse has no plugin name, so no reader may put a `rootDir` where a
+   * plugin name belongs.
+   */
+  unloadableManifests: FailedManifest[]
+  /**
    * Everything this boot did not get, in one list: plugins whose `activate()`
    * threw, plugins the dep graph eliminated for an unsatisfied `requires`,
    * plugins the boot profile withheld although the config enabled them, and
@@ -152,8 +171,8 @@ export interface DiscoverBundledResult {
   failed: FailedManifest[]
   /** Loadable but excluded from V1 default surface. */
   excluded: LoadedManifest[]
-  /** Directories with manifests not in the allowlist or excluded set. */
-  unknownDirs: string[]
+  /** Manifests that parsed under a name in neither the allowlist nor the excluded set. */
+  unknown: LoadedManifest[]
 }
 
 export interface DiscoverInstalledResult {
@@ -161,8 +180,22 @@ export interface DiscoverInstalledResult {
   loaded: LoadedManifest[]
   /** Lock entries whose `install_dir` manifest failed to load. */
   failed: FailedManifest[]
-  /** All lock entries that were considered (loaded + failed). */
+  /** All well-formed lock entries that were considered (loaded + failed). */
   lockEntries: PluginLockEntry[]
+  /**
+   * Lock entries the loader could not use at all: not an object, or no
+   * usable `install_dir` to load a manifest from. Named by lock key, which
+   * is the only identity such an entry still has, and kept out of `failed`
+   * because a `FailedManifest` is a directory plus a reason and these carry
+   * no directory.
+   */
+  malformed: PluginName[]
+  /**
+   * 1-based line of each `malformed` key in plugin-lock.json, so a repair
+   * can point at the row without repeating its untrusted key. A key whose
+   * line could not be read is absent.
+   */
+  malformedLines: Map<PluginName, number>
 }
 
 // --- activation ---
@@ -246,6 +279,8 @@ export interface ResolvedClientAsset {
   clients: string[]
   /** `sourceDir` for a skill, `sourceFile` for an agent. */
   source: string
+  /** The registering plugin, when the registry records one. */
+  plugin?: string
 }
 
 /**
@@ -315,8 +350,8 @@ export interface MaterializeClientAssetsOptions {
    * so the wizard finale (which threads a narrowed registry shape) and tests
    * (which pass fakes) can call this without constructing a full registry.
    */
-  skills?: { list(): { name: string; clients: string[]; sourceDir: string }[] }
-  agents?: { list(): { name: string; clients: string[]; sourceFile: string }[] }
+  skills?: { list(): { name: string; plugin?: string; clients: string[]; sourceDir: string }[] }
+  agents?: { list(): { name: string; plugin?: string; clients: string[]; sourceFile: string }[] }
   /**
    * State root (`<HYP_HOME>/hypaware`) holding the install ledger: the record
    * of which destinations HypAware itself wrote, which is what makes removing

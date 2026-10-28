@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-05
 **Related:** LLP 0147, LLP 0157, LLP 0158, LLP 0161, LLP 0167, LLP 0170, LLP 0172; issue #640
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > The Lane B sweep's projection gate flips from a vendor allowlist
 > (`{anthropic, openai}`) to a denylist of CLI-backend turns, keyed on two
@@ -149,14 +150,14 @@ countable, with `covered_by` naming the sibling route when one is known.
 
 ## Verify {#verify}
 
-- **Open, pre-acceptance-run:** one OpenClaw turn on a codex backend,
-  confirming its session-file record stamps `api: "cli"` (either rung
-  already excludes it if `provider` starts with `codex`; the probe pins the
-  mechanism marker). The probe's durable home is `docs/ACCEPTANCE.md`
-  `openclaw_capture` step 8, so it runs with every release that touches
-  this adapter, not only when someone reads this list. Record the binary
-  version with the result here or in
-  the acceptance notes.
+- **Open:** one OpenClaw turn on a codex backend, confirming its
+  session-file record stamps `api: "cli"` (either rung already excludes it
+  if `provider` starts with `codex`; the probe pins the mechanism marker).
+  ~~The probe's durable home is the manual OpenClaw capture procedure, so it
+  runs with every release that touches this adapter.~~ **Retired
+  (2026-09-23)** by
+  [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md); the
+  probe is still open. Record the binary version with the result here.
 - After upgrading an affected install, one `hyp backfill openclaw` run (or
   one sweep interval) imports the previously excluded history inside
   `window_days`; `part_id` dedupe makes the re-run safe.

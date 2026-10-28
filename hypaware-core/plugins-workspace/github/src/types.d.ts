@@ -200,9 +200,33 @@ export interface GithubRuntime {
   /** Undefined on activation: catch up existing rows once, then skip idle ticks. */
   projectionNeeded?: boolean
   /** Test seam; production defaults to the real fetch client. */
-  clientFactory?: () => GithubClient
+  clientFactory?: (opts?: { signal?: AbortSignal }) => GithubClient
   /** Test seam; production uses the fixed whole-tick request limit. */
   captureRequestLimit?: number
+}
+
+export interface GithubOAuthOptions {
+  fetchImpl?: typeof fetch
+  signal?: AbortSignal
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+}
+
+export interface GithubOAuthTokens {
+  access_token: string
+  expires_at?: number
+  refresh_token?: string
+  refresh_expires_at?: number
+}
+
+export interface GithubAuthRecord {
+  generation: string
+  status: 'pending' | 'logged_out' | 'active'
+  account?: { login: string; id: number }
+  access_token?: string
+  expires_at?: number
+  refresh_token?: string
+  refresh_expires_at?: number
 }
 
 export interface LocalObservedRepoState {
@@ -248,6 +272,8 @@ export interface ObservedRepoRevalidationState {
  * poller resumes past history rather than re-fetching it.
  */
 export interface RepoCursor {
+  /** Explicit one-time import authorization, removed on completion or exclusion. */
+  one_time_import?: true
   since?: { issues?: string; commits?: string; comments?: string; pulls?: string }
   /**
    * Event ids sitting exactly ON the matching `since` watermark. GitHub's
@@ -280,6 +306,13 @@ export interface CursorState {
   schema_version: number
   repos: Record<string, RepoCursor>
   next_repo?: string
+  /**
+   * The last capture verdict any process reached over the whole inventory:
+   * true when that tick ended with bounded work remaining, false when it did
+   * not. Absent on a sidecar written before the field existed, which reads as
+   * "no verdict recorded" rather than as false (LLP 0438#durable-verdict).
+   */
+  pending?: boolean
 }
 
 export interface GithubPullTask {
@@ -352,17 +385,26 @@ export interface GithubActor {
   type?: string
 }
 
+/**
+ * The capture tick's request allowance (LLP 0361#budget). The caller spends one
+ * unit before each page call; the client spends one more for every redirect hop
+ * and rejects with `github_budget_exhausted` when none is left.
+ */
+export interface GithubRequestBudget {
+  take(): boolean
+}
+
 export interface GithubClient {
   /** Enumerate every repository visible to the authenticated local identity. */
   listViewerRepos(): Promise<string[]>
-  listIssuesPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubIssue>>
-  listPullRequestsPage(owner: string, repo: string, etag: string | undefined, page?: string): Promise<GithubPage<GithubPull>>
-  listPullRequestFilesPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<string>>
-  listPullRequestReviewsPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<GithubReview>>
-  listPullRequestCommitsPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<GithubCommit>>
-  listCommitsPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubCommit>>
-  listCommitFilesPage(owner: string, repo: string, sha: string, page?: string): Promise<GithubPage<string>>
-  listIssueCommentsPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubComment>>
+  listIssuesPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubIssue>>
+  listPullRequestsPage(owner: string, repo: string, etag: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubPull>>
+  listPullRequestFilesPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<string>>
+  listPullRequestReviewsPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubReview>>
+  listPullRequestCommitsPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubCommit>>
+  listCommitsPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubCommit>>
+  listCommitFilesPage(owner: string, repo: string, sha: string, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<string>>
+  listIssueCommentsPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubComment>>
 }
 
 export interface GithubPage<T> {

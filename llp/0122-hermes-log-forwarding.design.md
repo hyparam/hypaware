@@ -2,6 +2,7 @@
 
 **Type:** Design
 **Status:** Active
+**Extended-by:** LLP 0449 (mutable local transcript reconciliation), LLP 0527 (budgeted batched reconcile per tick)
 **Systems:** Sources, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-20

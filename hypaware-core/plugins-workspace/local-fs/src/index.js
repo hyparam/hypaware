@@ -45,7 +45,10 @@ const PLUGIN_VERSION = '1.0.0'
  */
 export async function activate(ctx) {
   const baseDir = resolveExportsBaseDir({ pluginConfig: ctx.config, env: ctx.env })
-  await fs.mkdir(baseDir, { recursive: true })
+  // The blob store tolerates a missing base dir, so a preview boot can leave
+  // the user's exports root uncreated; a real boot still makes it here.
+  // @ref LLP 0525#preview-boot [implements]: a preview activation creates nothing on disk
+  if (!ctx.preview) await fs.mkdir(baseDir, { recursive: true })
   const blobStore = createLocalFsBlobStore({ baseDir })
   ctx.provideCapability('hypaware.blob-store', PLUGIN_VERSION, blobStore)
 
@@ -96,10 +99,10 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
   return {
     /**
      * @param {ExportBatch} batch
-     * @param {ExportOptions} _opts
+     * @param {ExportOptions} [opts]
      * @returns {Promise<ExportResult>}
      */
-    async exportBatch(batch, _opts) {
+    async exportBatch(batch, opts) {
       let bytesWritten = 0
       let exported = 0
       /** @type {QueryPartition[]} */
@@ -137,19 +140,25 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
             })
             continue
           }
-          const blob = await encodePartition(encoder, partition, {
-            log: sinkCtx.log,
-            tempDir: sinkCtx.paths.tempDir,
-            columns,
-            rows: reader.rows,
-            clusterColumns: clusterColumnsForDataset(query, partition.dataset),
-            sinkInstance: sinkCtx.name,
-            plugin: PLUGIN_NAME,
-          })
+          let blob
+          try {
+            blob = await encodePartition(encoder, partition, {
+              log: sinkCtx.log,
+              tempDir: sinkCtx.paths.tempDir,
+              columns,
+              rows: reader.rows,
+              clusterColumns: clusterColumnsForDataset(query, partition.dataset),
+              sinkInstance: sinkCtx.name,
+              plugin: PLUGIN_NAME,
+            })
+          } finally {
+            await reader.close()
+          }
           // Embed [sinceSeq, lastSeq] so a crash-retry re-writes the same file
           // (idempotent overwrite): the blob sink's server-ledger stand-in.
           const filename = withSeqRangeFilename(blob.filename, reader.sinceSeq, reader.lastAfter.seq)
           const destPath = await writeBlob(baseDir, partition, filename, blob.bytes)
+          opts?.onProgress?.({ rows: reader.rowCount, bytes: blob.bytesWritten ?? 0 })
           // Durable now: advance the watermark to this blob's last row.
           if (wmKey) {
             await watermarks.write(wmKey, {

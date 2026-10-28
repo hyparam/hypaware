@@ -6,12 +6,13 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { runPickerFinale } from '../../src/core/cli/walkthrough.js'
 
-// The finale's client-asset step reports counts per client, not one line per
-// copy: a two-client install copies a dozen trees, and a dozen paths on the
-// last screen of onboarding bury the step's one fact under output the user
-// did not choose and cannot act on.
+// The finale's client-asset step reports one line naming the clients, not one
+// line per copy: a two-client install copies a dozen trees, and a dozen paths
+// on the last screen of onboarding bury the step's one fact under output the
+// user did not choose and cannot act on. The install counts are left out too:
+// they describe the packaging, not anything the user picked.
 
 function makeBuf() {
   let value = ''
@@ -55,28 +56,31 @@ const agents = {
   ],
 }
 
-test('the finale reports asset counts per client, never a line per copy', async () => {
+test('the finale reports one install line naming the clients, never a line per copy', async () => {
   const env = await tmpEnv('hypaware-asset-counts-')
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities,
     skills,
     agents,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude', 'codex'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude', 'codex'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/codex' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true, dryRun: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   const text = stdout.text()
-  // Counted per client: claude took all three skills and the agent, codex two
-  // skills and no agent. The sum (five copies) is true of neither client.
-  assert.match(text, /\(dry-run\) would install 3 skills and 1 agent for claude\n/)
-  assert.match(text, /\(dry-run\) would install 2 skills for codex\n/)
+  // One line for both clients, and "agents" because claude took one.
+  assert.match(text, /^\(dry-run\) would install skills and agents for claude and codex$/m)
+  assert.equal(text.match(/would install/g)?.length, 1, 'one install line, not one per client')
   // No per-copy line, and no destination paths.
   assert.doesNotMatch(text, /install skill 'a'/)
   assert.doesNotMatch(text, /skills\/a/)

@@ -3,6 +3,7 @@
 **Type:** Issue
 **Status:** Active
 **Systems:** Cache, Gateway
+**Extended-by:** LLP 0417#cache-mutation-guard (cross-process mutation serialization)
 **Author:** Phil / Codex
 **Date:** 2026-08-24
 **Related:** LLP 0027, LLP 0199, LLP 0209, LLP 0217, LLP 0220

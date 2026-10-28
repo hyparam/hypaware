@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { isPartitionMutationBusy, withPartitionMutationLock } from './partition.js'
 
 /**
  * @import { IngestSeqAllocator } from '../../../src/core/cache/types.js'
@@ -17,11 +18,13 @@ import { atomicWriteJson } from '../util/fs_atomic.js'
 const SEQ_FILE = '_hyp_ingest_seq.json'
 
 /**
- * Default reservation block size. Each block costs one durable
- * write-rename; a crash abandons at most the unused tail of the current
- * block (a harmless gap), so the block can be generous.
+ * How long one reservation waits for another process to let go of the
+ * counter. A holder keeps it for one read and one write-rename, so a few
+ * short retries cover any live contention; a dead holder is reclaimed by
+ * the guard itself on the first retry.
  */
-export const DEFAULT_SEQ_BLOCK_SIZE = 1024
+const RESERVE_RETRY_LIMIT = 200
+const RESERVE_RETRY_DELAY_MS = 25
 
 /**
  * Read the persisted `nextSeq` watermark. The value is stored as a decimal
@@ -55,82 +58,76 @@ async function readNextSeq(statePath) {
  */
 async function writeNextSeq(statePath, nextSeq) {
   const payload = { v: 1, nextSeq: nextSeq.toString(), updatedAt: new Date().toISOString() }
-  // Sole caller reserveBlock() mkdirs cacheRoot first, so skip the per-write mkdir.
+  // Sole caller reserve() mkdirs cacheRoot first, so skip the per-write mkdir.
   await atomicWriteJson(statePath, payload, { mkdir: false })
 }
 
 /**
  * Crash-safe, never-regressing monotonic int64 allocator backing the
- * `_hyp_ingest_seq` column stamped at the `decorateRow` flush chokepoint.
+ * `_hyp_ingest_seq` column stamped on every row as it is committed.
  *
- * **Reserve-before-stamp.** A block of `blockSize` seqs is reserved by
- * durably advancing the persisted `nextSeq` (atomic write-rename) BEFORE any
- * seq in the block is handed to a row. So a crash/resume can only re-enter at
- * or above the persisted watermark: a resumed flush never re-issues a seq
- * `<=` one already stamped (and possibly already exported). Duplicate content
- * across a crash boundary is tolerable (strict `>` watermark + row-id dedup);
- * a *regression* would let a never-exported row slip below an advanced
- * watermark and be skipped forever, which this allocator makes impossible.
+ * **Reserve-before-stamp.** A run of `count` seqs is reserved by durably
+ * advancing the persisted `nextSeq` (atomic write-rename) BEFORE any seq in
+ * the run is handed to a row. So a crash/resume can only re-enter at or above
+ * the persisted watermark: a resumed flush never re-issues a seq `<=` one
+ * already stamped (and possibly already exported). Duplicate content across a
+ * crash boundary is tolerable (strict `>` watermark + row-id dedup); a
+ * *regression* would let a never-exported row slip below an advanced
+ * watermark and be skipped forever.
  *
- * **Cache-global, not per-partition.** The chokepoint runs in the spool reader
- * before rows are grouped into `source=<...>` destination partitions, and two
- * distinct spool table paths (e.g. live capture vs. `backfill`) can feed the
- * SAME destination partition. A single cache-wide counter therefore guarantees
- * that every partition only ever observes a strictly increasing subsequence of
- * seqs, the property the sink watermark relies on, which a per-partition
- * counter (interleaving two independent sequences into one partition) would
- * break. Gaps between consecutively-appended rows in one partition are fine.
+ * **Reserved at commit, never ahead of it.** Nothing is held back in memory
+ * between reservations: every call reads the counter from disk under a
+ * cross-process guard and returns exactly what the caller commits right now.
+ * Callers reserve inside the partition mutation guard, so within one
+ * partition seqs rise in commit order no matter how many processes flush the
+ * cache. The earlier design reserved a block of 1024 per process and handed
+ * them out from memory, which put a daemon's rows below the seqs a `hyp
+ * query` flush had already committed (and the sink had already forwarded);
+ * those rows sat under the watermark for good (issue #2578).
  *
- * Concurrency: in-process calls are serialized through a promise-chain mutex so
- * two concurrent flushes (different `tablePath`s share one allocator) never
- * double-reserve the same block. Cross-process concurrent flush of one cache is
- * not a supported scenario: the daemon owns the cache, matching the existing
- * single-writer write-rename idiom.
+ * **Cache-global, not per-partition.** Two distinct spool table paths (e.g.
+ * live capture vs. `backfill`) can feed the SAME destination partition. A
+ * single cache-wide counter therefore guarantees that every partition only
+ * ever observes a strictly increasing subsequence of seqs, the property the
+ * sink watermark relies on, which a per-partition counter (interleaving two
+ * independent sequences into one partition) would break. Gaps between
+ * consecutively-appended rows in one partition are fine.
  *
  * @ref LLP 0040#seq-allocator [implements]: cache-global never-regressing reserve-before-stamp allocator
- * @param {{ cacheRoot: string, blockSize?: number }} opts
+ * @ref LLP 0492#reserve-at-commit [implements]: reserved per commit under the partition guard, then the counter guard
+ * @ref LLP 0492#contention [implements]: bounded retry on a busy counter, then the chunk waits in the spool
+ * @param {{ cacheRoot: string }} opts
  * @returns {IngestSeqAllocator}
  */
-export function createIngestSeqAllocator({ cacheRoot, blockSize = DEFAULT_SEQ_BLOCK_SIZE }) {
+export function createIngestSeqAllocator({ cacheRoot }) {
   if (!cacheRoot) throw new Error('createIngestSeqAllocator: cacheRoot is required')
-  if (!Number.isInteger(blockSize) || blockSize < 1) {
-    throw new Error('createIngestSeqAllocator: blockSize must be a positive integer')
-  }
   const statePath = path.join(cacheRoot, SEQ_FILE)
-  const block = BigInt(blockSize)
 
-  /** Next seq to hand out from the in-memory reservation. */
-  let cursor = 0n
-  /** Exclusive upper bound of the in-memory reservation. */
-  let blockEnd = 0n
-  let initialized = false
-  /** @type {Promise<unknown>} */
-  let mutex = Promise.resolve()
-
-  async function reserveBlock() {
+  /** @param {number} count */
+  async function reserve(count) {
+    if (!Number.isInteger(count) || count < 1) {
+      throw new Error('IngestSeqAllocator.reserve: count must be a positive integer')
+    }
     await fs.mkdir(cacheRoot, { recursive: true })
-    const start = (await readNextSeq(statePath)) ?? 1n
-    const end = start + block
-    // Durable BEFORE any seq in [start, end) is stamped onto a row.
-    await writeNextSeq(statePath, end)
-    cursor = start
-    blockEnd = end
-    initialized = true
+    // The partition mutation guard is a general cross-process lock with
+    // dead-owner recovery; keyed on the counter file it serializes every
+    // process's read-modify-write of `nextSeq`. It fails fast on contention,
+    // and a holder is gone again within a few milliseconds, so wait briefly
+    // rather than send a whole chunk back to the spool for the next tick.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await withPartitionMutationLock(statePath, async () => {
+          const start = (await readNextSeq(statePath)) ?? 1n
+          // Durable BEFORE any seq in [start, start + count) is stamped onto a row.
+          await writeNextSeq(statePath, start + BigInt(count))
+          return start
+        })
+      } catch (error) {
+        if (!isPartitionMutationBusy(error) || attempt >= RESERVE_RETRY_LIMIT) throw error
+        await new Promise(resolve => setTimeout(resolve, RESERVE_RETRY_DELAY_MS))
+      }
+    }
   }
 
-  /** @returns {Promise<bigint>} */
-  async function next() {
-    const run = mutex.then(async () => {
-      if (!initialized || cursor >= blockEnd) await reserveBlock()
-      const seq = cursor
-      cursor += 1n
-      return seq
-    })
-    // Keep the chain alive (and serialized) even if a reservation rejects; the
-    // failed caller still sees the rejection, and the next call retries.
-    mutex = run.then(() => undefined, () => undefined)
-    return run
-  }
-
-  return { next }
+  return { reserve }
 }

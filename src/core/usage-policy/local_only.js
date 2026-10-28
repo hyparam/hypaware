@@ -5,13 +5,12 @@ import path from 'node:path'
 
 import { compareStrings } from '../util/compare_strings.js'
 import { atomicWriteJson, readFileIfExists } from '../util/fs_atomic.js'
+import { usagePolicyPath } from '../runtime/paths.js'
 
 /**
  * @import { LocalOnlyEntry, UsageClass } from '../../../src/core/usage-policy/types.js'
  */
 
-const LOCAL_ONLY_SUBDIR = 'usage-policy'
-const LOCAL_ONLY_FILENAME = 'local-only.json'
 const LOCAL_ONLY_LIST_VERSION = 2
 
 const USAGE_CLASSES = new Set(['ignore', 'local-only', 'full'])
@@ -57,7 +56,7 @@ export class LocalOnlyListUnreadableError extends Error {
  */
 export function localOnlyListPath(stateDir) {
   if (!stateDir) throw new Error('localOnlyListPath: stateDir is required')
-  return path.join(stateDir, LOCAL_ONLY_SUBDIR, LOCAL_ONLY_FILENAME)
+  return usagePolicyPath(stateDir, 'local-only')
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   projectGraph,
   resolveProjectionMaxHeapBytes,
 } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
+import { QueryExecutionBudgetError } from '../../src/core/query/sql.js'
 
 // Regression for issue #376 step 1: graph projection must pass its OWN finite
 // heap budget (HYP_GRAPH_PROJECTION_MAX_HEAP_MB, default 3 GiB) to every
@@ -124,6 +125,72 @@ test('HYP_GRAPH_PROJECTION_MAX_HEAP_MB overrides the projection budget at every 
     if (prev === undefined) delete process.env[KNOB]
     else process.env[KNOB] = prev
   }
+})
+
+test("a projection budget refusal names the projection's own lever, HYP_GRAPH_PROJECTION_MAX_HEAP_MB", async () => {
+  /** @type {any} */
+  const storage = {
+    cacheTablePath: (dataset) => `/fake/${dataset}`,
+    appendRows: async () => {},
+  }
+  await assert.rejects(
+    projectGraph({
+      query: /** @type {any} */ ({}),
+      storage,
+      contracts: [probeContract()],
+      __executeSql: async () => {
+        // The four-arg caller-budgeted form, carrying the diagnostics block the
+        // kernel's trip site always supplies, so these assertions read the
+        // sentence an operator actually gets: the kernel's message already says
+        // the budget came from a caller; the projection must say which one.
+        throw new QueryExecutionBudgetError(64 * 1048576, 128 * 1048576, {
+          site: 'row_scan',
+          rawBytes: 200 * 1048576,
+          baselineBytes: 10 * 1048576,
+          gcMode: 'confirmed',
+        }, true)
+      },
+    }),
+    (err) => {
+      // The typed identity command.js and the github projection log key on
+      // survives: the same instance is rethrown, not replaced by a new Error
+      // carrying only the name.
+      assert.ok(err instanceof QueryExecutionBudgetError)
+      assert.equal(err.name, 'QueryExecutionBudgetError')
+      assert.equal(err.code, 'query_budget_exceeded')
+      assert.equal(err.limitBytes, 64 * 1048576)
+      assert.ok(err.message.includes('budget set by its caller'), 'the kernel caller clause survives')
+      assert.match(err.message, /HYP_GRAPH_PROJECTION_MAX_HEAP_MB/)
+      // One wrapping layer, not one per scan site: the lever is appended once
+      // however many wrapped calls the error passes.
+      assert.equal(err.message.match(/HYP_GRAPH_PROJECTION_MAX_HEAP_MB/g)?.length, 1)
+      return true
+    }
+  )
+})
+
+test('a non-budget scan failure propagates without the projection lever appended', async () => {
+  /** @type {any} */
+  const storage = {
+    cacheTablePath: (dataset) => `/fake/${dataset}`,
+    appendRows: async () => {},
+  }
+  await assert.rejects(
+    projectGraph({
+      query: /** @type {any} */ ({}),
+      storage,
+      contracts: [probeContract()],
+      __executeSql: async () => {
+        throw new Error('scan exploded')
+      },
+    }),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.equal(err.name, 'Error')
+      assert.equal(err.message, 'scan exploded')
+      return true
+    }
+  )
 })
 
 test('resolveProjectionMaxHeapBytes defaults to 3 GiB and never returns 0', () => {

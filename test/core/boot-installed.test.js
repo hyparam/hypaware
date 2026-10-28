@@ -16,7 +16,9 @@ import {
   validateConfig,
 } from '../../src/core/config/validate.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
+import { removePlugin } from '../../src/core/plugin_install/install.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 
 /**
  * @import { PluginManifest } from '../../hypaware-plugin-kernel-types.js'
@@ -86,6 +88,18 @@ async function writeFixtureLock(hypHome, entries) {
     }
   }
   await writeLock(stateDir, { schema_version: 1, plugins })
+}
+
+/**
+ * @param {string} dir
+ * @returns {Promise<boolean>}
+ */
+async function dirExists(dir) {
+  try {
+    return (await fs.stat(dir)).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 function bufferWriter() {
@@ -372,6 +386,20 @@ test('dispatch routes hyp init <installed-preset> even when preset args include 
     assert.equal(exitCode, 0)
     assert.equal(stdout.text(), 'preset:target,--yes\n')
     assert.equal(stderr.text(), '')
+
+    // Only the bundled presets refuse setup choices they cannot honor
+    // (#2468); a third-party preset still receives them to read itself.
+    const optStdout = bufferWriter()
+    const optStderr = bufferWriter()
+    const optExit = await dispatch(['setup', 'fixture', '--retention-days', '45', '--from-file=mine.json', '--client', 'codex', '--yes'], {
+      env: { ...process.env, HYP_HOME: hypHome },
+      stdout: optStdout,
+      stderr: optStderr,
+      cwd: hypHome,
+      workspaceDir: path.join(hypHome, 'no-bundled'),
+    })
+    assert.equal(optExit, 0, optStderr.text())
+    assert.equal(optStdout.text(), 'preset:--retention-days,45,--from-file=mine.json,--client,codex,--yes\n')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
@@ -522,4 +550,536 @@ test('validateConfig does not flag installed plugin names as plugin_unknown', as
 
   const unknownErrors = result.errors.filter((e) => e.errorKind === 'plugin_unknown')
   assert.equal(unknownErrors.length, 0)
+})
+
+// Issue #1958. `plugin-lock.json` is hand-editable and `readLock` validates
+// only the container, so an entry with no `install_dir` reached `path.join`
+// inside `loadManifest` and took down every kernel-booting command - `hyp
+// status` and `hyp plugin list` included - on "The \"path\" argument must be
+// of type string. Received undefined", which named neither the lock file nor
+// the entry. The module already promised the opposite posture for a manifest
+// that will not load ("per-entry manifest failures are surfaced via
+// failed[]"); the entry-shape case simply never got it.
+
+/**
+ * Write a lock containing one well-formed entry and one raw entry exactly as
+ * given, so a test can stage a hand-edited shape `writeFixtureLock` cannot.
+ *
+ * @param {string} hypHome
+ * @param {{ name: string, version: string, installDir: string }} good
+ * @param {string} brokenName
+ * @param {unknown} brokenEntry
+ */
+/**
+ * The 1-based line of `text` on which the plugins key `key` is written,
+ * found from the text itself so the test does not share the scanner's logic.
+ *
+ * @param {string} text
+ * @param {string} key
+ */
+function lineOfKey(text, key) {
+  const found = text.split('\n').findIndex((l) => l.trimStart().startsWith(`${JSON.stringify(key)}:`))
+  assert.notEqual(found, -1, `key ${JSON.stringify(key)} is in the file`)
+  return found + 1
+}
+
+async function writeHandEditedLock(hypHome, good, brokenName, brokenEntry) {
+  const stateDir = path.join(hypHome, 'hypaware')
+  await writeFixtureLock(hypHome, [good])
+  const lockPath = path.join(stateDir, 'plugin-lock.json')
+  const lock = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+  lock.plugins[brokenName] = brokenEntry
+  await fs.writeFile(lockPath, JSON.stringify(lock, null, 2))
+  return lockPath
+}
+
+test('a lock entry with no install_dir degrades to malformed[] and the well-formed entries still load', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-invalid-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    // The reported shape: every other field present, `install_dir` deleted.
+    await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '@third-party/broken',
+      {
+        name: '@third-party/broken',
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: '/nowhere', path: '/nowhere' },
+        content_hash: 'c'.repeat(64),
+        manifest_hash: 'd'.repeat(64),
+        installed_at: '2026-05-21T00:00:00.000Z',
+      }
+    )
+
+    const result = await discoverInstalledPlugins({ stateDir: path.join(hypHome, 'hypaware') })
+    assert.deepEqual(result.malformed, ['@third-party/broken'])
+    // The neighbour is untouched, which is the whole point of degrading.
+    assert.equal(result.loaded.length, 1)
+    assert.equal(result.loaded[0].manifest.name, '@third-party/healthy')
+    assert.equal(result.failed.length, 0)
+    // Not in `lockEntries`: every consumer of that list dereferences a
+    // well-formed entry, and `failed[]` cannot hold it either - a
+    // `FailedManifest` is a directory plus a reason and this has no directory.
+    assert.deepEqual(result.lockEntries.map((e) => e.name), ['@third-party/healthy'])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a lock entry that is not an object degrades the same way', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-null-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '@third-party/nulled',
+      null
+    )
+
+    const result = await discoverInstalledPlugins({ stateDir: path.join(hypHome, 'hypaware') })
+    // Named by the lock key, the only identity this entry still has.
+    assert.deepEqual(result.malformed, ['@third-party/nulled'])
+    assert.equal(result.loaded.length, 1)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('hyp status names the bad lock entry and hyp plugin list still lists the others', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-status-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '@third-party/broken',
+      {
+        name: '@third-party/broken',
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: '/nowhere', path: '/nowhere' },
+        content_hash: 'c'.repeat(64),
+        manifest_hash: 'd'.repeat(64),
+        installed_at: '2026-05-21T00:00:00.000Z',
+      }
+    )
+    const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
+
+    const report = await collectHypAwareStatus({ env })
+    const diag = report.diagnostics.find((d) => d.kind === 'plugin_lock_entry_invalid')
+    assert.ok(diag, 'the bad lock entry is reported')
+    assert.equal(diag.severity, 'error')
+    // Names the entry AND the file, the two things the TypeError did not.
+    assert.equal(
+      diag.message,
+      `plugin-lock.json entry '@third-party/broken' has no usable install_dir,`
+        + ` so nothing it installed is running: ${lockPath}`
+    )
+    // The repair points at the row by line, not by key (issue #2115).
+    const brokenLine = lineOfKey(await fs.readFile(lockPath, 'utf8'), '@third-party/broken')
+    assert.deepEqual(diag.repair, [
+      `open ${lockPath} and remove the entry on line ${brokenLine},`
+        + ' or pass its exact key as one quoted argument to hyp plugin remove',
+    ])
+
+    // The commands that used to exit 1 on a bare TypeError.
+    const stdout = bufferWriter()
+    const stderr = bufferWriter()
+    const exitCode = await dispatch(['plugin', 'list'], {
+      env,
+      stdout,
+      stderr,
+      cwd: hypHome,
+      workspaceDir: path.join(hypHome, 'no-bundled'),
+    })
+    assert.equal(exitCode, 0)
+    assert.match(stdout.text(), /@third-party\/healthy@0\.1\.0/)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The repair line is one an operator may paste into a shell, and a lock key is
+// hand-edited text, so no byte of the key may reach it, not even a sanitized
+// or truncated copy that would name a different row (issue #2115). The key
+// never runs through a shell here: the test only reads the diagnostic.
+test('hyp status repair for a malformed lock row carries no byte of the key and names the row by line', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-hostile-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const hostile = `x'"; touch pwned \`id\` $(id)\n--force${'z'.repeat(400)}`
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      hostile,
+      null
+    )
+    const stateDir = path.join(hypHome, 'hypaware')
+    const result = await discoverInstalledPlugins({ stateDir })
+    assert.deepEqual(result.malformed, [hostile])
+    const hostileLine = lineOfKey(await fs.readFile(lockPath, 'utf8'), hostile)
+    assert.equal(result.malformedLines.get(hostile), hostileLine)
+
+    const report = await collectHypAwareStatus({ env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
+    const diag = report.diagnostics.find((d) => d.kind === 'plugin_lock_entry_invalid')
+    assert.ok(diag, 'the hostile lock entry is reported')
+    assert.equal(diag.repair.length, 1)
+    const [repair] = diag.repair
+    assert.equal(
+      repair,
+      `open ${lockPath} and remove the entry on line ${hostileLine},`
+        + ' or pass its exact key as one quoted argument to hyp plugin remove'
+    )
+    // Nothing of the key in any form: whole, sanitized, or any metacharacter it carries.
+    const fixed = repair.replace(lockPath, '')
+    assert.equal(fixed.includes(hostile), false)
+    assert.equal(fixed.includes('pwned'), false)
+    assert.equal(fixed.includes('zzzz'), false)
+    for (const ch of ["'", '"', ';', '`', '$', '(', '\n', '\r']) {
+      assert.equal(fixed.includes(ch), false, `repair carries ${JSON.stringify(ch)}`)
+    }
+    // The message still identifies the row, bounded and without control bytes.
+    assert.match(diag.message, /^plugin-lock\.json entry 'x'"; touch pwned `id` \$\(id\)/)
+    assert.equal(/[\n\r]/.test(diag.message), false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Object.keys lists integer-like keys first, so a position taken from it named
+// the healthy row when a malformed "42" sat after it in the file, and removing
+// that row left the malformed one in place (#2115 review). The line comes from
+// the file's own text, so it is the malformed row's line whatever the key.
+test('the repair line names the malformed row itself when an integer-like key reorders Object.keys', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-numeric-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const stateDir = path.join(hypHome, 'hypaware')
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      'x"; rm',
+      null
+    )
+    // By hand: JSON.stringify would also write '42' first.
+    const written = await fs.readFile(lockPath, 'utf8')
+    assert.ok(written.endsWith('\n  }\n}'))
+    const text = written.slice(0, -'\n  }\n}'.length) + ',\n    "42": {\n      "version": "0.1.0"\n    }\n  }\n}'
+    await fs.writeFile(lockPath, text)
+    // The premise: '42' is last in the file and first in Object.keys.
+    assert.equal(Object.keys(JSON.parse(text).plugins)[0], '42')
+    assert.ok(lineOfKey(text, '42') > lineOfKey(text, '@third-party/healthy'))
+
+    const result = await discoverInstalledPlugins({ stateDir })
+    assert.deepEqual([...result.malformed].sort(), ['42', 'x"; rm'])
+    for (const key of result.malformed) {
+      assert.equal(result.malformedLines.get(key), lineOfKey(text, key), key)
+    }
+    const report = await collectHypAwareStatus({ env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
+    const repairs = report.diagnostics
+      .filter((d) => d.kind === 'plugin_lock_entry_invalid')
+      .map((d) => d.repair[0])
+      .sort()
+    assert.deepEqual(repairs, [lineOfKey(text, '42'), lineOfKey(text, 'x"; rm')].map((n) =>
+      `open ${lockPath} and remove the entry on line ${n},`
+        + ' or pass its exact key as one quoted argument to hyp plugin remove').sort())
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a well-formed lock is unchanged: nothing malformed, no new diagnostic', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-healthy-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    await writeFixtureLock(hypHome, [
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+    ])
+    const stateDir = path.join(hypHome, 'hypaware')
+
+    const result = await discoverInstalledPlugins({ stateDir })
+    assert.deepEqual(result.malformed, [])
+    assert.equal(result.failed.length, 0)
+    assert.deepEqual(result.loaded.map((m) => m.manifest.name), ['@third-party/healthy'])
+    assert.deepEqual(result.lockEntries.map((e) => e.name), ['@third-party/healthy'])
+    assert.deepEqual(result.lockEntries.map((e) => e.install_dir), [installDir])
+
+    const report = await collectHypAwareStatus({ env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
+    assert.equal(report.diagnostics.some((d) => d.kind === 'plugin_lock_entry_invalid'), false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a malformed lock entry reaches unavailablePlugins, so the client-asset prune stands down', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-unavailable-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '@third-party/broken',
+      {
+        name: '@third-party/broken',
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: '/nowhere', path: '/nowhere' },
+        content_hash: 'c'.repeat(64),
+        manifest_hash: 'd'.repeat(64),
+        installed_at: '2026-05-21T00:00:00.000Z',
+      }
+    )
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({ version: 2, plugins: [{ name: '@third-party/healthy' }] }, null, 2)
+    )
+
+    const boot = await bootKernel({
+      hypHome,
+      configPath,
+      mode: 'smoke',
+      runId: 'test-lock-entry-unavailable',
+      env: { ...process.env, HYP_HOME: hypHome },
+      workspaceDir: path.join(hypHome, 'no-bundled'),
+    })
+    // A boot that came up short of its plugin set says so in the one list the
+    // delete path reads (LLP 0219 #incomplete-activation-prunes-nothing). An
+    // entry whose `install_dir` points at a missing directory already did;
+    // one carrying no `install_dir` at all leaves the same hole.
+    assert.ok(
+      boot.unavailablePlugins.includes('@third-party/broken'),
+      `expected the malformed lock key in unavailablePlugins, got ${JSON.stringify(boot.unavailablePlugins)}`
+    )
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('hyp plugin remove clears a lock row that is not an object, so the diagnostic repair runs', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-remove-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '@third-party/nulled',
+      null
+    )
+    const stateDir = path.join(hypHome, 'hypaware')
+
+    // The lock has a row for this name, so the repair `hyp status` prints for
+    // it must be able to act on it - it used to answer "plugin not installed"
+    // and leave an error-severity diagnostic no operator could clear.
+    const result = await removePlugin({
+      name: /** @type {any} */ ('@third-party/nulled'),
+      stateDir,
+    })
+    assert.equal(result.ok, true)
+    const after = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    assert.deepEqual(Object.keys(after.plugins), ['@third-party/healthy'])
+
+    const report = await collectHypAwareStatus({
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    })
+    assert.equal(report.diagnostics.some((d) => d.kind === 'plugin_lock_entry_invalid'), false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// A lock key is a map key, not a validated plugin name, and `hyp status`
+// used to print `hyp plugin remove <key>` as the repair for a malformed row, so a
+// key containing `..` turned the printed repair into a recursive delete
+// outside `<stateDir>/plugins` (issue #1967). Everything these tests can
+// delete is staged inside their own temp HYP_HOME.
+test('hyp plugin remove leaves a directory outside the plugins root alone and still clears the row', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-traversal-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '../../victim',
+      {}
+    )
+    const stateDir = path.join(hypHome, 'hypaware')
+    const victimDir = path.join(hypHome, 'victim')
+    // The traversal lands on the victim, and the victim is inside this test's
+    // own temp root: proven before the name reaches a recursive delete.
+    assert.equal(path.resolve(stateDir, 'plugins', '../../victim'), victimDir)
+    await fs.mkdir(victimDir, { recursive: true })
+    await fs.writeFile(path.join(victimDir, 'keep.txt'), 'precious\n')
+
+    const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
+    const stdout = bufferWriter()
+    const stderr = bufferWriter()
+    const exitCode = await dispatch(['plugin', 'remove', '../../victim'], {
+      env,
+      stdout,
+      stderr,
+      cwd: hypHome,
+      workspaceDir: path.join(hypHome, 'no-bundled'),
+    })
+    assert.equal(exitCode, 0, stderr.text())
+    assert.deepEqual(await fs.readdir(victimDir), ['keep.txt'])
+
+    // And the repair the diagnostic prints still does its job: the row is gone
+    // and the error-severity diagnostic with it.
+    const after = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    assert.deepEqual(Object.keys(after.plugins), ['@third-party/healthy'])
+    const report = await collectHypAwareStatus({ env })
+    assert.equal(report.diagnostics.some((d) => d.kind === 'plugin_lock_entry_invalid'), false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('hyp plugin remove deletes neither an escaping install_dir nor the plugins root itself', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-escape-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const stateDir = path.join(hypHome, 'hypaware')
+    const outsideDir = path.join(hypHome, 'outside')
+    await fs.mkdir(outsideDir, { recursive: true })
+    await fs.writeFile(path.join(outsideDir, 'keep.txt'), 'precious\n')
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '@third-party/escaping',
+      { name: '@third-party/escaping', version: '1.0.0', install_dir: outsideDir }
+    )
+    // An absolute `install_dir` outside the root is the other way in: the
+    // fallback join is not the only unvalidated source of the directory.
+    const escaped = await removePlugin({
+      name: /** @type {any} */ ('@third-party/escaping'),
+      stateDir,
+    })
+    assert.equal(escaped.ok, true)
+    assert.deepEqual(await fs.readdir(outsideDir), ['keep.txt'])
+
+    // '.' resolves to the plugins root itself, which would take every
+    // installed plugin with it.
+    const lock = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    lock.plugins['.'] = {}
+    await fs.writeFile(lockPath, JSON.stringify(lock, null, 2))
+    const dot = await removePlugin({ name: /** @type {any} */ ('.'), stateDir })
+    assert.equal(dot.ok, true)
+    assert.equal(await dirExists(installDir), true)
+    const after = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    assert.deepEqual(Object.keys(after.plugins), ['@third-party/healthy'])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('hyp plugin remove still deletes exactly the directory a contained entry names', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-legit-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const other = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/neighbour',
+      version: '0.1.0',
+    })
+    await writeFixtureLock(hypHome, [
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      { name: '@third-party/neighbour', version: '0.1.0', installDir: other.installDir },
+    ])
+    const stateDir = path.join(hypHome, 'hypaware')
+    const removed = await removePlugin({
+      name: /** @type {any} */ ('@third-party/healthy'),
+      stateDir,
+    })
+    assert.equal(removed.ok, true)
+    assert.equal(await dirExists(installDir), false)
+    assert.equal(await dirExists(other.installDir), true)
+
+    // A key that normalizes back inside the root is not an install name, and
+    // the directory it lands on belongs to the plugin named `nested`: the row
+    // is cleared and the directory kept (issue #2123, LLP 0505#removal).
+    const nestedDir = path.join(stateDir, 'plugins', 'nested')
+    await fs.mkdir(nestedDir, { recursive: true })
+    const lockPath = path.join(stateDir, 'plugin-lock.json')
+    const lock = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    lock.plugins['elsewhere/../nested'] = {}
+    await fs.writeFile(lockPath, JSON.stringify(lock, null, 2))
+    const normalized = await removePlugin({
+      name: /** @type {any} */ ('elsewhere/../nested'),
+      stateDir,
+    })
+    assert.equal(normalized.ok, true)
+    assert.equal(await dirExists(nestedDir), true)
+    const cleared = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    assert.equal(Object.hasOwn(cleared.plugins, 'elsewhere/../nested'), false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('hyp plugin remove still refuses a name the lock has no row for', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-absent-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    await writeFixtureLock(hypHome, [
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+    ])
+    const result = await removePlugin({
+      name: /** @type {any} */ ('@third-party/never-installed'),
+      stateDir: path.join(hypHome, 'hypaware'),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.errorKind, 'plugin_not_installed')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
 })

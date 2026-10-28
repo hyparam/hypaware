@@ -7,13 +7,201 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
-import { runSync } from '../../src/core/commands/sync.js'
+/** @import { SourceHistoryReplayRequest } from '../../hypaware-plugin-kernel-types.js' */
+
+import { createSyncProgress, runSync } from '../../src/core/commands/sync.js'
+import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
   firstSyncHoldMarkerPath,
   writeFirstSyncHoldMarker,
 } from '../../src/core/usage-policy/first_sync_hold.js'
 import { writeClientSyncEntries, writeLocalOnlyEntries } from '../../src/core/usage-policy/index.js'
+
+test('sync progress estimates from acknowledged rows and resets per destination', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 100, resume: { kind: /** @type {const} */ ('beginning') } }],
+    ['archive', { status: /** @type {const} */ ('counted'), rows: 2000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  assert.match(progress.render(), /0\/1,000 rows \(0%\).*ETA unavailable/)
+  now = 10_000
+  // The 10s before the first acknowledgement was the driver's dataset
+  // discovery and spool flush, which is paid once rather than per row, so it
+  // is not in the rate.
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+  now = 20_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 500/1,000 rows (50%) | ETA ~10s')
+  now = 35_000
+  // 15s since the acknowledgement at 20s, not 35s since the destination
+  // started: the number sits next to "waiting for progress" and is read as
+  // how long it has been stuck.
+  assert.match(progress.render(), /waiting for progress \(15s\).*ETA unavailable/)
+  progress.update('central', { rows: 500, bytes: 3000 })
+  assert.match(progress.render(), /1,000 rows sent.*finalizing/)
+  assert.doesNotMatch(progress.render(), /100%/)
+  progress.update('archive')
+  assert.match(progress.render(), /archive: 0\/2,000 rows/)
+  progress.update('archive', { rows: 2001, bytes: 4000 })
+  assert.match(progress.render(), /2,001 rows sent.*ETA unavailable/)
+  assert.doesNotMatch(progress.render(), /%/)
+})
+
+test('sync progress keeps ticking for a destination whose sink never reports', () => {
+  let now = 0
+  const volumes = new Map([
+    ['archive', { status: /** @type {const} */ ('counted'), rows: 12_000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('archive')
+  // `onProgress` is optional on the export contract, and half the shipped
+  // sinks never call it: `@hypaware/s3`, and the table-format sink an iceberg
+  // destination instantiates. This one line is then their whole export, so it
+  // has to keep showing that something is still happening.
+  const frames = [0, 37_000, 94_000].map((at) => { now = at; return progress.render() })
+  assert.deepEqual(frames.map((frame) => /\((\d+)s\)/.exec(frame)?.[1]), ['0', '37', '94'])
+  assert.equal(new Set(frames).size, 3, 'a destination that never reports must not render a frozen line')
+})
+
+test('sync progress keeps finalizing through a commit longer than the stall window', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  now = 5_000
+  progress.update('central', { rows: 1000, bytes: 4000 })
+  const committing = progress.render()
+  assert.match(committing, /central: 1,000 rows sent \| finalizing\.\.\. \(0s\)/)
+  // The last chunk is acknowledged, so by construction no further
+  // acknowledgement is coming: a commit that outlasts the stall window must
+  // not report a finished transfer as "99% | waiting for progress". It must
+  // still tick, though - a commit is the one wait long enough to need it.
+  now = 60_000
+  assert.match(progress.render(), /central: 1,000 rows sent \| finalizing\.\.\. \(55s\)/)
+  assert.notEqual(progress.render(), committing, 'a long commit must not render a frozen line')
+  assert.doesNotMatch(progress.render(), /waiting for progress|%/)
+})
+
+test('sync progress never treats a partial or missing count as a total', () => {
+  const progress = createSyncProgress(new Map([
+    ['central', { status: 'partial', rows: 10, withheldRows: 0, resume: { kind: 'unknown' } }],
+  ]))
+  for (const name of ['central', 'unknown']) {
+    progress.update(name)
+    progress.update(name, { rows: 5, bytes: 100 })
+    assert.match(progress.render(), /5 rows sent.*ETA unavailable/)
+    assert.doesNotMatch(progress.render(), /%/)
+  }
+})
+
+test('sync threads acknowledged progress through the driver to the terminal', async () => {
+  const hypHome = await makeHome('upload-progress')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 123, bytes: 456 })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 456 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /central: 123 rows sent/)
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('sync reads a sink progress report the way it reads a sink result: a number or nothing', async () => {
+  const hypHome = await makeHome('upload-progress-hostile')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 7, bytes: 8 })
+    // An argument-less call is the plugin saying nothing. It must not reach
+    // the display as the kernel's own start-of-destination signal, which is
+    // what an absent progress object means there.
+    opts.onProgress()
+    // Counts come from sink code the kernel does not own, and land in a line
+    // somebody is watching an upload on.
+    opts.onProgress({ rows: 'lots', bytes: null })
+    // A negative is the same class of input, and the worse one: `rows`
+    // accumulates, so it holds the running total below the real one for the
+    // rest of the destination.
+    opts.onProgress({ rows: -5000, bytes: -1 })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 8 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.doesNotMatch(stdout.text, /NaN/)
+  assert.doesNotMatch(stdout.text, /-[\d,]+ rows sent/)
+  assert.match(stdout.text, /central: 7 rows sent/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('sync progress does not let a zero-row report stand in for progress', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  now = 10_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+  // A zero-row report is a truthy object with nothing acknowledged. Counting
+  // one as an acknowledgement keeps the line quiet for as long as the reports
+  // keep arriving, which is the stall the warning exists to surface.
+  for (let at = 11_000; at <= 100_000; at += 1_000) {
+    now = at
+    progress.update('central', { rows: 0, bytes: 0 })
+  }
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | waiting for progress (90s) | ETA unavailable')
+})
+
+test('sync progress does not anchor its rate at a zero-row report', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  // Zero-row reports arriving during the driver's setup work. Anchoring the
+  // rate on one charges that one-time setup to the transfer rate.
+  for (const at of [1_000, 5_000, 9_000]) {
+    now = at
+    progress.update('central', { rows: 0, bytes: 0 })
+  }
+  now = 10_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  now = 11_000
+  // 250 rows in the 1s since the first acknowledgement, not in the 11s since
+  // the destination started: 750 rows remaining at 250 rows/s.
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+})
+
+test('a sink bare-calling onProgress cannot hold the stall warning off the line', async (t) => {
+  const hypHome = await makeHome('upload-progress-bare-loop')
+  let clock = Date.now()
+  t.mock.method(Date, 'now', () => clock)
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 123, bytes: 456 })
+    clock += 20_000
+    // A third-party sink may call `onProgress` with no argument at all, which
+    // the driver reads as zero rows. Twenty seconds of it is still a stall.
+    for (let i = 0; i < 50; i += 1) opts.onProgress()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 456 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /central: 123 rows sent \| waiting for progress \(20s\)/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
 
 // `hyp sync` (LLP 0101 #no-release, as amended): the user-facing export verb
 // that replaced `hyp sink force`. What these cover is the consent gate, not
@@ -66,7 +254,7 @@ function fakeSink(instanceName, config, result = {}) {
     config,
     exported,
     sink: {
-      async exportBatch(/** @type {unknown} */ batch) {
+      async exportBatch(/** @type {unknown} */ batch, /** @type {any} */ _opts = {}) {
         exported.push(batch)
         return { status: result.status ?? 'exported', partitionsExported: 0, bytesWritten: 0 }
       },
@@ -90,7 +278,7 @@ function fakeHistorySink(instanceName, config) {
       async previewSourceHistory(/** @type {{ source: string }} */ request) {
         return { rows: request.source === 'claude' ? 12 : 0, withheldRows: 3 }
       },
-      async replaySourceHistory(/** @type {{ source: string }} */ request) {
+      async replaySourceHistory(/** @type {SourceHistoryReplayRequest} */ request) {
         replayed.push(request)
         return { status: 'exported', rowsReplayed: 12, bytesWritten: 345 }
       },
@@ -178,10 +366,10 @@ test('confirming during the review window ends it and exports', async () => {
   assert.equal(code, 0)
   assert.equal(sink.exported.length, 1, 'a confirmed sync exports')
   assert.equal(await holdExists(hypHome), false, 'the marker is cleared, not merely bypassed')
-  assert.match(stdout.text, /central: exported/)
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n/)
 })
 
-test('the held prompt states the window, the irreversibility, and the way out', async () => {
+test('the held prompt states the deadline and the way out', async () => {
   const hypHome = await makeHome('held-warning')
   await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
   const { ctx, stdout } = makeCtx({
@@ -194,11 +382,12 @@ test('the held prompt states the window, the irreversibility, and the way out', 
   await runSync([], ctx)
 
   const text = stdout.text
-  assert.match(text, /FIRST SYNC: nothing has left this machine yet/)
-  assert.match(text, /ends the review\n  window \(until /)
-  assert.match(text, /cannot be undone/)
-  assert.match(text, /hypaware-privacy skill/)
-  assert.match(text, /hyp privacy set <path> local-only/)
+  // "by", not a bare timestamp: the instant is the deadline, which LLP 0101
+  // calls "the latest the first sync can happen, not the earliest". Scheduling
+  // it directly above a prompt whose bare enter sends now tells the reader the
+  // opposite of what enter does.
+  assert.match(text, /^Ready to upload to hypaware\.example\.com .*\(automatic by [^)]+\)\.\n/m)
+  assert.match(text, /To exclude anything first, use `hyp privacy` or the `\/hypaware-privacy` skill\./)
 })
 
 test('--dry-run prints the plan, exports nothing, and keeps the window open', async () => {
@@ -229,11 +418,12 @@ test('the pending preview animates on a TTY and clears before the plan', async (
   assert.equal(await runSync(['--dry-run'], ctx), 0)
 
   const text = stdout.text
-  assert.match(text, /\r\x1b\[2K\S Counting pending rows/, 'the preview wait animates')
-  // Transient: every frame is behind a line-clearing carriage return, and the
-  // plan renders after the last clear rather than under a leftover label.
-  assert.doesNotMatch(text, /Counting pending rows[^\r]*\n/)
-  assert.match(text.split('\r\x1b[2K').pop() ?? '', /destination/)
+  assert.match(text, /\S Counting pending rows/, 'the preview wait animates')
+  // Transient: the plan renders after the last erase rather than under a
+  // leftover label.
+  const after = text.split(/\x1b\[\d+A\r\x1b\[J/).pop() ?? ''
+  assert.doesNotMatch(after, /Counting pending rows/)
+  assert.match(after, /^Ready to upload to hypaware\.example\.com/)
 })
 
 test('the pending preview writes nothing off a TTY', async () => {
@@ -244,7 +434,7 @@ test('the pending preview writes nothing off a TTY', async () => {
   assert.equal(await runSync(['--dry-run'], ctx), 0)
 
   assert.doesNotMatch(stdout.text, /Counting pending rows/)
-  assert.doesNotMatch(stdout.text, /\x1b\[2K/)
+  assert.doesNotMatch(stdout.text, /\x1b\[J/)
 })
 
 test('the --history preview animates per destination on a TTY', async () => {
@@ -255,9 +445,10 @@ test('the --history preview animates per destination on a TTY', async () => {
   assert.equal(await runSync(['--history', 'claude', '--dry-run'], ctx), 0)
 
   const text = stdout.text
-  assert.match(text, /\r\x1b\[2K\S Counting retained 'claude' history on central/)
-  assert.doesNotMatch(text, /Counting retained[^\r]*\n/)
-  assert.match(text.split('\r\x1b[2K').pop() ?? '', /12 rows retained and eligible/)
+  assert.match(text, /\S Counting retained 'claude' history on central/)
+  const after = text.split(/\x1b\[\d+A\r\x1b\[J/).pop() ?? ''
+  assert.doesNotMatch(after, /Counting retained/)
+  assert.match(after, /12 rows retained and eligible/)
 })
 
 test('the --history preview writes nothing off a TTY', async () => {
@@ -268,7 +459,7 @@ test('the --history preview writes nothing off a TTY', async () => {
   assert.equal(await runSync(['--history', 'claude', '--dry-run'], ctx), 0)
 
   assert.doesNotMatch(stdout.text, /Counting retained/)
-  assert.doesNotMatch(stdout.text, /\x1b\[2K/)
+  assert.doesNotMatch(stdout.text, /\x1b\[J/)
 })
 
 // @ref LLP 0345#command [tests]: retained history has its own preview,
@@ -292,7 +483,8 @@ test('--history previews capable destinations and sends only after confirmation'
   assert.match(stdout.text, /12 rows retained and eligible/)
   assert.match(stdout.text, /3 rows withheld by privacy policy \(not sent\)/)
   assert.match(stdout.text, /not replayed.*parquet/)
-  assert.deepEqual(central.replayed, [{ source: 'claude' }])
+  assert.equal(central.replayed[0].source, 'claude')
+  assert.equal(typeof central.replayed[0].onProgress, 'function')
   assert.deepEqual(parquet.exported, [], 'history mode never runs an ordinary tick')
 })
 
@@ -343,8 +535,46 @@ test('--history quotes the rows once when two destinations can replay', async ()
   // The prompt goes to stderr (src/core/cli/confirm.js).
   assert.match(stderr.text, /Replay 12 retained rows/)
   assert.doesNotMatch(stderr.text, /24 retained rows/)
-  assert.deepEqual(one.replayed, [{ source: 'claude' }])
-  assert.deepEqual(two.replayed, [{ source: 'claude' }])
+  assert.equal(one.replayed[0].source, 'claude')
+  assert.equal(typeof one.replayed[0].onProgress, 'function')
+  assert.equal(two.replayed[0].source, 'claude')
+  assert.equal(typeof two.replayed[0].onProgress, 'function')
+})
+
+// The history preview counts only the destinations that can replay. A blob
+// destination is named in the plan but leaves no trace on the log line, so the
+// omitted count is the only thing there that says the narrowing happened.
+test('the history preview counts the destinations that cannot replay', async () => {
+  const hypHome = await makeHome('history-unsupported-count')
+  const { ctx } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeHistorySink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('parquet', { dir: '/home/u/exports' }),
+    ],
+    tty: true,
+  })
+
+  /** @type {any[]} */
+  const records = []
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { records.push(...batch) } }],
+  })
+  logs.setGlobalLoggerProvider(provider)
+  try {
+    await runSync(['--history', 'claude', '--dry-run'], ctx)
+  } finally {
+    await provider.shutdown()
+    // Restore the no-provider seam every later test in this file runs on.
+    logs.setGlobalLoggerProvider(/** @type {any} */ (null))
+  }
+
+  const preview = records.find((record) => record.body === 'sync.history_preview')
+  assert.ok(preview, 'the preview must report what it counted')
+  assert.equal(preview.attributes.destinations, 1, 'the counts cover the replay-capable destination only')
+  assert.equal(preview.attributes.hyp_unsupported_destinations, 1, 'the destination that cannot replay must be countable')
+  await fs.rm(hypHome, { recursive: true, force: true })
 })
 
 // An empty `--history=` value is falsy, so without an explicit guard the flag
@@ -407,7 +637,7 @@ test('--history cannot bypass the first-sync review window', async () => {
   assert.ok(await holdExists(hypHome))
 })
 
-test('the plan names each destination and whether it leaves the machine', async () => {
+test('a sharing plan shows upload targets without counting the accompanying file copy', async () => {
   const hypHome = await makeHome('plan')
   const { ctx, stdout } = makeCtx({
     hypHome,
@@ -423,14 +653,257 @@ test('the plan names each destination and whether it leaves the machine', async 
   await runSync(['--dry-run'], ctx)
 
   const text = stdout.text
-  // A server is named, never spelled as a URL a terminal would autolink
-  // (LLP 0100 R1a's reason, applied to this surface).
-  assert.match(text, /central\s+the 'prod' server\s+\(leaves this machine\)/)
+  // A server is named by its host, never spelled as a URL a terminal would
+  // autolink (LLP 0100 R1a's reason, applied to this surface; LLP 0437
+  // #server-name).
+  assert.match(text, /^Ready to upload to hypaware\.example\.com[ .]/m)
   assert.doesNotMatch(text, /https:\/\//)
-  assert.match(text, /\(run 'hyp remote list' to see server URLs\)/)
-  assert.match(text, /parquet\s+\/home\/u\/exports\s+\(stays on this machine\)/)
-  // An undeclarable destination says nothing rather than guessing either way.
-  assert.match(text, /mystery\s+@hypaware\/fake\n/)
+  assert.doesNotMatch(text, /parquet|\/home\/u\/exports|destinations|leaves this machine|stays on this machine|local-only/)
+  assert.match(text, /^Ready to export to @hypaware\/fake[ .]/m)
+})
+
+test('a sharing plan names the built-in target for a sink saved under its previous host', async () => {
+  const hypHome = await makeHome('plan-alias')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://hypaware.hyperparam.app' })],
+    tty: true,
+  })
+
+  await runSync(['--dry-run'], ctx)
+
+  assert.match(stdout.text, /^Ready to upload to HypAware Cloud[ .]/m)
+  assert.doesNotMatch(stdout.text, /hypaware\.hyperparam\.app|api\.hypaware\.ai/)
+})
+
+test('sharing shows only upload progress and results but still writes the file copy', async () => {
+  for (const copyFirst of [true, false]) {
+    const hypHome = await makeHome('shared-copy')
+    const upload = fakeSink('central', { url: 'https://hypaware.example.com' })
+    const copy = fakeSink('archive-copy', { dir: '/home/u/exports' })
+    for (const handle of [upload, copy]) {
+      const exportBatch = handle.sink.exportBatch
+      handle.sink.exportBatch = async (batch, opts) => {
+        opts.onProgress({ rows: 123, bytes: 456 })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        return exportBatch(batch, opts)
+      }
+    }
+    const { ctx, stdout, stderr } = makeCtx({
+      hypHome, sinks: copyFirst ? [copy, upload] : [upload, copy],
+      tty: true, stdoutTty: true, answer: 'y',
+    })
+    assert.equal(await runSync([], ctx), 0)
+    assert.match(stdout.text, /central: 123 rows sent/)
+    assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n/)
+    // `Preparing upload` alone cannot tell the two orders apart: the spinner
+    // renders its first frame before the tick starts, so that line is on
+    // screen in both. What distinguishes them is `Finishing`, which only a
+    // copy running *after* the upload can produce.
+    assert.match(stdout.text, /Preparing upload/)
+    assert[copyFirst ? 'doesNotMatch' : 'match'](stdout.text, /Finishing/)
+    assert.match(stderr.text, /Send now to /)
+    assert.doesNotMatch(stdout.text + stderr.text, /archive-copy|\/home\/u\/exports|\d destinations/)
+    assert.equal(copy.exported.length, 1)
+    assert.equal(upload.exported.length, 1)
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a copy sorting between two upload targets does not read as Finishing', async () => {
+  // Destinations tick serially in instance-name order (the sink registry sorts
+  // its listing), so a hidden file copy can run between two upload targets.
+  // One upload has run and another has not started, so "Finishing" is false.
+  const hypHome = await makeHome('shared-copy-between')
+  const first = fakeSink('alpha-remote', { url: 'https://hypaware.example.com' })
+  const copy = fakeSink('mid-copy', { dir: '/home/u/exports' })
+  const last = fakeSink('zeta-remote', { url: 'https://hypaware.example.com' })
+  let duringCopy = ''
+  const { ctx, stdout } = makeCtx({
+    hypHome, sinks: [first, copy, last], stdoutTty: true,
+  })
+  const copyExport = copy.sink.exportBatch
+  copy.sink.exportBatch = async (batch, opts) => {
+    const before = stdout.text.length
+    // Wait for the spinner to actually draw a frame rather than for a fixed
+    // span: the frames are 120ms apart, but a loaded machine can stall past
+    // any sleep this test picks, and an empty window fails for a reason that
+    // has nothing to do with the label. Bounded so a spinner that never draws
+    // still fails on the assertion below instead of hanging the suite.
+    const drawnBy = Date.now() + 5000
+    while (stdout.text.length === before && Date.now() < drawnBy) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    duringCopy = stdout.text.slice(before)
+    return copyExport(batch, opts)
+  }
+
+  assert.equal(await runSync(['--yes'], ctx), 0)
+
+  assert.notEqual(duringCopy, '', 'the spinner must have drawn while the copy ran')
+  assert.doesNotMatch(duringCopy, /Finishing/, 'an upload had not started yet')
+  assert.match(duringCopy, /Preparing upload/)
+  assert.equal(last.exported.length, 1)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('a failed accompanying copy remains visible and fails the command', async () => {
+  const hypHome = await makeHome('shared-copy-failed')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeSink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('archive-copy', { dir: '/home/u/exports' }, { status: 'failed' }),
+    ],
+  })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  assert.match(stdout.text, /^Could not send to \/home\/u\/exports/m)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+/**
+ * Give `ctx` two cached datasets whose discovery the test controls (#976).
+ * `failed` throws on every discovery. `partial` reads once, has rows waiting
+ * in the spool, and throws when the driver re-discovers after the flush; the
+ * pending preview never flushes, so only the export pass sees that failure.
+ *
+ * @param {any} ctx
+ * @param {{ logs?: 'complete' | 'failed' | 'partial', metrics?: 'complete' | 'failed' | 'partial' }} modes
+ */
+function withDatasets(ctx, modes) {
+  const flushed = new Set()
+  /** @param {string} name @param {'complete' | 'failed' | 'partial'} mode */
+  const dataset = (name, mode) => ({
+    name,
+    async discoverPartitions() {
+      if (mode === 'failed' || (mode === 'partial' && flushed.has(name))) throw new Error(`secret-path ${name}`)
+      return [
+        { dataset: name, partition: { p: 'a' }, tablePath: `/cache/${name}/a` },
+        { dataset: name, partition: { p: 'b' }, tablePath: `/cache/${name}/b` },
+      ]
+    },
+  })
+  ctx.query = {
+    listDatasets: () => [dataset('logs', modes.logs ?? 'complete'), dataset('metrics', modes.metrics ?? 'complete')],
+  }
+  ctx.storage = {
+    ...ctx.storage,
+    tableExists: () => true,
+    hasPendingSync: (/** @type {string} */ tablePath) => modes[tablePath.split('/')[2]] === 'partial',
+    async flushTable(/** @type {string} */ tablePath) { flushed.add(tablePath.split('/')[2]) },
+  }
+}
+
+test('a complete sync reports what it prepared per dataset and warns about nothing', async () => {
+  const hypHome = await makeHome('discovery-complete')
+  const { ctx, stdout, stderr } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeSink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('archive-copy', { dir: '/home/u/exports' }),
+    ],
+  })
+  withDatasets(ctx, {})
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n {2}logs: 2 partitions\n {2}metrics: 2 partitions\n/)
+  assert.doesNotMatch(stdout.text, /\/home\/u\/exports\n {2}logs/, 'a successful hidden copy stays silent')
+  assert.doesNotMatch(stderr.text, /warning:/)
+  assert.doesNotMatch(stdout.text, /\x1b/, 'plain output carries no escape codes')
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('a dataset that could not be read is named on stderr and fails the command', async () => {
+  const hypHome = await makeHome('discovery-failed')
+  const central = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const copy = fakeSink('archive-copy', { dir: '/home/u/exports' })
+  const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [central, copy] })
+  withDatasets(ctx, { logs: 'failed' })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  // What did go out is still reported as sent; the summary line is unchanged.
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n {2}metrics: 2 partitions\n/)
+  assert.doesNotMatch(stdout.text, / {2}logs:/)
+  assert.match(stderr.text, /^warning: could not read logs for hypaware\.example\.com; this sync left it out$/m)
+  // The hidden copy's failure to read is shown even though its success is not.
+  assert.match(stderr.text, /^warning: could not read logs for \/home\/u\/exports; this sync left it out$/m)
+  assert.doesNotMatch(stdout.text, /Exported to \/home\/u\/exports/)
+  assert.match(stderr.text, /run `hyp sync` again to retry/)
+  assert.doesNotMatch(stderr.text + stdout.text, /secret-path/, 'the plugin error is not echoed')
+  assert.equal(central.exported.length, 1, 'the readable dataset still shipped')
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('a dataset read only in part is marked incomplete and fails the command', async () => {
+  const hypHome = await makeHome('discovery-partial')
+  const { ctx, stdout, stderr } = makeCtx({
+    hypHome, sinks: [fakeSink('central', { url: 'https://hypaware.example.com' })],
+  })
+  withDatasets(ctx, { metrics: 'partial' })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n {2}logs: 2 partitions\n {2}metrics: 2 partitions \(incomplete\)\n/)
+  assert.match(stderr.text, /^warning: read only part of metrics for hypaware\.example\.com; this sync did not cover all of it$/m)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('when no dataset can be read the sync does not claim success', async () => {
+  const hypHome = await makeHome('discovery-all-failed')
+  const central = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [central] })
+  withDatasets(ctx, { logs: 'failed', metrics: 'failed' })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  assert.doesNotMatch(stdout.text, /✓/)
+  assert.match(stdout.text, /^Nothing sent to hypaware\.example\.com: no dataset could be read$/m)
+  assert.match(stderr.text, /could not read logs for hypaware\.example\.com/)
+  assert.match(stderr.text, /could not read metrics for hypaware\.example\.com/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+for (const stdoutTty of [false, true]) {
+  test(`a plugin-registered dataset name cannot drive the terminal (stdout TTY: ${stdoutTty})`, async () => {
+    const hypHome = await makeHome('discovery-escape')
+    const { ctx, stdout, stderr } = makeCtx({
+      hypHome, stdoutTty, sinks: [fakeSink('central', { url: 'https://hypaware.example.com' })],
+    })
+    const flushed = new Set()
+    /** @param {string} name @param {'complete' | 'failed' | 'partial'} mode */
+    const named = (name, mode) => ({
+      name,
+      async discoverPartitions() {
+        if (mode === 'failed' || (mode === 'partial' && flushed.has(name))) throw new Error('unreadable')
+        return [{ dataset: name, partition: { p: 'a' }, tablePath: name }]
+      },
+    })
+    const esc = '\x1b[8m'
+    ctx.query = {
+      listDatasets: () => [named(`logs${esc}`, 'complete'), named(`metrics${esc}`, 'failed'), named(`spans${esc}`, 'partial')],
+    }
+    ctx.storage = {
+      ...ctx.storage,
+      tableExists: () => true,
+      hasPendingSync: (/** @type {string} */ tablePath) => tablePath.startsWith('spans'),
+      async flushTable(/** @type {string} */ tablePath) { flushed.add(tablePath) },
+    }
+    assert.equal(await runSync(['--yes'], ctx), 1)
+    // The TTY's own styling and spinner may use SGR; a dataset name never does.
+    assert.doesNotMatch(stdout.text + stderr.text, /\x1b\[8m/)
+    assert.doesNotMatch(stderr.text, /\x1b/)
+    assert.match(stdout.text, /^ {2}logs\\u001b\[8m: 1 partition$/m)
+    assert.match(stdout.text, /^ {2}spans\\u001b\[8m: 1 partition \(incomplete\)$/m)
+    assert.match(stderr.text, /could not read metrics\\u001b\[8m for hypaware\.example\.com/)
+    assert.match(stderr.text, /read only part of spans\\u001b\[8m for hypaware\.example\.com/)
+    if (!stdoutTty) assert.doesNotMatch(stdout.text, /\x1b/)
+    await fs.rm(hypHome, { recursive: true, force: true })
+  })
+}
+
+test('a file-only sync still names its target and reports its result', async () => {
+  const hypHome = await makeHome('file-only-plan')
+  const { ctx, stdout } = makeCtx({
+    hypHome, sinks: [fakeSink('archive', { dir: '/home/u/exports' })],
+  })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /^Ready to export to \/home\/u\/exports[ .]/m)
+  assert.match(stdout.text, /^✓ Exported to \/home\/u\/exports\n/m)
+  await fs.rm(hypHome, { recursive: true, force: true })
 })
 
 test('an unnamed server falls back to its host, still not a linkifiable URL', async () => {
@@ -444,7 +917,7 @@ test('an unnamed server falls back to its host, still not a linkifiable URL', as
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /central\s+elsewhere\.example\.com\s+\(leaves this machine\)/)
+  assert.match(stdout.text, /^Ready to upload to elsewhere\.example\.com[ .]/m)
   assert.doesNotMatch(stdout.text, /https:\/\//)
 })
 
@@ -508,6 +981,43 @@ test('a hold that cannot be cleared fails loudly instead of exiting 0 with nothi
   }
 })
 
+// On a sharing machine the plan hides the accompanying file copy and the
+// preview counts narrow to match it, while that copy still exports. The
+// hidden count is the only thing on the line that says the narrowing
+// happened.
+test('the pending preview counts the destinations a sharing plan hides', async () => {
+  const hypHome = await makeHome('preview-hidden')
+  const { ctx } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeSink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('parquet', { dir: '/home/u/exports' }),
+    ],
+    tty: true,
+  })
+
+  /** @type {any[]} */
+  const records = []
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { records.push(...batch) } }],
+  })
+  logs.setGlobalLoggerProvider(provider)
+  try {
+    await runSync(['--dry-run'], ctx)
+  } finally {
+    await provider.shutdown()
+    // Restore the no-provider seam every later test in this file runs on.
+    logs.setGlobalLoggerProvider(/** @type {any} */ (null))
+  }
+
+  const preview = records.find((record) => record.body === 'sync.pending_preview')
+  assert.ok(preview, 'the preview must report what it counted')
+  assert.equal(preview.attributes.destinations, 1, 'the counts cover the printed upload target only')
+  assert.equal(preview.attributes.hyp_hidden_destinations, 1, 'the hidden file copy must be countable')
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
 test('the plan counts the directories being withheld', async () => {
   const hypHome = await makeHome('exclusions')
   await writeLocalOnlyEntries({
@@ -526,7 +1036,7 @@ test('the plan counts the directories being withheld', async () => {
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /withholding 2 directories marked local-only, 1 directory marked ignore/)
+  assert.match(stdout.text, /^Excluded: 3 directories\n/m)
 })
 
 test('the plan names the clients kept local-only (LLP 0188 #never-silent)', async () => {
@@ -546,11 +1056,11 @@ test('the plan names the clients kept local-only (LLP 0188 #never-silent)', asyn
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /keeping these clients local-only: hermes · openclaw/)
+  assert.match(stdout.text, /^Excluded: hermes, openclaw\n/m)
   assert.doesNotMatch(stdout.text, /no directories or clients are marked/)
 })
 
-test('with nothing marked, the plan says so in one line covering both stores', async () => {
+test('with no exclusions, the plan adds no policy narration', async () => {
   const hypHome = await makeHome('no-exclusions')
   const { ctx, stdout } = makeCtx({
     hypHome,
@@ -560,7 +1070,7 @@ test('with nothing marked, the plan says so in one line covering both stores', a
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /no directories or clients are marked local-only or ignore/)
+  assert.doesNotMatch(stdout.text, /local-only|ignore|excluded|no directories or clients/)
 })
 
 test('with no hold, --yes exports without inventing a review window', async () => {
@@ -572,7 +1082,7 @@ test('with no hold, --yes exports without inventing a review window', async () =
 
   assert.equal(code, 0)
   assert.equal(sink.exported.length, 1)
-  assert.doesNotMatch(stdout.text, /FIRST SYNC/)
+  assert.doesNotMatch(stdout.text, /First upload:/)
 })
 
 test('an unknown instance names the ones that exist', async () => {
@@ -688,5 +1198,23 @@ test('a failed export reports a nonzero exit', async () => {
   const code = await runSync(['--yes'], ctx)
 
   assert.equal(code, 1)
-  assert.match(stdout.text, /parquet: failed/)
+  assert.match(stdout.text, /^Could not send to \/home\/u\/exports/m)
+})
+
+
+test('sync progress explains retry waits and resumed rows without inflating transfer rate', () => {
+  let now = 1000
+  const progress = createSyncProgress(new Map([['central', { status: 'counted', rows: 1000 }]]), () => now)
+  progress.update('central')
+  progress.update('central', { rows: 750, bytes: 0, resumedRows: 750, wireBytes: 0 })
+  assert.match(progress.render(), /750 resumed.*ETA unavailable/)
+  progress.update('central', { rows: 0, bytes: 0, waitMs: 2000 })
+  assert.match(progress.render(), /retrying in 2s/)
+  now += 1000
+  assert.match(progress.render(), /retrying in 1s/)
+  now += 1000
+  progress.update('central', { rows: 50, bytes: 2097152, wireBytes: 1048576 })
+  assert.match(progress.render(), /1.0 MiB uploaded.*750 resumed.*ETA ~8s/)
+  progress.update('central', { rows: 200, bytes: 100, wireBytes: 50 })
+  assert.match(progress.render(), /1,000 rows complete.*finalizing/)
 })

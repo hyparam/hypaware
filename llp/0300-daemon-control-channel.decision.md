@@ -116,6 +116,52 @@ before; only win32 routes through the file channel. The signal path is
 proven by the existing smokes, and service managers (`launchctl bootout`,
 `systemctl stop`) speak signals regardless, so the daemon's handlers stay.
 
+> **Amended (this doc is a Draft):** the sentence above holds for a daemon the
+> service manager is not supervising, which is the case this decision was
+> written against. Where the manager *is* supervising one, a bare SIGTERM is
+> not a stop at all: launchd's `KeepAlive` and systemd's `Restart=always`
+> respawn the job within seconds, so `hyp daemon stop` reported a stop that did
+> not happen. A supervised `hyp daemon stop` therefore goes through the service
+> manager (`launchctl bootout`, `systemctl --user stop`), which is what can
+> defeat the respawn policy, and preserves the plist / unit so
+> `hyp daemon start` and `hyp daemon restart` bring it back. This changes the
+> transport, not the decision underneath it: both service managers deliver
+> SIGTERM, so the daemon's handlers are still the thing that runs, and
+> `requestDaemonStop` is unchanged and still the path for every daemon the
+> manager is not supervising.
+>
+> **Supervision, not installation and not a pid.** The unit file on disk is the
+> wrong gate: it survives a stop, so an installed-but-stopped service beside a
+> foreground `hyp daemon run` would take the manager path and leave that daemon
+> running. A live pid is the wrong gate too, in the other direction: a respawn
+> policy leaves no pid for the whole throttle gap (launchd's
+> `ThrottleInterval`, systemd's `RestartSec`) while still being about to bring
+> the daemon back, and that gap is when an operator most wants a stop. Each
+> manager answers supervision with its own fact: launchd either holds the label
+> or does not, which is what `loaded` reports there, because a stop boots it
+> out; systemd leaves a stopped unit `loaded` and separates the two by
+> `ActiveState`, which `systemctl show` was already asked for.
+>
+> **What `hyp status` then reads.** On macOS the stop leaves the plist on disk
+> and launchd holding nothing, which is byte-identical to a LaunchAgent that
+> failed to load. [LLP 0383](./0383-status-reads-the-daemons-last-state-to-tell-a-crash-from-a-stop.decision.md#the-signal-is-the-daemons-last-state)
+> settled that signal for the *loaded* shape; applying it to the unloaded one
+> is this doc's extension of it, and is why a macOS stop reports a warning
+> rather than an outage. **The stop is bounded by the current boot.** The
+> snapshot's terminal `stopped` is otherwise unbounded in age, and a clean
+> shutdown writes it, a reboot included, so read alone it would report a
+> LaunchAgent that fails to load at the next login as `warning` / `healthy`
+> (issue #2267). The bound is the age bound
+> [LLP 0384](./0384-a-stopping-snapshot-that-stopped-ageing-is-a-stop-that-never-completed.decision.md#stopping-is-a-claim-with-an-expiry)
+> puts on `stopping`, with the boot as the limit: only a `stoppedAt` later
+> than the platform's boot time (`kern.boottime` on macOS, read through
+> `os.uptime()`) is the operator's stop. One from before this boot, a missing
+> `stoppedAt`, or a boot time the platform will not give reads as the failed
+> load, `error` / `degraded`, because a wrong outage costs a reinstall and a
+> wrong `healthy` costs every capture until someone looks. A logout and login
+> without a reboot is not bounded this way and keeps the warning. Promoting
+> this doc out of Draft should add the `Extended-by:` forward-ref to LLP 0383.
+
 <a id="home-resolution"></a>**Home resolution: `env.HOME` wins when set,
 `os.homedir()` is the fallback, `''` is never a home.** For `HYP_HOME`
 derivations, the shape is `env.HYP_HOME || path.join(env.HOME ||

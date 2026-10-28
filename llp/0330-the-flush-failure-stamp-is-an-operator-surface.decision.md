@@ -20,6 +20,8 @@ rendering is settled as intended)
 capture-health section the line joins), LLP 0164 (labels cleaned before a
 terminal)
 
+**Extended-by:** [LLP 0455](./0455-compact-status.spec.md) (compact text view, per-client sharing labels, and verbose details; collector and JSON verdicts unchanged).
+
 > LLP 0322 stamped a failed spool-to-cache flush so the automatic query gate
 > could pace its retry, and deliberately scoped the operator signal to the span
 > status code and the run metric. That left the stamp's one human-readable

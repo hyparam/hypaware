@@ -153,13 +153,7 @@ export async function curateRequestForCluster(runtime, cluster, recallByProspect
   const completion = getCompletion(runtime)
   const prospects = cluster.map((p) => ({ ...viewOf(p), recall: formatHits(recallByProspect.get(strField(p.prospect_id)) ?? []) }))
   const sharedRecalled = formatSharedRecalled(cluster, recallByProspect)
-  /** @type {Set<string>} */
-  const idSet = new Set()
-  for (const p of cluster) {
-    const keys = asObject(p.source_keys)[cfg.id_column]
-    if (Array.isArray(keys)) for (const k of keys) if (typeof k === 'string') idSet.add(k)
-  }
-  const source = await safeDeref(runtime, [...idSet])
+  const source = await safeDeref(runtime, cluster)
   const maxTokens = Math.min(16_000, 2048 + cluster.length * 512)
   return buildCurateBatchRequest({ prospects, neighborhood: sharedRecalled, source, model: c.t2_model, maxTokens, provider: completion.provider })
 }
@@ -313,7 +307,7 @@ export async function clusterProspects(runtime, prospects, recallByProspect) {
   }
   const regionClusters = clusterByRecallRegion(warm, recallByProspect)
   const coldClusters = await embeddingClusters(runtime, cold)
-  return [...regionClusters, ...coldClusters].flatMap((cl) => chunkBySize(cl, c.max_cluster_size))
+  return [...regionClusters, ...coldClusters].flatMap((cl) => chunkBySize(cl, Math.min(16, c.max_cluster_size)))
 }
 
 /**
@@ -469,13 +463,14 @@ function clusterText(p) {
 
 /**
  * @param {Record<string, unknown>} p
- * @returns {{ type: string, label: string, summary: string, confidence: number | undefined }}
+ * @returns {{ type: string, label: string, summary: string, evidence: string, confidence: number | undefined }}
  */
 function viewOf(p) {
   return {
     type: strField(p.prospect_type),
     label: strField(p.label),
     summary: strField(asObject(p.props).summary),
+    evidence: strField(p.evidence).slice(0, 2000),
     confidence: numField(p.confidence),
   }
 }
@@ -518,33 +513,47 @@ function formatSharedRecalled(cluster, recallByProspect) {
  * {@link MAX_SOURCE_CHARS}.
  *
  * @param {EnrichRuntime} runtime
- * @param {string[]} ids
+ * @param {Record<string, unknown>[]} prospects
  * @returns {Promise<string>}
  */
-async function safeDeref(runtime, ids) {
+async function safeDeref(runtime, prospects) {
+  const cfg = runtime.config
+  const plans = []
+  const byColumn = new Map()
+  for (const p of prospects.slice(0, 16)) {
+    if (p.source_dataset !== cfg.source_dataset) continue
+    const keys = asObject(p.source_keys)
+    const parts = keys[cfg.tiebreak_column]
+    const column = Array.isArray(parts) && parts.length ? cfg.tiebreak_column : cfg.id_column
+    const values = keys[column]
+    const quote = strField(p.evidence)
+    if (!Array.isArray(values) || !values.length || values.length > 40 || !quote || quote.length > 2000) continue
+    const ids = values.filter(k => typeof k === 'string' && k.length > 0 && k.length <= 4096)
+    if (ids.length !== values.length) continue
+    plans.push({ prospect: p, column, ids: new Set(ids), quote })
+    const all = byColumn.get(column) ?? new Set()
+    for (const id of ids) all.add(id)
+    byColumn.set(column, all)
+  }
+  if (!plans.length) return ''
+  // One query per cluster, not one full source scan per prospect. New claims
+  // contribute one precise part; bounded legacy key lists remain best effort.
+  const predicates = [...byColumn].map(([column, ids]) => `${column} IN (${[...ids].map(id => `'${sqlQuote(id)}'`).join(', ')})`)
+  const where = [`(${predicates.join(' OR ')})`, ...contentFilterClauses(cfg)].join(' AND ')
+  const columns = [...new Set([cfg.text_column, cfg.id_column, cfg.tiebreak_column])]
   try {
-    const cfg = runtime.config
-    const list = ids.filter((k) => typeof k === 'string' && k.length > 0)
-    if (list.length === 0) return ''
-    const inList = list.slice(0, 40).map((id) => `'${sqlQuote(id)}'`).join(', ')
-    // Same content filter as the T1 scan: a message whose kept text part shares
-    // its id with an excluded part (e.g. a tool_result) must not re-admit that
-    // part into the curator excerpt. @ref LLP 0028#row-selection
-    const where = [`${cfg.id_column} IN (${inList})`, ...contentFilterClauses(cfg)].join(' AND ')
-    const rows = await runSql(
-      runtime,
-      `SELECT ${cfg.text_column} FROM ${cfg.source_dataset} WHERE ${where} LIMIT 40`
-    )
+    const rows = await runSql(runtime, `SELECT ${columns.join(', ')} FROM ${cfg.source_dataset} WHERE ${where} LIMIT 641`)
+    if (rows.length > 640) return ''
     let out = ''
-    for (const r of rows) {
-      const t = r[cfg.text_column]
-      const s = typeof t === 'string' ? t : t == null ? '' : JSON.stringify(t)
-      if (!s) continue
-      out += (out ? '\n' : '') + s.slice(0, MAX_SOURCE_CHARS - out.length)
-      if (out.length >= MAX_SOURCE_CHARS) break
+    for (const plan of plans) {
+      if (!rows.some(r => plan.ids.has(strField(r[plan.column])) && strField(r[cfg.text_column]).includes(plan.quote))) continue
+      const excerpt = `[${strField(plan.prospect.prospect_id)}] ${plan.quote}`
+      if (out.length + excerpt.length + 1 > MAX_SOURCE_CHARS) break
+      out += (out ? '\n' : '') + excerpt
     }
     return out
   } catch {
+    // Unavailable evidence stays explicitly unavailable in the prompt.
     return ''
   }
 }
@@ -605,7 +614,7 @@ export function routeDecision(prospect, view, decision, at) {
     item_id: itemKey,
     item_type: itemType,
     label: decision.label || view.label,
-    props: summary ? { summary } : null,
+    props: { ...(summary ? { summary } : {}), ...(strField(prospect.evidence) ? { evidence: strField(prospect.evidence).slice(0, 2000) } : {}) },
     confidence: decision.confidence ?? (isMerge ? undefined : view.confidence) ?? null,
     anchor_type: strField(prospect.anchor_type),
     anchor_key: strField(prospect.anchor_key),

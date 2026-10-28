@@ -604,6 +604,133 @@ test('OpenAI Responses captures top-level instructions into system_text', () => 
   assert.equal(projection.system_text, 'You are Codex, a coding agent.')
 })
 
+// UUIDs generated independently with Python uuid.uuid5(uuid.uuid5(uuid.NAMESPACE_OID,
+// threadId), text), matching Codex rust-v0.162.0 core/src/client.rs.
+const baseInstructionThread = '019a1234-5678-7890-abcd-0123456789ab'
+const baseInstructionText = 'You are Codex, a coding agent.'
+const baseInstructionId = 'msg_e009442f-0c3d-5772-a0f8-bcabf51c1e2b'
+
+/** @param {Record<string, unknown>} [overrides] */
+function baseInstructionMessage(overrides = {}) {
+  return {
+    type: 'message', role: 'developer', id: baseInstructionId,
+    content: [{ type: 'input_text', text: baseInstructionText }],
+    ...overrides,
+  }
+}
+
+/** @param {Record<string, unknown>} [overrides] */
+function baseInstructionRequest(overrides = {}) {
+  return {
+    model: 'gpt-5-codex',
+    client_metadata: {
+      'x-codex-installation-id': 'install-test',
+      session_id: 'parent-session', thread_id: baseInstructionThread,
+    },
+    input: [baseInstructionMessage(), { role: 'user', content: 'hello' }],
+    ...overrides,
+  }
+}
+
+/** @param {Record<string, unknown>} body */
+function projectBaseInstructions(body) {
+  return /** @type {any} */ (createCodexExchangeProjector().project(exchange({
+    path: '/v1/responses',
+    request_body: JSON.stringify(body),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+}
+
+test('Codex base instructions use the thread-derived ID when classification is stripped', () => {
+  const projection = projectBaseInstructions(baseInstructionRequest())
+  assert.equal(projection.system_text, baseInstructionText)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['user', 'assistant'])
+  assert.equal(projection.session_id, 'parent-session')
+  assert.equal(projection.conversation_id, baseInstructionThread)
+})
+
+test('Codex base instructions preserve exact Unicode and whitespace in ID matching', () => {
+  const text = '  café 🦀\n\n'
+  const projection = projectBaseInstructions(baseInstructionRequest({ input: [baseInstructionMessage({
+    id: 'msg_aada349b-5441-5ccf-97f9-3ccd06781f87',
+    content: [{ type: 'input_text', text }],
+  })] }))
+  assert.equal(projection.system_text, text)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['assistant'])
+})
+
+test('Codex explicit base-instruction classification needs no thread ID and allows the tools prefix', () => {
+  const projection = projectBaseInstructions(baseInstructionRequest({
+    client_metadata: { 'x-codex-installation-id': 'install-test' },
+    input: [
+      { type: 'additional_tools', role: 'developer', tools: [] },
+      baseInstructionMessage({
+        id: undefined,
+        internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] },
+      }),
+      { role: 'developer', content: 'Follow AGENTS.md' },
+    ],
+  }))
+  assert.equal(projection.system_text, baseInstructionText)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['developer', 'assistant'])
+  assert.equal(projection.messages[0].content[0].text, 'Follow AGENTS.md')
+})
+
+test('Codex base instructions retain top-level precedence and preserve conflicts', () => {
+  for (const instructions of [baseInstructionText, 'different instructions', '']) {
+    const projection = projectBaseInstructions(baseInstructionRequest({ instructions }))
+    const conflict = instructions === 'different instructions'
+    assert.equal(projection.system_text, instructions || baseInstructionText)
+    assert.deepEqual(projection.messages.map((m) => m.role), conflict
+      ? ['developer', 'user', 'assistant'] : ['user', 'assistant'])
+  }
+  const projection = projectBaseInstructions(baseInstructionRequest({ system: 'system wins', instructions: baseInstructionText }))
+  assert.equal(projection.system_text, 'system wins')
+  assert.equal(projection.messages[0].role, 'developer')
+})
+
+test('Codex base-instruction recognition preserves ambiguous and ordinary developer items', () => {
+  const cases = [
+    ['ordinary ID', { input: [baseInstructionMessage({ id: 'msg_other' })] }],
+    ['missing ID', { input: [baseInstructionMessage({ id: undefined })] }],
+    ['modified text', { input: [baseInstructionMessage({ content: [{ type: 'input_text', text: 'different' }] })] }],
+    ['wrong role', { input: [baseInstructionMessage({ role: 'user' })] }],
+    ['wrong type', { input: [baseInstructionMessage({ type: 'other' })] }],
+    ['mixed content', { input: [baseInstructionMessage({ content: [{ type: 'input_text', text: baseInstructionText }, { type: 'input_image', image_url: 'https://example.test/image' }] })] }],
+    ['explicit other kind', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: ['developer.instructions'] } })] }],
+    ['malformed kind', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: 'model.base_instructions' } })] }],
+    ['multiple kinds', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions', 'developer.instructions'] } })] }],
+    ['missing thread', { client_metadata: { 'x-codex-installation-id': 'install-test', session_id: baseInstructionThread } }],
+    ['wrong thread', { client_metadata: { 'x-codex-installation-id': 'install-test', thread_id: 'other-thread', session_id: baseInstructionThread } }],
+    ['unrelated Responses client', { client_metadata: { thread_id: baseInstructionThread, session_id: 'parent-session' } }],
+    ['historical message', { input: [{ role: 'user', content: 'earlier' }, baseInstructionMessage()] }],
+  ]
+  for (const [name, overrides] of cases) {
+    const body = baseInstructionRequest(/** @type {Record<string, unknown>} */ (overrides))
+    const projection = projectBaseInstructions(body)
+    assert.equal(projection.system_text, undefined, String(name))
+    assert.equal(projection.messages.length, /** @type {unknown[]} */ (body.input).length + 1, String(name))
+  }
+})
+
+test('Codex prefix removal preserves materialized identities, usage and replay dedupe', async () => {
+  const projector = createCodexExchangeProjector()
+  const makeDispatcher = () => createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+  const legacyBody = baseInstructionRequest({ instructions: baseInstructionText, input: [{ role: 'user', content: 'hello' }] })
+  const input = exchange({
+    path: '/backend-api/codex/responses',
+    request_body: JSON.stringify(legacyBody),
+    response_body: JSON.stringify({ output_text: 'done', usage: { input_tokens: 20, output_tokens: 3, total_tokens: 23 } }),
+  })
+  const before = await makeDispatcher().projectExchange(input)
+  const dispatcher = makeDispatcher()
+  const after = await dispatcher.projectExchange({ ...input, request_body: JSON.stringify(baseInstructionRequest()) })
+  assert.deepEqual(after, before)
+  assert.equal(after.length, 2)
+  assert.deepEqual(await dispatcher.projectExchange(input), [])
+  assert.deepEqual(await dispatcher.projectExchange({ ...input, request_body: JSON.stringify(baseInstructionRequest()) }), [])
+})
+
 test('OpenAI Chat system field still wins over instructions', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
@@ -1286,10 +1413,12 @@ test('a refused workspace substitution is logged with hashed paths, not silently
   )
 })
 
-test('a refused workspace substitution still enriches the row from the workspace key (#476)', () => {
-  // The substitution keeps its ENRICHMENT role: only the gate/stamp cwd is
-  // taken back from it. Losing `workspace` / git identity would be a separate
-  // regression (LLP 0032#capture).
+test('a refused workspace substitution no longer enriches the row from the workspace key (#1189)', () => {
+  // Reversed on purpose. #476 took the gate/stamp cwd back from a key that does
+  // not cover the cwd and left it the enrichment role; under a session_repos
+  // inventory that remote is capture evidence, so a key the session never ran
+  // in now supplies none of it. The conversation itself is untouched.
+  // @ref LLP 0506#decision [tests]: no covering key, no repository identity
   const projector = createCodexExchangeProjector({
     resolver: ignoringResolver('/work/ignored'),
   })
@@ -1311,9 +1440,10 @@ test('a refused workspace substitution still enriches the row from the workspace
     response_body: JSON.stringify({ output_text: 'done' }),
   }), context()))
   assert.equal(projection.cwd, '/work/clean/elsewhere')
-  assert.equal(projection.attributes.codex.workspace, '/work/clean/proj')
-  assert.equal(projection.git_remote, 'git@github.com:acme/clean.git')
-  assert.equal(projection.head_sha, 'deadbeef')
+  assert.equal(projection.conversation_id, 'thread-476d')
+  assert.equal(projection.attributes.codex.workspace, undefined)
+  assert.equal(projection.git_remote, undefined)
+  assert.equal(projection.head_sha, undefined)
 })
 
 test('the workspace key still supplies the gate cwd when the request states none (#476)', () => {
@@ -1668,6 +1798,322 @@ test('an ancestor key that resolves MORE restrictively than the cwd is silent (d
   }
 })
 
+// ---------------------------------------------------------------------
+// Repository enrichment needs a covering, non-ignored workspace (#1189)
+//
+// Phil's 2026-10-05 decision on LLP 0350 (B)+(C): a row carries a workspace's
+// git_remote/head_sha and its attributes.codex mirrors only when the key covers
+// the RESOLVED cwd and the shared matcher does not classify the key `ignore`.
+// Otherwise the row is still recorded, without that identity.
+//
+// @ref LLP 0506#decision [tests]
+// ---------------------------------------------------------------------
+
+const REPO_MIRRORS = ['workspace', 'git_origin_url', 'git_commit', 'has_changes']
+
+/**
+ * @param {any} projection
+ * @param {string} label
+ */
+function assertNoRepoEnrichment(projection, label) {
+  assert.equal(projection.git_remote, undefined, `${label}: git_remote`)
+  assert.equal(projection.head_sha, undefined, `${label}: head_sha`)
+  for (const key of REPO_MIRRORS) {
+    assert.equal(projection.attributes.codex[key], undefined, `${label}: attributes.codex.${key}`)
+  }
+}
+
+function capturingLog() {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const infos = []
+  return {
+    infos,
+    log: {
+      debug() {},
+      warn() {},
+      error() {},
+      /** @param {string} message @param {Record<string, unknown>=} fields */
+      info: (message, fields) => { infos.push({ message, fields }) },
+    },
+  }
+}
+
+/**
+ * An API-key route turn (`/v1/responses`, cwd in `metadata`) carrying the
+ * given `workspaces` map and a subagent lineage, so a test can assert identity
+ * and lineage survive a withheld enrichment.
+ *
+ * @param {string} cwd
+ * @param {Record<string, unknown>} workspaces
+ */
+function apiKeyTurn(cwd, workspaces) {
+  return exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'session-1189',
+        thread_id: 'thread-1189-api',
+        parent_thread_id: 'thread-1189-parent',
+        workspaces,
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', metadata: { cwd }, input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  })
+}
+
+test('API-key route: no covering key withholds every repository field and keeps the conversation (#1189)', () => {
+  const { infos, log } = capturingLog()
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(apiKeyTurn('/work/clean/sub', {
+    '/work/other': {
+      associated_remote_urls: { origin: 'https://github.com/acme/other.git' },
+      latest_git_commit_hash: 'cafe0001',
+      has_changes: true,
+    },
+  }), { log }))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'a clean conversation is not dropped')
+  assertNoRepoEnrichment(projection, 'no covering key')
+  assert.equal(projection.cwd, '/work/clean/sub')
+  assert.equal(projection.session_id, 'session-1189')
+  assert.equal(projection.conversation_id, 'thread-1189-api')
+  assert.equal(projection.parent_thread_id, 'thread-1189-parent')
+  assert.equal(projection.attributes.codex.thread_id, 'thread-1189-api')
+  assert.equal(projection.attributes.codex.parent_thread_id, 'thread-1189-parent')
+  assert.equal(projection.attributes.codex.identity_source, 'gateway_fallback')
+  const withheld = infos.find((e) => e.message === 'plugin.codex.workspace_enrichment_withheld')
+  assert.equal(withheld?.fields?.reason, 'not_covering')
+  assert.ok(!JSON.stringify(withheld?.fields).includes('/work'), 'the diagnostic carries no path')
+})
+
+test('a clean covering key enriches in either map order, beside an ignored unrelated key (#1189)', () => {
+  const clean = {
+    associated_remote_urls: { origin: 'https://user:tok@github.com/acme/clean.git' },
+    latest_git_commit_hash: 'feedface',
+    has_changes: false,
+  }
+  const secret = {
+    associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+    latest_git_commit_hash: 'deadbeef',
+  }
+  for (const order of ['secret-first', 'clean-first']) {
+    const workspaces = order === 'secret-first'
+      ? { '/work/ignored/secret-proj': secret, '/work/clean': clean }
+      : { '/work/clean': clean, '/work/ignored/secret-proj': secret }
+    const projector = createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') })
+    const projection = /** @type {any} */ (projector.project(apiKeyTurn('/work/clean/sub', workspaces), context()))
+    assert.equal(projection.git_remote, 'https://github.com/acme/clean.git', `${order}: redacted covering remote`)
+    assert.equal(projection.head_sha, 'feedface', order)
+    assert.equal(projection.attributes.codex.workspace, '/work/clean', order)
+    assert.equal(projection.attributes.codex.git_origin_url, 'https://github.com/acme/clean.git', order)
+    assert.equal(projection.attributes.codex.git_commit, 'feedface', order)
+    assert.equal(projection.attributes.codex.has_changes, false, order)
+    assert.ok(!JSON.stringify(projection).includes('SECRET'), `${order}: nothing of the ignored tree`)
+  }
+})
+
+test('an ignored unrelated key alone enriches nothing and drops nothing (#1189, #492)', () => {
+  const projector = createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') })
+  const projection = /** @type {any} */ (projector.project(apiKeyTurn('/work/clean/real', {
+    '/work/ignored/proj': {
+      associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+      latest_git_commit_hash: 'deadbeef',
+    },
+  }), context()))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'no .hypignore covers this session')
+  assertNoRepoEnrichment(projection, 'ignored unrelated key')
+  assert.ok(!JSON.stringify(projection).includes('SECRET'))
+})
+
+test('an ignored covering ancestor does not enrich a turn its nested loosening admits (#1189)', () => {
+  // LLP 0350 (C): `ignore` at the ancestor, `local-only` beneath, cwd under
+  // both. The turn records (the user's own carve-out), but the ancestor is
+  // itself ignored, so its identity stays off the row in BOTH map orders,
+  // including the one where a non-covering clean key sorts first.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-1189-'))
+  const outer = path.join(root, 'outer')
+  const proj = path.join(outer, 'proj')
+  const cwd = path.join(proj, 'sub')
+  fs.mkdirSync(cwd, { recursive: true })
+  fs.writeFileSync(path.join(outer, '.hypignore'), 'ignore\n')
+  fs.writeFileSync(path.join(proj, '.hypignore'), 'local-only\n')
+  const secret = { associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' } }
+  const clean = { associated_remote_urls: { origin: 'https://github.com/acme/clean.git' } }
+  const elsewhere = path.join(root, 'clean')
+  try {
+    for (const order of ['clean-first', 'secret-first']) {
+      const workspaces = order === 'clean-first'
+        ? { [elsewhere]: clean, [outer]: secret }
+        : { [outer]: secret, [elsewhere]: clean }
+      const { infos, log } = capturingLog()
+      const projection = /** @type {any} */ (createCodexExchangeProjector().project(apiKeyTurn(cwd, workspaces), { log }))
+      assert.ok(projection && projection !== USAGE_POLICY_DROP, `${order}: the carve-out records`)
+      assertNoRepoEnrichment(projection, order)
+      assert.ok(!JSON.stringify(projection).includes('SECRET'), `${order}: no ignored identity`)
+      const withheld = infos.find((e) => e.message === 'plugin.codex.workspace_enrichment_withheld')
+      assert.equal(withheld?.fields?.reason, 'workspace_ignored', order)
+      assert.ok(!JSON.stringify(withheld?.fields).includes(root), `${order}: no path in the diagnostic`)
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a cwd-scoped ignore still drops the turn outright (#1189 keeps the gate)', () => {
+  const projector = createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') })
+  const projection = projector.project(apiKeyTurn('/work/ignored/real', {
+    '/work/ignored': { associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' } },
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP)
+})
+
+// ---------------------------------------------------------------------
+// The stored turn-metadata header names only what the row may (#2636)
+//
+// The gateway stores the request headers on every row as
+// `attributes.gateway.request_headers`, and `x-codex-turn-metadata` carries the
+// whole `workspaces` map. The six enrichment fields above already apply LLP
+// 0506's rule; the stored header applies the same rule to every key, after the
+// projector has read the metadata.
+//
+// @ref LLP 0506#decision [tests]
+// ---------------------------------------------------------------------
+
+/**
+ * Drive one exchange through the real gateway dispatcher, capturing every log
+ * line either side emits.
+ *
+ * @param {ReturnType<typeof createCodexExchangeProjector>} projector
+ * @param {Record<string, unknown>} overrides
+ */
+async function gatewayRows(projector, overrides) {
+  /** @type {unknown[]} */
+  const logged = []
+  const log = {
+    debug: (/** @type {unknown[]} */ ...args) => { logged.push(args) },
+    info: (/** @type {unknown[]} */ ...args) => { logged.push(args) },
+    warn: (/** @type {unknown[]} */ ...args) => { logged.push(args) },
+    error: (/** @type {unknown[]} */ ...args) => { logged.push(args) },
+  }
+  const dispatcher = createAiGatewayMessageProjector({ gatewayId: 'gw-test', log, projectors: [{ ...projector, _seq: 0 }] })
+  const rows = /** @type {any[]} */ (await dispatcher.projectExchange(exchange(overrides)))
+  return { rows, logged }
+}
+
+/** @param {any} row */
+function storedTurnMetadata(row) {
+  return row.attributes.gateway.request_headers['x-codex-turn-metadata']
+}
+
+test('the stored header keeps the covering workspace byte-exact and drops the ignored one (#2636)', async () => {
+  const clean = {
+    associated_remote_urls: { origin: 'https://github.com/acme/clean.git' },
+    latest_git_commit_hash: 'feedface',
+    has_changes: false,
+  }
+  const secret = {
+    associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+    latest_git_commit_hash: 'deadbeef',
+  }
+  for (const order of ['secret-first', 'clean-first']) {
+    const workspaces = order === 'secret-first'
+      ? { '/work/ignored/secret-proj': secret, '/work/clean': clean }
+      : { '/work/clean': clean, '/work/ignored/secret-proj': secret }
+    const metadata = { session_id: 'session-2636', thread_id: 'thread-2636', workspaces, turn_id: 'turn-1' }
+    const { rows, logged } = await gatewayRows(createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') }), {
+      path: '/v1/responses',
+      provider: 'openai',
+      request_headers: JSON.stringify({
+        'user-agent': 'codex_cli_rs/0.50.0',
+        'x-codex-turn-metadata': JSON.stringify(metadata),
+      }),
+      request_body: JSON.stringify({ model: 'gpt-5-codex', metadata: { cwd: '/work/clean/sub' }, input: 'go' }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    })
+    assert.ok(rows.length > 0, `${order}: the clean turn records`)
+    for (const row of rows) {
+      assert.equal(
+        storedTurnMetadata(row),
+        JSON.stringify({ ...metadata, workspaces: { '/work/clean': clean } }),
+        `${order}: only the covering entry remains, byte-exact, with every other field intact`,
+      )
+      assert.equal(row.attributes.gateway.request_headers['user-agent'], 'codex_cli_rs/0.50.0', order)
+    }
+    assert.ok(!JSON.stringify(rows).includes('SECRET'), `${order}: no row carries the ignored remote`)
+    assert.ok(!JSON.stringify(rows).includes('deadbeef'), `${order}: nor its commit`)
+    assert.ok(!JSON.stringify(rows).includes('/work/ignored'), `${order}: nor its path`)
+    const telemetry = JSON.stringify(logged)
+    assert.ok(!telemetry.includes('SECRET') && !telemetry.includes('/work/ignored'), `${order}: no log line carries it either`)
+  }
+})
+
+test('the stored header drops a workspace that does not cover the cwd (#2636)', async () => {
+  const other = { associated_remote_urls: { origin: 'https://github.com/acme/other.git' } }
+  const { rows } = await gatewayRows(createCodexExchangeProjector({ resolver: governsNothingResolver() }), {
+    path: '/v1/responses',
+    provider: 'openai',
+    request_headers: JSON.stringify({
+      'X-Codex-Turn-Metadata': JSON.stringify({ thread_id: 'thread-2636b', workspaces: { '/work/other': other } }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', metadata: { cwd: '/work/clean/sub' }, input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  })
+  assert.ok(rows.length > 0)
+  for (const row of rows) {
+    assert.equal(
+      row.attributes.gateway.request_headers['X-Codex-Turn-Metadata'],
+      JSON.stringify({ thread_id: 'thread-2636b', workspaces: {} }),
+      'the header name is matched case-insensitively and the non-covering entry is gone',
+    )
+  }
+  assert.ok(!JSON.stringify(rows).includes('acme/other'))
+})
+
+test('a turn whose every workspace may stay stores its headers untouched (#2636)', () => {
+  const headers = JSON.stringify({
+    'x-codex-turn-metadata': JSON.stringify({
+      thread_id: 'thread-2636c',
+      workspaces: {
+        '/work': { associated_remote_urls: { origin: 'https://github.com/acme/mono.git' } },
+        '/work/clean': { associated_remote_urls: { origin: 'https://github.com/acme/clean.git' } },
+      },
+    }),
+  })
+  const input = apiKeyTurn('/work/clean/sub', {})
+  input.request_headers = headers
+  const projection = createCodexExchangeProjector({ resolver: governsNothingResolver() }).project(input, context())
+  assert.ok(projection && projection !== USAGE_POLICY_DROP)
+  assert.equal(input.request_headers, headers, 'both nested keys cover the cwd, so nothing is rewritten')
+})
+
+test('a subscription turn with no cwd of its own keeps only the key it ran under (#2636)', () => {
+  // No in-band cwd and no rollout: the first key is substituted as the cwd
+  // (LLP 0083#workspace-key-ranks-last), so it covers itself and stays; an
+  // unrelated second key does not.
+  const input = exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-2636d',
+        workspaces: {
+          '/work/first': { latest_git_commit_hash: 'aaaa' },
+          '/work/second': { latest_git_commit_hash: 'bbbb' },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  })
+  const projection = /** @type {any} */ (createCodexExchangeProjector({ resolver: governsNothingResolver() }).project(input, context()))
+  assert.equal(projection.cwd, '/work/first')
+  assert.deepEqual(
+    JSON.parse(JSON.parse(input.request_headers)['x-codex-turn-metadata']).workspaces,
+    { '/work/first': { latest_git_commit_hash: 'aaaa' } },
+  )
+})
+
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
@@ -1839,10 +2285,14 @@ test('Codex lineage resolves from the compatibility headers Codex actually sends
   assert.equal(projection.attributes.codex.lineage_source, 'turn_metadata')
 })
 
-// @ref LLP 0151#real-header-names [tests]: `thread-id`, `session-id` and
-// `parent-thread-id` are names Codex never emits. Reading them let an
-// unrelated proxy hop or a hand-rolled client dictate `conversation_id`, which
-// is the partition-adjacent row identity, so they must resolve to nothing.
+// @ref LLP 0151#real-header-names [tests]: no Codex turn states its lineage
+// under these bare names, so reading them only let an unrelated proxy hop or a
+// hand-rolled client dictate `conversation_id`, which is the partition-adjacent
+// row identity. They must therefore resolve to nothing.
+// @ref LLP 0165#header-audit-correction [tests]: `parent-thread-id` is fictional
+// outright, while `thread-id` and `session-id` are real on the compaction and
+// websocket-handshake paths and still unread, since the turn-metadata blob
+// states the same ids for the one request kind that carries them.
 test('a bare lineage header name Codex never sends resolves to nothing, not a wrong value', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
@@ -2035,9 +2485,154 @@ test('a non-Codex client sending only a flat client_metadata identity pair is no
 // @ref LLP 0151#body-is-a-codex-signal [tests]: corroboration is what makes the
 // flat pair readable, not the pair itself, so the guard above must narrow only
 // WHO may be called Codex and not WHAT a known Codex client's map carries. A
-// Codex user-agent is corroboration on its own, so a Codex turn whose map states
-// only the flat pair still resolves its lineage from the body.
-test('a transport-corroborated Codex request still resolves lineage from a flat-only client_metadata', () => {
+// Codex-namespaced signal is corroboration on its own, so a Codex turn whose map
+// states only the flat pair still resolves its lineage from the body.
+// @ref LLP 0165#flat-pair-corroboration [tests]: each preserved corroborator
+// (the chatgpt upstream, the route namespace, and either compatibility header)
+// still seats the flat pair on its own.
+test('a namespace-corroborated Codex request still resolves lineage from a flat-only client_metadata', () => {
+  const projector = createCodexExchangeProjector()
+  const corroborators = [
+    { name: 'chatgpt upstream', provider: 'chatgpt', path: '/v1/responses', headers: {} },
+    { name: 'route namespace', provider: null, path: '/backend-api/codex/responses', headers: {} },
+    { name: 'x-codex-window-id', provider: null, path: '/v1/responses', headers: { 'x-codex-window-id': 'window-corr' } },
+    {
+      name: 'x-codex-turn-metadata',
+      provider: null,
+      path: '/v1/responses',
+      // A blob stating no ids, so the lineage can only come from the flat pair.
+      headers: { 'x-codex-turn-metadata': JSON.stringify({ sandbox: 'workspace-write' }) },
+    },
+  ]
+  for (const c of corroborators) {
+    const projection = /** @type {any} */ (projector.project(exchange({
+      provider: c.provider,
+      path: c.path,
+      request_headers: JSON.stringify(c.headers),
+      request_body: JSON.stringify({
+        model: 'gpt-5-codex',
+        input: 'go',
+        client_metadata: { session_id: 'session-corr', thread_id: 'thread-corr' },
+      }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    }), context()))
+
+    assert.equal(projection.client_name, 'codex', c.name)
+    assert.equal(projection.conversation_id, 'thread-corr', c.name)
+    assert.equal(projection.session_id, 'session-corr', c.name)
+    assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata', c.name)
+  }
+})
+
+// @ref LLP 0151#body-is-a-codex-signal [tests]: corroboration lets a complete
+// flat pair through and nothing less. A half pair or a non-string value stays
+// out of row identity even on a namespaced route, and the row matches the same
+// request sent without the map.
+test('an incomplete or malformed flat pair sets no lineage even when corroborated', () => {
+  const projector = createCodexExchangeProjector()
+  /** @param {Record<string, unknown>} body */
+  const project = (body) => /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go', ...body }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  const control = project({})
+  const maps = [
+    { thread_id: 'thread-only' },
+    { session_id: 'session-only' },
+    { session_id: 'session-empty', thread_id: '' },
+    { session_id: 42, thread_id: 'thread-num' },
+    { session_id: 'session-obj', thread_id: { id: 'x' } },
+  ]
+  for (const map of maps) {
+    const projection = project({ client_metadata: map })
+    const label = JSON.stringify(map)
+    assert.equal(projection.client_name, 'codex', label)
+    assert.equal(projection.conversation_id, control.conversation_id, label)
+    assert.equal(projection.session_id, control.session_id, label)
+    assert.equal(projection.attributes.codex.lineage_source, undefined, label)
+  }
+})
+
+// @ref LLP 0165#flat-pair-corroboration [tests]: the user-agent is a product-name
+// convention any local process can copy, so it may name the client but must not
+// promote an uncorroborated flat pair into the LLP 0030 partition key. The two
+// halves are asserted together: the row is still called Codex (all four signals
+// still answer "may be called Codex"), and the flat pair still contributes
+// nothing (only the namespace signals answer "may have its flat pair trusted").
+test('a Codex user-agent alone does not let a flat client_metadata pair dictate row identity', () => {
+  const projector = createCodexExchangeProjector()
+  /** @param {Record<string, unknown>} body */
+  const project = (body) => /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    request_headers: JSON.stringify({ 'user-agent': 'codex_cli_rs/0.55.0' }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go', ...body }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  const projection = project({ client_metadata: { session_id: 'session-ua', thread_id: 'thread-ua' } })
+  // Loose half: the user-agent still identifies the client.
+  assert.equal(projection.client_name, 'codex')
+  assert.equal(projection.client_version, '0.55.0')
+  // Strict half: nothing of the unproven pair reaches the row.
+  assert.notEqual(projection.conversation_id, 'thread-ua')
+  assert.notEqual(projection.session_id, 'session-ua')
+  assert.equal(projection.attributes.codex.thread_id, undefined)
+  assert.equal(projection.attributes.codex.session_id, undefined)
+  assert.equal(projection.attributes.codex.lineage_source, undefined)
+  // Strongest form: the row is identical to the same request without the map.
+  const control = project({})
+  assert.equal(projection.conversation_id, control.conversation_id)
+  assert.equal(projection.session_id, control.session_id)
+  // Losing lineage never drops the content: the turn is still recorded.
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant'])
+  assert.deepEqual(projection.messages[0].content, [{ type: 'text', text: 'go' }])
+})
+
+// @ref LLP 0165#flat-pair-corroboration [tests]: the attack the split closes,
+// end to end. A real Codex turn seats its pair as the LLP 0030 partition key. A
+// local process that copies the user-agent and replays that pair, whole or
+// mangled, never lands on the same `session_id` or `conversation_id`.
+test('a forged or malformed flat pair cannot land a row in another session\'s partition', () => {
+  const projector = createCodexExchangeProjector()
+  /**
+   * @param {string} path
+   * @param {Record<string, string>} headers
+   * @param {unknown} map
+   */
+  const project = (path, headers, map) => /** @type {any} */ (projector.project(exchange({
+    path,
+    request_headers: JSON.stringify(headers),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go', client_metadata: map }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  const pair = { session_id: 'session-victim', thread_id: 'thread-victim' }
+
+  const victim = project('/backend-api/codex/responses', {}, pair)
+  assert.equal(victim.session_id, 'session-victim')
+  assert.equal(victim.conversation_id, 'thread-victim')
+
+  const ua = { 'user-agent': 'codex_cli_rs/0.55.0' }
+  const forgeries = [
+    { name: 'copied user-agent, whole pair', path: '/v1/responses', headers: ua, map: pair },
+    { name: 'copied user-agent, thread only', path: '/v1/responses', headers: ua, map: { thread_id: pair.thread_id } },
+    { name: 'copied user-agent, session only', path: '/v1/responses', headers: ua, map: { session_id: pair.session_id } },
+    { name: 'namespaced, thread only', path: '/backend-api/codex/responses', headers: {}, map: { thread_id: pair.thread_id } },
+    { name: 'namespaced, session only', path: '/backend-api/codex/responses', headers: {}, map: { session_id: pair.session_id } },
+    { name: 'namespaced, non-string thread', path: '/backend-api/codex/responses', headers: {}, map: { session_id: pair.session_id, thread_id: [pair.thread_id] } },
+  ]
+  for (const f of forgeries) {
+    const row = project(f.path, f.headers, f.map)
+    assert.notEqual(row.session_id, victim.session_id, f.name)
+    assert.notEqual(row.conversation_id, victim.conversation_id, f.name)
+  }
+})
+
+// @ref LLP 0165#flat-pair-corroboration [tests]: dropping the user-agent branch
+// from the strict predicate must not cost a Codex build that still writes an
+// `x-codex-*` entry into its map. That key names the client on its own, so a
+// user-agent-only transport keeps full lineage whenever the map is self-naming.
+test('a Codex user-agent request keeps its lineage when the map carries a Codex-owned key', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
@@ -2045,14 +2640,18 @@ test('a transport-corroborated Codex request still resolves lineage from a flat-
     request_body: JSON.stringify({
       model: 'gpt-5-codex',
       input: 'go',
-      client_metadata: { session_id: 'session-ua', thread_id: 'thread-ua' },
+      client_metadata: {
+        'x-codex-installation-id': 'install-ua',
+        session_id: 'session-ua-owned',
+        thread_id: 'thread-ua-owned',
+      },
     }),
     response_body: JSON.stringify({ output_text: 'done' }),
   }), context()))
 
   assert.equal(projection.client_name, 'codex')
-  assert.equal(projection.conversation_id, 'thread-ua')
-  assert.equal(projection.session_id, 'session-ua')
+  assert.equal(projection.conversation_id, 'thread-ua-owned')
+  assert.equal(projection.session_id, 'session-ua-owned')
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
 })
 
@@ -2159,3 +2758,33 @@ function exchange(overrides = {}) {
 function context() {
   return { log: { debug() {}, info() {}, warn() {}, error() {} } }
 }
+
+test('OpenAI Responses input items carry content_item_kinds onto the projected user message', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [
+        {
+          role: 'user',
+          content: [{ type: 'input_text', text: '<environment_context>cwd</environment_context>' }],
+          internal_chat_message_metadata_passthrough: { content_item_kinds: ['environments.environment_context'] },
+        },
+        {
+          role: 'user',
+          content: [{ type: 'input_text', text: 'fix the bug' }],
+          internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text'] },
+        },
+        { role: 'user', content: [{ type: 'input_text', text: 'no metadata' }] },
+      ],
+    }),
+    response_body: JSON.stringify({ id: 'resp_1', output_text: 'ok' }),
+  }), context()))
+
+  const users = projection.messages.filter((/** @type {any} */ m) => m.role === 'user')
+  assert.equal(users.length, 3)
+  assert.deepEqual(users[0].attributes, { codex: { content_item_kinds: ['environments.environment_context'] } })
+  assert.deepEqual(users[1].attributes, { codex: { content_item_kinds: ['user.text'] } })
+  assert.equal(users[2].attributes, undefined)
+})

@@ -30,6 +30,7 @@ import {
 } from '../../src/core/update/self_update.js'
 import { DAEMON_RESTART_EXIT_CODE } from '../../src/core/daemon/runtime.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
+import { parseCommandArgv } from '../../src/core/cli/verb_codec.js'
 import { CONFIG_BASENAME, parseConfigShape } from '../../src/core/config/schema.js'
 import { mergeConfigLayers } from '../../src/core/config/merge.js'
 
@@ -410,6 +411,9 @@ async function fakeGlobalInstall(dir, opts = {}) {
       }
       return { exitCode: 0, stdout: `hypaware ${version}\n`, stderr: '' }
     }
+    if (cmd === process.execPath && args[1] === 'skills') {
+      return { exitCode: 0, stdout: 'installed skills\n', stderr: '' }
+    }
     // One version npm cannot install at all (`installFailsVersion`), so a
     // rollback can be made to fail while the update that provoked it
     // installed cleanly.
@@ -463,10 +467,11 @@ test('runSelfUpdatePass applies a newer release from a global install', async ()
     })
     assert.equal(result.action, 'updated')
     assert.equal(result.latest, '1.1.0')
-    assert.deepEqual(calls.at(-2), ['npm', 'install', '-g', 'hypaware@1.1.0'])
+    assert.deepEqual(calls.at(-3), ['npm', 'install', '-g', 'hypaware@1.1.0'])
     // The install is followed by the preflight of what it put on disk,
     // run with the same node the service unit relaunches with.
-    assert.deepEqual(calls.at(-1), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), '--version'])
+    assert.deepEqual(calls.at(-2), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), '--version'])
+    assert.deepEqual(calls.at(-1), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), 'skills', 'install', '--attached'])
     const state = readSelfUpdateState(dir)
     assert.equal(state.last_apply?.ok, true)
     assert.equal(state.available, false)
@@ -475,10 +480,93 @@ test('runSelfUpdatePass applies a newer release from a global install', async ()
   }
 })
 
+test('manual and automatic upgrades run the new installer with the selected config under the apply lock', async () => {
+  for (const force of [false, true]) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-skills-'))
+    try {
+      const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+      const configPath = path.join(dir, 'custom-config.json')
+      const env = { HOME: dir, HYP_HOME: path.join(dir, '.hyp'), HYP_CONFIG: '/wrong-config.json' }
+      const events = []
+      let installs = 0
+      const result = await runSelfUpdatePass({
+        stateRoot: dir, env, packageRoot, configPath, force, supervised: !force,
+        fetchImpl: fetchStub('1.1.0').impl,
+        runner: async (cmd, args, options) => {
+          if (args[1] === 'skills') {
+            installs += 1
+            assert.equal(acquireApplyLock(dir), null, 'the package cannot be replaced while skills copy')
+            assert.equal(cmd, process.execPath)
+            assert.deepEqual(args, [path.join(packageRoot, 'bin', 'hypaware.js'), 'skills', 'install', '--attached'])
+            assert.equal(options.env?.HOME, dir)
+            assert.equal(options.env?.HYP_HOME, env.HYP_HOME)
+            assert.equal(options.env?.HYP_CONFIG, configPath)
+            assert.equal(options.timeoutMs, NPM_TIMEOUT_MS)
+            assert.equal(calls.at(-1)?.at(-1), '--version', 'preflight precedes skills')
+          }
+          return runner(cmd, args, options)
+        },
+        log: (event) => { events.push(event) },
+      })
+      assert.equal(result.action, 'updated')
+      assert.equal(installs, 1)
+      assert.ok(events.includes('self_update.skills_installed'))
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('skill install failures and partial warnings are reported without blocking package handover', async () => {
+  for (const outcome of ['error', 'warning', 'throw', 'timeout']) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-skill-error-'))
+    try {
+      const { packageRoot, runner } = await fakeGlobalInstall(dir)
+      const events = []
+      const result = await runSelfUpdatePass({
+        stateRoot: dir, env: {}, packageRoot, force: true,
+        fetchImpl: fetchStub('1.1.0').impl,
+        runner: async (cmd, args, options) => {
+          if (args[1] !== 'skills') return runner(cmd, args, options)
+          if (outcome === 'throw') throw new Error('could not spawn installer')
+          return { exitCode: outcome === 'warning' ? 0 : outcome === 'timeout' ? -1 : 1,
+            stdout: '', stderr: 'warning: skill copy failed' }
+        },
+        log: (event, fields) => { events.push({ event, fields }) },
+      })
+      assert.equal(result.action, 'updated', 'the daemon must still restart onto the healthy package')
+      assert.equal(readSelfUpdateState(dir).last_apply?.ok, true)
+      const event = events.find((e) => e.event === (outcome === 'warning'
+        ? 'self_update.skills_install_warning' : 'self_update.skills_install_failed'))
+      assert.ok(event)
+      assert.match(String(event.fields?.detail), /skill copy failed|could not spawn installer/)
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('failed package installs and preflight rollbacks never run the skill installer', async () => {
+  for (const options of [{ installExit: 1 }, { preflightFails: '1.1.0' }]) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-no-skills-'))
+    try {
+      const { packageRoot, runner, calls } = await fakeGlobalInstall(dir, options)
+      const result = await runSelfUpdatePass({
+        stateRoot: dir, env: {}, packageRoot, runner, force: true,
+        fetchImpl: fetchStub('1.1.0').impl,
+      })
+      assert.notEqual(result.action, 'updated')
+      assert.equal(calls.some((call) => call[2] === 'skills'), false)
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('runSelfUpdatePass records an up-to-date probe and respects the TTL after it', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-ttl-'))
   try {
-    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
     const probe = fetchStub('1.0.0')
     const first = await runSelfUpdatePass({
       supervised: true,
@@ -492,6 +580,7 @@ test('runSelfUpdatePass records an up-to-date probe and respects the TTL after i
     })
     assert.equal(second.action, 'none')
     assert.equal(probe.calledCount(), 1)
+    assert.deepEqual(calls, [], 'no package or skill install on an unchanged check')
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
@@ -707,11 +796,46 @@ test('npm runs with the node bin directory on PATH, not the service manager defa
       name: 'hypaware', version: '1.1.0', packageRoot, runner, env: { PATH: '/usr/bin:/bin' },
     })
     assert.equal(applied.applied, true)
-    // prefix, install, preflight: all three run with the node bin in front.
-    assert.equal(envs.length, 3)
+    // Prefix, install, preflight, skills: every child gets the node bin.
+    assert.equal(envs.length, 4)
     for (const env of envs) assert.equal(env.PATH?.split(path.delimiter)[0], nodeBin)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the apply lock stays stale-proof for twice the longest bounded apply path', async () => {
+  // Each command `runCommand` starts is bounded by its timeout (npm's when
+  // none is given) plus the SIGKILL grace. Pricing the commands
+  // `applySelfUpdate` actually issues, on both of its longest paths, keeps
+  // a command added later from silently eating the margin: the sequence
+  // pin fails first, and the price check fails if the window is not grown.
+  /** @param {{ timeoutMs?: number } | undefined} options */
+  const budget = (options) =>
+    (typeof options?.timeoutMs === 'number' ? options.timeoutMs : NPM_TIMEOUT_MS) + NPM_KILL_GRACE_MS
+  for (const preflightFails of [undefined, '1.1.0']) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-budget-'))
+    try {
+      const { packageRoot, runner } = await fakeGlobalInstall(dir, { preflightFails })
+      /** @type {string[]} */
+      const steps = []
+      let held = 0
+      const result = await applySelfUpdate({
+        name: 'hypaware', version: '1.1.0', previousVersion: '1.0.0', packageRoot, env: {},
+        runner: async (cmd, args, options) => {
+          steps.push(cmd === 'npm' ? `npm ${args.join(' ')}` : args.slice(1).join(' '))
+          held += budget(options)
+          return runner(cmd, args, options)
+        },
+      })
+      assert.deepEqual(steps, preflightFails
+        ? ['npm config get prefix', 'npm install -g hypaware@1.1.0', '--version', 'npm install -g hypaware@1.0.0']
+        : ['npm config get prefix', 'npm install -g hypaware@1.1.0', '--version', 'skills install --attached'])
+      assert.equal(result.applied, !preflightFails)
+      assert.equal(2 * held, APPLY_LOCK_STALE_MS)
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
   }
 })
 
@@ -719,12 +843,6 @@ test('the apply lock outlives the longest legitimate hold and releases only its 
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-lock-life-'))
   try {
     const lockPath = path.join(dir, 'run', 'self-update.lock')
-    // `applySelfUpdate` runs two npm commands, each capped at the npm
-    // timeout plus the SIGKILL grace. A stale window below that sum lets a
-    // second process steal a live holder's lock and start the concurrent
-    // `npm install -g` the lock exists to prevent.
-    assert.ok(APPLY_LOCK_STALE_MS > 2 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS))
-
     const release = acquireApplyLock(dir)
     assert.ok(release)
     assert.equal(acquireApplyLock(dir), null)
@@ -2008,6 +2126,51 @@ test('without a supervisor the automatic lanes install nothing, and hyp update s
   }
 })
 
+test('an unsupervised refusal reaches hyp status while that daemon lives, and a supervised pass clears it', async () => {
+  // @ref LLP 0539#record [tests]: recorded by the refusing pass, cleared by a supervised one, read only for a live daemon
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-refusal-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('99.1.0')
+    const refused = await runSelfUpdatePass({
+      stateRoot: dir, env: { XPC_SERVICE_NAME: '0' }, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(refused.reason, 'unsupervised')
+    assert.equal(readSelfUpdateState(dir).refusal, 'unsupervised')
+
+    // Stopped: nothing is refusing any more, so the plain line stands.
+    const stopped = describeSelfUpdate({ stateRoot: dir, env: {}, packageRoot })
+    assert.equal(stopped.line, 'self-update: 99.1.0 available (running 1.0.0)')
+    assert.equal(stopped.json.refusal, undefined)
+
+    // Live: a terminal's `hyp status` reads the daemon's record, not its own shell.
+    writePidFile(dir, { pid: process.pid, startedAt: new Date().toISOString(), runId: 'test', mode: 'foreground' })
+    const live = describeSelfUpdate({ stateRoot: dir, env: {}, packageRoot })
+    assert.match(String(live.line), /99\.1\.0 available.*not running under a service manager; run 'hyp update'/)
+    assert.equal(live.json.refusal, 'unsupervised')
+
+    // A replacement daemon under a service manager clears it on its first
+    // pass, before the probe is due again.
+    const supervisedPass = await runSelfUpdatePass({
+      stateRoot: dir, env: {}, supervised: true, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.deepEqual(supervisedPass, { action: 'none' })
+    assert.equal(readSelfUpdateState(dir).refusal, undefined)
+    assert.equal(describeSelfUpdate({ stateRoot: dir, env: {}, packageRoot }).line,
+      'self-update: 99.1.0 available (running 1.0.0)')
+
+    // `hyp update` typed in an unsupervised terminal is not the daemon
+    // evaluating its supervisor, so it records no refusal.
+    const manual = await runSelfUpdatePass({
+      stateRoot: dir, env: { XPC_SERVICE_NAME: '0' }, packageRoot, runner, fetchImpl: probe.impl, force: true,
+    })
+    assert.equal(manual.action, 'updated')
+    assert.equal(readSelfUpdateState(dir).refusal, undefined)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('repeated failed boots on an installed version reinstall the one it replaced', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-rollback-'))
   try {
@@ -2041,6 +2204,51 @@ test('repeated failed boots on an installed version reinstall the one it replace
     const third = await lane()
     assert.notEqual(third.action, 'updated')
     assert.equal(calls.filter((c) => c[1] === 'install').length, 1)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a rollback onto a release predating --attached does not fail its own helper step', async () => {
+  // The rollback installs the version the update replaced, so the
+  // post-install child is the *downgraded* binary. A release predating
+  // LLP 0458 declares no `attached` property in its skills parse and
+  // refuses the flag outright, and this lane only runs when the boot is
+  // already failing: it must not report its own argv as a failed step.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-rollback-preflag-'))
+  try {
+    const { packageRoot, runner } = await failedBootAfterApply(dir)
+    /** @type {string[]} */
+    const events = []
+    let attachedAsked = false
+    const lane = () => runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, fetchImpl: fetchStub('1.1.0').impl,
+      runner: async (cmd, args, options) => {
+        if (args[1] !== 'skills') return runner(cmd, args, options)
+        if (args.includes('--attached')) attachedAsked = true
+        // The pre-flag `parseSkillsArgs`: `client` and nothing else, so an
+        // unknown flag is refused with `error: ...` and exit 2.
+        const parsed = parseCommandArgv(args.slice(3), {
+          type: 'object',
+          properties: { client: { type: 'string', default: 'all' } },
+        })
+        if ('ok' in parsed && !parsed.ok) return { exitCode: 2, stdout: '', stderr: `error: ${parsed.error}\n` }
+        return { exitCode: 0, stdout: 'installed skills\n', stderr: '' }
+      },
+      log: (event) => { events.push(event) },
+    })
+    // One failed boot is counted; the second is the pattern that rolls back.
+    assert.notEqual((await lane()).action, 'updated')
+    assert.deepEqual(await lane(), { action: 'updated', reason: 'rolled_back', latest: '1.0.0' })
+    assert.equal(
+      events.includes('self_update.skills_install_failed'), false,
+      'the rollback must not report a failure for an argv the restored release cannot parse'
+    )
+    assert.ok(
+      events.includes('self_update.skills_install_skipped'),
+      'the skipped helper step is named by its own event, not left silent'
+    )
+    assert.equal(attachedAsked, false)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
@@ -2151,6 +2359,123 @@ test('a stuck boot on a version this updater did not install is not rolled back'
     }
     assert.equal(calls.filter((c) => c[1] === 'install').length, 0)
     assert.equal(readSelfUpdateState(dir).boot_failures, undefined)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('classifySelfProvenance separates a project dependency from the global install', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-provenance-local-'))
+  try {
+    // A project that carries `hypaware` as a dependency and runs
+    // `node_modules/.bin/hyp`: `npm install -g` from there lands beside the
+    // copy actually running and never replaces it (issue #1622).
+    const project = path.join(dir, 'app')
+    await fsp.mkdir(project, { recursive: true })
+    await fsp.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.1' }))
+    const dep = path.join(project, 'node_modules', 'hypaware')
+    await fsp.mkdir(dep, { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: dep, env: {} }), 'project-local')
+
+    // A transitive dependency answers on the outermost tree, the rule
+    // `isEphemeralBinPath` already applies: the enclosing project decides.
+    const nested = path.join(project, 'node_modules', 'some-tool', 'node_modules', 'hypaware')
+    await fsp.mkdir(nested, { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: nested, env: {} }), 'project-local')
+
+    // Must not change: a real global install still self-updates, an npx
+    // run is still `npx`, and a dev clone of HypAware is not under any
+    // project's node_modules.
+    const globalRoot = path.join(dir, 'prefix', 'lib', 'node_modules', 'hypaware')
+    await fsp.mkdir(globalRoot, { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: globalRoot, env: {} }), 'global-candidate')
+    const clone = path.join(dir, 'code', 'hypaware')
+    await fsp.mkdir(path.join(clone, '.git'), { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: clone, env: {} }), 'checkout')
+    const npxRoot = path.join(dir, 'cache', '_npx', 'abc', 'node_modules', 'hypaware')
+    await fsp.mkdir(npxRoot, { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: npxRoot, env: {} }), 'npx')
+
+    // Pinned, not overlooked: pnpm and yarn write a manifest beside their
+    // GLOBAL root (issue #1625), so this predicate reads one as project-local.
+    // `applySelfUpdate` compares against npm's prefix and refused those roots
+    // before this verdict existed, so the answer costs them no apply, and
+    // separating them needs a heuristic #1625 put out of scope. Asserted so a
+    // later change to that verdict is a decision someone made on purpose.
+    const pnpmGlobal = path.join(dir, 'pnpm', 'global', '5')
+    await fsp.mkdir(path.join(pnpmGlobal, 'node_modules', 'hypaware'), { recursive: true })
+    await fsp.writeFile(path.join(pnpmGlobal, 'package.json'), JSON.stringify({ name: 'global', version: '0.0.1' }))
+    assert.equal(
+      classifySelfProvenance({ packageRoot: path.join(pnpmGlobal, 'node_modules', 'hypaware'), env: {} }),
+      'project-local'
+    )
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the automatic lane refuses a project-local install instead of installing beside it', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-local-pass-'))
+  try {
+    // A project-local root beside a real global prefix. Read as a global
+    // candidate it costs a daily registry probe, an `npm config get prefix`
+    // spawn, and a sticky `apply_failed: not_global_install` error that puts a
+    // permanent "degraded" line on a machine with nothing wrong with it.
+    const { runner, calls } = await fakeGlobalInstall(dir)
+    const project = path.join(dir, 'app')
+    const packageRoot = path.join(project, 'node_modules', 'hypaware')
+    await fsp.mkdir(packageRoot, { recursive: true })
+    await fsp.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.1' }))
+    await fsp.writeFile(
+      path.join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'hypaware', version: '1.0.0' })
+    )
+    const probe = fetchStub('1.1.0')
+    const stateRoot = path.join(dir, 'state')
+    await fsp.mkdir(stateRoot, { recursive: true })
+
+    const auto = await runSelfUpdatePass({
+      supervised: true, stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl, jitter: 0,
+    })
+    assert.deepEqual(auto, { action: 'skipped', reason: 'project-local' })
+    // Neither the network nor npm: the same silence a dev checkout gets.
+    assert.equal(probe.calledCount(), 0)
+    assert.deepEqual(calls, [])
+    assert.equal(readSelfUpdateState(stateRoot).error, undefined)
+    assert.equal(describeSelfUpdate({ stateRoot, env: {}, packageRoot }).line, null)
+
+    // Pinned because it is the one lane this verdict takes away rather than
+    // merely refuses earlier: read as a global candidate, a root ahead of the
+    // code the daemon booted reached the restart-only hand-over
+    // (LLP 0365 #running-version-is-tracked), which installs nothing. It is now
+    // as silent there as a source checkout, whose tree moves ahead the same way.
+    const ahead = await runSelfUpdatePass({
+      supervised: true, stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl, jitter: 0,
+      runningVersion: '0.9.0',
+    })
+    assert.deepEqual(ahead, { action: 'skipped', reason: 'project-local' })
+    assert.deepEqual(calls, [])
+
+    // `hyp update` still probes (force) and still cannot apply, and names
+    // which install shape it is rather than blaming a failed npm.
+    const forced = await runSelfUpdatePass({
+      supervised: true, force: true, stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(forced.action, 'checked')
+    assert.equal(forced.reason, 'project-local')
+    assert.equal(forced.latest, '1.1.0')
+    assert.deepEqual(calls, [])
+    assert.equal(readSelfUpdateState(stateRoot).error, undefined)
+    assert.equal(describeSelfUpdate({ stateRoot, env: {}, packageRoot }).json.provenance, 'project-local')
+
+    // And the status comparison that reads `identity.version` as "the
+    // version installed on this machine" stays off: this render is not
+    // that install, so it must not tell an operator to restart onto it.
+    writePidFile(stateRoot, { pid: process.pid, startedAt: new Date().toISOString(), runId: 'test', mode: 'foreground' })
+    writeSelfUpdateState(stateRoot, { running_version: '0.9.0' })
+    const line = String(describeSelfUpdate({ stateRoot, env: {}, packageRoot }).line)
+    assert.doesNotMatch(line, /hyp daemon restart/)
+    assert.match(line, /1\.1\.0 available/)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

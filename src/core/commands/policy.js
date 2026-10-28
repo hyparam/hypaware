@@ -23,6 +23,8 @@ import {
 } from '../usage-policy/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { syncDestinationName } from '../remote/builtin_remotes.js'
+import { centralLayerUnreadable, centralSinkOrigins } from '../remote/gateway_seed.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
@@ -37,13 +39,12 @@ import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmar
  * over the machine-local usage-class store that replaces the
  * `hyp ignore --sync`/`--local-only`/`--private` misnomer. `set` / `show` /
  * `unset` / `list` are thin runners over the marking internals hoisted in
- * `src/core/commands/clients.js`; the `hyp ignore`/`hyp unignore` flag forms
- * keep working as delegating compatibility aliases (see
+ * `src/core/commands/clients.js` (see
  * {@link runMarkMachineLocal}, {@link runUnmarkMachineLocal},
  * {@link runIgnoreCheck}). The store format, the shared resolver, and the
  * three-class lattice are untouched (LLP 0103 #cli). Every human line these
  * runners print goes through {@link PUBLIC_VOCABULARY}, so the verb answers
- * in the vocabulary it teaches; `--json` and the aliases do not.
+ * in the vocabulary it teaches; `--json` keeps the resolver vocabulary.
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy` verb surface that retires the `hyp ignore --sync` misnomer
  * @ref LLP 0111#surface [implements]: `policy set` / `show` / `unset` / `list`, registered as a `makeGroupCommand` group
@@ -83,9 +84,7 @@ const STORE_LABEL = 'machine-local policy store'
  * vocabulary the user typed and the hook and the privacy skill teach, never
  * the stored class or the store's file path. `--json` never routes through
  * this, so the machine contract keeps emitting the resolver vocabulary and
- * the real store path; the deprecated `hyp ignore` / `hyp unignore` flag
- * aliases do not pass it and keep their exact legacy output (LLP 0111
- * #aliases). A governing `.hypignore` is still named by its real path: it is
+ * the real store path. A governing `.hypignore` is still named by its real path: it is
  * a file the user can open and edit, not an internal.
  *
  * @ref LLP 0111#tokens [implements]: the class-to-token mapping is a CLI-edge rendering; the store and the JSON keep speaking `full`
@@ -106,9 +105,7 @@ const PUBLIC_VOCABULARY = {
  * which is exactly the internals-leaking vocabulary this verb exists to
  * avoid (LLP 0111 #tokens). Scoped to the four `policy` runners only
  * ({@link runPolicySet}, {@link runPolicyShow}, {@link runPolicyUnset},
- * {@link runPolicyList}): `hyp status` and the deprecated `hyp
- * ignore`/`hyp unignore` aliases keep the resolver's own wording (LLP 0111
- * #aliases).
+ * {@link runPolicyList}): `hyp status` keeps the resolver's own wording.
  *
  * Catching here also means the error never reaches the dispatcher's generic
  * catch, which is what tags the `command.run` span with `error_kind`. So this
@@ -217,8 +214,7 @@ function parsePolicyListArgs(argv) {
  *
  * Writes a machine-local usage-class marking for `<path>` in the
  * class-per-entry store (LLP 0103), delegating to
- * {@link runMarkMachineLocal}, the internal both this verb and the
- * `hyp ignore --sync`/`--local-only`/`--private` compatibility aliases call.
+ * {@link runMarkMachineLocal}.
  * `<path>` is required (the bare grammar makes it necessary: `hyp policy set
  * sync` would be ambiguous between a path and a class token) and resolved
  * against the command-context cwd, matching the sibling verbs; the resolved
@@ -261,12 +257,10 @@ export async function runPolicySet(argv, ctx) {
  * class, the governing source (`dotfile`/`machine-local`/`none`), the
  * governing file, and the residual already-cached row count with the
  * `hyp purge` hint. Prospective-only, never destructive. `--json` emits the
- * exact field set `hyp ignore --check --json` emits today (byte-compatible),
- * since {@link runIgnoreCheck} is the shared implementation both spellings
- * call.
+ * stable resolver field set from {@link runIgnoreCheck}.
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy show`, the `hyp ignore --check` successor
- * @ref LLP 0111#show [implements]: `--json` stays byte-compatible with today's `--check --json` field set
+ * @ref LLP 0111#show [implements]: `--json` keeps the established resolver field set
  * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#reporting [constrained-by]: the report names which source governs (dotfile vs machine-local entry) and the class
  * @ref LLP 0103#cli [constrained-by]: the store, resolver, and class lattice are unchanged; only the verb spelling is new
@@ -297,8 +291,7 @@ export async function runPolicyShow(argv, ctx) {
  * every machine-local entry governing the target is removed, "back to the
  * implicit default" (LLP 0111 #unset), matching the store's one-entry-per-dir
  * shape. An optional trailing class token scopes removal to that class only
- * - the scoped form the `hyp unignore --sync`/`--local-only`/`--private`
- * aliases delegate to. Both forms delegate to {@link runUnmarkMachineLocal}.
+ * through {@link runUnmarkMachineLocal}.
  * `unset` never touches `.hypignore` dotfiles and never touches cached rows
  * (LLP 0104 boundary). Idempotent: nothing governing (of the given class, or
  * of any class) is a no-op success.
@@ -430,6 +423,28 @@ async function resolveClientPolicyContext(ctx) {
 }
 
 /**
+ * Name the config layers that exist but cannot be read, for a receipt that
+ * must qualify where rows go, or null when every layer read cleanly. A missing
+ * local file is an absence, not a failure, and a resolution that threw left
+ * nothing verified. Only paths reach the copy: a parse error can quote the
+ * file, so its message never does.
+ *
+ * @param {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> | null} layered
+ * @param {string} stateDir
+ * @returns {string | null}
+ */
+function unreadableConfigLayers(layered, stateDir) {
+  if (!layered) return "this machine's config"
+  /** @type {string[]} */
+  const parts = []
+  const central = centralLayerUnreadable({ stateDir, centralLoaded: layered.centralLoaded })
+  if (central) parts.push(`this machine's central config layer (${central.configPath})`)
+  const local = layered.localLoaded
+  if (local && !local.ok && local.errorKind !== 'config_missing') parts.push(`the local config (${local.configPath})`)
+  return parts.length > 0 ? parts.join(' and ') : null
+}
+
+/**
  * `hyp policy client [<name>] [sync|local-only] [--json]`
  *
  * The per-client sibling of the directory verbs (LLP 0188): on an enrolled
@@ -501,7 +516,7 @@ export async function runPolicyClient(argv, ctx) {
       return 0
     }
     if (provenance === 'central') {
-      ctx.stdout.write(`${name}: sync (managed by your fleet)\n`)
+      ctx.stdout.write(`${name}: sync (set by your team)\n`)
     } else if (optedOut.has(name)) {
       ctx.stdout.write(`${name}: local-only (${CLIENT_STORE_LABEL})\n`)
     } else {
@@ -510,9 +525,22 @@ export async function runPolicyClient(argv, ctx) {
     return 0
   }
 
+  // Where this machine's rows actually go, from the effective config this
+  // command already resolved: a hand-authored `@hypaware/central` sink in the
+  // local layer forwards too (issue #2249), while the lock above stays on the
+  // central layer. A self-hosted enrollment is a supported lane, so no line
+  // below may call the destination "the cloud".
+  // @ref LLP 0134#custom-url-deferred [constrained-by]: the receipt names the server this machine forwards to, hosted or not
+  const origins = centralSinkOrigins(layered?.effective)
+  const destination = syncDestinationName(origins)
+  // A layer nobody can read may forward somewhere this receipt cannot name, so
+  // no line below states an unqualified destination while one is unread.
+  const unreadable = unreadableConfigLayers(layered, stateDir)
+
   if (parsed.token === 'local-only') {
     if (provenance === 'central') {
-      ctx.stderr.write(`error: '${name}' is managed by your fleet and always syncs to your server\n`)
+      ctx.stderr.write(`error: '${name}' is set by your team and always syncs to ${destination}\n`)
+      if (unreadable) ctx.stderr.write(`  ${unreadable} cannot be read, so other destinations cannot be ruled out\n`)
       return 1
     }
     const next = [...(entries ?? []), { source: name, class: /** @type {'local-only'} */ ('local-only') }]
@@ -524,15 +552,24 @@ export async function runPolicyClient(argv, ctx) {
     }
     ctx.stdout.write(`${name}: local-only${optedOut.has(name) ? ' (unchanged)' : ''}\n`)
     ctx.stdout.write(`  future ${name} rows stay on this machine; rows already exported are not recalled\n`)
-    if (layered && !layered.centralConfig) {
-      ctx.stdout.write('  this machine is not connected to a server; the opt-out takes effect if it joins one\n')
+    // A layer yielding no config is either verifiably absent or merely
+    // unreadable, and only the first is "not connected": an enrollment nobody
+    // can read is not evidence that there is none (issue #2223), and a local
+    // sink forwards with no enrollment at all (issue #2249). The opt-out above
+    // is already written in every case.
+    if (unreadable) {
+      ctx.stdout.write(origins.length > 0
+        ? `  ${unreadable} cannot be read, so this machine's destinations beyond ${destination} cannot be verified; the opt-out is recorded either way\n`
+        : `  ${unreadable} cannot be read, so whether it syncs to a HypAware server cannot be verified; the opt-out is recorded either way\n`)
+    } else if (origins.length === 0) {
+      ctx.stdout.write('  this machine is not connected to a HypAware server; the opt-out takes effect if it connects\n')
     }
     return 0
   }
 
   // token === 'sync': remove the opt-out, idempotent.
   if (!optedOut.has(name)) {
-    ctx.stdout.write(`${name}: sync${provenance === 'central' ? ' (managed by your fleet)' : ' (default, unchanged)'}\n`)
+    ctx.stdout.write(`${name}: sync${provenance === 'central' ? ' (set by your team)' : ' (default, unchanged)'}\n`)
     return 0
   }
   try {
@@ -544,7 +581,15 @@ export async function runPolicyClient(argv, ctx) {
   ctx.stdout.write(`${name}: sync\n`)
   // @ref LLP 0188#no-retroactive-ship [implements]: changing standing policy remains future-only
   // @ref LLP 0345#command [implements]: the policy transition points at the separate attended history replay
-  ctx.stdout.write(`  future ${name} rows sync to your server\n`)
+  if (!unreadable) {
+    ctx.stdout.write(`  future ${name} rows sync to ${destination}\n`)
+  } else {
+    // The removal is recorded, but where the rows go is not provable: name a
+    // readable destination only as a known one (issue #2235).
+    ctx.stdout.write(origins.length > 0
+      ? `  future ${name} rows are eligible to sync, including to ${destination}; ${unreadable} cannot be read, so the complete list of destinations cannot be verified\n`
+      : `  future ${name} rows are eligible to sync, but ${unreadable} cannot be read, so where they go cannot be verified\n`)
+  }
   ctx.stdout.write(`  to upload retained history too: hyp sync --history ${name}\n`)
   return 0
 }

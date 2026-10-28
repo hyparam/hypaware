@@ -25,12 +25,17 @@ import { loadManifests } from '../manifest.js'
  */
 export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/ai-gateway',
+  '@hypaware/grep',
   '@hypaware/otel',
   '@hypaware/claude',
   '@hypaware/codex',
   '@hypaware/hermes',
   '@hypaware/openclaw',
   '@hypaware/opencode',
+  '@hypaware/cursor',
+  '@hypaware/copilot',
+  '@hypaware/pi',
+  '@hypaware/droid',
   '@hypaware/antigravity',
   '@hypaware/antigravity-desktop',
   '@hypaware/local-fs',
@@ -89,6 +94,14 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/claude-account',
   '@hypaware/claude-desktop',
   '@hypaware/github',
+  // @ref LLP 0511#onboarding: hosted collection needs a local selection as well as activation.
+  '@hypaware/codex-cloud',
+  // @ref LLP 0469#seams [implements]: native Ollama capture requires explicit plugins[] opt-in
+  '@hypaware/ollama',
+  // @ref LLP 0548#onboarding: explicitly selected in Customize or attached later
+  '@hypaware/langgraph',
+  // @ref LLP 0553#capture: NanoClaw roots are explicit local selections.
+  '@hypaware/nanoclaw',
 ]))
 
 /**
@@ -116,8 +129,10 @@ export function defaultBundledWorkspaceDir() {
  *                  manifests feed the plugin catalog so datasets,
  *                  client descriptors, and capability metadata remain
  *                  visible to config validation and the walkthrough.
- *  - `unknownDirs` - directories that hold a parseable manifest under
- *                    a name the kernel doesn't recognise as bundled.
+ *  - `unknown` - manifests that parsed under a name the kernel doesn't
+ *                recognize as bundled. The whole manifest, not just the
+ *                directory: the name it declares is the only thing that can
+ *                answer a caller asking after that name (issue #1843).
  *
  * Missing workspace directories return an empty result rather than
  * throwing so `npx hypaware --help` works from any directory.
@@ -142,7 +157,7 @@ export async function discoverBundledPlugins(opts = {}) {
       .map((d) => path.join(workspaceDir, d.name))
   } catch (err) {
     if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
-      return { loaded: [], failed: [], excluded: [], unknownDirs: [] }
+      return { loaded: [], failed: [], excluded: [], unknown: [] }
     }
     throw err
   }
@@ -153,8 +168,8 @@ export async function discoverBundledPlugins(opts = {}) {
   const loaded = []
   /** @type {LoadedManifest[]} */
   const excluded = []
-  /** @type {string[]} */
-  const unknownDirs = []
+  /** @type {LoadedManifest[]} */
+  const unknown = []
   for (const entry of all.loaded) {
     const name = /** @type {PluginName} */ (entry.manifest.name)
     if (allowlist.has(name)) {
@@ -162,9 +177,9 @@ export async function discoverBundledPlugins(opts = {}) {
     } else if (excludeSet.has(name)) {
       excluded.push(entry)
     } else {
-      unknownDirs.push(entry.rootDir)
+      unknown.push(entry)
     }
   }
 
-  return { loaded, failed: all.failed, excluded, unknownDirs }
+  return { loaded, failed: all.failed, excluded, unknown }
 }

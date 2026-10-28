@@ -25,6 +25,8 @@ hyparam/hypaware#1147
 > either moves a denominator that must not move or leaves a hole where a
 > step the user passed through should be.
 
+**Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
+
 ## Context {#context}
 
 [LLP 0135 #progress](./0135-install-experience-overhaul.design.md#progress)

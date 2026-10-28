@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-10
 **Related:** LLP 0129 (#fork: the copy this rewords), LLP 0182 (every machine reaches the fork), LLP 0134 (#login-lane: the lane behind the shared row), LLP 0000 (the product this screen must explain)
+**Extended-by:** [LLP 0410](./0410-fork-two-rows-sync-default.decision.md) (#collect-labels: the Quit row is withdrawn, the rows are relabelled "Sync to the cloud" / "Local only", and sync becomes the bare-enter default; the "never preselecting it" clause no longer holds)
 
 > Extends [LLP 0129 §fork](./0129-init-wizard-fork.decision.md#fork).
 > The fork's *mechanics* are untouched: it is still the wizard's first
@@ -73,6 +74,14 @@ is revisitable. Both the TUI and the numbered readline fallback render
 the summaries. Row *values*, the quit default on a bare enter, and
 LLP 0129's pathway consequences are unchanged: recommending shared
 means leading with it and saying why, never preselecting it.
+
+> **Extended-by: [LLP 0410](./0410-fork-two-rows-sync-default.decision.md).**
+> The `quit` row above is withdrawn and the two remaining rows are
+> relabelled "Sync to the cloud" and "Local only", with the local row's
+> summary saying "switch to sync" instead of "switch to shared". Sync
+> becomes the bare-enter default, so the "never preselecting it" clause
+> no longer holds. The rest stands: sync still leads, and both renderers
+> still carry the row summaries.
 
 ## Consequences
 

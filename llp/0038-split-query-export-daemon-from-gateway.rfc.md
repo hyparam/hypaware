@@ -167,8 +167,8 @@ It also verifies lifecycle telemetry with a stable run ID and smoke step.
 
 Run the traditional suite, typecheck, existing gateway/daemon/policy smokes, and
 the new isolation smoke. Before release run the full smoke battery and real
-Mac/Linux installed-service checks. The adapter/capture changes require their
-real-client acceptance procedures in `docs/ACCEPTANCE.md`; fixtures do not prove
+Mac/Linux installed-service checks. The adapter/capture changes require checks
+against real clients; fixtures do not prove
 upstream client behavior. No persistent data format changed, so a new durable
 queue upgrade gate is not implied by this implementation.
 

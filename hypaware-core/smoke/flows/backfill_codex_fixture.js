@@ -12,6 +12,9 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
+import { createBackfillSweepDriver } from '../../../src/core/daemon/backfill_sweep.js'
+import { runBackfillProvider } from '../../../src/core/commands/backfill.js'
+import { prepareAttach } from '../../plugins-workspace/codex/src/toml-config.js'
 
 /**
  * Phase 7 smoke: Codex rollout backfill → query → idempotent rerun.
@@ -90,7 +93,9 @@ export async function run({ harness, expect }) {
   )
 
   const previousHome = process.env.HOME
+  const previousCodexHome = process.env.CODEX_HOME
   process.env.HOME = fakeHome
+  process.env.CODEX_HOME = path.join(fakeHome, '.codex')
 
   try {
     await runRoot(
@@ -205,6 +210,73 @@ export async function run({ harness, expect }) {
     const rows2 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 2' })
     expect.that('query: rerun did not duplicate rows (still exactly two)', rows2, (v) => Array.isArray(v) && v.length === 2)
 
+    // Exercise default ongoing capture through the real daemon scheduler,
+    // with no inference listener or client request in the loop.
+    const configPath = path.join(fakeHome, '.codex', 'config.toml')
+    await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+    for (const originator of ['codex-tui', 'Codex Desktop']) {
+      const id = `${sessionId}-${originator}`
+      const records = [
+        { type: 'session_meta', payload: { id, originator, base_instructions: { text: 'native instructions' } } },
+        { type: 'event_msg', payload: { type: 'task_started' } },
+        { type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'developer instructions' }] } },
+        { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'scheduled answer' }] } },
+        { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } } } },
+        { type: 'event_msg', payload: { type: 'task_complete' } },
+      ]
+      await fs.writeFile(path.join(sessionsDir, `rollout-${originator}.jsonl`), records.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    }
+    /** @type {Array<Promise<any>>} */
+    const pending = []
+    const sweep = createBackfillSweepDriver({
+      backfills: kernel.backfills, backfillMaterializers: kernel.backfillMaterializers,
+      storage: kernel.storage, query: kernel.query, env,
+      config: { version: 2, query: { cache: { retention: { default_days: 0 } } } },
+      runBackfill: (args) => {
+        const run = runBackfillProvider(args)
+        pending.push(run)
+        return run
+      },
+    })
+    const now = new Date()
+    await sweep.tick({ now })
+    const firstSweep = await Promise.all(pending)
+    expect.that('sweep: both client surfaces imported', firstSweep[0], (v) => v?.ok && v.rowsWritten === 4)
+    expect.that('sweep: previous provider restored', await fs.readFile(configPath, 'utf8'), (v) => v.startsWith('model_provider = "custom"\n') && v.includes('[model_providers.hypaware]') && !v.includes('127.0.0.1'))
+    const nativeRows = await queryRows({
+      dispatch, kernel, registry, env, expect, label: 'scheduled capture',
+      sql: "select entrypoint, system_text, tools from ai_gateway_messages where content_text = 'scheduled answer'",
+    })
+    expect.that('sweep: CLI and Desktop attribution and base instructions', nativeRows, (v) =>
+      v.length === 2 && new Set(v.map((r) => r.entrypoint)).size === 2 &&
+      v.every((r) => r.system_text === 'native instructions' && r.tools == null))
+    pending.length = 0
+    await sweep.tick({ now: new Date(now.getTime() + 60_000) })
+    const secondSweep = await Promise.all(pending)
+    expect.that('sweep: unchanged inputs do no materialization', secondSweep[0], (v) => v?.ok && v.scanned === 0 && v.rowsWritten === 0)
+
+    // @ref LLP 0556#updates [tests]: idle title changes must write just the
+    // metadata revision after durable dedupe, never duplicate old content.
+    for (const [index, title] of ['Generated name', 'Renamed chat', 'Generated name'].entries()) {
+      await runRoot('smoke.title_update', {
+        [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'title_update',
+        [Attr.DEV_RUN_ID]: harness.devRunId, status: 'ok',
+      }, async () => {
+        await fs.appendFile(path.join(fakeHome, '.codex', 'session_index.jsonl'), JSON.stringify({
+          id: sessionId, thread_name: title, updated_at: new Date(now.getTime() + (index + 1) * 1000).toISOString(),
+        }) + '\n')
+        pending.length = 0
+        await sweep.tick({ now: new Date(now.getTime() + (index + 2) * 60_000) })
+        const [result] = await Promise.all(pending)
+        expect.that('idle title update writes exactly one metadata part', result,
+          v => v?.ok && v.rowsWritten === 1)
+        const rows = await queryRows({ dispatch, kernel, registry, env, expect, label: 'native title',
+          sql: `select max_by(JSON_EXTRACT(attributes, '$.session.title'), JSON_EXTRACT(attributes, '$.session.title_updated_at')) as title from ai_gateway_messages where session_id = '${sessionId}' and part_type = 'session_metadata'`,
+        })
+        expect.that('query returns the latest native title', rows[0]?.title, v => v === title)
+      })
+    }
+
     // ----- 4. Internal telemetry: dev_run_id + provider + row counts -----
     await obs.shutdown()
     const traces = await expect.traces()
@@ -235,6 +307,12 @@ export async function run({ harness, expect }) {
     )
 
     const logs = await expect.logs()
+    expect.that('logs: title capture is observable without title text', logs, v => v.some(l =>
+      l.body === 'codex.backfill.session_projected' && l.attributes?.title_captured === true))
+    expect.that('logs: scheduled unchanged-file skip', logs, (v) => v.some((l) =>
+      l.body === 'codex.backfill.scan_complete' && l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 3))
+    expect.that('logs: scheduled capture completed', logs, (v) => v.some((l) =>
+      l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'codex' && l.attributes?.rows_written === 4))
     const finishLogs = logs.filter(
       (/** @type {any} */ l) => l.body === 'backfill.finish' && l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
     )
@@ -246,6 +324,8 @@ export async function run({ harness, expect }) {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = previousCodexHome
   }
 }
 

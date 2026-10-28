@@ -7,6 +7,7 @@ import path from 'node:path'
 import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { errCode } from '../util/json_util.js'
+import { claimPartitionMutation, isPartitionMutationBusy, PARTITION_MUTATION_BUSY_ERROR_KIND } from '../util/mutation_guard.js'
 import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
 import { cacheTablePath, datasetsRoot, isConfirmedSymlink } from './paths.js'
@@ -29,12 +30,14 @@ const RETIRED_DIR = '.retired'
  */
 const NUL_BYTE = String.fromCharCode(0)
 
+export { claimPartitionMutation, isPartitionMutationBusy, PARTITION_MUTATION_BUSY_ERROR_KIND }
+
 /** @type {Map<string, Promise<unknown>>} */
 const partitionMutationLocks = new Map()
 
 /**
- * Serialize cursor-coupled mutations of one logical cache partition inside
- * the process. Flush and maintenance run on independent daemon timers, but a
+ * Serialize cursor-coupled mutations of one logical cache partition across
+ * processes. Flush and maintenance run on independent daemon timers, but a
  * compaction cursor swap must not strand an append in the retired generation.
  *
  * @ref LLP 0301#requirements [implements]: keep the replacement-generation cursor swap atomic with respect to daemon flushes
@@ -45,13 +48,33 @@ const partitionMutationLocks = new Map()
  */
 export function withPartitionMutationLock(partitionDir, fn) {
   const previous = partitionMutationLocks.get(partitionDir) ?? Promise.resolve()
-  const current = previous.catch(() => undefined).then(fn)
+  const current = previous.catch(() => undefined).then(async () => {
+    const release = claimPartitionMutation(partitionDir)
+    try { return await fn() } finally { release() }
+  })
   partitionMutationLocks.set(partitionDir, current)
   return current.finally(() => {
     if (partitionMutationLocks.get(partitionDir) === current) {
       partitionMutationLocks.delete(partitionDir)
     }
   })
+}
+
+/**
+ * Hold the mutation locks of several partitions at once, claimed in sorted
+ * order so two multi-partition holders cannot deadlock in-process; the
+ * cross-process guard fails fast, so contention unwinds every claim.
+ * @ref LLP 0347#rows-wait [implements]: a multi-partition chunk claims every guard before it commits to any
+ * @template T
+ * @param {readonly string[]} partitionDirs
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function withPartitionMutationLocks(partitionDirs, fn) {
+  const dirs = [...new Set(partitionDirs)].sort()
+  /** @param {number} index @returns {Promise<T>} */
+  const run = index => index === dirs.length ? fn() : withPartitionMutationLock(dirs[index], () => run(index + 1))
+  return run(0)
 }
 
 /**
@@ -115,9 +138,18 @@ export function tryReadCursorSync(partitionDir) {
       const kind = parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`
       throw new TypeError(`cursor.json holds ${kind}, not a cursor object`)
     }
+    // The same synthesized zero, one field down: `epoch: "2"` read as epoch
+    // 0, and maintenance reclaimed the live `epoch=2/` as an orphan (issue
+    // #2522). Every writer since the first has written a numeric epoch, so a
+    // missing one is no historical shape either.
+    // @ref LLP 0323#whole-cursor [implements]: a non-numeric epoch refuses the whole cursor instead of defaulting to zero.
+    if (typeof parsed.epoch !== 'number') {
+      const kind = parsed.epoch === undefined ? 'no epoch' : `an epoch of type ${parsed.epoch === null ? 'null' : typeof parsed.epoch}`
+      throw new TypeError(`cursor.json holds ${kind}, not a numeric epoch`)
+    }
     /** @type {PartitionCursor} */
     const cursor = {
-      epoch: typeof parsed.epoch === 'number' ? parsed.epoch : 0,
+      epoch: parsed.epoch,
       rowCount: typeof parsed.rowCount === 'number' ? parsed.rowCount : 0,
       compaction: parsed.compaction ?? null,
     }
@@ -720,7 +752,7 @@ export function appendRefusalReason(partitionDir) {
  * @param {string[]} sourceSegments
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
- * @param {{ declaration?: CachePartitioningDeclaration }} [options]
+ * @param {{ declaration?: CachePartitioningDeclaration, filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[], stampRows?: (rows: Record<string, unknown>[]) => Promise<void>, mutationLockHeld?: boolean }} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
 export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows, options) {
@@ -728,13 +760,21 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
-  // @ref LLP 0027#re-settle-sweep [implements]: the sweep's gate is this
-  // count, so the write path is where it is maintained - maintenance reading
-  // the cursor is only cheap because nothing here forgets to tally. Rows
-  // arrive after the flush-time settle hook has run, so a marker still
-  // present is a genuinely unsettled row.
-  const fallbackAppended = countGatewayFallbackRows(rows)
-  return withPartitionMutationLock(partitionDir, async () => {
+  /** @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>} */
+  const append = async () => {
+    // Buffered rows must be checked again after waiting behind a purge.
+    rows = options?.filterRows ? options.filterRows(rows) : rows
+    if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
+    // Seqs are stamped here, under the guard and after the purge re-check,
+    // so every row this partition commits carries a seq above every row it
+    // committed before, whichever process did the committing. Stamping any
+    // earlier (the spool reader once did) let two processes commit out of
+    // seq order and left rows under the sink's watermark (issue #2578). A
+    // multi-partition chunk reserves its whole run before this, once every
+    // guard is held, and only hands each partition its slice here.
+    // @ref LLP 0492#reserve-at-commit [implements]: stamp under the partition guard, after the purge re-check
+    if (options?.stampRows) await options.stampRows(rows)
+    const fallbackAppended = countGatewayFallbackRows(rows)
     const cursor = readCursorForAppend(partitionDir)
     const tableDir = cursor.tableDir ?? 'table'
     const icebergDir = path.join(partitionDir, tableDir)
@@ -743,32 +783,61 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, icebergDir)
     const declaration = options?.declaration
     const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
+    // Spread first, so every field the reader returned survives the append
+    // (see `appendRowsToPartition` for the loss a field list caused).
     await writeCursor(partitionDir, {
-      epoch: cursor.epoch,
+      ...cursor,
       rowCount: cursor.rowCount + rows.length,
-      compaction: cursor.compaction,
       layout: 'source-table',
       tableDir,
-      retention: cursor.retention,
       ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result
-  })
+  }
+  // @ref LLP 0027#re-settle-sweep [implements]: the sweep's gate is this
+  // count, so the write path is where it is maintained - maintenance reading
+  // the cursor is only cheap because nothing here forgets to tally. Rows
+  // arrive after the flush-time settle hook has run, so a marker still
+  // present is a genuinely unsettled row.
+  //
+  // `mutationLockHeld` skips this: a multi-partition chunk in storage.js
+  // already claimed every guard, sorted, before committing to any of them
+  // (@ref LLP 0347#rows-wait), and claiming it again here would self-deadlock
+  // in-process.
+  if (options?.mutationLockHeld) return append()
+  return withPartitionMutationLock(partitionDir, append)
 }
 
 /**
- * Append rows into the current epoch's Iceberg table for the resolved
- * partition.  Creates the partition directory and cursor on first
- * write.
+ * Append rows into the live generation of the resolved partition, whichever
+ * layout the cursor names. Creates the partition directory and an
+ * `epoch=0` cursor on first write.
+ *
+ * The entry point is the legacy epoch layout's, but the generation it
+ * appends to is the cursor's, not the caller's. A purge rewrite
+ * (`maintenance.js`, the `purgeRewrite` branch) converts an epoch partition
+ * to a `table-<ms>-<uuid>` source-table generation, and this function used
+ * to append to `epoch=<n>` regardless and rewrite the cursor from a field
+ * list that had no `layout` or `tableDir`. That one write pointed the
+ * partition back at the epoch directory, which held only the rows appended
+ * since the purge, and left the rewritten generation holding every
+ * pre-purge row unreferenced for the orphan sweep to reclaim. The server
+ * ingest mover appends through here, so one session purge on a partition
+ * still receiving rows cost it its history.
+ *
+ * Hence the two rules below: the live directory is resolved from the
+ * cursor's layout, and the cursor is written by spreading the one read, so
+ * no field the reader returned is dropped.
  *
  * @param {string} cacheRoot
  * @param {string} dataset
  * @param {string[]} partitionSegments
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
+ * @param {{ filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[] }} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
-export async function appendRowsToPartition(cacheRoot, dataset, partitionSegments, columns, rows) {
+export async function appendRowsToPartition(cacheRoot, dataset, partitionSegments, columns, rows, options) {
   if (rows.length === 0) {
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
@@ -776,17 +845,19 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
   // @ref LLP 0027#re-settle-sweep [implements]: as above - the legacy epoch
   // layout is not settle-eligible today, but a cursor field maintained on
   // only one of two write paths is a count that drifts the day it is.
-  const fallbackAppended = countGatewayFallbackRows(rows)
   return withPartitionMutationLock(partitionDir, async () => {
+    // Buffered rows must be checked again after waiting behind a purge.
+    rows = options?.filterRows ? options.filterRows(rows) : rows
+    if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
+    const fallbackAppended = countGatewayFallbackRows(rows)
     const cursor = readCursorForAppend(partitionDir)
-    const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
-    // As above: asked before the append creates the epoch's table.
-    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, epochDir)
-    const result = await appendRowsToTable(epochDir, columns, rows)
+    const liveDir = path.join(partitionDir, cursor.layout === 'source-table' ? cursor.tableDir ?? 'table' : `epoch=${cursor.epoch}`)
+    // As above: asked before the append creates the generation's table.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, liveDir)
+    const result = await appendRowsToTable(liveDir, columns, rows)
     await writeCursor(partitionDir, {
-      epoch: cursor.epoch,
+      ...cursor,
       rowCount: cursor.rowCount + rows.length,
-      compaction: cursor.compaction,
       ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result
@@ -922,46 +993,6 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
  */
 export function resolveClientName(row) {
   return nonEmpty(row.client_name) ?? nonEmpty(row.conversation_source) ?? nonEmpty(row.provider) ?? 'unknown'
-}
-
-/**
- * Extract a `YYYY-MM-DD` date string from common timestamp fields.
- * Returns `undefined` when no recognizable timestamp is present.
- *
- * @param {Record<string, unknown>} row
- * @returns {string | undefined}
- */
-export function resolvePartitionDate(row) {
-  const ts = row.timestamp ?? row.created_at ?? row.recorded_at ?? row.date
-  if (typeof ts === 'string') {
-    const match = ts.match(/^(\d{4}-\d{2}-\d{2})/)
-    if (match) return match[1]
-    const d = new Date(ts)
-    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10)
-  }
-  if (ts instanceof Date) return ts.toISOString().slice(0, 10)
-  if (typeof ts === 'number' && Number.isFinite(ts)) return new Date(ts).toISOString().slice(0, 10)
-  return undefined
-}
-
-/**
- * Derive the partition segments for a row by inspecting its data for
- * client and date fields.  Falls back to `['all']` when neither
- * dimension is resolvable, preserving backwards compatibility with
- * datasets that carry no partition-relevant columns.
- *
- * @param {Record<string, unknown>} row
- * @returns {string[]}
- */
-export function resolvePartitionSegments(row) {
-  const client = resolveClientName(row)
-  const date = resolvePartitionDate(row)
-  if (client === 'unknown' && !date) return ['all']
-  /** @type {string[]} */
-  const segments = []
-  segments.push(`client=${client}`)
-  if (date) segments.push(`date=${date}`)
-  return segments
 }
 
 /**

@@ -152,6 +152,24 @@ test('retention commits Iceberg deletes on source-table rows older than cutoff',
   }
 })
 
+test('retention deletes more expired rows in one file than fit in a call stack', async () => {
+  const cacheRoot = await makeTmpDir('retention-large')
+  try {
+    const oldTimestamp = isoDateDaysAgo(45)
+    const count = 200_000
+    const rows = Array.from({ length: count }, (_, id) => ({ id, value: null, timestamp: oldTimestamp }))
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, rows)
+
+    const enforcer = createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } })
+    const result = await enforcer.tick()
+
+    assert.equal(result.sourceTableResults.length, 1)
+    assert.equal(result.sourceTableResults[0].rowsDeleted, count)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('retention skips source tables when all rows are within retention', async () => {
   const cacheRoot = await makeTmpDir('retention-skip')
   try {

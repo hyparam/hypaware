@@ -29,11 +29,13 @@
  * the OTLP guard intact, and answering it would widen the refusal that closed
  * the rebinding hole.
  *
- * `hexMappedIpv4` opts into the hex-serialized mapped form as well, and only
- * the self-updater passes it: a registry override written
+ * `hexMappedIpv4` opts into the hex-serialized mapped form as well for parsed
+ * URLs: the self-updater's registry override written
  * `http://[::ffff:127.0.0.1]:4873` reaches that check as `[::ffff:7f00:1]`,
  * because `URL` re-serializes it, and refusing the hex form there would turn
- * away a Verdaccio plainly running on this machine. It stays off elsewhere
+ * away a Verdaccio plainly running on this machine. Ollama setup uses the
+ * same URL form to reject a direct target pointing back at its collector,
+ * narrowing forwarding targets without granting inbound trust. It stays off elsewhere
  * because nothing there produces it: libuv reports an IPv4-mapped peer in
  * dotted form, so it never arrives off a socket, and in a `Host` header it is
  * a caller-chosen literal no resolver can point elsewhere, so admitting it

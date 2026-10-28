@@ -17,6 +17,7 @@ failed-write arm; #machine-local, why a stranded preference is safe),
 LLP 0201 (#narrate: the statements that are the fast path's consent
 surface), LLP 0338 (#context: the sibling decision from the same review),
 hyparam/hypaware#1151, hyparam/hypaware#1147
+**Extended-by:** LLP 0542 (#scope: the #absorb wrapper and the #consequences inheritance cover the streams the orchestrator hands its lanes and phases, not output reached through a dispatcher-owned command closure or the raw-context runStatus callback; #finale-warnings: the #warnings guard enumeration is a snapshot, not a closed list)
 
 > Driving `runInitWizard` against a pipe whose read end closes killed the
 > run with an uncaught EPIPE after the folder-ask lane had persisted its

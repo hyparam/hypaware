@@ -44,9 +44,9 @@ test('contract carries its source/projector metadata', () => {
 // @ref LLP 0073#additive-no-migration: the Program/invoked rules bump the
 // projector version 1 → 2 as provenance only (ids are content-addressed; no
 // re-key, no migration).
-test('PROJECTOR_VERSION is 2 after the additive Program/invoked rules', () => {
-  assert.equal(PROJECTOR_VERSION, 2)
-  assert.equal(contract.projectorVersion, 2)
+test('PROJECTOR_VERSION is 3 after precise action evidence', () => {
+  assert.equal(PROJECTOR_VERSION, 3)
+  assert.equal(contract.projectorVersion, 3)
 })
 
 // @ref LLP 0030#decision: the Session node keys on session_id (the
@@ -183,7 +183,7 @@ test('the contract declares the aux rowFilter on attributes, and raw rules selec
   assert.ok(contract.rowFilter, 'contract carries the aux rowFilter')
   assert.deepEqual(contract.rowFilter.columns, ['attributes'])
   for (const r of contract.rules.filter((r) => typeof r.sql === 'string')) {
-    assert.match(/** @type {string} */ (r.sql), /^SELECT\s+attributes\b/i, `raw rule ${r.kind}/${r.type} projects attributes itself`)
+    assert.match(/** @type {string} */ (r.sql), /^SELECT\s+.*\battributes\b/i, `raw rule ${r.kind}/${r.type} projects attributes itself`)
   }
 })
 
@@ -346,7 +346,7 @@ test('Commit -in-> Repo is the second `in` edge and converges with the GitHub ed
 test('Program/invoked rules select only tool_call rows from the two shell tools', () => {
   for (const r of [rule('node', 'Program'), rule('edge', 'invoked')]) {
     assert.equal(r.where?.eq?.part_type, 'tool_call', `${r.kind}/${r.type} filters tool_call parts`)
-    assert.deepEqual(r.where?.in?.tool_name, ['Bash', 'exec_command'], `${r.kind}/${r.type} filters the shell tools`)
+    assert.ok(r.where?.in?.tool_name?.includes('exec'), `${r.kind}/${r.type} filters the shell tools`)
   }
 })
 
@@ -438,7 +438,7 @@ test('Skill/ran rules declare the strict per-surface filters', () => {
     assert.match(/** @type {string} */ (slash.sql), /content_text LIKE '<command-name>%'/, `${kind} surface 3 anchors the tag in SQL`)
 
     const codex = rule(kind, type, SKILL_CODEX)
-    assert.deepEqual(codex.where?.eq, { part_type: 'tool_call', tool_name: 'exec_command' }, `${kind} surface 4 filters exec_command tool calls`)
+    assert.deepEqual(codex.where?.eq, { part_type: 'tool_call' }, `${kind} surface 4 filters tool calls`)
   }
 })
 

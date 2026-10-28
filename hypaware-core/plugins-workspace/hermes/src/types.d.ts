@@ -1,9 +1,11 @@
+import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
+
 /**
  * Row and watermark shapes for the `@hypaware/hermes` adapter's reader
  * (`src/state_db.js`). Column sets mirror hermes's own `state.db` schema as
  * described in LLP 0118 (spec) and mapped in LLP 0122 (design, projection
- * table); the reader returns these unmodified, the projector (T2) is the
- * only place that reshapes them into `AiGatewayProjectedExchange`.
+ * table); the reader resolves hash-backed system prompts, and the projector
+ * (T2) reshapes the rows into `AiGatewayProjectedExchange`.
  */
 
 /**
@@ -15,16 +17,18 @@
  *   fields.
  */
 export interface HermesSessionRow {
-  /** Store-scoped integer id, namespaced by the projector as `hermes-<id>`. */
-  id: number
-  /** Launch surface: `cli`, `telegram`, `discord`, `slack`, `whatsapp`, `signal`, `email`, ... */
+  /** Store-scoped session id, namespaced by the projector as `hermes-<id>`. */
+  id: string | number
+  /** Stored source: `local` in newer interactive sessions, or `cli`, `telegram`, ... */
   source: string
+  /** Creating launch surface when recorded by Hermes; absent on older stores. */
+  created_source?: string | null
   /** Model id, when recorded. */
   model: string | null
   /** Working directory for interactive sessions; NULL for some interactive and all channel sessions until the projector stamps the channel scope path. */
   cwd: string | null
   /** Parent session id for subagent/child sessions, namespaced the same way as `id`. */
-  parent_session_id: number | null
+  parent_session_id: string | number | null
   /** Session start timestamp. Hermes stores it as an epoch-seconds REAL (a float with fractional millis), surfaced by node:sqlite as a number; the projector normalizes it to ISO-8601 (`hermesTimestampToIso`). A string is tolerated (already ISO). */
   started_at: number | string
   /** Session end timestamp, or NULL while the session is open. Same epoch-seconds REAL shape as `started_at`. */
@@ -35,7 +39,7 @@ export interface HermesSessionRow {
   billing_provider: string | null
   /** Upstream `base_url` hermes recorded for this session. */
   billing_base_url: string | null
-  /** System prompt text, when recorded. */
+  /** System prompt text, resolved from system_prompts with inline fallback when available. */
   system_prompt: string | null
   /** Final input token total, populated once the session ends. */
   input_tokens: number | null
@@ -65,7 +69,7 @@ export interface HermesMessageRow {
   /** Store-scoped integer id; the projector derives `message_id`/`part_id` from (session id, this id, part index). */
   id: number
   /** Owning session id (`HermesSessionRow.id`). */
-  session_id: number
+  session_id: string | number
   /** Message role: `system`, `user`, `assistant`, `tool`. */
   role: string
   /** Text content, when the message carries a text part. */
@@ -89,36 +93,56 @@ export interface HermesMessageRow {
 /**
  * The poll source's per-session progress mark (T4), kept in plugin kernel
  * storage. `state_db.js#listChangedSessions` compares the store's current
- * aggregate against a map of these to find sessions to re-project.
+ * digest against a map of these to find sessions to re-project.
  *
- * @ref LLP 0122#watermark [implements]: `{ max_message_id, ended_at }` is
- *   exactly the pair the change-detection aggregate needs: `max_message_id`
- *   catches new messages in an open session, `ended_at` catches the
- *   NULL -> set transition that fires the synthetic session-end part.
+ * @ref LLP 0449#detection [implements]: the fingerprint detects edits and
+ *   rewinds; the original fields remain for compatibility and diagnostics.
  */
 export interface HermesSessionWatermark {
+  /** Digest of the last successfully reconciled visible snapshot; absent on legacy marks. */
+  fingerprint?: string
   /** Highest `messages.id` observed for this session as of the last successful poll/backfill; 0 if none observed. */
   max_message_id: number
   /** `sessions.ended_at` as of the last observation; NULL while still open. */
-  ended_at: string | null
+  ended_at: string | number | null
 }
 
 /** `{ session_id (stringified) -> watermark }`, the full persisted poll state for one state.db. */
 export type HermesWatermarkState = Record<string, HermesSessionWatermark>
 
-/** Why `listChangedSessions` flagged a session: new messages appended, or `ended_at` transitioned from NULL. */
-export type HermesChangedSessionReason = 'new_messages' | 'ended'
+/** Why `listChangedSessions` flagged a session: new messages, an ended session, or changed visible content. */
+export type HermesChangedSessionReason = 'new_messages' | 'ended' | 'changed'
 
-/** One session `listChangedSessions` (LLP 0122#watermark) determined needs re-projection. */
+/** One session `listChangedSessions` (LLP 0449#detection) determined needs re-projection. */
 export interface HermesChangedSession {
+  /** Digest of the last successfully reconciled visible snapshot; absent on legacy marks. */
+  fingerprint?: string
   /** `HermesSessionRow.id`. */
-  session_id: number
-  /** Which condition triggered the change; informational, both re-project the whole session identically. */
+  session_id: string | number
+  /** Which condition triggered the change; informational, all re-project the whole session identically. */
   reason: HermesChangedSessionReason
   /** The store's current `max(messages.id)` for this session (0 if it has none). */
   max_message_id: number
   /** The store's current `sessions.ended_at` for this session. */
-  ended_at: string | null
+  ended_at: string | number | null
+}
+
+/** One session read in a single transaction by `readSessionSnapshot` (LLP 0449#read-commit-guard). */
+export interface HermesSessionSnapshot {
+  session: HermesSessionRow
+  /** Visible messages, oldest first, from the same transaction as `session`. */
+  messages: HermesMessageRow[]
+  /** The mark of exactly this view; the watermark advances to it only after its reconcile commits. */
+  mark: HermesChangedSession
+}
+
+/** One session the poll tick admitted to its batch (LLP 0527#tick-budget). */
+export interface HermesBatchEntry {
+  session_id: string | number
+  /** The mark of the view read; set in the watermark only once the batch committed it. */
+  mark: HermesChangedSession
+  /** The scoped snapshot still to reconcile; absent when the session needs no cache commit. */
+  snapshot?: { rows: Record<string, unknown>[]; scope: { where: Record<string, string>; key: string }; columns: ColumnSpec[] }
 }
 
 /** Options accepted by `state_db.js`'s bounded SQLITE_BUSY retry. */

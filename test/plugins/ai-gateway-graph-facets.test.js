@@ -316,11 +316,11 @@ test('skillFromCodexRead fails closed on an un-gateable captured name and non-st
 // fleet, and fail-closed (miss) is safer than widening into false-positives,
 // so this is an accepted exclusion. @ref LLP 0075#decision: only
 // single-segment `~/.codex/skills/<name>/SKILL.md` is in scope for surface 4.
-test('skillFromCodexRead fails closed on nested/system skill directory layouts (accepted exclusion, not widened)', () => {
+test('skillFromCodexRead recognizes system skills and rejects unsupported plugin layouts', () => {
   assert.equal(
     skillFromCodexRead('cat /Users/alice/.codex/skills/.system/openai-docs/SKILL.md'),
-    null,
-    'a nested segment (.system/openai-docs) between skills/ and SKILL.md is out of scope'
+    'openai-docs',
+    'system skills are an explicit supported root'
   )
   assert.equal(
     skillFromCodexRead('cat /repo/.codex/plugins/foo/skills/bar/SKILL.md'),

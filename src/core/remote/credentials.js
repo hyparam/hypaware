@@ -1,15 +1,16 @@
 // @ts-check
 
-import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
-import path from 'node:path'
 
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { refreshSession, sessionExpiredMessage } from './identity_client.js'
+import { withFileLock } from '../util/file_lock.js'
+import { credentialsPath } from '../runtime/paths.js'
+import { InvalidGrantError, ServiceTokenStoppedError, exchangeServiceToken, refreshSession, sessionExpiredMessage } from './identity_client.js'
+import { hasServiceTokenPrefix, isServiceTokenShape } from './service_token.js'
 
 /**
  * @import { Stats } from 'node:fs'
- * @import { RemoteCredentialRecord, RemoteOidcRecord } from '../../../src/core/remote/types.js'
+ * @import { RemoteCredentialRecord, RemoteOidcRecord, RemoteServiceRecord } from '../../../src/core/remote/types.js'
  */
 
 /**
@@ -30,24 +31,8 @@ import { refreshSession, sessionExpiredMessage } from './identity_client.js'
  * all-powerful operator token (LLP 0033 §credential-stakes).
  */
 
-const CREDENTIALS_BASENAME = 'remote-credentials.json'
-
 /** Refresh an `oidc` access JWT once it is within this window of expiry. */
 const REFRESH_SKEW_MS = 60 * 1000
-
-/**
- * The one lock constant: a lock whose mtime is older than this is treated as
- * abandoned by a dead holder and broken (LLP 0065 D1). It is set comfortably
- * above the longest *legitimate* hold - the 30s-bounded token-endpoint refresh
- * ({@link refreshOidcSession}) plus a millisecond commit - so a live holder mid
- * refresh is never broken, and comfortably below user patience. There is no
- * separate wait timeout and no liveness probe: because a lock's mtime is fixed at
- * acquisition and the clock only advances, every waiter is guaranteed to either
- * acquire (the holder released) or break the lock (its age crossed this) within
- * one stale interval. {@link withCredentialsLock} keeps a `2x` overall deadline
- * only as a runaway-loop backstop.
- */
-const LOCK_STALE_MS = 60 * 1000
 
 /**
  * Single-entry parse cache for the credential file. The stdio proxy resolves a
@@ -84,7 +69,7 @@ const MCP_PATH = '/v1/mcp'
 /**
  * Derive the MCP endpoint a target's remote tool calls POST to, from the one
  * registered target URL (LLP 0084 D1). A target is registered with the server's
- * **base** URL - the built-in `hyperparam` ships exactly that - and the server
+ * **base** URL - the built-in `hypaware` ships exactly that - and the server
  * serves MCP only at `<base>/v1/mcp`, so a base URL POSTed verbatim 404s on
  * every remote verb. Back-compat (LLP 0084 D2): a URL whose path already ends in
  * `/v1/mcp` (the form LLP 0033 originally documented) is honored verbatim;
@@ -162,7 +147,7 @@ export function deriveReportsEndpoint(url) {
  * @returns {string}
  */
 export function remoteCredentialsPath(stateDir) {
-  return path.join(stateDir, CREDENTIALS_BASENAME)
+  return credentialsPath(stateDir)
 }
 
 /**
@@ -190,7 +175,14 @@ export function remoteTokenEnvVar(target) {
  * @ref LLP 0033#credentials [constrained-by]: single 0600 per-target store, secrets never in config
  */
 export async function readCredentials(stateDir) {
-  const parsed = await readRawCredentials(stateDir)
+  return normalizeAll(await readRawCredentials(stateDir))
+}
+
+/**
+ * @param {Record<string, unknown>} parsed
+ * @returns {Record<string, RemoteCredentialRecord>}
+ */
+function normalizeAll(parsed) {
   // Object.fromEntries, not `out[target] = record`: a target named `__proto__`
   // would run the inherited setter, dropping the record from the map and making
   // it the prototype, from where it answers every other name's lookup.
@@ -274,6 +266,19 @@ function normalizeRecord(entry) {
     expiresAt: typeof e.expiresAt === 'string' ? e.expiresAt : '',
     org: typeof e.org === 'string' ? e.org : '',
   })
+  if (e.kind === 'service') {
+    // An org service secret (LLP 0547 D4). The secret is what makes it usable;
+    // the cached JWT is re-exchanged from it. A malformed secret is no
+    // credential, and is never read as a static `token` either.
+    if (!isServiceTokenShape(e.secret)) return null
+    return {
+      kind: 'service',
+      secret: e.secret,
+      accessJwt: typeof e.accessJwt === 'string' ? e.accessJwt : '',
+      expiresAt: typeof e.expiresAt === 'string' ? e.expiresAt : '',
+      org: typeof e.org === 'string' ? e.org : '',
+    }
+  }
   if (e.kind === 'oidc') {
     // Explicit oidc: the refresh token is what makes the record usable - the
     // cached access JWT is derivable from it. So keep a record whose `accessJwt`
@@ -317,6 +322,35 @@ export async function writeToken(stateDir, target, token) {
 }
 
 /**
+ * Store (or replace) an org service secret with its first exchanged JWT,
+ * stamped `kind: 'service'` (LLP 0547 D4). Same atomic 0600 path as
+ * {@link writeToken}.
+ *
+ * @param {string} stateDir
+ * @param {string} target
+ * @param {Omit<RemoteServiceRecord, 'kind'>} record
+ * @param {{ unlessStored?: string }} [opts] write nothing while the store
+ *   holds a record under this name, checked under the same lock as the write
+ * @returns {Promise<boolean>} false when `unlessStored` refused the write
+ */
+export async function writeServiceRecord(stateDir, target, record, { unlessStored } = {}) {
+  return withCredentialsLock(stateDir, async () => {
+    const current = await readRawCredentials(stateDir)
+    if (unlessStored !== undefined && Object.hasOwn(current, unlessStored)) return false
+    await writeCredentials(stateDir, putRecord(current, target, serviceEntry(record)))
+    return true
+  })
+}
+
+/**
+ * @param {Omit<RemoteServiceRecord, 'kind'>} record
+ * @returns {RemoteServiceRecord}
+ */
+function serviceEntry(record) {
+  return { kind: 'service', secret: record.secret, accessJwt: record.accessJwt, expiresAt: record.expiresAt, org: record.org }
+}
+
+/**
  * The raw credential map with one target's record replaced, defined as an
  * **own** key. Plain assignment cannot: `current['__proto__'] = record` runs
  * Object.prototype's inherited setter, so the record becomes the map's
@@ -328,7 +362,7 @@ export async function writeToken(stateDir, target, token) {
  *
  * @param {Record<string, unknown>} current
  * @param {string} target
- * @param {Record<string, unknown>} record
+ * @param {object} record
  * @returns {Record<string, unknown>}
  */
 function putRecord(current, target, record) {
@@ -420,26 +454,34 @@ export async function removeToken(stateDir, target) {
  * exists for the stdio proxy's fail-fast probe, which only asks "is there a
  * credential here at all" and must not refuse a session it could refresh.
  *
- * @param {{ target: string, env: NodeJS.ProcessEnv, stateDir: string }} args
+ * `legacyTarget` is the name an earlier release stored this target's
+ * credential under (legacyCredentialName). Env overrides still beat stored
+ * records, so the order is: the target's env override, the old name's, the
+ * target's record, the old name's record.
+ *
+ * @param {{ target: string, legacyTarget?: string, env: NodeJS.ProcessEnv, stateDir: string }} args
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file' } | { ok: false, error: string }>}
  */
-export async function resolveToken({ target, env, stateDir }) {
+export async function resolveToken({ target, legacyTarget, env, stateDir }) {
   const envName = remoteTokenEnvVar(target)
-  const fromEnv = envOverride(env, target)
+  const fromEnv = envOverride(env, target) ?? (legacyTarget === undefined ? undefined : envOverride(env, legacyTarget))
   if (fromEnv !== undefined) {
     return { ok: true, token: fromEnv, source: 'env' }
   }
-  const creds = await readCredentials(stateDir)
+  const raw = await readRawCredentials(stateDir)
+  const creds = normalizeAll(raw)
   // Own-key read: an inherited Object.prototype member is truthy, so a target
   // named `constructor` walked past this presence check and died in bearerOf's
   // `token.length` instead of reporting that it has no stored token.
-  const entry = Object.hasOwn(creds, target) ? creds[target] : undefined
+  const key = storedKey(raw, target, legacyTarget)
+  const entry = Object.hasOwn(creds, key) ? creds[key] : undefined
   if (entry) {
     const token = bearerOf(entry)
     // A non-empty cached bearer is usable as-is; an oidc record is also present
     // when only its refresh token survives (normalizeRecord guarantees a
-    // non-empty refreshToken), since resolveAccessJwt can mint a fresh JWT.
-    if (token.length > 0 || entry.kind === 'oidc') {
+    // non-empty refreshToken), since resolveAccessJwt can mint a fresh JWT. A
+    // service record likewise re-exchanges from its secret.
+    if (token.length > 0 || entry.kind === 'oidc' || entry.kind === 'service') {
       return { ok: true, token, source: 'file' }
     }
   }
@@ -456,6 +498,7 @@ export async function resolveToken({ target, env, stateDir }) {
  *
  * @param {{
  *   target: string,
+ *   legacyTarget?: string,
  *   env: NodeJS.ProcessEnv,
  *   stateDir: string,
  *   identityBase?: string,
@@ -463,23 +506,31 @@ export async function resolveToken({ target, env, stateDir }) {
  *   fetchImpl?: typeof fetch,
  *   forceRefresh?: boolean,
  * }} args
- * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file', kind?: 'static' | 'oidc' } | { ok: false, error: string }>}
+ * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file', kind?: 'static' | 'oidc' | 'service' } | { ok: false, error: string }>}
  * @ref LLP 0058#d5 [implements]: silent refresh on the attach path; env override still wins
  */
-export async function resolveAccessJwt({ target, env, stateDir, identityBase, now = Date.now(), fetchImpl, forceRefresh = false }) {
+export async function resolveAccessJwt({ target, legacyTarget, env, stateDir, identityBase, now = Date.now(), fetchImpl, forceRefresh = false }) {
   const envName = remoteTokenEnvVar(target)
-  const fromEnv = envOverride(env, target)
+  const ownEnv = envOverride(env, target)
+  const fromEnv = ownEnv ?? (legacyTarget === undefined ? undefined : envOverride(env, legacyTarget))
   if (fromEnv !== undefined) {
+    // @ref LLP 0547#env [implements]: the override stays a static bearer, so a raw service secret is refused rather than sent on every request
+    if (hasServiceTokenPrefix(fromEnv)) {
+      const varName = ownEnv !== undefined || legacyTarget === undefined ? envName : remoteTokenEnvVar(legacyTarget)
+      return { ok: false, error: `${varName} holds a service token; store it with 'hyp remote login ${target} --token-file <path>'` }
+    }
     return { ok: true, token: fromEnv, source: 'env', kind: 'static' }
   }
 
   // A forced refresh is the live-401 retry: drop the parse cache so the read
   // below sees the freshest refresh token a sibling may have just rotated in.
   if (forceRefresh) rawCache = null
-  const creds = await readCredentials(stateDir)
+  const raw = await readRawCredentials(stateDir)
+  const creds = normalizeAll(raw)
   // Own-key read, as in resolveToken: an inherited member is truthy, so the
   // miss was signposted as an unrefreshable session, not a logged-out target.
-  const entry = Object.hasOwn(creds, target) ? creds[target] : undefined
+  const key = storedKey(raw, target, legacyTarget)
+  const entry = Object.hasOwn(creds, key) ? creds[key] : undefined
   if (!entry) {
     return { ok: false, error: noTokenError(target, envName) }
   }
@@ -489,14 +540,105 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
       : { ok: false, error: noTokenError(target, envName) }
   }
 
-  // oidc: a fresh cached JWT needs neither a network call nor the lock.
+  // oidc and service: a fresh cached JWT needs neither a network call nor the lock.
   if (!forceRefresh && isFresh(entry, now)) {
-    return { ok: true, token: entry.accessJwt, source: 'file', kind: 'oidc' }
+    return { ok: true, token: entry.accessJwt, source: 'file', kind: entry.kind }
   }
   if (!identityBase) {
     return { ok: false, error: `cannot refresh '${target}': no identity endpoint resolved` }
   }
-  return refreshOidcSession({ target, stateDir, identityBase, fetchImpl, from: entry, envName })
+  if (entry.kind === 'service') {
+    return exchangeServiceRecord({ target, key, stateDir, identityBase, fetchImpl, from: entry, envName })
+  }
+  return refreshOidcSession({ target, key, stateDir, identityBase, fetchImpl, from: entry, envName })
+}
+
+/**
+ * Re-exchange a service secret for a fresh read JWT, single-flight under the
+ * write lock exactly as {@link refreshOidcSession} refreshes: re-read, adopt a
+ * sibling's newer fresh JWT, else exchange and commit only if the record still
+ * carries the same secret. A refusal is `{ ok: false }` naming the server's
+ * code and the remedy; there is no retry here (LLP 0547 D4).
+ *
+ * @param {{
+ *   target: string,
+ *   key: string,
+ *   stateDir: string,
+ *   identityBase: string,
+ *   fetchImpl?: typeof fetch,
+ *   from: RemoteServiceRecord,
+ *   envName: string,
+ * }} args
+ * @returns {Promise<{ ok: true, token: string, source: 'file', kind: 'service' } | { ok: false, error: string }>}
+ * @ref LLP 0547#remote-login [implements]: one exchange per expiry across concurrent hyp processes, committed by compare-and-swap on the secret
+ */
+async function exchangeServiceRecord({ target, key, stateDir, identityBase, fetchImpl, from, envName }) {
+  return withCredentialsLock(stateDir, async () => {
+    const rec = (await readCredentials(stateDir))[key]
+    const latest = rec && rec.kind === 'service' ? rec : null
+    if (!latest) return { ok: false, error: noTokenError(target, envName) }
+    if (latest.accessJwt !== from.accessJwt && isFresh(latest, Date.now())) {
+      return { ok: true, token: latest.accessJwt, source: 'file', kind: 'service' }
+    }
+    /** @type {Awaited<ReturnType<typeof exchangeServiceToken>>} */
+    let exchanged
+    try {
+      exchanged = await exchangeServiceToken({ identityBase, serviceToken: latest.secret, fetchImpl })
+    } catch (err) {
+      const refused = serviceRefusal(err, target)
+      if (refused) return { ok: false, error: refused }
+      throw err
+    }
+    const current = await readRawCredentials(stateDir)
+    const cur = /** @type {Record<string, any> | undefined} */ (current[key])
+    if (cur && typeof cur === 'object' && cur.kind === 'service' && cur.secret === latest.secret) {
+      await writeCredentials(stateDir, putRecord(current, key, serviceEntry({
+        secret: latest.secret,
+        accessJwt: exchanged.accessJwt,
+        expiresAt: exchanged.expiresAt,
+        org: exchanged.org || latest.org,
+      })))
+    }
+    return { ok: true, token: exchanged.accessJwt, source: 'file', kind: 'service' }
+  })
+}
+
+/**
+ * The guidance for a server refusal of a service secret, or `undefined` when
+ * the error is not one (a transport failure, which the caller rethrows).
+ *
+ * @param {unknown} err
+ * @param {string} target
+ * @returns {string | undefined}
+ */
+export function serviceRefusal(err, target) {
+  if (err instanceof ServiceTokenStoppedError) {
+    return `'${target}' refused the service token (${err.code}) - create a new token in HypAware and run 'hyp remote login ${target} --token-file <path>'`
+  }
+  if (err instanceof InvalidGrantError) {
+    return `'${target}' refused the service token (invalid_grant) - check the token, or create a new one in HypAware and run 'hyp remote login ${target} --token-file <path>'`
+  }
+  return undefined
+}
+
+/**
+ * The credential-file key a target's record is read under: its own name, or
+ * the legacy name an earlier release stored it under when only that one holds
+ * a record. A refresh commits back to the key it read, so the session stays
+ * where it is until the next login writes the target's own name. Presence is
+ * read from the raw store: an entry this release cannot use under the
+ * target's own name (a malformed service record) fails closed rather than
+ * handing the target the old name's session.
+ *
+ * @ref LLP 0552#credentials [implements]: the old name's record answers only when the new name has none
+ * @param {Record<string, unknown>} creds
+ * @param {string} target
+ * @param {string | undefined} legacyTarget
+ * @returns {string}
+ */
+function storedKey(creds, target, legacyTarget) {
+  if (legacyTarget === undefined || Object.hasOwn(creds, target)) return target
+  return Object.hasOwn(creds, legacyTarget) ? legacyTarget : target
 }
 
 /**
@@ -527,6 +669,7 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
  *
  * @param {{
  *   target: string,
+ *   key: string,
  *   stateDir: string,
  *   identityBase: string,
  *   fetchImpl?: typeof fetch,
@@ -536,9 +679,9 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
  * @returns {Promise<{ ok: true, token: string, source: 'file', kind: 'oidc' } | { ok: false, error: string }>}
  * @ref LLP 0058#d5 [implements]: single-flight refresh under the lock - no double-spend, clobber, or lost-race re-login across concurrent hyp processes
  */
-async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, from, envName }) {
+async function refreshOidcSession({ target, key, stateDir, identityBase, fetchImpl, from, envName }) {
   return withCredentialsLock(stateDir, async () => {
-    const latest = await readOidcRecord(stateDir, target)
+    const latest = await readOidcRecord(stateDir, key)
     if (!latest) {
       // `hyp remote remove` ran (or a static login replaced the record) before we
       // got the lock. Honor that instead of resurrecting a refreshed session.
@@ -561,7 +704,7 @@ async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, f
     // on the network, we surface the fresh JWT for this in-flight request but leave
     // the newer on-disk state untouched rather than resurrecting or clobbering it.
     const refreshed = await refreshSession({ identityBase, refreshToken: latest.refreshToken, fetchImpl })
-    await commitSession(stateDir, target, {
+    await commitSession(stateDir, key, {
       refreshToken: refreshed.refreshToken || latest.refreshToken,
       accessJwt: refreshed.accessJwt,
       expiresAt: refreshed.expiresAt,
@@ -586,16 +729,17 @@ async function readOidcRecord(stateDir, target) {
 }
 
 /**
- * Whether a resolved credential can be silently refreshed: an `oidc` record
- * read from the file. A per-target env override and a `static` token cannot be
- * refreshed. The attach paths call this instead of each re-deriving the
- * kind+source rule, so "what is refreshable" has one owner (LLP 0058 D5).
+ * Whether a resolved credential can be silently refreshed: an `oidc` or
+ * `service` record read from the file. A per-target env override and a
+ * `static` token cannot be refreshed. The attach paths call this instead of
+ * each re-deriving the kind+source rule, so "what is refreshable" has one
+ * owner (LLP 0058 D5).
  *
- * @param {{ source?: 'env' | 'file', kind?: 'static' | 'oidc' }} resolved a successful resolveAccessJwt result
+ * @param {{ source?: 'env' | 'file', kind?: 'static' | 'oidc' | 'service' }} resolved a successful resolveAccessJwt result
  * @returns {boolean}
  */
 export function isRefreshable(resolved) {
-  return resolved.kind === 'oidc' && resolved.source === 'file'
+  return (resolved.kind === 'oidc' || resolved.kind === 'service') && resolved.source === 'file'
 }
 
 /**
@@ -618,8 +762,8 @@ export function isRefreshable(resolved) {
  *
  * @template T
  * @param {{
- *   resolved: { ok: true, token: string, source?: 'env' | 'file', kind?: 'static' | 'oidc' },
- *   refresh: () => Promise<{ ok: true, token: string, source?: 'env' | 'file', kind?: 'static' | 'oidc' } | { ok: false, error: string }>,
+ *   resolved: { ok: true, token: string, source?: 'env' | 'file', kind?: 'static' | 'oidc' | 'service' },
+ *   refresh: () => Promise<{ ok: true, token: string, source?: 'env' | 'file', kind?: 'static' | 'oidc' | 'service' } | { ok: false, error: string }>,
  *   op: (token: string) => Promise<{ authFailed: boolean, value: T }>,
  * }} args
  * @returns {Promise<{ ok: true, value: T, authFailed: boolean } | { ok: false, error: string }>}
@@ -646,7 +790,7 @@ export async function attachWithRefresh({ resolved, refresh, op }) {
  *    the store), so point at the env var (exit 1);
  *  - a static file token re-login *does* replace, so advise re-login (exit 1).
  *
- * @param {{ target: string, status: number, resolved: { source?: 'env' | 'file', kind?: 'static' | 'oidc' } }} args
+ * @param {{ target: string, status: number, resolved: { source?: 'env' | 'file', kind?: 'static' | 'oidc' | 'service' } }} args
  * @returns {{ message: string, exitCode: number }}
  * @ref LLP 0058#d5 [implements]: 401-after-retry guidance, one home for both attach paths
  */
@@ -667,10 +811,10 @@ export function describeAuthRejection({ target, status, resolved }) {
 }
 
 /**
- * Whether an `oidc` record's cached JWT is still safely usable: present and
- * more than the skew window from its parseable expiry.
+ * Whether an `oidc` or `service` record's cached JWT is still safely usable:
+ * present and more than the skew window from its parseable expiry.
  *
- * @param {RemoteOidcRecord} record
+ * @param {RemoteOidcRecord | RemoteServiceRecord} record
  * @param {number} now
  * @returns {boolean}
  */
@@ -683,13 +827,13 @@ function isFresh(record, now) {
 
 /**
  * The bearer token a record presents as-is (no refresh): the static token, or
- * the oidc cached access JWT.
+ * the oidc or service cached access JWT.
  *
  * @param {RemoteCredentialRecord} record
  * @returns {string}
  */
 function bearerOf(record) {
-  return record.kind === 'oidc' ? record.accessJwt : record.token
+  return record.kind === 'static' ? record.token : record.accessJwt
 }
 
 /**
@@ -715,101 +859,17 @@ function noTokenError(target, envName) {
   return `no token for '${target}' - run 'hyp remote login ${target}' (or set ${envName})`
 }
 
-/** @param {number} ms @returns {Promise<void>} */
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 /**
- * Break a lock whose holder is past {@link LOCK_STALE_MS}, so a crashed holder can
- * never wedge the store for longer than one stale interval (LLP 0065 D1). The
- * break is a plain `fs.rm`: it does not grant the lock, it only clears a dead
- * file, so the contender that broke it must still win the `O_EXCL` create like
- * everyone else. That is what makes a four-line break safe where the old
- * rename-aside-and-restore steal was not - exclusivity is decided by the create,
- * never by the break.
- *
- * @param {string} lockPath
- * @returns {Promise<void>}
- */
-async function breakLockIfStale(lockPath) {
-  /** @type {Stats} */
-  let st
-  try {
-    st = await fs.stat(lockPath)
-  } catch {
-    return // vanished between the failed open and now: the loop retries the create
-  }
-  // A holder within its budget is alive (or recently so): wait it out. Only an
-  // age past the bounded-hold ceiling marks it dead and breakable.
-  if (Date.now() - st.mtimeMs > LOCK_STALE_MS) await fs.rm(lockPath, { force: true })
-}
-
-/**
- * Serialize the read-modify-write of the shared 0600 store across concurrent
- * `hyp` processes (a verb call beside a proxy, two MCP clients). Without it two
- * writers to *different* targets each read the whole map and rename; the later
- * rename clobbers the earlier writer's just-rotated one-time-use refresh token
- * for the other target, forcing a needless re-login. An `O_EXCL` lock file is the
- * cross-process mutex, held across the bounded token-endpoint refresh
- * ({@link refreshOidcSession}). The cache is dropped on entry so the locked body
- * reads the freshest on-disk map (an identical-size sibling rewrite the parse
- * cache would otherwise miss).
- *
- * Crash recovery is age-only (LLP 0065 D1): the lock is granted solely by the
- * `O_EXCL` create, a holder past {@link LOCK_STALE_MS} is broken with a plain
- * `fs.rm`, and release removes the file only if its per-acquisition nonce is still
- * ours, so a holder whose overran lock was broken and re-acquired never evicts the
- * successor. No liveness probe, no `{host, pid}` tag, no second timeout: the only
- * deadline is a `2x` runaway-loop backstop, because a fixed-mtime lock is
- * guaranteed to be acquired or broken within one stale interval.
- *
  * @template T
  * @param {string} stateDir
  * @param {() => Promise<T>} fn
  * @returns {Promise<T>}
- * @ref LLP 0065#d1 [implements]: age-stale mutex - grant only by O_EXCL, break by rm, release by nonce
  */
 async function withCredentialsLock(stateDir, fn) {
-  await fs.mkdir(stateDir, { recursive: true })
-  const lockPath = `${remoteCredentialsPath(stateDir)}.lock`
-  const nonce = crypto.randomUUID()
-  const deadline = Date.now() + LOCK_STALE_MS * 2
-  for (;;) {
-    try {
-      const handle = await fs.open(lockPath, 'wx')
-      try {
-        await handle.writeFile(nonce)
-      } catch (err) {
-        // A create that could not record its nonce must not leave an empty lock
-        // that wedges contenders until the stale age; drop our own fresh file.
-        await fs.rm(lockPath, { force: true })
-        throw err
-      } finally {
-        await handle.close()
-      }
-      break
-    } catch (err) {
-      if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
-      await breakLockIfStale(lockPath)
-      if (Date.now() > deadline) {
-        throw new Error('timed out acquiring the remote credentials lock')
-      }
-      await delay(25)
-    }
-  }
-  try {
-    // Read the freshest on-disk map inside the lock; see the doc comment.
+  return withFileLock(`${remoteCredentialsPath(stateDir)}.lock`, async () => {
     rawCache = null
-    return await fn()
-  } finally {
-    // Remove only our own lock: if a hold ever overran the stale age and a
-    // contender broke and re-acquired it, the file now belongs to a successor.
-    try {
-      const owner = await fs.readFile(lockPath, 'utf8')
-      if (owner === nonce) await fs.rm(lockPath, { force: true })
-    } catch { /* already gone */ }
-  }
+    return fn()
+  })
 }
 
 /**

@@ -7,6 +7,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
@@ -46,26 +48,19 @@ test('the ignored-session set is readable: GET reports current membership', asyn
   })
 })
 
-test('a gateway restart no longer fails open SILENTLY: the reader reports the resumed recording', async () => {
-  // The exact defect in issue #432. LLP 0066 accepts that a gateway restart
-  // drops the set (non-goal 2: no persistence), but before this reader existed
-  // there was no way for the user, or the privacy skill, to find out. The
-  // opt-out silently stopped applying.
-  const live = /** @type {Set<string>} */ (new Set())
-  await withControlServer(live, async (base) => {
-    await postSession(base, 'sess-restart')
-    const before = await getSession(base, 'sess-restart')
-    assert.equal(before.body.ignored, true)
-  })
-
-  // A daemon restart builds a fresh GatewayState, hence a fresh empty set.
-  const afterRestart = /** @type {Set<string>} */ (new Set())
-  await withControlServer(afterRestart, async (base) => {
-    const read = await getSession(base, 'sess-restart')
-    assert.equal(read.status, 200)
-    assert.equal(read.body.ignored, false, 'recording resumed - and it is now observable')
-    assert.equal(read.body.total, 0)
-  })
+test('GET still reports an exclusion after the recorder restarts', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-status-'))
+  try {
+    await withControlServer(new SessionIgnoreSet(root), async (base) => {
+      await postSession(base, 'sess-restart')
+      assert.equal((await getSession(base, 'sess-restart')).body.ignored, true)
+    })
+    await withControlServer(new SessionIgnoreSet(root), async (base) => {
+      const read = await getSession(base, 'sess-restart')
+      assert.equal(read.status, 200)
+      assert.deepEqual(read.body, { session_id: 'sess-restart', ignored: true, total: 1 })
+    })
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
 test('GET without a session_id is a 400, and an unrelated /_hypaware path is still a 404', async () => {
@@ -147,14 +142,47 @@ test('hyp session status fails closed when no gateway endpoint can be resolved a
   assert.equal(out.ignored, null)
 })
 
-test('hyp session status names the folder governor rather than omitting it (R7)', async () => {
+// The UNKNOWN report has two readers and they need different advice. With an
+// id, "assume this session IS being recorded" names a real session. With no
+// id nothing was checked and no session was named, so the unconditional
+// wording would warn about a session that may not exist.
+test('an UNKNOWN with no resolved id says nothing was checked, not that "this session" is recorded', async () => {
+  const codexHome = temporaryDirectory('hyp-session-nocodex-')
+  fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true })
+  const ctx = fakeCtx({ endpoint: undefined, env: { CODEX_HOME: codexHome }, cwd: '/repo/here' })
+  const code = await runSessionStatus([], ctx.ctx)
+  assert.equal(code, SESSION_EXIT_UNKNOWN)
+  const text = ctx.stdout()
+  assert.match(text, /session \(unresolved\): UNKNOWN/)
+  assert.match(text, /no session was identified, so nothing was checked/)
+  assert.doesNotMatch(text, /assume this session IS being recorded until a check succeeds/)
+})
+
+test('an UNKNOWN that DID resolve an id keeps the unconditional fail-closed warning', async () => {
+  const deadPort = await closedPort()
+  const ctx = fakeCtx({
+    endpoint: `http://127.0.0.1:${deadPort}`,
+    env: { CLAUDE_CODE_SESSION_ID: 'sess-unreachable-human' },
+  })
+  const code = await runSessionStatus([], ctx.ctx)
+  assert.equal(code, SESSION_EXIT_UNKNOWN)
+  const text = ctx.stdout()
+  assert.match(text, /assume this session IS being recorded until a check succeeds/)
+  assert.doesNotMatch(text, /no session was identified/)
+})
+
+// @ref LLP 0463#human-output [tests]: no trust, endpoint, or folder lines
+test('hyp session status prints no trust, endpoint, or folder lines', async () => {
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
     const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-open' } })
     await runSessionStatus([], ctx.ctx)
     const text = ctx.stdout()
     assert.match(text, /not ignored/)
-    assert.match(text, /hyp privacy show/, 'the session verb must point at the other, independent governor')
+    assert.doesNotMatch(text, /^(trust|endpoint|folder):/m)
+    const json = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-open' } })
+    await runSessionStatus(['--json'], json.ctx)
+    assert.equal(JSON.parse(json.stdout()).folder_policy, 'hyp privacy show')
   })
 })
 
@@ -270,23 +298,15 @@ test('hyp session ignore / unignore round-trip through the control route', async
   })
 })
 
-test('the ephemerality caveat names the fork that mints a new session id, not only a restart', async () => {
-  // Issue #455. LLP 0066 §readable lists TWO ways an opt-out stops applying
-  // while the user still believes it holds: the gateway restart that drops the
-  // set, and the client minting a new `session_id` for what the user
-  // experiences as one conversation (`claude --fork-session`, `codex fork`;
-  // a plain resume reuses the id). The caveat named only the restart, which
-  // reads as the exhaustive list and teaches the user the other cannot happen.
-  //
-  // @ref LLP 0066#readable [tests]: R9 - the caveat next to a confirmed
-  //   `ignored` names both ways, in the writer and the reader alike.
+test('the lifetime note describes persistence and warns that forks need a new exclusion', async () => {
+  // @ref LLP 0403#contract [tests]: reads and writes share the lifetime receipt.
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
     const env = { CLAUDE_CODE_SESSION_ID: 'sess-fork' }
 
     const mut = fakeCtx({ endpoint: base, env })
     assert.equal(await runSessionIgnore([], mut.ctx), 0)
-    assert.match(mut.stdout(), /a gateway restart drops it/, 'the restart half must survive')
+    assert.match(mut.stdout(), /survives daemon restarts/, 'the receipt must describe persistence')
     assert.match(mut.stdout(), /fork/)
     assert.match(mut.stdout(), /mints a new session id it no longer covers/)
 
@@ -294,7 +314,7 @@ test('the ephemerality caveat names the fork that mints a new session id, not on
     // wording and the reader's cannot drift apart.
     const read = fakeCtx({ endpoint: base, env })
     assert.equal(await runSessionStatus([], read.ctx), 0)
-    assert.match(read.stdout(), /a gateway restart drops it/)
+    assert.match(read.stdout(), /survives daemon restarts/)
     assert.match(read.stdout(), /mints a new session id it no longer covers/)
 
     // `unignore` has no opt-out to qualify, so it stays silent about both.
@@ -392,6 +412,10 @@ test('a cwd match with NO thread id still makes the answer ambiguous: it is not 
     'the survivor must not be resolved just because its rival lacked a thread id'
   )
   assert.match(out.ok ? '' : out.error, /2 Codex rollouts record cwd/)
+  // The refusal must not tell this caller the shell is not an AI session: the
+  // same sentence just said two rollouts record this cwd, so the shell may
+  // well be inside one of them. The remedy here is to name the id, not to move.
+  assert.doesNotMatch(out.ok ? '' : out.error, /does not look like an AI session/)
   assert.match(
     out.ok ? '' : out.error,
     /rollout-2026-01-01-aaa\.jsonl/,
@@ -484,6 +508,9 @@ test('refuses when no Codex rollout matches the cwd', () => {
   ])
   const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
   assert.equal(out.ok, false)
+  // Nothing on disk records this cwd and no client stated an id, so the
+  // likeliest cause really is a plain terminal: say so before the fallback.
+  assert.match(out.ok ? '' : out.error, /does not look like an AI session/)
 })
 
 test('CLAUDE_CODE_SESSION_ID wins over any Codex rollout scan', () => {
@@ -914,16 +941,9 @@ test('a Codex answer discloses the grain it acts at, and names the thread beside
   })
 })
 
-test('an endpoint nothing proved is the gateway is reported as such', async () => {
-  // `validateControlResponse` proves the responder saw our token, not that it
-  // is the gateway. When the port came from a pinned `listen` rather than a
-  // live daemon's status.json, that gap is named next to the answer.
+test('an endpoint from a pinned `listen` is reported in --json', async () => {
   const set = /** @type {Set<string>} */ (new Set(['sess-pinned']))
   await withControlServer(set, async (base) => {
-    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-pinned' } })
-    assert.equal(await runSessionStatus([], ctx.ctx), 0)
-    assert.match(ctx.stdout(), /pinned `listen`, not a live daemon/)
-
     const json = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-pinned' } })
     await runSessionStatus(['--json'], json.ctx)
     assert.equal(JSON.parse(json.stdout()).endpoint_source, 'config_listen')
@@ -1060,7 +1080,7 @@ function fakeCtx(args) {
   let out = ''
   let err = ''
   const listen = args.endpoint ? args.endpoint.replace(/^https?:\/\//, '') : undefined
-  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-home-'))
+  const hypHome = temporaryDirectory('hyp-session-home-')
   const ctx = {
     stdout: { write: (/** @type {string} */ s) => { out += s; return true } },
     stderr: { write: (/** @type {string} */ s) => { err += s; return true } },
@@ -1142,7 +1162,7 @@ function dropContext(ignored) {
  * @param {{ file: string, id?: string, noThread?: boolean, sessionId?: unknown, legacy?: boolean, cwd: string, ageMs?: number, type?: string }[]} rollouts
  */
 function tempCodexHome(rollouts) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-home-'))
+  const home = temporaryDirectory('hyp-codex-home-')
   const dir = path.join(home, 'sessions', '2026', '01')
   fs.mkdirSync(dir, { recursive: true })
   for (const r of rollouts) {

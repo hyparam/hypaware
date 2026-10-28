@@ -198,3 +198,15 @@ test('a newly picked needs_setup row still runs when another row is carried', as
   )
   assert.deepEqual(calls.map((c) => c.name), ['other install'])
 })
+
+test('Ollama configure runs only for a new attended recording-enabled pick', async () => {
+  for (const mode of ['attended', 'off', 'unattended']) {
+    const { calls, ctx } = fakeCommands({})
+    const result = await runConfigurePhase(/** @type {any} */ ({
+      descriptors: [descriptor({ id: 'ollama', label: 'Ollama', configureCommand: 'ollama setup' })],
+      config: { version: 2, plugins: [{ name: '@hypaware/ollama', recording: mode !== 'off' }] },
+    }), /** @type {any} */ ({ stdout: makeBuf(), ctx, ...(mode === 'unattended' ? { picks: {} } : {}) }))
+    assert.equal(calls.length, mode === 'attended' ? 1 : 0)
+    assert.equal(result.results.length, mode === 'attended' ? 1 : 0)
+  }
+})

@@ -33,7 +33,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *  - Below the Claude Code version floor, attach refuses the switch:
  *    exit 1, the `claude update` hint on stderr, and the settings file
  *    byte-identical to before the attempt (LLP 0258 #version-floor).
- *  - Codex attach writes `model_provider = "hypaware"`, the
+ *  - Explicit Codex gateway-mode attach writes `model_provider = "hypaware"`, the
  *    `[model_providers.hypaware]` table with `base_url`,
  *    `wire_api = "responses"`, and `requires_openai_auth = true`.
  *  - `--json` output is structurally well-formed JSON, one object
@@ -159,7 +159,8 @@ export async function run({ harness, expect }) {
           .map((l) => ({
             manifest: l.manifest,
             rootDir: l.rootDir,
-            config: l.manifest.name === '@hypaware/ai-gateway' ? aiGatewayConfig : {},
+            config: l.manifest.name === '@hypaware/ai-gateway' ? aiGatewayConfig
+              : l.manifest.name === '@hypaware/codex' ? { capture_mode: 'gateway' } : undefined,
           }))
         return activatePlugins({
           plugins: entries,
@@ -180,12 +181,12 @@ export async function run({ harness, expect }) {
     // ----------------------------------------------------------------
     // Claude: attach -> attach -> assert idempotent + preserved keys
     // ----------------------------------------------------------------
-    let code = await runAttach(['--client', 'claude'], { registry, kernel, env })
+    let code = await runAttach(['claude'], { registry, kernel, env })
     expect.that('claude attach #1 exited 0', code, (v) => v === 0)
 
     const afterFirstClaude = await fs.readFile(claudeSettingsPath, 'utf8')
 
-    code = await runAttach(['--client', 'claude'], { registry, kernel, env })
+    code = await runAttach(['claude'], { registry, kernel, env })
     expect.that('claude attach #2 (idempotent) exited 0', code, (v) => v === 0)
 
     const afterSecondClaude = JSON.parse(await fs.readFile(claudeSettingsPath, 'utf8'))
@@ -258,7 +259,7 @@ export async function run({ harness, expect }) {
     )
 
     // Detach -> detach -> attach -> verify round-trip integrity.
-    code = await runDetach(['--client', 'claude'], { registry, kernel, env })
+    code = await runDetach(['claude'], { registry, kernel, env })
     expect.that('claude detach #1 exited 0', code, (v) => v === 0)
     const afterFirstDetach = await fs.readFile(claudeSettingsPath, 'utf8')
     expect.that(
@@ -268,7 +269,7 @@ export async function run({ harness, expect }) {
     )
 
     const detach2Stdout = makeBuf()
-    code = await runDetach(['--client', 'claude'], {
+    code = await runDetach(['claude'], {
       registry,
       kernel,
       env,
@@ -278,7 +279,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'claude detach #2 stdout reported nothing to do',
       detach2Stdout.text(),
-      (v) => typeof v === 'string' && v.includes('No HypAware marker found')
+      (v) => typeof v === 'string' && v.includes('nothing to do')
     )
 
     // ----------------------------------------------------------------
@@ -290,7 +291,7 @@ export async function run({ harness, expect }) {
     // ----------------------------------------------------------------
     process.env.HYP_CLAUDE_CODE_VERSION = '2.1.100'
     const floorStderr = makeBuf()
-    code = await runAttach(['--client', 'claude'], {
+    code = await runAttach(['claude'], {
       registry,
       kernel,
       env: smokeEnv(harness),
@@ -310,7 +311,7 @@ export async function run({ harness, expect }) {
     )
     process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
 
-    code = await runAttach(['--client', 'claude'], { registry, kernel, env })
+    code = await runAttach(['claude'], { registry, kernel, env })
     expect.that('claude attach after detach exited 0', code, (v) => v === 0)
     const reattachedClaude = await fs.readFile(claudeSettingsPath, 'utf8')
     // Byte-for-byte comparison ignoring the `_hypaware.attached_at`
@@ -325,7 +326,7 @@ export async function run({ harness, expect }) {
     // JSON output: detach with --json should emit one parseable JSON
     // object on stdout with status=ok.
     const detachJsonStdout = makeBuf()
-    code = await runDetach(['--client', 'claude', '--json'], {
+    code = await runDetach(['claude', '--json'], {
       registry,
       kernel,
       env,
@@ -356,13 +357,13 @@ export async function run({ harness, expect }) {
 
     // Restore claude marker for one more attach cycle below (so the
     // codex tests run against a kernel where Claude is also attached).
-    code = await runAttach(['--client', 'claude'], { registry, kernel, env })
+    code = await runAttach(['claude'], { registry, kernel, env })
     expect.that('claude re-attach for codex phase exited 0', code, (v) => v === 0)
 
     // ----------------------------------------------------------------
     // Codex: attach -> attach -> assert idempotent + preserved keys
     // ----------------------------------------------------------------
-    code = await runAttach(['--client', 'codex'], { registry, kernel, env })
+    code = await runAttach(['codex'], { registry, kernel, env })
     expect.that('codex attach #1 exited 0', code, (v) => v === 0)
 
     const afterFirstCodex = await fs.readFile(codexConfigPath, 'utf8')
@@ -404,7 +405,7 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && /\[history\][\s\S]*?max_bytes\s*=\s*1024/.test(v)
     )
 
-    code = await runAttach(['--client', 'codex'], { registry, kernel, env })
+    code = await runAttach(['codex'], { registry, kernel, env })
     expect.that('codex attach #2 (idempotent) exited 0', code, (v) => v === 0)
     const afterSecondCodex = await fs.readFile(codexConfigPath, 'utf8')
     expect.that(
@@ -413,13 +414,13 @@ export async function run({ harness, expect }) {
       (v) => v === normalizeCodexForCompare(afterFirstCodex)
     )
 
-    code = await runDetach(['--client', 'codex'], { registry, kernel, env })
+    code = await runDetach(['codex'], { registry, kernel, env })
     expect.that('codex detach #1 exited 0', code, (v) => v === 0)
     const afterCodexDetach = await fs.readFile(codexConfigPath, 'utf8')
     expect.that(
-      'codex config: detach removed [model_providers.hypaware] table',
+      'codex config: detach retains saved-chat provider without gateway endpoint',
       afterCodexDetach,
-      (v) => typeof v === 'string' && !/\[model_providers\.hypaware\]/.test(v)
+      (v) => typeof v === 'string' && /\[model_providers\.hypaware\]/.test(v) && !v.includes('base_url') && v.includes('supports_websockets = true')
     )
     expect.that(
       'codex config: detach removed root model_provider assignment',
@@ -438,7 +439,7 @@ export async function run({ harness, expect }) {
     )
 
     const codexDetach2Stdout = makeBuf()
-    code = await runDetach(['--client', 'codex'], {
+    code = await runDetach(['codex'], {
       registry,
       kernel,
       env,
@@ -448,10 +449,10 @@ export async function run({ harness, expect }) {
     expect.that(
       'codex detach #2 stdout reported nothing to do',
       codexDetach2Stdout.text(),
-      (v) => typeof v === 'string' && v.includes('No HypAware marker found')
+      (v) => typeof v === 'string' && v.includes('nothing to do')
     )
 
-    code = await runAttach(['--client', 'codex'], { registry, kernel, env })
+    code = await runAttach(['codex'], { registry, kernel, env })
     expect.that('codex attach after detach exited 0', code, (v) => v === 0)
     const reattachedCodex = await fs.readFile(codexConfigPath, 'utf8')
     expect.that(
@@ -463,7 +464,7 @@ export async function run({ harness, expect }) {
     // JSON output: codex attach with --json should emit a parseable
     // JSON object with the gateway base_url echoed back.
     const codexAttachJsonStdout = makeBuf()
-    code = await runAttach(['--client', 'codex', '--json'], {
+    code = await runAttach(['codex', '--json'], {
       registry,
       kernel,
       env,

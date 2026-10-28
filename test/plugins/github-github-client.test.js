@@ -1,13 +1,227 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import http from 'node:http'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createGithubClient } from '../../hypaware-core/plugins-workspace/github/src/github_client.js'
+import { captureRepos } from '../../hypaware-core/plugins-workspace/github/src/capture.js'
+import { createGithubClient, tokenFromGh } from '../../hypaware-core/plugins-workspace/github/src/github_client.js'
 import { silentLog } from './github-fake-client.js'
 
-/** @import { HypError } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
+test('API redirects are refused and malformed response bodies never appear in errors', async () => {
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+    async fetchImpl(_url, init) {
+      assert.equal(init?.redirect, 'manual')
+      assert.ok(init?.signal instanceof AbortSignal)
+      return new Response('sensitive-upstream-content')
+    },
+  })
+  await assert.rejects(client.listViewerRepos(), /response was unreadable or timed out/)
+})
+
+test('a refused redirect reports its status and hint without the Location target', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+    async fetchImpl(url, _init) {
+      urls.push(String(url))
+      return new Response('moved-body', { status: 301, headers: { location: 'https://evil.example/steal?tok=x' } })
+    },
+  })
+  await assert.rejects(client.listViewerRepos(), (err) => {
+    assert.match(/** @type {Error} */ (err).message, /GitHub API 301 for GET/)
+    assert.match(/** @type {Error} */ (err).message, /renamed or transferred/)
+    assert.doesNotMatch(/** @type {Error} */ (err).message, /evil\.example|moved-body|secret/)
+    assert.equal(/** @type {HypError} */ (err).status, 301)
+    return true
+  })
+  assert.equal(urls.length, 1, 'the redirect is never followed')
+})
+
+test('a same-origin redirect from a transferred repository is followed', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+    async fetchImpl(url, init) {
+      urls.push(String(url))
+      assert.equal(init?.redirect, 'manual')
+      if (urls.length === 1) {
+        return new Response(null, { status: 301, headers: { location: 'https://api.github.com/repositories/42/issues?state=all&per_page=100' } })
+      }
+      return Response.json([])
+    },
+  })
+  const page = await client.listIssuesPage('old-owner', 'repo', undefined)
+  assert.deepEqual(page.items, [])
+  assert.deepEqual(urls, [
+    'https://api.github.com/repos/old-owner/repo/issues?state=all&per_page=100',
+    'https://api.github.com/repositories/42/issues?state=all&per_page=100',
+  ])
+})
+
+test('a redirect loop on the API origin stops and reports the status', async () => {
+  let calls = 0
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+    async fetchImpl() {
+      calls++
+      return new Response(null, { status: 301, headers: { location: '/repositories/42/issues' } })
+    },
+  })
+  await assert.rejects(client.listIssuesPage('o', 'r', undefined), /GitHub API 301 for GET/)
+  assert.equal(calls, 4)
+})
+
+/**
+ * A loopback API origin and a client pointed at it. Real HTTP, so a redirect
+ * body is a real stream.
+ *
+ * @param {(req: http.IncomingMessage, res: http.ServerResponse) => void} handler
+ */
+async function loopbackApi(handler) {
+  /** @type {string[]} */
+  const requests = []
+  const server = http.createServer((req, res) => {
+    requests.push(String(req.url))
+    handler(req, res)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)))
+  const { port } = /** @type {import('node:net').AddressInfo} */ (server.address())
+  const baseUrl = `http://127.0.0.1:${port}`
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog, baseUrl })
+  async function close() {
+    server.closeAllConnections()
+    await new Promise((resolve) => server.close(() => resolve(undefined)))
+  }
+  return { baseUrl, client, requests, close }
+}
+
+/** @param {http.ServerResponse} res @param {unknown} body @param {Record<string, string>} [headers] */
+function sendJson(res, body, headers = {}) {
+  res.writeHead(200, { 'content-type': 'application/json', ...headers })
+  res.end(JSON.stringify(body))
+}
+
+/**
+ * Answer an `/repos/old/<name>/...` path the way GitHub answers for a
+ * transferred repository: a 301 to the same resource under `/repositories/42/`.
+ *
+ * @param {http.ServerResponse} res @param {string} url
+ */
+function movedTo(res, url) {
+  res.writeHead(301, { location: url.replace(/^\/repos\/old\/[^/]+\//, '/repositories/42/') })
+  res.end()
+}
+
+test('every redirect hop is charged to the tick budget, so redirected capture stays within the allowance', async () => {
+  const api = await loopbackApi((req, res) => {
+    if (String(req.url).startsWith('/repos/')) movedTo(res, String(req.url))
+    else sendJson(res, [])
+  })
+  try {
+    const result = await captureRepos({
+      client: api.client,
+      config: /** @type {any} */ ({ inventory: 'session_repos', ignore: [] }),
+      cursors: { schema_version: 1, repos: {} },
+      append: async () => {},
+      log: silentLog,
+      mode: 'poll',
+      observedRepos: Array.from({ length: 101 }, (_, i) => `old/r${i}`),
+    })
+    assert.ok(api.requests.length <= 400, `sent ${api.requests.length} requests on a 400-request tick`)
+    assert.equal(result.requests, api.requests.length, 'the reported count is the physical count')
+    assert.equal(result.pending, true)
+    assert.deepEqual(result.errors, [])
+  } finally {
+    await api.close()
+  }
+})
+
+test('a budget that runs out before a redirect hop keeps the page for the next tick', async () => {
+  const issue = (/** @type {number} */ number) => ({ number, state: 'open', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z', user: { login: 'a' } })
+  const api = await loopbackApi((req, res) => {
+    const url = new URL(String(req.url), 'http://x')
+    if (url.pathname.startsWith('/repos/')) return movedTo(res, String(req.url))
+    if (url.pathname !== '/repositories/42/issues') return sendJson(res, [])
+    if (url.searchParams.get('page') === '2') return sendJson(res, [issue(2)])
+    sendJson(res, [issue(1)], { link: `<${api.baseUrl}/repos/old/repo/issues?page=2>; rel="next"` })
+  })
+  try {
+    /** @type {Record<string, unknown>[]} */
+    const rows = []
+    /** @type {CursorState} */
+    const cursors = { schema_version: 1, repos: {} }
+    const tick = (/** @type {number} */ requestLimit) => captureRepos({
+      client: api.client,
+      config: /** @type {any} */ ({ inventory: 'session_repos', ignore: [] }),
+      cursors,
+      append: async (batch) => { rows.push(...batch) },
+      log: silentLog,
+      mode: 'poll',
+      observedRepos: ['old/repo'],
+      requestLimit,
+    })
+    // Page one costs two requests; page two's 301 spends the third and its hop
+    // has nothing left to spend.
+    const first = await tick(3)
+    assert.equal(api.requests.length, 3)
+    assert.equal(first.requests, 3)
+    assert.equal(first.pending, true)
+    assert.deepEqual(first.errors, [])
+    assert.deepEqual(rows.map((row) => row.number), [1])
+    assert.equal(cursors.repos['old/repo'].work?.page, `${api.baseUrl}/repos/old/repo/issues?page=2`)
+
+    const second = await tick(400)
+    assert.deepEqual(second.errors, [])
+    assert.equal(second.pending, false)
+    assert.deepEqual(rows.map((row) => row.number), [1, 2], 'page two is captured once, after the resume')
+  } finally {
+    await api.close()
+  }
+})
+
+test('an intermediate redirect body is released before the next hop, even while it is still streaming', async () => {
+  let open = 0
+  const api = await loopbackApi((req, res) => {
+    if (!String(req.url).startsWith('/repos/')) return sendJson(res, [])
+    open++
+    res.on('close', () => open--)
+    // Headers and part of a body, never finished: only the client can end it.
+    res.writeHead(301, { location: '/repositories/42/issues' })
+    res.write('redirect body still streaming')
+  })
+  try {
+    for (let i = 0; i < 20; i++) await api.client.listIssuesPage('old', 'repo', undefined)
+    for (let waited = 0; open > 0 && waited < 2000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(open, 0, `${open} redirect response streams still open after 20 sequential calls`)
+  } finally {
+    await api.close()
+  }
+})
+
+test('network failures carry a runtime code or name, never upstream message text', async () => {
+  /** @param {unknown} thrown @returns {Promise<Error>} */
+  async function failWith(thrown) {
+    const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+      async fetchImpl() { throw thrown },
+    })
+    try {
+      await client.listViewerRepos()
+    } catch (err) {
+      return /** @type {Error} */ (err)
+    }
+    throw new Error('expected rejection')
+  }
+  const dns = await failWith(new TypeError('fetch failed', { cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.github.com'), { code: 'ENOTFOUND' }) }))
+  assert.match(dns.message, /failed or timed out \(ENOTFOUND\)/)
+  assert.doesNotMatch(dns.message, /getaddrinfo/)
+  const timeout = await failWith(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }))
+  assert.match(timeout.message, /failed or timed out \(TimeoutError\)/)
+  const opaque = await failWith(new TypeError('fetch failed', { cause: new Error('http://internal.example/leaky-detail') }))
+  assert.equal(opaque.message, 'GitHub API request failed or timed out')
+})
+
+/** @import { CursorState, HypError } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
 
 test('GitHub client prefers the configured env token', async () => {
   let ghCalls = 0
@@ -87,6 +301,13 @@ test('GitHub CLI lookup extends a launchd-style path only for the child', async 
   assert.ok(childPath.split(path.delimiter).includes('/opt/homebrew/bin'))
   assert.ok(childPath.split(path.delimiter).includes('/Users/tester/.local/share/mise/shims'))
   assert.equal(env.PATH, '/usr/bin:/bin')
+})
+
+test('an empty gh token is unavailable for every caller, not silently sent as a bearer', async () => {
+  await assert.rejects(
+    tokenFromGh({}, (_file, _args, _options, callback) => callback(null, '\n')),
+    /GitHub authentication unavailable/,
+  )
 })
 
 test('GitHub auth failure is safe and classified', async () => {

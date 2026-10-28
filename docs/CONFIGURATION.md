@@ -1,14 +1,12 @@
 # Configure storage, exports, and plugins
 
-[Documentation](README.md) / Configuration
-
 Prefer `hyp setup` for routine changes. It composes the required plugins,
 preserves centrally managed settings, and reports the actions it will take.
 
 ## Locate and validate configuration
 
 The local file is `<HYP_HOME>/hypaware-config.json`; `HYP_HOME` defaults to
-`~/.hyp`. Run `hyp status` to see the paths and effective setup.
+`~/.hyp`. Run `hyp status --verbose` to see the paths and effective setup.
 
 ```sh
 hyp config validate
@@ -16,31 +14,30 @@ hyp plugin list
 ```
 
 Configuration uses `version: 2`, an explicit `plugins` list, optional `sinks`,
-and `query.cache` settings. Each plugin owns its own `config` block. Use
+and `query.cache` settings. The top-level `auto_update` setting defaults to
+`true` for supervised global installations; see [automatic updates](CLI.md#update-hypaware).
+To disable automatic updates, set `"auto_update": false` and restart the daemon.
+Organization policy may control this setting. Each plugin owns its own `config` block. Use
 `hyp plugin info PLUGIN` to inspect an installed plugin's manifest.
 
-On an enrolled machine, a separate central layer under `config-control/` is
+On an enrolled host, a separate central layer under `config-control/` is
 authoritative. Local settings are additive and cannot override central locks.
-`hyp status` identifies each layer and any rejected local entries. Joining
-does not replace your local configuration; leaving removes central management.
+`hyp status --verbose` identifies each layer and any rejected local entries.
+Joining does not replace your local configuration; leaving removes central
+management.
 
 ## Make a repeatable setup
 
-Preview an unattended local setup:
-
-```sh
-hyp setup --yes --source codex --client codex --export keep-local --retention-days 120 --dry-run
-```
-
-Remove `--dry-run` to apply it. On an existing installation, interactive
-`hyp setup` is the usual reconfiguration path. An unattended replacement
+For a fresh installation, use the [unattended setup example](CLI.md#install-hypaware).
+On an existing installation, interactive `hyp setup` is the usual reconfiguration
+path. An unattended replacement
 requires `--force` and backs up the previous local file; supply the complete
 set of choices, since it is a replacement rather than an incremental patch.
 
 To apply a complete configuration file you have prepared:
 
 ```sh
-hyp config validate --path ./hypaware-config.json
+hyp config validate ./hypaware-config.json
 hyp setup --from-file ./hypaware-config.json --force
 hyp status
 ```
@@ -49,11 +46,44 @@ For direct edits to the active file, validate afterward and restart the daemon
 to load the change. Set a custom `HYP_HOME` consistently for the CLI and daemon;
 changing it in one shell does not move existing recordings or a running service.
 
+## Redact exported content
+
+Exports automatically mask recognized credentials and sensitive file-tool
+contents before cloud forwarding or file export. The local cache retains the
+original recording. See [privacy and redaction](PRIVACY.md#automatic-export-redaction)
+for coverage and limits.
+
+Add your own patterns at the top level of `hypaware-config.json`:
+
+```json
+{
+  "redaction": {
+    "custom_patterns": [
+      { "pattern": "internal-token-[A-Za-z0-9]+" },
+      { "pattern": "customer-[0-9]{8}", "flags": "i" }
+    ]
+  }
+}
+```
+
+Merge this fragment into your existing configuration. Patterns use JavaScript
+regex syntax without `/` delimiters. Matching replaces every occurrence with
+`[REDACTED]`; optional flags are `g`, `i`, `m`, `s`, and `u`. JSON requires
+backslashes to be doubled, for example `"\\d{8}"`. Each layer accepts up to
+32 patterns, each up to 2048 characters. Invalid expressions fail validation.
+Local patterns add to organization patterns and built-in masking.
+
+Run `hyp config validate`, then `hyp daemon restart` to apply changes.
+Pattern matching has a one-second worker deadline per row. A timeout or row
+budget failure stops that export with an error; it never sends raw content as
+a fallback. Earlier exports are not changed by adding a pattern.
+
 ## Set local retention
 
-The guided setup uses 120 days for local collection and 90 days for team
-collection. Existing retention survives interactive reconfiguration.
-`--retention-days` overrides the setup default. In a configuration file, the
+First-time guided setup uses 120 days for local collection and 90 days for team
+collection. Unattended setup defaults to 90 days, including local-only installs.
+Existing retention survives interactive reconfiguration. `--retention-days`
+overrides the setup default. In a configuration file, the
 following is a fragment to merge into the existing `query` block:
 
 ```json
@@ -69,7 +99,7 @@ following is a fragment to merge into the existing `query` block:
 
 This retains local logs for 30 days and other datasets for 120 days. A value
 of `0` means no age limit. Shortening retention allows maintenance to remove
-older cache data; it does not delete exported files or server copies.
+older cache data; it does not delete exported files or copies in HypAware Cloud.
 
 Retention also supplies the fallback history-recovery window when an adapter
 has no explicit `backfill.window_days`. See [clients and history](CLIENTS.md).
@@ -85,21 +115,13 @@ from that cache, not a prerequisite for querying it.
 | `--export local-parquet` | Also write Parquet files under `<HYP_HOME>/exports` every five minutes. |
 | `--export configure-later` | Defer local export configuration. |
 
-New guided setups default to local Parquet exports; interactive reconfiguration
-preserves the existing export choice. An enrolled machine may also have a
-centrally managed forwarding sink regardless of its local export choice.
+These `--export` flags select unattended setup; they are not extra choices
+inside the guided walkthrough. New guided setups default to local Parquet
+exports; interactive reconfiguration preserves the existing export choice. An enrolled host may also have a
+centrally managed sync sink regardless of its local export choice.
 
-To inspect destinations and send eligible data now:
-
-```sh
-hyp sync --dry-run
-hyp sync
-```
-
-`hyp sync` prints its plan and asks for confirmation. It does not bypass
-local-only or ignored-folder exclusions. A confirmed all-destination sync can
-release an attended enrollment's first-sync hold early. See [privacy](PRIVACY.md)
-and [headless setup](HEADLESS.md) for enrollment-specific behavior.
+For previewing destinations and sending recordings now, see
+[Cloud sync](TEAM_SETUP.md#send-recordings-now).
 
 The generated Parquet sink instance is named `local`.
 
@@ -118,6 +140,17 @@ For custom destinations, keep writer and destination plugin settings in their
 documented config blocks and run `hyp config validate` before restarting.
 The [plugin authoring guide](PLUGIN_AUTHORING.md) explains the sink contracts.
 
+## Maintain the query cache
+
+The cache is Iceberg storage backed by Parquet files. Local queries use this
+cache; optional Parquet exports are an additional copy for external use.
+
+Use `hyp cache refresh DATASET` when a query reports stale cached data, and
+`hyp cache maintain DATASET --dry-run` to inspect maintenance before applying
+it. Cache refresh does not import client transcripts; use
+[history imports](CLIENTS.md#bring-in-existing-history) for that. Cache
+maintenance does not delete exported copies.
+
 ## Know where data lives
 
 All paths below are relative to `HYP_HOME`:
@@ -128,12 +161,36 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/config-control/` | Central enrollment and managed configuration |
 | `hypaware/cache/` | Local query cache |
 | `hypaware/plugins/` | Per-plugin state |
-| `hypaware/sinks/` | Export state and retry outboxes |
+| `hypaware/sinks/` | Export progress and retained failure diagnostics |
 | `exports/` | Default local Parquet destination |
 | `spool/claude-bodies/` | Transient Claude raw bodies |
-| `hypaware/logs/` | Service stdout and stderr logs |
+| `hypaware/logs/daemon.log` | Main structured daemon log |
+| `hypaware/logs/daemon.out.log` | Service stdout log |
+| `hypaware/logs/daemon.err.log` | Service stderr log |
+| `hypaware/session-ignores/` | Persistent session exclusions for supported recorders |
+| `hypaware/product-telemetry/` | Product telemetry policy and pending batches |
+| `hypaware/tls/` | Local proxy certificate authority and certificates |
 | `hypaware/processing/logs/daemon.log` | Processing daemon log |
 | `hypaware/dev-telemetry/` | Local development diagnostics |
+
+<!-- @ref LLP 0471#diagnostic-history: prune owned diagnostic evidence without acknowledging cache payload -->
+Each destination's `hypaware/sinks/<instance>/outbox/` holds failure diagnostics,
+not rows waiting to be uploaded. HypAware writes the new record atomically,
+then retains up to 100 recognized records per destination after successful cleanup.
+It protects the new record and the newest failure dated no later than cleanup,
+then fills the remaining places with the newest history.
+An unsuccessful write prunes nothing.
+Cleanup preserves unfamiliar files, symlinks and other destinations' records.
+It does not delete cache rows, advance export progress or clear an export warning.
+
+If filesystem access prevents cleanup, history can temporarily exceed 100.
+The daemon logs a separate cleanup failure and retries on its existing cache
+maintenance schedule, rather than rescanning old history on each export failure.
+With automatic cache maintenance disabled, no cleanup timer runs: a new sink
+handle after restart can retry cleanup when it next publishes a failure.
+Check directory permissions and the [diagnostic logs](TROUBLESHOOTING.md#find-diagnostic-logs).
+`hyp sink maintain` maintains export tables; it is not a command for pruning
+these diagnostics.
 
 ## Manage optional plugins
 

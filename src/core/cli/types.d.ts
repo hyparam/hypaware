@@ -71,11 +71,19 @@ export type AsyncConfirmSelectPrompt = (question: ConfirmSelectQuestion) => Prom
 export type PickerSource =
   | 'claude'
   | 'codex'
+  | 'codex-cloud'
+  | 'chatgpt-work'
   | 'opencode'
+  | 'cursor'
+  | 'copilot'
+  | 'pi'
+  | 'droid'
   | 'antigravity'
   | 'antigravity-desktop'
   | 'claude-desktop'
   | 'openclaw'
+  | 'ollama'
+  | 'langgraph'
   | 'hermes'
   | 'raw-anthropic'
   | 'raw-openai'
@@ -119,8 +127,8 @@ export interface WalkthroughQuestion {
   /**
    * Optional position line shown above the title (LLP 0135 #progress),
    * e.g. `Step 2 of 3 · Choose what to collect`. Set only by the wizard,
-   * which knows the committed pathway; `runPickerWalkthrough` and every
-   * non-interactive caller leave it unset and print nothing.
+   * which knows the committed pathway; non-interactive callers leave it
+   * unset and print nothing.
    */
   progress?: string
   options: WalkthroughOption[]
@@ -129,7 +137,7 @@ export interface WalkthroughQuestion {
    * Back-navigation opt-in (LLP 0191): the TUI multiselect's escape and
    * the numbered fallback's `b` answer throw `PromptBackRequestedError`
    * instead of cancelling. Set only by wizard lanes that have a screen
-   * to return to; `runPickerWalkthrough` never sets it.
+   * to return to.
    */
   allowBack?: boolean
   /**
@@ -165,6 +173,9 @@ export interface PickerPicks {
   sources: PickerSource[]
   exportChoice: PickerExport
   retentionDays: number
+  retentionExplicit?: boolean
+  /** Explicit opt-in to GitHub collection; browser login is a separate command. */
+  github?: boolean
 }
 
 export interface PickerFinaleActions {
@@ -187,84 +198,6 @@ export interface PickerFinaleActions {
   skipDaemonInstall?: boolean
 }
 
-export interface RunPickerWalkthroughOptions {
-  capabilities: CapabilityRegistry
-  /**
-   * Platform the picker gates rows against, defaulting to `process.platform`.
-   * The menu is otherwise a function of the host, so a test over it would
-   * answer differently on a Mac and on CI.
-   */
-  platform?: string
-  /**
-   * Kernel-owned client registry. The superset of attachable clients: the
-   * gateway capability's `getClient`/`listClients` filter to registrations
-   * with a gateway upstream, so an endpoint-free adapter (LLP 0306) is only
-   * reachable here.
-   */
-  clients?: ClientRegistry
-  sources?: { stopAll?: () => Promise<void> }
-  skills?: {
-    list(): { name: string; clients: ('claude' | 'codex')[]; sourceDir: string }[]
-  }
-  agents?: {
-    list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[]
-  }
-  /**
-   * Plugins this boot failed to activate, threaded to the finale's client-asset
-   * materialization so a partial boot copies but never prunes
-   * (LLP 0219 #incomplete-activation-prunes-nothing).
-   */
-  failedPlugins?: string[]
-  stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stdin?: NodeJS.ReadableStream
-  env: NodeJS.ProcessEnv
-  /** Pre-baked picks; bypass prompts when set. */
-  picks?: PickerPicks
-  /**
-   * Provenance of `picks.exportChoice`, for telemetry only. Consulted
-   * solely on the pre-baked path (with `picks`); the interactive wizard
-   * always defaults export, so its origin is `default`. Omit to default.
-   */
-  exportOrigin?: PickerExportOrigin
-  prompt?: AsyncPickPrompt
-  /**
-   * Override the system source detector. Defaults to a catalog-backed
-   * wrapper around the real filesystem-based `detectPickerSources`.
-   * Only consulted in interactive mode (no pre-baked `picks`); tests
-   * inject a stub so the picker's preselected boxes do not depend on
-   * the dev's home dir.
-   */
-  detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
-  /**
-   * Interactive consent prompt for the onboarding backfill step. Only
-   * consulted in interactive mode (no pre-baked `picks`); non-interactive
-   * runs (`--yes` / `--dry-run`) backfill automatically. Defaults to a
-   * yes/no confirm that defaults to yes.
-   */
-  backfillConsentPrompt?: AsyncBackfillConsentPrompt
-  /**
-   * Backfill runner the finale uses to import a picked client's local
-   * history right after config is written. Injected by `hyp init` with the
-   * kernel registries; omit to skip the backfill step entirely.
-   */
-  backfill?: PickerBackfillRunner
-  /** When set, run daemon install / attach / skills / restart after writing config. */
-  finale?: PickerFinaleActions
-  /**
-   * Overwrite an existing local config (LLP 0031). Non-interactive only
-   * (`--force` / `--from-file`); the interactive wizard prompts instead.
-   */
-  force?: boolean
-  /**
-   * Interactive overwrite confirm, consulted only in interactive mode
-   * (no pre-baked `picks`) when a local config already exists. Tests
-   * inject a stub; the default is a readline yes/no prompt defaulting to
-   * no.
-   */
-  confirmOverwrite?: (targetPath: string) => Promise<boolean>
-}
-
 /**
  * One provider's onboarding backfill outcome, surfaced in the finale
  * summary (one entry per picked client that has a registered backfill
@@ -279,6 +212,8 @@ export interface BackfillFinaleResult {
   scanned: number
   rowsWritten: number
   skipped: number
+  /** Why the import could not run, when the provider said so. */
+  note?: string
 }
 
 /**
@@ -335,17 +270,35 @@ export interface FinaleSummary {
    * already reported it attached (team pathway). `noAdapter` marks a client
    * contribution with no registered runtime adapter (Claude Desktop's
    * deliberate no-attach-on-join posture): not applicable to the attach
-   * lane, so `ok: true` and the run summary prints nothing for it.
+   * lane, so `ok: true` and the run summary prints nothing for it. That
+   * reading holds only when the owning plugin activated: `activationFailed`
+   * marks a client whose owner's `activate()` threw, recorded `ok: false`
+   * with the owner's `plugin` name and its safe `errorKind` label, and never
+   * attached even when the owner registered an adapter before throwing
+   * (issue #596).
    */
-  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean }[]
+  attach: {
+    client: string
+    dryRun: boolean
+    ok: boolean
+    skipped?: boolean
+    noAdapter?: boolean
+    notRecording?: boolean
+    activationFailed?: boolean
+    plugin?: string
+    errorKind?: string
+  }[]
   skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   /**
    * `skipped` is "the restart did not run": the caller asked for no daemon or
    * no restart, or the install above failed, which leaves nothing to restart.
    * `daemonInstall.failed` is where a run says it was the latter.
+   * `withheld` is set when the install failed and the daemon probe could not
+   * reach the service manager, so whether a daemon was left running on the
+   * old config is unknown (LLP 0545).
    */
-  daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
+  daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean; withheld?: 'service_manager_unreachable' }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]
   /**
@@ -356,17 +309,6 @@ export interface FinaleSummary {
    * injectable seam) need not synthesize it.
    */
   attachedNotConfigured?: string[]
-}
-
-export interface PickerWalkthroughResult {
-  exitCode: number
-  configPath: string
-  config: HypAwareV2Config
-  sourcesPicked: PickerSource[]
-  exportPicked: PickerExport
-  clientsPicked: string[]
-  retentionDays: number
-  finale?: FinaleSummary
 }
 
 export interface CommandResult {
@@ -395,10 +337,13 @@ export interface InitFlags {
   yes: boolean
   noDaemon: boolean
   dryRun: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'antigravity' | 'antigravity-desktop')[]
+  github?: boolean
+  noBackfill?: boolean
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'droid' | 'ollama' | 'langgraph' | 'antigravity' | 'antigravity-desktop')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number
+  retentionExplicit?: boolean
   fromFile?: string
   binPath?: string
   /** Overwrite an existing local config (backs it up first). */
@@ -415,6 +360,8 @@ export interface DispatchOptions {
   cwd?: string
   /** Override the local plugin workspace */
   workspaceDir?: string
+  /** Override OS temp root (tests); reaches `createPluginPaths` through `bootKernel`. */
+  tmpRoot?: string
   registry?: ReturnType<typeof createCommandRegistry>
   kernel?: KernelRuntime
 }
@@ -514,4 +461,78 @@ export interface CoreCommandArgSpec {
   schema: VerbInputSchema
   /** argv token aliases, e.g. `{ '-y': '--yes' }`. */
   aliases?: Record<string, string>
+}
+
+/**
+ * One saved report as `hyp report list` inventories the store
+ * (`$HYP_HOME/reports`): the folder's name and path and the brief's mtime,
+ * never its contents.
+ */
+export interface LocalReportRow {
+  name: string
+  path: string
+  /** `report.md`'s mtime as ISO-8601, the listing's sort key and display. */
+  modifiedAt: string
+  /** The same mtime as a number, for ordering without re-parsing. */
+  mtimeMs: number
+}
+
+/**
+ * One turn a recommendation page cites, as the server records it (server
+ * LLP 0419#evidence): enough to find the message, never its content.
+ */
+export interface FixEvidence {
+  sessionId: string
+  /** A subagent's agent_id or a Codex thread's conversation_id; null for the main conversation. */
+  chainId: string | null
+  messageId: string
+  /** One tool call inside the message, when that is the cited thing; null otherwise. */
+  toolCallId: string | null
+  /** The message's UTC day. */
+  day: string
+  /** One line saying what the turn shows. */
+  note: string
+}
+
+/** One query the report ran to reach a recommendation (server LLP 0419#basis). */
+export interface FixBasisQuery {
+  /** `coordinator`, `coordinator-revision`, `subagent-<n>`, or empty when the record did not say. */
+  agent: string
+  query: string
+}
+
+/**
+ * One status event on a recommendation, as the server records it (server
+ * recommendation-status RFC). `state` is the server's enum (`open`,
+ * `in_progress`, `applied`, `dismissed`) and is carried as the server spelled
+ * it, so a newer server's state still prints. A recommendation never marked
+ * has no status at all; clients read that as `open`.
+ */
+export interface RecommendationStatus {
+  state: string
+  reason?: string
+  links: string[]
+  /** The subject that marked it: a user key, `email:<email>`, or `operator`. */
+  by?: string
+  /** ISO-8601 timestamp of the event. */
+  at?: string
+  /** `cli`, `dashboard`, or `api`. */
+  via?: string
+}
+
+/**
+ * A recommendation as `hyp report fix` carries it from the record to the
+ * saved brief: the page stem and title, the citations the server attached at
+ * publish (empty when the record carries none), and the status the server
+ * joins onto the record (`status` absent when never marked, `history` oldest
+ * first and empty off the listing route or an older server).
+ */
+export interface FixRecommendation {
+  id: string
+  page: string
+  title?: string
+  evidence: FixEvidence[]
+  basis: FixBasisQuery[]
+  status?: RecommendationStatus
+  history: RecommendationStatus[]
 }

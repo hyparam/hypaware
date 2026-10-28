@@ -764,8 +764,13 @@ function declaredOptionalMembers(types = readFileSync(new URL('../../hypaware-pl
   // The `?` is followed by `:`, `(`, or `<`: the last is an optional method
   // that declares type parameters (`foo?<T>(x: T): T`), which `tsc` accepts
   // and which the two-character form would drop with nothing said.
+  //
+  // What follows the `?` may open on the next line (`hidden?` / `: boolean`),
+  // because `tsc` accepts that too and a same-line gap drops the member with
+  // nothing said. Only that gap crosses lines: the name and its `?` still share
+  // one, so the split shape above, whose `?` opens a line, is refused as before.
   const declared = []
-  for (const match of body.matchAll(/(?:^|[;,{])[ \t]*(?:readonly[ \t]+)?([^\n;,?:{]*?)[ \t]*\?[ \t]*[:(<]/gm)) {
+  for (const match of body.matchAll(/(?:^|[;,{])[ \t]*(?:readonly[ \t]+)?([^\n;,?:{]*?)[ \t]*\?\s*[:(<]/gm)) {
     const spelled = types.slice(bodyStart + match.index, bodyStart + match.index + match[0].length).trim()
     assert.match(match[1], /^[A-Za-z_$][\w$]*$/, `an optional member of CommandRegistration is not a bare identifier (${JSON.stringify(spelled)}): a quoted or computed name is blanked by the mask before the member reader runs, so the parse cannot name it`)
     declared.push(match[1])
@@ -878,6 +883,17 @@ test('the interface parse fails closed on an optional whose name is not on its l
   const conditional = ['export interface CommandRegistration {', '  x: A extends B', '    ? (c: D) => E', '    : F', '  hidden?: boolean', '}'].join('\n')
   assert.throws(() => declaredOptionalMembers(split), /not a bare identifier/)
   assert.throws(() => declaredOptionalMembers(conditional), /not a bare identifier/)
+})
+
+// The complement of the shape above: the name and its `?` share a line and
+// only the type, parameter list, or type-parameter list opens on the next.
+// `tsc --strict` accepts all three, and nothing on either line is ambiguous,
+// so each is read as the member it is rather than dropped with nothing said.
+test('the interface parse reads an optional whose type opens on the next line', () => {
+  const next = (name, rest) => ['export interface CommandRegistration {', `  ${name}?`, `    ${rest}`, '}'].join('\n')
+  assert.deepEqual(declaredOptionalMembers(next('hidden', ': boolean')), ['hidden'])
+  assert.deepEqual(declaredOptionalMembers(next('foo', '<T>(x: T): void')), ['foo'])
+  assert.deepEqual(declaredOptionalMembers(next('bar', '(x: string): void')), ['bar'])
 })
 
 // A quoted member name is legal TypeScript and is the one member spelling the

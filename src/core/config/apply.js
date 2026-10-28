@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
+import { configControlActivePath, configControlDir, configControlSeedPath, configControlStatePath, configSlotEtagPath, configSlotPath } from '../runtime/paths.js'
 import { parseConfigShape } from './schema.js'
 
 /**
@@ -18,6 +19,7 @@ import { parseConfigShape } from './schema.js'
  *   ConfigSlot,
  *   CreateConfigControlOptions,
  *   ProbationMarker,
+ *   RememberedBadEtag,
  * } from '../../../src/core/config/types.js'
  */
 
@@ -46,25 +48,14 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 300
  */
 export const PROBATION_FLOOR_SECONDS = 120
 
-const CONTROL_DIRNAME = 'config-control'
-const STATE_BASENAME = 'state.json'
-
 /**
- * The active-slot pointer. A relative symlink under `config-control/`
- * pointing at the live `config.{a,b}.json` slot. Relocated here (off the
- * user-facing `hypaware-config.json` path) so the local layer can be a
- * plain user file: the atomic symlink-flip crash-safety is preserved.
- * @ref LLP 0031#physical-layout [constrained-by]: active-slot pointer relocated into config-control/
+ * How long a revision this host could not confirm is held back before
+ * the same etag is applied again. Long enough that a host whose sink
+ * keeps failing restarts onto it a few times a day at most; a client
+ * version change retries at once instead of waiting.
+ * @ref LLP 0517#retry [implements]: bounded backoff for an unconfirmed revision, settled at 6 hours
  */
-const ACTIVE_BASENAME = 'active'
-
-/**
- * The join seed: the initial central layer, written by `hyp join` (mode
- * 0600: it holds the policy token). Read once on the first apply to
- * preserve it as the rollback target, then retired.
- * @ref LLP 0031#physical-layout [implements]: dedicated central-seed file, not hypaware-config.json
- */
-const SEED_BASENAME = 'seed.json'
+export const UNCONFIRMED_RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000
 
 /**
  * Path to the join seed (the initial central layer) under a host's
@@ -75,7 +66,7 @@ const SEED_BASENAME = 'seed.json'
  * @returns {string}
  */
 export function centralSeedPath(stateRoot) {
-  return path.join(stateRoot, CONTROL_DIRNAME, SEED_BASENAME)
+  return configControlSeedPath(stateRoot)
 }
 
 /**
@@ -89,10 +80,9 @@ export function centralSeedPath(stateRoot) {
  * @ref LLP 0031#physical-layout [implements]: central = active slot else seed else none
  */
 export function resolveCentralLayerPath({ stateRoot }) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  const slot = readActiveSlot(controlDir)
-  if (slot) return path.join(controlDir, `config.${slot}.json`)
-  const seed = path.join(controlDir, SEED_BASENAME)
+  const slot = readActiveSlot(stateRoot)
+  if (slot) return configSlotPath(stateRoot, slot)
+  const seed = configControlSeedPath(stateRoot)
   if (fs.existsSync(seed)) return seed
   return null
 }
@@ -119,14 +109,13 @@ export function resolveCentralLayerPath({ stateRoot }) {
  * @ref LLP 0223 [implements]: the join converge wait's probe - applied slot, never the seed
  */
 export function hasAppliedCentralConfig({ stateRoot }) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  if (readActiveSlot(controlDir) !== null) return true
+  if (readActiveSlot(stateRoot) !== null) return true
   // Only on the not-converged answer, so the happy path stays one readlink:
   // re-read the pointer to separate a control directory that holds nothing
   // yet from one this process cannot read (EACCES, EIO, a pointer that is
   // not a symlink at all).
   try {
-    fs.readlinkSync(path.join(controlDir, ACTIVE_BASENAME))
+    fs.readlinkSync(configControlActivePath(stateRoot))
   } catch (err) {
     const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
     if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err
@@ -139,24 +128,37 @@ export function hasAppliedCentralConfig({ stateRoot }) {
  * *through*: the pointer it reads and the files it can name. Their presence
  * is the on-disk evidence that this host has a central layer, independent of
  * whether the resolution above managed to follow them.
+ *
+ * @param {string} stateRoot
+ * @returns {string[]}
  */
-const CENTRAL_LAYER_BASENAMES = [ACTIVE_BASENAME, SEED_BASENAME, 'config.a.json', 'config.b.json']
+function centralLayerBasenames(stateRoot) {
+  return [
+    configControlActivePath(stateRoot),
+    configControlSeedPath(stateRoot),
+    configSlotPath(stateRoot, 'a'),
+    configSlotPath(stateRoot, 'b'),
+  ].map((p) => path.basename(p))
+}
 
 /**
- * Why {@link resolveCentralLayerPath} returned `null`, for the one caller that
- * cannot treat "resolved nothing" and "could not resolve" alike: the D4
+ * Why {@link resolveCentralLayerPath} returned `null`, for the two callers
+ * that cannot treat "resolved nothing" and "could not resolve" alike: the D4
  * exclusivity gate (LLP 0063), which reads `null` as *not enrolled* and would
  * otherwise let a second org enroll a machine whose layer it merely failed to
- * look up (#623).
+ * look up (#623); and `hyp status`'s unreadable-central-layer diagnostic,
+ * which would otherwise report a host with an unresolvable layer as having
+ * no central layer at all and name no file (#2423).
  *
  * Resolution is lossy on purpose everywhere else. `readActiveSlot` swallows
  * every `readlink` error into `null` (the pointer replaced by a regular file,
  * a dangling or looping link, a target that is not a slot), and `existsSync`
- * swallows `EACCES` on `config-control/` into `false`. Boot and `hyp status`
- * are right to see one `null`: either way there is no layer to merge or show.
- * A permission decision is not, so this reports resolution *failure*
- * separately: the control directory could not be listed, or it still holds
- * central-layer files that the resolution above did not manage to name.
+ * swallows `EACCES` on `config-control/` into `false`. Boot is right to see
+ * one `null`: there is no layer to merge either way. A permission decision
+ * and a report that has to name the layer are not, so this reports
+ * resolution *failure* separately: the control directory could not be
+ * listed, or it still holds central-layer files that the resolution above
+ * did not manage to name.
  *
  * `null` means the absence is real: no control directory, or one with no
  * central-layer file left in it (what `hyp leave` and `resetCentralLayerToSeed`
@@ -168,7 +170,7 @@ const CENTRAL_LAYER_BASENAMES = [ACTIVE_BASENAME, SEED_BASENAME, 'config.a.json'
  * @ref LLP 0031#physical-layout [constrained-by]: same active-slot-else-seed layout, read for evidence of a layer rather than for a path to load
  */
 export function centralLayerResolutionFailure({ stateRoot }) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  const controlDir = configControlDir(stateRoot)
   if (resolveCentralLayerPath({ stateRoot }) !== null) return null
   /** @type {string[]} */
   let entries
@@ -184,7 +186,7 @@ export function centralLayerResolutionFailure({ stateRoot }) {
       message: `failed to read the central config directory ${controlDir}: ${err instanceof Error ? err.message : String(err)}`,
     }
   }
-  const residue = CENTRAL_LAYER_BASENAMES.filter((name) => entries.includes(name))
+  const residue = centralLayerBasenames(stateRoot).filter((name) => entries.includes(name))
   if (residue.length === 0) return null
   return {
     configPath: controlDir,
@@ -217,18 +219,17 @@ export function centralLayerResolutionFailure({ stateRoot }) {
  * @ref LLP 0031#physical-layout [implements]: re-join resets to seed mode so a stale active slot never shadows the fresh seed token
  */
 export function resetCentralLayerToSeed(stateRoot) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  const supersededActiveSlot = readActiveSlot(controlDir) !== null
-  for (const name of [
-    ACTIVE_BASENAME,
-    STATE_BASENAME,
-    'config.a.json',
-    'config.b.json',
-    'config.a.etag',
-    'config.b.etag',
+  const supersededActiveSlot = readActiveSlot(stateRoot) !== null
+  const activePath = configControlActivePath(stateRoot)
+  for (const target of [
+    activePath,
+    configControlStatePath(stateRoot),
+    configSlotPath(stateRoot, 'a'),
+    configSlotPath(stateRoot, 'b'),
+    configSlotEtagPath(stateRoot, 'a'),
+    configSlotEtagPath(stateRoot, 'b'),
   ]) {
-    const target = path.join(controlDir, name)
-    if (name === ACTIVE_BASENAME) {
+    if (target === activePath) {
       // `rmSync(..., { force: true })` first follows an existence check and
       // leaves a dangling or looping symlink untouched. The active pointer is
       // allowed to be exactly those damaged shapes, so unlink it as a directory
@@ -266,11 +267,12 @@ export function resetCentralLayerToSeed(stateRoot) {
 export function createConfigControl(opts) {
   const { stateRoot, requestRestart, onConfirmed } = opts
   const now = opts.now ?? Date.now
+  const clientVersion = opts.clientVersion ?? 'unknown'
   const log = getLogger('config-control')
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
-  const statePath = path.join(controlDir, STATE_BASENAME)
-  const activePath = path.join(controlDir, ACTIVE_BASENAME)
-  const seedPath = path.join(controlDir, SEED_BASENAME)
+  const controlDir = configControlDir(stateRoot)
+  const statePath = configControlStatePath(stateRoot)
+  const activePath = configControlActivePath(stateRoot)
+  const seedPath = configControlSeedPath(stateRoot)
 
   /** @type {ConfigApplyDeps | null} */
   let applyDeps = null
@@ -290,17 +292,17 @@ export function createConfigControl(opts) {
 
   /** @param {ConfigSlot} slot */
   function slotPath(slot) {
-    return path.join(controlDir, `config.${slot}.json`)
+    return configSlotPath(stateRoot, slot)
   }
 
   /** @param {ConfigSlot} slot */
   function slotEtagPath(slot) {
-    return path.join(controlDir, `config.${slot}.etag`)
+    return configSlotEtagPath(stateRoot, slot)
   }
 
   /** @returns {ConfigSlot | null} */
   function activeSlot() {
-    return readActiveSlot(controlDir)
+    return readActiveSlot(stateRoot)
   }
 
   /**
@@ -315,13 +317,13 @@ export function createConfigControl(opts) {
    */
   function flipPointer(slot) {
     const tmp = `${activePath}.tmp.${process.pid}.${now()}`
-    fs.symlinkSync(`config.${slot}.json`, tmp)
+    fs.symlinkSync(path.basename(slotPath(slot)), tmp)
     fs.renameSync(tmp, activePath)
   }
 
   /** @returns {string | undefined} */
   function runningEtag() {
-    return readRunningEtag(controlDir)
+    return readRunningEtag(stateRoot)
   }
 
   /**
@@ -367,7 +369,12 @@ export function createConfigControl(opts) {
     flipPointer(marker.previous_slot)
     const state = readState()
     delete state.probation
-    state.bad_etag = { etag: marker.etag, reason, recorded_at: at }
+    state.bad_etag = {
+      etag: marker.etag,
+      reason,
+      recorded_at: at,
+      ...(reason === 'probation_unconfirmed' ? { client_version: marker.client_version } : {}),
+    }
     state.last_rollback = {
       etag: marker.etag,
       reason,
@@ -448,6 +455,40 @@ export function createConfigControl(opts) {
     return { action: /** @type {const} */ ('recovered_bad_active'), recovery: /** @type {const} */ ('repull') }
   }
 
+  /**
+   * The reason an expired probation records. A sink that failed to
+   * materialize during the window means this host could not run the
+   * confirming poll, which says nothing about the revision itself.
+   * @param {ProbationMarker} marker
+   * @returns {ConfigRollbackReason}
+   * @ref LLP 0517#unconfirmed [implements]: an expiry after a sink materialize failure is "could not confirm", not a bad revision
+   */
+  function expiryReason(marker) {
+    return marker.client_version === undefined ? 'probation_expired' : 'probation_unconfirmed'
+  }
+
+  /**
+   * Stamp the active probation marker when a sink failed to materialize
+   * at this boot, so its expiry, by the timer or at a later boot, is
+   * recorded as unconfirmed. Persisted rather than held in memory because
+   * the boot-path expiry runs in a later process. The latest failing
+   * version wins, so an upgrade mid-probation that still fails does not
+   * earn an immediate retry.
+   */
+  function noteSinkMaterializeFailed() {
+    const state = readState()
+    if (!state.probation || state.probation.client_version === clientVersion) return
+    state.probation.client_version = clientVersion
+    writeState(state)
+    log.warn('config.probation_unconfirmable', {
+      [Attr.COMPONENT]: 'config-control',
+      [Attr.OPERATION]: 'config.probation',
+      config_etag: state.probation.etag,
+      client_version: clientVersion,
+      hyp_reason: 'sink_materialize_failed',
+    })
+  }
+
   function disarmProbationWatchdog() {
     if (watchdog) {
       clearTimeout(watchdog)
@@ -472,16 +513,18 @@ export function createConfigControl(opts) {
       watchdog = null
       const current = readState().probation
       if (!current || current.etag !== marker.etag) return
+      const reason = expiryReason(current)
       log.error('config.probation_expired', {
         [Attr.COMPONENT]: 'config-control',
         [Attr.OPERATION]: 'config.probation_expired',
         config_etag: marker.etag,
         status: 'failed',
+        hyp_reason: reason,
       })
       // Only restart when there was somewhere distinct to roll back to;
       // a no-op rollback leaves the same config active, so restarting
       // onto it would just re-probate and re-fail forever (#141).
-      const rolledBack = rollback(current, 'probation_expired')
+      const rolledBack = rollback(current, reason)
       if (rolledBack) {
         restartPending = true
         requestRestart('probation_expired')
@@ -526,7 +569,7 @@ export function createConfigControl(opts) {
     }
 
     if (Date.parse(marker.until) <= now()) {
-      const rolledBack = rollback(marker, 'probation_expired')
+      const rolledBack = rollback(marker, expiryReason(marker))
       return rolledBack
         ? { action: /** @type {const} */ ('rolled_back') }
         : { action: /** @type {const} */ ('rollback_no_target') }
@@ -546,6 +589,12 @@ export function createConfigControl(opts) {
     if (!state.probation) return
     const etag = state.probation.etag
     delete state.probation
+    // A revision has now survived probation, so an earlier rollback is
+    // history, not a condition: keeping it would leave `hyp status` reporting
+    // "Needs attention" forever. That includes this etag's own rollback,
+    // when this is an unconfirmed revision's retry. The bad etag stays as
+    // the re-apply backoff.
+    delete state.last_rollback
     writeState(state)
     disarmProbationWatchdog()
     log.info('config.probation_cleared', {
@@ -602,8 +651,11 @@ export function createConfigControl(opts) {
         const state = readState()
         // Re-apply backoff: one remembered bad etag, skipped until the
         // server serves a different revision. Re-polling is fine; an
-        // apply-crash loop is not.
-        if (state.bad_etag && state.bad_etag.etag === etag) {
+        // apply-crash loop is not. A revision this host only could not
+        // confirm is retried once its backoff elapses or the client changes.
+        const bad = state.bad_etag && state.bad_etag.etag === etag ? state.bad_etag : null
+        const retry = bad ? unconfirmedRetryReason(bad) : null
+        if (bad && !retry) {
           span.setAttribute('apply_action', 'skipped_bad_etag')
           log.warn('config.apply_skipped', {
             [Attr.COMPONENT]: 'config-control',
@@ -611,6 +663,13 @@ export function createConfigControl(opts) {
             hyp_reason: 'bad_etag_backoff',
           })
           return { ok: true, action: 'skipped_bad_etag' }
+        }
+        if (retry) {
+          log.info('config.apply_retry_unconfirmed', {
+            [Attr.COMPONENT]: 'config-control',
+            config_etag: etag,
+            hyp_reason: retry,
+          })
         }
 
         const serialized = JSON.stringify(document, null, 2) + '\n'
@@ -683,6 +742,22 @@ export function createConfigControl(opts) {
   }
 
   /**
+   * Why an unconfirmed revision may be applied again now, or null while
+   * it stays held back. A revision recorded for any other reason is
+   * never retried: its etag must change.
+   * @param {RememberedBadEtag} bad
+   * @returns {'client_version_changed' | 'backoff_elapsed' | null}
+   * @ref LLP 0517#retry [implements]: the same etag is retried after a bounded backoff or a client version change; a bad revision still waits for a new etag
+   */
+  function unconfirmedRetryReason(bad) {
+    if (bad.reason !== 'probation_unconfirmed') return null
+    if (bad.client_version !== clientVersion) return 'client_version_changed'
+    const recordedAt = Date.parse(bad.recorded_at)
+    if (!Number.isFinite(recordedAt) || now() - recordedAt >= UNCONFIRMED_RETRY_BACKOFF_MS) return 'backoff_elapsed'
+    return null
+  }
+
+  /**
    * Remember a rejected revision so re-polls don't become an
    * apply-fail loop. Pre-flip failures (validation, install) record
    * only the bad etag + reason; `last_rollback` is reserved for actual
@@ -745,6 +820,9 @@ export function createConfigControl(opts) {
     const pollSeconds = pollIntervalFromConfig(config)
     const windowSeconds = Math.max(3 * pollSeconds, PROBATION_FLOOR_SECONDS)
     const state = readState()
+    // An unconfirmed retry re-applies its own remembered etag; leaving the
+    // mark would make the active slot carry a bad etag (#141).
+    if (state.bad_etag && state.bad_etag.etag === etag) delete state.bad_etag
     state.probation = {
       etag,
       applied_at: new Date(now()).toISOString(),
@@ -779,6 +857,7 @@ export function createConfigControl(opts) {
     attachApplyDeps(deps) { applyDeps = deps },
     armProbationWatchdog,
     disarmProbationWatchdog,
+    noteSinkMaterializeFailed,
     status,
   }
 }
@@ -806,32 +885,32 @@ function readControlState(statePath) {
  * at, or null when no apply has flipped it yet (seed-config mode) or it
  * is missing.
  *
- * @param {string} controlDir
+ * @param {string} stateRoot
  * @returns {ConfigSlot | null}
  */
-function readActiveSlot(controlDir) {
-  const activePath = path.join(controlDir, ACTIVE_BASENAME)
+function readActiveSlot(stateRoot) {
+  const activePath = configControlActivePath(stateRoot)
   let target
   try {
     target = fs.readlinkSync(activePath)
   } catch {
     return null
   }
-  const resolved = path.resolve(controlDir, target)
-  if (resolved === path.join(controlDir, 'config.a.json')) return 'a'
-  if (resolved === path.join(controlDir, 'config.b.json')) return 'b'
+  const resolved = path.resolve(path.dirname(activePath), target)
+  if (resolved === configSlotPath(stateRoot, 'a')) return 'a'
+  if (resolved === configSlotPath(stateRoot, 'b')) return 'b'
   return null
 }
 
 /**
- * @param {string} controlDir
+ * @param {string} stateRoot
  * @returns {string | undefined}
  */
-function readRunningEtag(controlDir) {
-  const slot = readActiveSlot(controlDir)
+function readRunningEtag(stateRoot) {
+  const slot = readActiveSlot(stateRoot)
   if (!slot) return undefined
   try {
-    const etag = fs.readFileSync(path.join(controlDir, `config.${slot}.etag`), 'utf8').trim()
+    const etag = fs.readFileSync(configSlotEtagPath(stateRoot, slot), 'utf8').trim()
     return etag.length > 0 ? etag : undefined
   } catch {
     return undefined
@@ -848,11 +927,10 @@ function readRunningEtag(controlDir) {
  * @ref LLP 0025#last-known-good-rollback [implements]: operator-visible probation/rollback/bad-etag state without log spelunking
  */
 export function readConfigControlStatus({ stateRoot }) {
-  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
   /** @type {ConfigControlState} */
   let state = {}
   try {
-    state = readControlState(path.join(controlDir, STATE_BASENAME))
+    state = readControlState(configControlStatePath(stateRoot))
   } catch {
     // unreadable state surfaces as empty: status is best-effort
   }
@@ -860,7 +938,7 @@ export function readConfigControlStatus({ stateRoot }) {
     probation: state.probation ?? null,
     lastRollback: state.last_rollback ?? null,
     badEtag: state.bad_etag ?? null,
-    runningEtag: readRunningEtag(controlDir) ?? null,
+    runningEtag: readRunningEtag(stateRoot) ?? null,
   }
 }
 

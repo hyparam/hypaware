@@ -2,6 +2,8 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+import { fileMightMatch } from 'icebird/src/prune.js'
 import { executePlan, readBatchColumn, selectedRowCount, valueAt } from 'squirreling'
 
 import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
@@ -12,6 +14,7 @@ import {
   icebergDataSource,
   icebergDelete,
   icebergRead,
+  icebergTransaction,
   loadLatestFileCatalogMetadata,
 } from 'icebird'
 // Deep imports for in-place schema evolution. icebird's public top-level API
@@ -26,6 +29,7 @@ import { fileCatalogCommit } from 'icebird/src/write/commit.js'
 // reuse of the same icebird write internals (LLP 0104 rewrite mechanics).
 import { deleteFileAppliesToDataEntry } from 'icebird/src/delete.js'
 import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
+import { icebergManifestList } from 'icebird/src/manifest.js'
 import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
@@ -46,7 +50,7 @@ import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
  * @import { AppendOptions } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, Manifest, ManifestEntry, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow, ExprNode } from 'squirreling'
- * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
+ * @import { AsyncBuffer, FileMetaData, ParquetQueryFilter } from 'hyparquet'
  */
 
 /**
@@ -349,27 +353,36 @@ const PURGE_DELETE_BATCH_SIZE = 5000
  * @ref LLP 0104 [implements]: cache-only row deletion via position-deletes; preserves part_id identity and the export watermark
  * @param {string} tablePath the Iceberg table directory
  * @param {(row: Record<string, unknown>) => boolean} predicate
- * @param {{ columns: string[] }} opts columns the predicate reads (intersected with the table schema)
+ * @param {{ columns: string[], beforeDelete?: () => Promise<void> }} opts columns the predicate reads (intersected with the table schema)
  * @returns {Promise<{ rowsDeleted: number, filesAffected: number, batchCount: number }>}
  */
 export async function deleteMatchingRows(tablePath, predicate, opts) {
   if (!tableExists(tablePath)) return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
+  return deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns: opts.columns, beforeDelete: opts.beforeDelete })
+}
 
-  /** @type {TableMetadata} */
-  let metadata
-  try {
-    const loaded = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
-    metadata = loaded.metadata
-  } catch {
-    return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
-  }
-  if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) {
-    return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
-  }
-
-  const dataFileMap = await findDataFileEntries(metadata, resolver)
+/**
+ * The same position-delete path for local cache and BlobStore archives.
+ * Unreadable metadata or data is a failed purge, never a zero-row success.
+ *
+ * `files`, when given, narrows the scan to those live data files, named by
+ * their canonical manifest `file_path`. Omitted means every live file; an
+ * empty selection deletes nothing. The whole selection is checked against the
+ * current snapshot before the first commit, so a path that is not live there
+ * (unknown, already compacted away, or another table's) throws and nothing is
+ * deleted. Repeats collapse to one scan. The predicate still decides which
+ * rows go: selecting a file never deletes all of it.
+ *
+ * @ref LLP 0417#erasure [implements]: logical deletion uses Iceberg positions; physical reclamation is separate
+ * @param {{ tableUrl: string, resolver: Resolver, lister: Lister, predicate: (row: Record<string, unknown>) => boolean, columns: string[], beforeDelete?: () => Promise<void>, files?: Iterable<string> }} args
+ */
+export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns, beforeDelete, files }) {
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+  const hasSnapshot = metadata['current-snapshot-id'] !== undefined && Boolean(metadata.snapshots?.length)
+  const liveFiles = hasSnapshot ? await findDataFileEntries(metadata, resolver) : new Map()
+  const dataFileMap = files === undefined ? liveFiles : selectLiveFiles(liveFiles, files)
   if (dataFileMap.size === 0) return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
 
   // Only project columns that exist in the current schema; a predicate column
@@ -379,7 +392,7 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
   // still, so the per-file read below narrows this list again.
   const schema = currentSchema(metadata)
   const schemaColumns = new Set(schema?.fields.map((f) => f.name) ?? [])
-  const projected = opts.columns.filter((c) => schemaColumns.has(c))
+  const projected = columns.filter((c) => schemaColumns.has(c))
 
   const alreadyDeleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
   const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
@@ -391,26 +404,48 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
   let batchCount = 0
 
   for (const [filePath] of dataFileMap) {
-    const positions = await scanFileForMatchingRows(
-      filePath, resolver, predicate, projected, alreadyDeleted.get(filePath)
-    )
-    if (positions.length === 0) continue
-    filesAffected++
-    pending.push(...positions.map((pos) => ({ file_path: filePath, pos })))
-    while (pending.length >= PURGE_DELETE_BATCH_SIZE) {
-      const batch = pending.splice(0, PURGE_DELETE_BATCH_SIZE)
-      await icebergDelete({ catalog, tableUrl: url, deletes: batch })
-      rowsDeleted += batch.length
-      batchCount++
+    let matched = false
+    for await (const pos of scanFileForMatchingRows(filePath, resolver, predicate, projected, alreadyDeleted.get(filePath))) {
+      matched = true
+      pending.push({ file_path: filePath, pos })
+      if (pending.length === PURGE_DELETE_BATCH_SIZE) {
+        await beforeDelete?.()
+        await icebergDelete({ catalog, tableUrl: url, deletes: pending })
+        rowsDeleted += pending.length
+        pending = []
+        batchCount++
+      }
     }
+    if (matched) filesAffected++
   }
   if (pending.length > 0) {
+    await beforeDelete?.()
     await icebergDelete({ catalog, tableUrl: url, deletes: pending })
     rowsDeleted += pending.length
     batchCount++
   }
 
   return { rowsDeleted, filesAffected, batchCount }
+}
+
+/**
+ * The subset of `liveFiles` that `files` names, deduplicated. Throws before
+ * any delete when a requested path is not live in the current snapshot, so a
+ * stale selection fails whole instead of purging part of it.
+ *
+ * @param {Map<string, { entry: ManifestEntry }>} liveFiles
+ * @param {Iterable<string>} files
+ * @returns {Map<string, { entry: ManifestEntry }>}
+ */
+function selectLiveFiles(liveFiles, files) {
+  /** @type {Map<string, { entry: ManifestEntry }>} */
+  const selected = new Map()
+  for (const filePath of files) {
+    const found = liveFiles.get(filePath)
+    if (!found) throw new Error('cache purge: selected file is not a live data file in the current snapshot')
+    selected.set(filePath, found)
+  }
+  return selected
 }
 
 /**
@@ -447,8 +482,20 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
  */
 export async function physicalProjection(file, columns) {
   const metadata = await parquetMetadataAsync(file)
+  return { metadata, columns: physicalColumns(metadata, columns) }
+}
+
+/**
+ * The narrowing of {@link physicalProjection}, over a footer already parsed,
+ * for a caller that stages more than one projection against one file.
+ *
+ * @param {FileMetaData} metadata
+ * @param {string[]} columns
+ * @returns {string[]}
+ */
+function physicalColumns(metadata, columns) {
   const physical = new Set(parquetSchema(metadata).children.map((child) => child.element.name))
-  return { metadata, columns: columns.filter((column) => physical.has(column)) }
+  return columns.filter((column) => physical.has(column))
 }
 
 /**
@@ -461,26 +508,26 @@ export async function physicalProjection(file, columns) {
  * @param {(row: Record<string, unknown>) => boolean} predicate
  * @param {string[]} columns projected columns the predicate needs
  * @param {Set<bigint>} [deletedPositions]
- * @returns {Promise<number[]>}
+ * @returns {AsyncGenerator<number>}
  */
-async function scanFileForMatchingRows(filePath, resolver, predicate, columns, deletedPositions) {
-  /** @type {number[]} */
-  const positions = []
-  try {
-    const file = await Promise.resolve(resolver.reader(filePath))
-    const readOpts = columns.length > 0
-      ? { file, ...await physicalProjection(file, columns) }
-      : { file }
-    const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects(readOpts))
+async function* scanFileForMatchingRows(filePath, resolver, predicate, columns, deletedPositions) {
+  const file = await Promise.resolve(resolver.reader(filePath))
+  const projection = await physicalProjection(file, columns)
+  // Hyparquet decodes a whole column chunk for any slice within its row
+  // group. Align reads to groups so a fixed-size slice does not repeatedly
+  // decode the same chunk. Positions are still committed in bounded batches.
+  let start = 0
+  for (const group of projection.metadata.row_groups) {
+    const end = start + Number(group.num_rows)
+    const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
+      file, ...projection, rowStart: start, rowEnd: end,
+    }))
     for (let i = 0; i < rows.length; i++) {
-      if (deletedPositions?.has(BigInt(i))) continue
-      if (predicate(rows[i])) positions.push(i)
+      const pos = start + i
+      if (!deletedPositions?.has(BigInt(pos)) && predicate(rows[i])) yield pos
     }
-  } catch {
-    // Unreadable file: skip rather than block the whole purge. The rows stay
-    // cached; a subsequent purge over a healthy file still removes them.
+    start = end
   }
-  return positions
 }
 
 /**
@@ -493,9 +540,12 @@ async function scanFileForMatchingRows(filePath, resolver, predicate, columns, d
  * @param {TableMetadata} metadata
  * @param {Resolver} resolver
  * @param {Map<string, { entry: ManifestEntry }>} dataFileMap
+ * @param {boolean} [narrowed] the map is a selection, not the whole table:
+ *   fetch only the delete files that apply to one of its files, so delete
+ *   history outside the selection is neither read nor held
  * @returns {Promise<Map<string, Set<bigint>>>}
  */
-async function loadDeletedPositions(metadata, resolver, dataFileMap) {
+async function loadDeletedPositions(metadata, resolver, dataFileMap, narrowed = false) {
   const snapshotId = metadata['current-snapshot-id']
   const snapshot = metadata.snapshots?.find((s) => String(s['snapshot-id']) === String(snapshotId))
   if (!snapshot?.['manifest-list']) return new Map()
@@ -511,8 +561,11 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
       deleteEntries.push(entry)
     }
   }))
-  if (deleteEntries.length === 0) return new Map()
-  const { positionDeletesMap } = await fetchDeleteMaps(deleteEntries, resolver)
+  const fetched = narrowed
+    ? deleteEntries.filter((deleteEntry) => appliesToAnyDataFile(deleteEntry, dataFileMap, metadata))
+    : deleteEntries
+  if (fetched.length === 0) return new Map()
+  const { positionDeletesMap } = await fetchDeleteMaps(fetched, resolver)
   /** @type {Map<string, Set<bigint>>} */
   const out = new Map()
   for (const [filePath, groups] of positionDeletesMap) {
@@ -527,6 +580,29 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
     if (set.size > 0) out.set(filePath, set)
   }
   return out
+}
+
+/**
+ * Does a position delete apply to any file in `dataFileMap`? A deletion
+ * vector names its one data file; a position delete file is matched by
+ * partition and sequence number, the same test the caller applies after the
+ * fetch, so the filter never drops a delete the caller would have kept.
+ *
+ * @param {ManifestEntry} deleteEntry
+ * @param {Map<string, { entry: ManifestEntry }>} dataFileMap
+ * @param {TableMetadata} metadata
+ * @returns {boolean}
+ */
+function appliesToAnyDataFile(deleteEntry, dataFileMap, metadata) {
+  const referenced = deleteEntry.data_file.referenced_data_file
+  if (referenced) {
+    const found = dataFileMap.get(referenced)
+    return found !== undefined && deleteFileAppliesToDataEntry(found.entry, deleteEntry, metadata, 'position')
+  }
+  for (const { entry } of dataFileMap.values()) {
+    if (deleteFileAppliesToDataEntry(entry, deleteEntry, metadata, 'position')) return true
+  }
+  return false
 }
 
 /**
@@ -548,19 +624,37 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * `hyp query sql` fails loudly; grep search must not answer zero where SQL
  * raises.
  *
+ * `opts.newestBy` names an identity-partition column and keeps only the
+ * files whose value for it is the greatest (string comparison), so a reader
+ * that wants just the newest day pays manifest enumeration for the table but
+ * reads and holds delete data for that day alone.
+ *
  * @param {string} tablePath
+ * @param {{ newestBy?: string }} [opts]
  * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, sizeBytes: number, deletedPositions: Set<bigint> | undefined }[]>}
  * @ref LLP 0302#purge-by-position [implements]: the file walk needs the committed delete positions, because a raw parquet read applies none
  */
-export async function listLiveDataFiles(tablePath) {
+export async function listLiveDataFiles(tablePath, opts) {
   if (!tableExists(tablePath)) return []
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return []
   const dataFileMap = await findDataFileEntries(metadata, resolver)
+  const key = opts?.newestBy
+  if (key !== undefined) {
+    /** @type {string | undefined} */
+    let newest
+    for (const { partition } of dataFileMap.values()) {
+      const value = partition[key]
+      if (typeof value === 'string' && (newest === undefined || value > newest)) newest = value
+    }
+    for (const [filePath, { partition }] of dataFileMap) {
+      if (newest === undefined || partition[key] !== newest) dataFileMap.delete(filePath)
+    }
+  }
   if (dataFileMap.size === 0) return []
-  const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
+  const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap, key !== undefined)
   /** @type {{ filePath: string, partition: Record<string, unknown>, sizeBytes: number, deletedPositions: Set<bigint> | undefined }[]} */
   const out = []
   for (const [filePath, { partition, entry }] of dataFileMap) {
@@ -594,8 +688,8 @@ export async function listLiveDataFiles(tablePath) {
  *   (skipped). A sink passes this once it HAS a durable watermark, so the
  *   pre-upgrade backlog is re-exported exactly once, never on every subsequent
  *   tick (LLP 0040 §6 risk #1). No new null-seq row can appear post-upgrade,
- *   the `decorateRow` chokepoint stamps a real seq on every flushed row, so
- *   excluding legacy rows after the first export is safe.
+ *   the commit path stamps a real seq on every flushed row, so excluding
+ *   legacy rows after the first export is safe.
  *
  * A real seq is yielded iff strictly `> since`. The seq column is force-projected
  * so the predicate can be evaluated even when the caller asked for a narrower
@@ -689,21 +783,25 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
 async function* scanResolvedRows(source, columns, where) {
-  if (source.schema && source.prepareScan && columns.every((name) => source.schema?.fields.some((field) => field.name === name))) {
+  if (source.schema && source.prepareScan) {
+    // @ref LLP 0417#performance [implements]: optional fence columns must not disable native scans
+    const physical = columns.filter(name => source.schema?.fields.some(field => field.name === name))
+    const missing = columns.filter(name => !physical.includes(name))
     // @ref LLP 0040#storage-api-extension [constrained-by]: seq/legacy policy is still checked at the row boundary
     const result = executePlan({
-      plan: { type: 'Scan', table: 'cache', hints: { columns, where } },
+      plan: { type: 'Scan', table: 'cache', hints: { columns: physical, where } },
       context: { tables: { cache: source } },
     })
     if (result.batches) {
-      const indices = columns.map((name) => result.columns.indexOf(name))
+      const indices = physical.map((name) => result.columns.indexOf(name))
       for await (const batch of result.batches()) {
         const vectors = await Promise.all(indices.map((columnIndex) => readBatchColumn({ batch, columnIndex })))
         const count = selectedRowCount(batch.selection)
         for (let i = 0; i < count; i++) {
           /** @type {Record<string, unknown>} */
           const row = {}
-          for (let j = 0; j < columns.length; j++) row[columns[j]] = valueAt(vectors[j], i)
+          for (let j = 0; j < physical.length; j++) row[physical[j]] = valueAt(vectors[j], i)
+          for (const name of missing) row[name] = undefined
           yield row
         }
       }
@@ -815,7 +913,57 @@ export async function dataSourceForTable(tablePath) {
   const url = tableUrlForDir(tablePath)
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return null
-  return icebergDataSource({ tableUrl: url, metadata, resolver, lister })
+  const pinned = await pinSnapshotManifests(resolver, metadata)
+  return icebergDataSource({ tableUrl: url, metadata, resolver: pinned, lister })
+}
+
+/**
+ * A resolver that serves the current snapshot's manifest list and data
+ * manifests from bytes read now, and delegates every other path.
+ *
+ * icebird reads a source's data manifests on its first scan, not when the
+ * source is built. Snapshot retention is the only reader-safety window the
+ * cache has, and it promises no minimum reader interval, so expiry can
+ * release the snapshot a source just pinned and the sweep then unlinks a
+ * manifest the source has yet to read: the scan fails with ENOENT while every
+ * data file it selects is still live. Reading the bytes up front gives the
+ * source its manifests from construction, as icebird did before 0.9, and
+ * keeps its lazy decode and manifest pruning. The cost is the raw manifest
+ * bytes for the source's lifetime, smaller than the decoded entries the old
+ * eager read held.
+ *
+ * @ref LLP 0310#unreferenced-sweep [constrained-by]: retention is the reader window, so a source must own its manifests before the next sweep
+ * @param {Resolver} resolver
+ * @param {TableMetadata} metadata
+ * @returns {Promise<Resolver>}
+ */
+async function pinSnapshotManifests(resolver, metadata) {
+  /** @type {Map<string, AsyncBuffer>} */
+  const pinned = new Map()
+  /**
+   * @param {string} url
+   * @param {number} [byteLength]
+   */
+  async function pin(url, byteLength) {
+    const file = await resolver.reader(url, byteLength)
+    const bytes = await file.slice(0, file.byteLength)
+    pinned.set(url, { byteLength: bytes.byteLength, slice: (start, end) => bytes.slice(start, end) })
+  }
+  /** @type {Resolver} */
+  const pinning = {
+    ...resolver,
+    reader(url, byteLength) {
+      return pinned.get(url) ?? resolver.reader(url, byteLength)
+    },
+  }
+  const current = String(metadata['current-snapshot-id'])
+  const listUrl = metadata.snapshots?.find((s) => String(s['snapshot-id']) === current)?.['manifest-list']
+  if (listUrl) await pin(listUrl)
+  const { manifests } = await icebergManifestList({ metadata, resolver: pinning })
+  await Promise.all(manifests
+    .filter((m) => (m.content ?? 0) === 0)
+    .map((m) => pin(m.manifest_path, Number.isFinite(Number(m.manifest_length)) ? Number(m.manifest_length) : undefined)))
+  return pinning
 }
 
 /**
@@ -926,4 +1074,243 @@ function addedFilesSize(metadata) {
   const raw = snapshot?.summary?.['added-files-size']
   const value = raw === undefined ? 0 : Number(raw)
   return Number.isFinite(value) ? value : 0
+}
+
+/**
+ * Locate one reconciliation scope's live rows in one data file, reading the
+ * wide columns only where the snapshot comparison can still need them.
+ *
+ * At most ONE live in-scope row per snapshot key survives a reconcile, the
+ * one equal to the snapshot's row, and CANDIDACY for that comparison follows
+ * from the scope columns and the identity key alone: a row whose key the
+ * snapshot no longer owes is retired whatever its payload holds, and an
+ * out-of-scope row is never touched. So the reads stage:
+ *
+ *  - the SCOPE pass projects the `where` columns plus the key, a handful of
+ *    dictionary-encoded strings, over every row group, and settles scope and
+ *    candidacy for every row;
+ *  - the VALUE pass projects the columns the scope pass did not read, over
+ *    the row range holding that group's candidates, and merges them on so
+ *    the caller's deep-equal still sees a full row.
+ *
+ * The two projections are disjoint and together cover the caller's column
+ * list once, so a group holding a candidate costs what one full-width read
+ * cost and a group holding none costs only the scope columns: for
+ * `ai_gateway_messages`, three dictionary-encoded strings rather than sixty
+ * columns with `raw_frame` and `content_text` among them. hyparquet decodes
+ * a whole column chunk for any slice inside its row group, so narrowing the
+ * value pass to the candidate range buys materialized rows rather than
+ * bytes; the bytes come from the groups it never opens. Each group is
+ * settled before the next is read, so only row positions cross a group
+ * boundary.
+ *
+ * A batch of scopes shares one walk: `owner` maps a row to the snapshot whose
+ * scope holds it, or to nothing, so a file is read once for every scope.
+ *
+ * @template O
+ * @param {string} filePath
+ * @param {Resolver} resolver
+ * @param {{ owner: (row: Record<string, unknown>) => O | undefined, key: string, scopeColumns: string[], valueColumns: string[], claim: (owner: O, key: string) => boolean, keep: (owner: O, key: string, row: Record<string, unknown>) => boolean }} plan
+ * @param {Set<bigint>} [deletedPositions]
+ * @returns {Promise<{ pos: number, owner: O }[]>} the scoped rows to retire, in file order
+ */
+async function scanFileForScopedRows(filePath, resolver, plan, deletedPositions) {
+  const file = await Promise.resolve(resolver.reader(filePath))
+  const metadata = await parquetMetadataAsync(file)
+  const scopeColumns = physicalColumns(metadata, plan.scopeColumns)
+  const valueColumns = physicalColumns(metadata, plan.valueColumns)
+  /** @type {{ pos: number, owner: O }[]} */
+  const retire = []
+  let start = 0
+  for (const group of metadata.row_groups) {
+    const end = start + Number(group.num_rows)
+    /** @type {Record<string, unknown>[] | undefined} */
+    let scoped = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
+      file, metadata, columns: scopeColumns, rowStart: start, rowEnd: end,
+    }))
+    /** @type {{ pos: number, owner: O, key: string, row: Record<string, unknown> | undefined }[]} */
+    const hits = []
+    let first = -1
+    let last = -1
+    for (let i = 0; i < scoped.length; i++) {
+      const pos = start + i
+      if (deletedPositions?.has(BigInt(pos))) continue
+      const row = scoped[i]
+      const owner = plan.owner(row)
+      if (owner === undefined) continue
+      const key = String(row[plan.key])
+      const candidate = plan.claim(owner, key)
+      hits.push({ pos, owner, key, row: candidate ? row : undefined })
+      if (!candidate) continue
+      if (first < 0) first = pos
+      last = pos
+    }
+    // Drop the group's scope rows before the value pass awaits: `hits` holds
+    // the candidates it still compares, and the binding would otherwise keep
+    // every other scope row reachable through the whole value decode (#2345).
+    scoped = undefined
+    const values = first < 0 ? [] : /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
+      file, metadata, columns: valueColumns, rowStart: first, rowEnd: last + 1,
+    }))
+    for (const hit of hits) {
+      if (hit.row && plan.keep(hit.owner, hit.key, { ...hit.row, ...values[hit.pos - first] })) continue
+      retire.push(hit)
+    }
+    start = end
+  }
+  return retire
+}
+
+/**
+ * Reconcile one exact scope in one table. The partition guard belongs to the
+ * caller. A transaction publishes deletions and replacements together; a failed
+ * commit leaves the prior snapshot readable and the source retries its snapshot.
+ * @ref LLP 0449#reconciliation [implements]: unchanged keys retain their rows and ingest sequences
+ * @param {string} tablePath
+ * @param {readonly ColumnSpec[]} columns
+ * @param {Record<string, unknown>[]} rows
+ * @param {{ where: Record<string, string>, key: string }} scope
+ * @param {(count: number) => Promise<bigint>} reserveSeq
+ * @param {AppendOptions} [options]
+ */
+export async function reconcileRowsInTable(tablePath, columns, rows, scope, reserveSeq, options) {
+  const result = await reconcileSnapshotsInTable(tablePath, columns, [{ rows, scope }], reserveSeq, options)
+  return { rowsWritten: result.rowsWritten, rowsDeleted: result.rowsDeleted, rowCount: result.rowCount }
+}
+
+/**
+ * Reconcile a batch of exact scopes in one table: one metadata load, one walk
+ * over the files and one transaction for the whole batch, with each scope
+ * settled exactly as a lone `reconcileRowsInTable` would settle it. Every
+ * scope names the same `where` columns and the same key, and no two scopes
+ * are equal, so each scoped row belongs to at most one snapshot.
+ * @ref LLP 0527#batched-reconcile [implements]: per-session cost is one row lookup, not one metadata load
+ * @param {string} tablePath
+ * @param {readonly ColumnSpec[]} columns
+ * @param {{ rows: Record<string, unknown>[], scope: { where: Record<string, string>, key: string } }[]} snapshots
+ * @param {(count: number) => Promise<bigint>} reserveSeq
+ * @param {AppendOptions} [options]
+ * @returns {Promise<{ rowsWritten: number, rowsDeleted: number, rowCount: number, perSnapshot: { rowsWritten: number, rowsDeleted: number }[] }>}
+ */
+export async function reconcileSnapshotsInTable(tablePath, columns, snapshots, reserveSeq, options) {
+  if (!snapshots.length) throw new Error('Empty snapshot batch')
+  const key = snapshots[0].scope.key
+  const whereNames = Object.keys(snapshots[0].scope.where)
+  if (!whereNames.length) throw new Error('Invalid snapshot scope')
+  // The owner of a scoped row is found by walking a trie over its `where`
+  // values in a fixed column order, so the lookup allocates nothing per row.
+  /** @type {Map<unknown, any>} */
+  const trie = new Map()
+  /** @type {{ pending: Map<string, Record<string, unknown>>, rowsWritten: number, rowsDeleted: number }[]} */
+  const owners = []
+  let totalRows = 0
+  for (const { rows, scope } of snapshots) {
+    const names = Object.keys(scope.where)
+    if (scope.key !== key || names.length !== whereNames.length || names.some(name => !whereNames.includes(name))) {
+      throw new Error('Mixed snapshot scopes in one batch')
+    }
+    const records = rowsToIcebergRecords(columns, rows)
+    const pending = new Map(records.map(row => [String(row[key]), row]))
+    if (pending.size !== rows.length) throw new Error('Duplicate snapshot row identity')
+    const owner = { pending, rowsWritten: 0, rowsDeleted: 0 }
+    let node = trie
+    for (let i = 0; i < whereNames.length - 1; i++) {
+      const value = scope.where[whereNames[i]]
+      let next = node.get(value)
+      if (!next) node.set(value, next = new Map())
+      node = next
+    }
+    const leaf = scope.where[whereNames[whereNames.length - 1]]
+    if (node.has(leaf)) throw new Error('Duplicate snapshot scope in one batch')
+    node.set(leaf, owner)
+    owners.push(owner)
+    totalRows += rows.length
+  }
+  const perSnapshot = () => owners.map(owner => ({ rowsWritten: owner.rowsWritten, rowsDeleted: owner.rowsDeleted }))
+  const tablePresent = tableExists(tablePath)
+  if (!tablePresent && !totalRows) return { rowsWritten: 0, rowsDeleted: 0, rowCount: 0, perSnapshot: perSnapshot() }
+  // Create the table, or evolve an existing one in place. The transaction
+  // below stages its append against the table's CURRENT schema, so a column
+  // the dataset gained since this table was created would be dropped from
+  // every reconciled row with no error. An empty append is the same switch
+  // point a spool flush goes through (LLP 0029#in-place-evolution).
+  if (!tablePresent || (totalRows && options?.declaration)) {
+    await appendRowsToTable(tablePath, [...columns, INGEST_SEQ_COLUMN], [], options)
+  }
+  const { resolver, lister } = await getLocalIO()
+  const url = tableUrlForDir(tablePath)
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+  const schema = currentSchema(metadata)
+  const files = await findDataFileEntries(metadata, resolver)
+  const deleted = await loadDeletedPositions(metadata, resolver, files)
+  /** @type {{ file_path: string, pos: number }[]} */
+  const deletes = []
+  const names = columns.map(column => column.name)
+  // Both halves of the staged projection stay inside the dataset's own
+  // column list: a scope column the dataset does not declare was never
+  // projected, so it must stay invisible to the scope pass too, and a row
+  // can then never match a scope that names it.
+  const declared = new Set(names)
+  const scopeColumns = [...new Set([...whereNames, key])].filter(name => declared.has(name))
+  const inScopePass = new Set(scopeColumns)
+  const undeclared = whereNames.some(name => !declared.has(name))
+  const plan = {
+    owner: (/** @type {Record<string, unknown>} */ row) => {
+      if (undeclared) return undefined
+      /** @type {any} */
+      let node = trie
+      for (let i = 0; i < whereNames.length && node; i++) node = node.get(row[whereNames[i]])
+      return /** @type {typeof owners[number] | undefined} */ (node)
+    },
+    key,
+    scopeColumns,
+    valueColumns: names.filter(name => !inScopePass.has(name)),
+    // Every live in-scope row for a key the snapshot STILL OWES is a
+    // candidate, so the copy equal to the snapshot survives wherever a key's
+    // duplicates sit. A first-come claim would hand the key to whichever copy
+    // the file walk met first, and that order is a race:
+    // `findDataFileEntries` fills its map inside a `Promise.all` over
+    // manifests (#2346). Candidacy is settled for a whole row group before
+    // any `keep` runs, so a duplicate sitting behind the equal copy in the
+    // SAME group is still read and compared. The `pending.delete` inside
+    // `keep` is what spares every later group and file, which settle that
+    // key's remaining duplicates as retirements without reading a payload.
+    claim: (/** @type {typeof owners[number]} */ owner, /** @type {string} */ id) => owner.pending.has(id),
+    // The unchanged-row test: a candidate equal to the snapshot's row keeps
+    // its place and its ingest sequence, and the snapshot stops owing a write.
+    keep: (/** @type {typeof owners[number]} */ owner, /** @type {string} */ id, /** @type {Record<string, unknown>} */ row) => {
+      if (!isDeepStrictEqual(rowsToIcebergRecords(columns, [row])[0], owner.pending.get(id))) return false
+      owner.pending.delete(id)
+      return true
+    },
+  }
+  let rowCount = 0
+  for (const [filePath, { entry }] of files) rowCount += Number(entry.data_file.record_count) - (deleted.get(filePath)?.size ?? 0)
+  for (const [filePath, { entry }] of files) {
+    if (schema && !snapshots.some(({ scope }) => fileMightMatch(/** @type {ParquetQueryFilter} */ (scope.where), entry, schema))) continue
+    for (const hit of await scanFileForScopedRows(filePath, resolver, plan, deleted.get(filePath))) {
+      deletes.push({ file_path: filePath, pos: hit.pos })
+      hit.owner.rowsDeleted++
+    }
+  }
+  /** @type {Record<string, unknown>[]} */
+  const writes = []
+  for (const owner of owners) {
+    owner.rowsWritten = owner.pending.size
+    for (const row of owner.pending.values()) writes.push(row)
+  }
+  if (!deletes.length && !writes.length) return { rowsWritten: 0, rowsDeleted: 0, rowCount, perSnapshot: perSnapshot() }
+  if (writes.length) {
+    const first = await reserveSeq(writes.length)
+    writes.forEach((row, index) => { row[INGEST_SEQ_COLUMN.name] = first + BigInt(index) })
+  }
+  const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
+  await icebergTransaction({ catalog, tableUrl: url }, async tx => {
+    for (let i = 0; i < deletes.length; i += PURGE_DELETE_BATCH_SIZE) {
+      await tx.delete({ deletes: deletes.slice(i, i + PURGE_DELETE_BATCH_SIZE) })
+    }
+    if (writes.length) await tx.append({ records: writes })
+  })
+  return { rowsWritten: writes.length, rowsDeleted: deletes.length,
+    rowCount: rowCount + writes.length - deletes.length, perSnapshot: perSnapshot() }
 }

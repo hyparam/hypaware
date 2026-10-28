@@ -1,32 +1,22 @@
-# Set up HypAware for your team
+# Connect to HypAware Cloud and your team
 
-[Documentation](README.md)
-
-Get an organization on the central server, then set up each machine to join
-it.
+Get an organization in HypAware Cloud, then set up each host to join it. A host is any machine the collector runs on: a laptop, a build box, a remote agent's box.
 
 ## Get an organization
 
-Organizations are hosted on the central server and keyed by email domain:
-anyone who signs in with a verified email on your claimed domain joins your
-organization automatically. 
+You can sign in to HypAware Cloud and sync your own hosts without setting
+up a team.
 
-> To get an organization,
-> [get in touch](https://hyperparam.app/contact) and we will set one up for your
-> domain.
+For a team, [contact us](https://hypaware.ai/contact?utm_medium=docs) to set up
+an organization for your email domain. Teammates join automatically when they
+sign in with a verified email address from that domain.
 
-## Run the setup
+## Connect a host
 
-HypAware requires **Node 22.12 or newer**. Run:
-
-```sh
-npx hypaware
-```
-
-This opens a guided setup. The first question is how you want to collect
-agent logs. Select **Collect shared agent logs**.
-
-<img src="images/wizard-fork.png" width="480" alt="The setup's opening choice, with Collect shared agent logs selected: Collect shared agent logs, Collect agent logs locally, or Quit.">
+[Install HypAware](CLI.md#install-hypaware), then select **Sync to the cloud**
+in `hyp setup`. If you already configured local capture, either run `hyp setup`
+and switch to Cloud collection, or run `hyp remote login` to enroll without
+repeating the client choices.
 
 ## Follow the prompts
 
@@ -36,81 +26,122 @@ doing at each one:
 1. **Sign in.** A browser window opens for sign-in with your work email.
    This completes enrollment: your organization is identified from your
    email address, so there are no codes or keys to enter.
-2. **Set up recording.** One question with two answers. **Record and sync
-   everything** takes the default answer to every remaining question: the
-   setup names the tools it is about to configure, then states what it will
-   record, what will sync to your team, and how new folders are handled,
-   and continues without stopping again. **Customize** asks you those three
-   questions instead, one screen at a time (see below).
-3. **Complete any additional setup.** A tool whose adapter needs one more
-   step asks for it here, and you may defer any of them; the remaining setup
-   continues. No tool shipped today asks for one, so on a stock install this
-   step passes silently. Claude Desktop is now a regular collection choice:
-   selecting it schedules transcript imports and performs no additional app
-   setup.
+2. **Set up recording.** **Record and sync everything** accepts the default
+   client and folder choices. Setup names the clients, explains what will be
+   recorded and shared, and continues. **Customize** lets you change those
+   choices on the screens below. Later prompts can still ask about importing
+   history, uploading now, GitHub sign-in, or trying a skill.
 
 ### If you choose Customize
 
-Three screens, in order, each with the same answer already selected that
-**Record and sync everything** would have taken. A bare enter accepts what
-is on the screen, so inspecting everything and changing nothing is one
-keypress per screen.
+Two main screens let you choose clients and folder handling. Enter accepts the
+selected answer. Depending on the client choices, setup can also ask for consent
+to import existing history.
 
-1. **Choose what to collect.** A checklist of AI tools. Tools your team
-   manages are already selected and locked; tools detected on your machine
-   are pre-selected as well.
-2. **Choose what syncs.** Which of your own additions sync to the server
-   and which stay on this machine. Team-managed tools always sync and are
-   shown read-only.
-3. **Choose how new folders are handled.** Whether recording in a project
+1. **Choose what to collect and sync.** A checklist of AI clients. Clients your
+   team manages are selected and locked. On a first run, detected clients are
+   preselected; reconfiguration starts from your saved choices. A checked client
+   is recorded here *and* shared with HypAware Cloud. Completing setup clears any
+   standing `hyp privacy client <name> local-only` for the clients on it;
+   canceling before setup commits preserves those settings.
+   `hyp privacy client` changes them afterward.
+2. **Choose how new folders are handled.** Whether recording in a project
    you have not worked in before syncs without asking, or asks you the
    first time. This is a standing preference; `hyp privacy folders`
    changes it later.
-
-<img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as managed by your fleet and a detected tool pre-checked.">
-
-<!--
-  Screenshots need re-shooting on a real terminal: issue #1146 tracks it.
-  (Not #1139, which the PR that wrote this note closes.)
-  There is no image of the "Set up recording" question, which is now the
-  screen most people see after signing in, and wizard-pick.png predates
-  the step being renumbered, so its position line may not match what the
-  checklist shows today. The prose above was verified against the code;
-  the images were not.
--->
 
 ### After the questions
 
 Both answers arrive here, so this applies whichever one you gave.
 
-The setup then installs the components, imports your recent AI history, and
-reports when the first upload will occur.
+Setup installs the components, imports eligible history, and offers to upload
+recordings. Review the first-sync behavior below before accepting that prompt.
 
-> **Nothing is uploaded immediately.** The first upload is held until
-> tonight, leaving a window to review what will be shared. Before then, run
-> the `hypaware-privacy` skill to see what would be shared and keep any
-> private material off the record. See
-> [what HypAware records and how to control it](./PRIVACY.md).
+## Review before the first upload
+
+> **Caution:** Setup asks `Upload now? [Y/n]`. Choose **n** to review your recordings first.
+> Pressing Enter chooses Yes and uploads them immediately.
+
+On your first browser sign-in, HypAware normally pauses uploads until 11:59pm
+local time. If fewer than four hours remain, it waits until 11:59pm the next day.
+Check `hyp status` to confirm that uploads are paused and see the deadline.
+
+Before that deadline, ask Claude Code or Codex to run the `hypaware-privacy`
+skill. It helps you review recordings and choose which folders to keep private.
+See [privacy review](./PRIVACY.md#review-before-the-first-cloud-sync).
+
+When you are ready, run `hyp sync` to upload. Otherwise, uploads start when the
+pause expires.
+
+This review period applies to first-time browser sign-in. Signing in again or
+using `hyp join` with a token does not pause uploads. For unattended installs,
+set privacy controls before connecting; see [headless setup](integrations/ci-and-headless.md).
 
 ## Verify the setup
 
+<!-- agent: Run hyp status and tell me whether recording is active, what is shared with my team versus kept local, and whether a first-sync deadline is pending. -->
 ```sh
 hyp status
 ```
 
 This reports whether recording is active, what is shared with your team
-versus kept on your machine, and any pending upload deadline. To disconnect
-and undo the setup, run `hyp leave`.
+versus kept on your host, and any pending first-sync deadline. To disconnect
+from Cloud while retaining local capture, use [disconnect a host](#disconnect-a-host).
 
-## Explore what was recorded
+## Send recordings now
 
-Because setup imports your recent history, there is data to query
-immediately. Two queries to start with:
+Sync runs on a schedule. To inspect the destinations and exclusions before
+sending eligible recordings now:
 
 ```sh
-# Which providers and models you use, by volume
-hyp query sql "select provider, model, count(*) n from ai_gateway_messages group by 1,2 order by n desc"
-
-# Sessions and message parts per day, most recent first
-hyp query sql "select date, count(distinct session_id) sessions, count(*) parts from ai_gateway_messages group by 1 order by 1 desc limit 14"
+hyp sync --dry-run
+hyp sync
 ```
+
+`hyp sync` asks for confirmation. Local-only and ignored data remain excluded.
+An all-destination confirmed sync can release the first-sync review hold early.
+For replaying previously withheld history, see the
+[sync reference](CLI_REFERENCE.md#hyp-sync).
+
+<!-- @ref LLP 0471#manual-work: manual progress belongs to one awaited destination at a time -->
+The command sends to selected destinations one at a time and waits for each
+result. Cloud upload progress counts acknowledged rows; `Finishing` can still
+mean HypAware is saving export progress locally. Read each destination's final
+result before ending the process. A partial result can leave work to retry;
+the exit code alone does not prove every destination finished.
+
+<!-- @ref LLP 0471#daemon-work: scheduled destinations and daemon health work progress independently -->
+Scheduled exports run independently by destination. A slow Cloud upload does
+not make the local file export wait for it, or hold up recording recovery
+sweeps and status updates. Repeated schedule fires for a busy destination
+request one follow-up run rather than building a queue of exports.
+
+For timeouts, unresolved warnings and retained error history, see
+[export troubleshooting](TROUBLESHOOTING.md#an-export-or-team-sync-is-missing).
+
+## Manage remote access
+
+```sh
+hyp remote list
+hyp remote login <target> --no-forward
+```
+
+`--no-forward` grants query access without enrolling this host for sync.
+Use `hyp remote add` to configure
+another target; see the [remote reference](CLI_REFERENCE.md#manage-remote-query-targets)
+for its URL and credential options. For remote searches and SQL, see
+[queries](QUERYING.md#query-a-remote-target).
+
+## Disconnect a host
+
+```sh
+hyp leave
+```
+
+This stops Cloud sync and configuration pull, reverses organization-managed
+client attaches, and removes the sync credential. Local configuration,
+recordings, the background service, and remote query sign-ins remain. Use
+`hyp remote remove <name>` separately to remove a query target and its stored
+sign-in. For deletion, see
+[privacy](PRIVACY.md#deleting-what-was-already-recorded); for uninstall, see
+[setup](CLI.md#uninstall).

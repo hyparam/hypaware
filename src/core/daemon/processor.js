@@ -22,7 +22,7 @@ function send(message) {
 // A lost supervisor must not leave an orphan cache writer behind.
 process.on('disconnect', () => { process.exit(0) })
 
-/** @param {RunDaemonOptions & { type?: string, endpoint?: { host: string, port: number } }} msg */
+/** @param {RunDaemonOptions & { type?: string, endpoint?: { host: string, port: number }, recordingGeneration?: string }} msg */
 async function control(msg) {
   if (msg.type === 'processing.stop') {
     if (!handle) process.exit(0)
@@ -42,9 +42,10 @@ async function control(msg) {
     const { createCaptureReceiver, setGatewayProcessTransport } = await import(PROCESS_TRANSPORT_ENTRY)
     setGatewayProcessTransport({
       role: 'processing',
+      generation: msg.recordingGeneration,
       endpoint: msg.endpoint,
-      receive(onExchange) {
-        const receiver = createCaptureReceiver({ onExchange, send })
+      receive(onExchange, refreshRecording, settleVerification) {
+        const receiver = createCaptureReceiver({ onExchange, send, refreshRecording, settleVerification })
         process.on('message', receiver.message)
         send({ type: 'gateway.capture_ready' })
         return async () => {
@@ -70,7 +71,7 @@ async function control(msg) {
 // as none of its business must not cost a promise per frame. The guards are
 // still set before the async hop, so a repeat start cannot race through.
 process.on('message', input => {
-  const msg = /** @type {RunDaemonOptions & { type?: string, endpoint?: { host: string, port: number } }} */ (input)
+  const msg = /** @type {RunDaemonOptions & { type?: string, endpoint?: { host: string, port: number }, recordingGeneration?: string }} */ (input)
   if (msg.type === 'processing.stop') {
     stopping = true
     void control(msg)

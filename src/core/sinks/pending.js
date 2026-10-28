@@ -1,6 +1,7 @@
 // @ts-check
 
 import { instanceWatermarkStateDir } from './incremental.js'
+import { sinkInstanceName } from '../registry/sinks.js'
 import { pluginStateDir } from '../runtime/paths.js'
 import { createSinkWatermarkStore } from './watermarks.js'
 
@@ -16,7 +17,7 @@ import { createSinkWatermarkStore } from './watermarks.js'
  * exact total. Generous, because the answer is worth having; bounded, because
  * this runs in front of a prompt somebody is waiting at.
  */
-const DEFAULT_ROW_LIMIT = 200000
+const DEFAULT_ROW_LIMIT = 2000000
 
 /**
  * Wall-clock budget for the whole preview. The row limit bounds work, this
@@ -53,7 +54,12 @@ const CLOCK_CHECK_EVERY = 512
  *    throwing: the plan is the consent surface, so a preview that could not run
  *    at all resolves to `unknown` for every destination rather than propagating
  *    and taking the whole prompt down with it. `previewPendingRows` never
- *    rejects.
+ *    rejects. Every input it reads - the clock, both contract objects, the
+ *    options - is read *inside* that recovery: a value somebody else owns can
+ *    refuse to be read at all, not only to answer (issue #2096).
+ *    `args.handles` is the exception, read before the guard and iterated
+ *    inside its recovery, because the recovery is a backfill over the
+ *    destinations and has nothing to fill without them.
  *
  * Nothing here writes: no flush, no mkdir, no watermark move. An un-flushed
  * spool therefore holds rows this cannot see, which is why a partition with
@@ -73,18 +79,23 @@ const CLOCK_CHECK_EVERY = 512
  * @returns {Promise<Map<string, PendingVolume>>}
  */
 export async function previewPendingRows(args) {
-  const { handles, query, storage, stateRoot, config } = args
-  const rowLimit = args.rowLimit ?? DEFAULT_ROW_LIMIT
-  const budgetMs = args.budgetMs ?? DEFAULT_BUDGET_MS
-  const now = args.now ?? (() => Date.now())
-  const start = now()
+  // Read outside the guard below, because that guard's recovery is a backfill
+  // over the destinations and has nothing to fill without them. Everything
+  // else `args` carries is read inside it.
+  const { handles } = args
 
+  // Keyed by the registry's record of each instance's name, for the reason
+  // the watermark join below reads it: a handle is a live object its owner
+  // still holds through `ctx.sinks.get`, so `handle.instanceName` is the
+  // owner's to replace with an accessor, and the `catch` below re-reads its
+  // key to decide what still needs backfilling - so the live property made
+  // the recovery path that produces `unknown` the one that raised, against
+  // rule 3 above (issue #2092). The record keys better too: `instantiate`
+  // validated it and the registry is keyed by it, so every handle this kernel
+  // built gets its own entry where two accessors answering alike collapse
+  // into one.
   /** @type {Map<string, PendingVolume>} */
   const out = new Map()
-  if (!query?.listDatasets || !storage?.readRowsSince) {
-    for (const handle of handles) out.set(handle.instanceName, unknownVolume('no cache reader is available'))
-    return out
-  }
 
   // Rule 3 taken to its conclusion. Everything below reaches into plugin-owned
   // registries and on-disk state, so "it threw" is a live outcome, and the
@@ -92,10 +103,32 @@ export async function previewPendingRows(args) {
   // count reached, then backfill the rest as `unknown`: a destination with no
   // answer is disclosed as having none, never omitted from the plan and never
   // rendered as zero.
+  //
+  // It opens above the inputs, not below them: anchoring the budget (`now()`)
+  // and probing the two contract objects for the methods the count needs are
+  // themselves reads of values somebody else owns. `activation.js` hands
+  // `ctx.query` and `ctx.storage` to plugins raw and unfaceted and the loader
+  // imports plugin entrypoints into this same realm, so
+  // `Object.defineProperty(ctx.query, 'listDatasets', { get() { throw } })` is
+  // a property write away, and a read that refuses is the same outcome as the
+  // call that refuses one frame later - which this already reports as a cache
+  // it could not list (issue #2096).
+  // @ref LLP 0420#split [constrained-by]: ctx.query and ctx.storage are the raw registries on the activation context by decision, not oversight, so a hostile accessor on either is reachable and the guard must open above these reads
   try {
+    const { query, storage, stateRoot, config } = args
+    const rowLimit = args.rowLimit ?? DEFAULT_ROW_LIMIT
+    const budgetMs = args.budgetMs ?? DEFAULT_BUDGET_MS
+    const now = args.now ?? (() => Date.now())
+    const start = now()
+
+    if (!query?.listDatasets || !storage?.readRowsSince) {
+      for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('no cache reader is available'))
+      return out
+    }
+
     const discovered = await discoverCountablePartitions({ query, storage, config })
     if (discovered.partitions.length === 0 && discovered.failures > 0) {
-      for (const handle of handles) out.set(handle.instanceName, unknownVolume('the cache partitions could not be listed'))
+      for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('the cache partitions could not be listed'))
       return out
     }
 
@@ -144,14 +177,15 @@ export async function previewPendingRows(args) {
       // @ref LLP 0325#spent-is-spent [implements]: a budget discovery already overran puts every deadline in the past at every n, not only where the share survives rounding
       const deadline = Math.min(scanStart + remaining * (i + 1) / handles.length, start + budgetMs)
       out.set(
-        handle.instanceName,
+        sinkInstanceName(handle),
         await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })
       )
     }
   } catch (err) {
     const reason = `the count failed: ${describeError(err)}`
     for (const handle of handles) {
-      if (!out.has(handle.instanceName)) out.set(handle.instanceName, unknownVolume(reason))
+      const name = sinkInstanceName(handle)
+      if (!out.has(name)) out.set(name, unknownVolume(reason))
     }
   }
   return out
@@ -307,8 +341,23 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
   /** @type {ReturnType<typeof createSinkWatermarkStore>} */
   let watermarks
   try {
+    // The instance name comes from the registry's record, because that is the
+    // key the *writer* uses: every shipped sink builds its export store as
+    // `createInstanceWatermarkStore({ paths: sinkCtx.paths, instanceName:
+    // sinkCtx.name })`, and `sinkCtx.name` is the name `instantiate` validated
+    // and keyed the handle under. A handle is a live object its owner still
+    // holds through `ctx.sinks.get`, so `handle.instanceName` is a second
+    // spelling of the join `instanceWatermarkStateDir` exists to keep single:
+    // the preview reads a directory the export never advances, so a caught-up
+    // destination discloses the machine's whole retained history as pending,
+    // and a rename onto a live neighbour reads that neighbour's cursor and
+    // understates instead (issue #2089). `handle.plugin` beside it is the
+    // owner-rewritable field class tracked by issue #2059: the registry does
+    // record it, as `ownerOf(instanceName)`, but that record is registry-scoped
+    // and this function is handed a handle and a `stateRoot`, never the
+    // registry.
     watermarks = createSinkWatermarkStore({
-      stateDir: instanceWatermarkStateDir(pluginStateDir(stateRoot, handle.plugin), handle.instanceName),
+      stateDir: instanceWatermarkStateDir(pluginStateDir(stateRoot, handle.plugin), sinkInstanceName(handle)),
     })
   } catch (err) {
     return unknownVolume(describeError(err))
@@ -470,9 +519,36 @@ function unknownVolume(reason) {
 }
 
 /**
+ * The reason text rule 3 puts on a destination, derived from a value the
+ * failing plugin chose. Guarded, because this is called from inside the
+ * `catch` that implements rule 3, so a raise here is a raise out of the
+ * recovery itself and there is nothing further out to catch it: `String(err)`
+ * runs the thrown value's own `toString`, and `err instanceof Error` runs a
+ * proxy's own `getPrototypeOf`. A value that refuses coercion made the
+ * recovery path the one that raised and the whole preview reject, which is
+ * issue #2092's shape one hop further out: `handle.sink` is read outside
+ * `countForHandle`'s own guard, so an owner's accessor throws the owner's
+ * value straight in here.
+ *
+ * The coercion happens *inside* the guard, on `err.message` too, because
+ * returning the message unexamined only moved the raise one frame out.
+ * `message` is a writable own property on every `Error`, so a plugin can
+ * throw an `Error` (passing `instanceof`) whose `message` is the value that
+ * refuses to be described, and then this returned a non-string against its own
+ * annotation and the caller's "the count failed" template did the coercion
+ * outside any guard. The other caller is worse, not better: it stores the
+ * result as a `reason` and resolves, so the raise lands in `renderVolume` and
+ * the plan dies at print time with the preview reporting success. Coercing
+ * inside makes the annotation true by construction: `String` either yields a
+ * string or throws, and a throw is caught.
+ *
  * @param {unknown} err
  * @returns {string}
  */
 function describeError(err) {
-  return err instanceof Error ? err.message : String(err)
+  try {
+    return String(err instanceof Error ? err.message : err)
+  } catch {
+    return 'the error could not be described'
+  }
 }

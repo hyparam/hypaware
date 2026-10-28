@@ -1,12 +1,14 @@
 // @ts-check
 
 import os from 'node:os'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { ensureAiGatewayStorageContracts } from '../../ai-gateway/src/storage_contracts.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../ai-gateway/src/session_command.js'
+import { registerSkills } from '../../../skills/index.js'
 import { attachOpenCodePlugin } from './attach.js'
 import { createOpenCodeBackfillProvider } from './backfill.js'
 import { OPENCODE_CONFIG_SECTION, opencodeListenPort, validateOpenCodeConfig } from './config.js'
@@ -33,7 +35,7 @@ export async function activate(ctx) {
 
   ensureAiGatewayStorageContracts(ctx)
   const localPolicyPath = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
-  const ignoredSessions = new Set()
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
   ctx.backfills.register(createOpenCodeBackfillProvider({
     localOnlyListPath: localPolicyPath,
     ignoredSessions,
@@ -48,6 +50,7 @@ export async function activate(ctx) {
   })
 
   registerSessionCommands(ctx)
+  registerSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
 
   // @ref LLP 0306#endpoint-free-clients [implements]: install a local plugin
   //   file through the intrinsic registry, with no gateway endpoint
@@ -116,7 +119,7 @@ function registerSessionCommands(ctx) {
   for (const command of [
     {
       name: 'session ignore',
-      summary: 'Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)',
+      summary: 'Stop recording this AI session on every local recorder (saved until explicitly unignored)',
       usage: 'hyp session ignore [session-id] [--json]',
       run: runSessionIgnore,
     },

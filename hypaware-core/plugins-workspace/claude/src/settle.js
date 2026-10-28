@@ -7,7 +7,10 @@ import {
   assignTranscriptIdentity,
   defaultClaudeProjectsDir,
   indexTranscriptEntries,
+  loadAgentMeta,
+  minimizedRawFrame,
   withToolUseResult,
+  withTurnOrigin,
 } from './transcripts.js'
 import { sharedTranscriptLoader } from './transcript-cache.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
@@ -17,7 +20,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { SessionContextRecord, TranscriptEntry, TranscriptLoader } from './types.js'
+ * @import { SessionContextRecord, SettledIdRewrite, TranscriptEntry, TranscriptLoader } from './types.js'
  * @import { ResolveResult, UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -48,6 +51,13 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
  * is the wrong one. A now-known cwd that resolves to `ignore` marks the row
  * for removal (the `USAGE_POLICY_DROP` sentinel at its position); otherwise
  * the row is enriched.
+ *
+ * A third pass re-derives a sidechain row's `claude.spawned_by_tool_use_id`
+ * (issue #1794): the `agent-<id>.meta.json` sidecar is written just after the
+ * exchange finalizes, so a subagent's opening exchange can project without it,
+ * and no later lane fills it in - the backfill materializer skips its own copy
+ * of a row whose native `part_id` this pass already committed.
+ *
  * @ref LLP 0085 [implements]: flush-time settlement may DROP a late-resolved
  * `ignore` row, not only upgrade identity - the capture-seam-or-settlement
  * enforcement of the `.hypignore` guarantee when cwd was unknown at capture.
@@ -83,6 +93,10 @@ export function createClaudeSettlementEnricher(opts) {
   return {
     name: 'claude-settlement',
     clientName,
+    // @ref LLP 0560#wants [implements]: the gateway's selection cannot see a
+    // provenance gap on a row whose identity is final, so the plugin names
+    // those rows itself. Answered from the row alone; nothing is stored.
+    wants: wantsProvenance,
     /**
      * @param {Record<string, unknown>[]} rows
      * @param {DatasetSettleContext} _ctx
@@ -111,6 +125,10 @@ export function createClaudeSettlementEnricher(opts) {
 
       /** @type {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} */
       const out = rows.slice()
+      // Pre-settlement id -> where that row ended the pass, read by the relink
+      // pass below. Allocated only by a pass that rewrites an identity.
+      /** @type {Map<string, SettledIdRewrite> | undefined} */
+      let rewrittenIds
       for (const [sessionId, indices] of bySession) {
         // Transcript path is session-level (stable across a session's context
         // records), so the session-latest record is fine for the transcript
@@ -124,33 +142,135 @@ export function createClaudeSettlementEnricher(opts) {
         // settlement for the session (that would re-open the #258 hole).
         /** @type {ReturnType<typeof indexTranscriptEntries> | undefined} */
         let index
-        try {
-          const entries = await transcriptLoader.load({
-            projectsDir,
-            sessionId,
-            transcriptPath: sessionRecord?.transcript_path,
-          })
-          index = indexTranscriptEntries(entries)
-        } catch {
-          index = undefined
+        // Resolve the transcript only for a group that actually reads the
+        // index, i.e. one holding a match_key row. `planSettleSelection` also
+        // admits match_key-less rows, among them pure null-cwd rows (the
+        // #258 race) and successor rows whose `previous_message_id` names a
+        // fallback row's `message_id` (LLP 0441). A group made only of those
+        // would otherwise resolve a whole transcript to build an index
+        // nothing consults - which, with `homeDir` armed below, is a Desktop
+        // container sweep whose cost grows with every conversation the
+        // machine has held. `.some` short-circuits, so a group that does need
+        // the index pays one extra key read. An OTEL prompt row owed its
+        // provenance (LLP 0560) needs the index too, for its uuid lookup; in
+        // an agentic batch the tool rows' match keys already forced the load.
+        if (indices.some((i) => readMatchKey(rows[i].attributes) || wantsProvenance(rows[i]))) {
+          try {
+            const entries = await transcriptLoader.load({
+              projectsDir,
+              sessionId,
+              transcriptPath: sessionRecord?.transcript_path,
+              // Fallback roots for attached-Desktop sessions, whose sandboxed
+              // transcripts live outside projectsDir (see loadTranscript).
+              // Absent them the wire row keeps its fallback hash id forever, so
+              // the sweep's uuid copy of the same turn stands as a second row.
+              // @ref LLP 0133#attribution [implements]: the claude adapter
+              // scans the 3p container roots wherever it reads a transcript.
+              homeDir: opts.homeDir,
+            })
+            index = indexTranscriptEntries(entries)
+          } catch {
+            index = undefined
+          }
         }
+
+        // Sidechain provenance, re-derived (issue #1794). The projector stamps
+        // `claude.spawned_by_tool_use_id` from the `agent-<id>.meta.json`
+        // sidecar, which the CLI writes a moment after the exchange finalizes,
+        // so a subagent's opening exchange can project without it. Nothing else
+        // recovers it: once this pass commits the row under its native
+        // `part_id`, the backfill materializer's pre-write `part_id` dedupe
+        // skips its own copy, the one that does carry the attribute.
+        //
+        // Load lazily after identity resolution: a tool-id match can discover
+        // a sidechain whose OTEL event carried no agent.name. The hook's
+        // transcript_path still roots the walk, at most once per session.
+        /** @type {Map<string, { tool_use_id: string }> | undefined} */
+        let agentMeta
 
         for (const i of indices) {
           let row = rows[i]
           // 1. Identity upgrade: only fallback rows carry a match_key, and only
-          // once the transcript line has landed. The content-key index is
-          // agent-scoped, so settle a row only against its own thread's entries
-          // (row.agent_id; empty = main loop) - a subagent row must not match a
-          // main-loop entry's uuid and vice versa.
+          // once the transcript line has landed. OTEL's agent.name is not the
+          // transcript's agentId. Tool ids recover the owning thread without
+          // conflating same-name agents; content-only matching stays scoped.
           if (index) {
             const key = readMatchKey(row.attributes)
             if (key) {
-              const match = index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
-              if (match && match.provider_uuid) row = upgradeRow(row, match)
+              const toolMatch = findOtelToolMatch(row, index)
+              // A uuid-less tool match knows less than the content key: fall
+              // through instead of letting `match.provider_uuid` below reject
+              // the row outright. Keep this a ternary, not `??`: `toolMatch`
+              // is truthy even without a `provider_uuid`, so `??` would never
+              // reach the content-key fallback.
+              const match = toolMatch?.provider_uuid
+                ? toolMatch
+                : index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
+              if (match && match.provider_uuid) {
+                const agentBefore = stringValue(row.agent_id)
+                const idBefore = stringValue(row.message_id)
+                row = upgradeRow(row, match, match === toolMatch)
+                // A row chained to `idBefore` now names an id no row carries.
+                // `previous` is the link this row was projected with, which is
+                // what a successor inherits when the upgrade above moved this
+                // row out of that successor's thread.
+                // @ref LLP 0440#successors-follow-the-rewrite [implements]: the
+                // rewrite invalidates a successor's link, scope change or not
+                if (idBefore && idBefore !== match.provider_uuid) {
+                  (rewrittenIds ??= new Map()).set(idBefore, {
+                    id: match.provider_uuid,
+                    agent: stringValue(row.agent_id),
+                    previous: rows[i].previous_message_id,
+                  })
+                }
+                // The chain was built at projection time over
+                // (thread, agent_id), so a row whose agent_id just moved holds
+                // a link computed in a scope it no longer belongs to: with two
+                // same-name subagents, a pointer into the other agent's turns.
+                // The transcript knows the predecessor in the new scope, and
+                // names the same line the backfill sweep chains this row to.
+                // @ref LLP 0439#relink-from-the-transcript [implements]: the
+                // scope change is what re-links the row, and the only thing
+                // that does
+                if (stringValue(row.agent_id) !== agentBefore) {
+                  const previous = index.previousUuid(match.provider_uuid)
+                  row.previous_message_id = previous ? [previous] : []
+                }
+              }
+            } else if (wantsProvenance(row)) {
+              // 1b. Provenance late-stamp for an OTEL prompt row. The row was
+              // born with the transcript line's uuid, so this is a key lookup,
+              // not a match: no content key, no agent scope, and no identity
+              // rewrite. Only the line the row already names can be the source,
+              // and only a `user` line is accepted (a role mismatch would mean
+              // the uuid is not what the event said it was).
+              // @ref LLP 0560#provenance-at-flush [implements]: identity stays
+              // final at ingest; the line's provenance lands at flush
+              // @ref LLP 0560#identity-untouched [constrained-by]: message_id,
+              // part_id, previous_message_id, agent_id and is_sidechain are
+              // not copied, so the chain and twin logic never see this row move
+              const line = index.byUuid.get(/** @type {string} */ (stringValue(row.provider_uuid)))
+              if (line && line.role === 'user') row = stampProvenance(row, line)
             }
           }
 
-          // 2. cwd late-resolution (issue #258). Independent of the transcript.
+          // 2. Sidechain provenance late-stamp. After the upgrade: that rebuilds
+          // `attributes` from the transcript match, so stamping first would be
+          // overwritten.
+          if (sessionRecord?.transcript_path && wantsSpawnedBy(row)) {
+            // @ref LLP 0133#attribution [implements]: provenance and identity
+            // resolve through the same Desktop container roots.
+            agentMeta ??= loadAgentMeta({
+              transcriptPath: sessionRecord.transcript_path,
+              projectsDir,
+              sessionId,
+              homeDir: opts.homeDir,
+            })
+            const toolUseId = agentMeta.get(stringValue(row.agent_id) ?? '')?.tool_use_id
+            if (toolUseId) row = stampSpawnedBy(row, toolUseId)
+          }
+
+          // 3. cwd late-resolution (issue #258). Independent of the transcript.
           // Select the context record by the row's OWN time, not the session's
           // latest: a session can change dirs, and these null-cwd rows are the
           // opening exchanges, so the newest record can carry a different cwd
@@ -177,6 +297,7 @@ export function createClaudeSettlementEnricher(opts) {
           out[i] = settled.row
         }
       }
+      if (rewrittenIds) relinkRewrittenPredecessors(out, rewrittenIds)
       return out
     },
   }
@@ -364,30 +485,170 @@ function hashCwd(cwd) {
 }
 
 /**
+ * The call and its result share a tool id but have different native uuids.
+ * Look up the row's own kind, never the parent's Agent/Task spawn metadata.
+ * Keep legacy multi-block lines on the content path: a standalone OTEL block
+ * cannot inherit their uuid with its unchanged zero part_index.
+ *
+ * @ref LLP 0026#decision [implements]: native single-block transcript identity
+ * @ref LLP 0435#tool-id-first [implements]: the tool id joins the two sides
+ *   without the agent scope, which `agent.name` can never satisfy
+ * @param {Record<string, unknown>} row
+ * @param {ReturnType<typeof indexTranscriptEntries>} index
+ */
+function findOtelToolMatch(row, index) {
+  if (row.conversation_source !== 'claude_code') return undefined
+  const id = stringValue(row.tool_call_id)
+  if (!id) return undefined
+  const match = row.role === 'assistant' && row.part_type === 'tool_call'
+    ? index.byToolCallId.get(id)
+    : row.role === 'user' && row.part_type === 'tool_result'
+      ? index.byToolUseId.get(id)
+      : undefined
+  return Array.isArray(match?.content) && match.content.length === 1 ? match : undefined
+}
+
+/**
  * Produce an upgraded copy of a fallback row: native identity from the
  * transcript line, a recomputed `part_id`, and a cleaned `attributes`
  * (fallback marker and the now-spent match_key removed).
  *
  * @param {Record<string, unknown>} row
  * @param {TranscriptEntry} match
+ * @param {boolean} [resolveAgent]
  * @returns {Record<string, unknown>}
  */
-function upgradeRow(row, match) {
+function upgradeRow(row, match, resolveAgent = false) {
   const upgraded = { ...row }
   assignTranscriptIdentity(upgraded, match)
+  // A resolved transcript line replaces the event's provisional label: a
+  // replayed parent tool in a subagent body belongs to the main loop, so its
+  // label is cleared as well as replaced for sidechains. But this tool-id
+  // lookup also admits the proxy lane (conversation_source 'claude_code' is
+  // the claude-cli User-Agent, not an OTEL marker), whose agent_id comes from
+  // the authoritative x-claude-code-agent-id request header. A line that
+  // claims `isSidechain: true` while naming no agentId knows less than that
+  // header, so the row keeps its own agent_id in that case - clearing it
+  // would also drop the row's spawned_by late-stamp below. is_sidechain
+  // still follows the line: assignTranscriptIdentity above already copied
+  // it, and true is what such a row already carried.
+  // @ref LLP 0435#line-arbitrates [implements]: the matched line decides
+  // attribution, except where it knows less than the row already did
+  if (resolveAgent && (match.agent_id || !match.is_sidechain)) {
+    upgraded.agent_id = match.agent_id
+    upgraded.is_sidechain = match.is_sidechain ?? (match.agent_id ? true : undefined)
+  }
   const partIndex = upgraded.part_index
   if (typeof upgraded.message_id === 'string' &&
       (typeof partIndex === 'number' || typeof partIndex === 'bigint')) {
     upgraded.part_id = `${upgraded.message_id}#${partIndex}`
   }
   const cleaned = cleanAttributes(upgraded.attributes)
-  // Stamp the transcript's structured tool result like the live match
-  // path does, but never at the cost of an attributes column we could
-  // not parse into an object.
+  // Stamp the transcript's structured tool result and turn provenance
+  // like the live match path does, but never at the cost of an
+  // attributes column we could not parse into an object.
   upgraded.attributes = isPlainObject(cleaned) || cleaned === undefined
-    ? withToolUseResult(cleaned, match)
+    ? withTurnOrigin(withToolUseResult(cleaned, match), match)
     : cleaned
   return upgraded
+}
+
+/**
+ * Point a settled row's `previous_message_id` at where its predecessor ended
+ * the pass, wherever the link still names the id that predecessor started it
+ * with.
+ *
+ * The gateway chained these rows at projection time, when a predecessor whose
+ * transcript line had not landed yet carried a fallback hash id. The identity
+ * upgrade above renames that predecessor to its native uuid, leaving the link
+ * naming an id no row carries, and settlement strips `claude.match_key` from
+ * both rows, which is the flag the LLP 0027 re-settle sweep selects on: without
+ * this the dangling pointer is permanent. LLP 0439 re-derives the link for a
+ * row whose OWN scope moved; this is the same repair seen from the other end,
+ * for the row whose PREDECESSOR moved or was renamed under it.
+ *
+ * A successor that already had native identity and a cwd asks for nothing
+ * else in this pass; it is in the group only so this can reach it.
+ *
+ * @ref LLP 0440#batch-local [constrained-by]: only ids this pass rewrote are
+ * in hand, so a link into an earlier batch is out of reach and stays as it is
+ * @ref LLP 0441#select-the-successors [constrained-by]: this repair reaches
+ * exactly the rows `planSettleSelection` hands the enricher
+ *
+ * @param {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} out
+ * @param {Map<string, SettledIdRewrite>} rewrittenIds
+ */
+function relinkRewrittenPredecessors(out, rewrittenIds) {
+  // Identity settles per PART, and every part row of one message carries
+  // that message's `message_id`. A message whose other parts matched
+  // nothing is still in the batch under the old id, so nothing was
+  // invalidated: without this a successor is spliced past a row that is
+  // still there.
+  for (const entry of out) {
+    if (entry === USAGE_POLICY_DROP) continue
+    const row = /** @type {Record<string, unknown>} */ (entry)
+    const id = stringValue(row.message_id)
+    if (id) rewrittenIds.delete(id)
+  }
+  if (rewrittenIds.size === 0) return
+
+  for (let i = 0; i < out.length; i++) {
+    const entry = out[i]
+    if (entry === USAGE_POLICY_DROP) continue
+    const row = /** @type {Record<string, unknown>} */ (entry)
+    const previous = row.previous_message_id
+    if (!Array.isArray(previous) || previous.length === 0) continue
+    const agent = stringValue(row.agent_id)
+    /** @type {unknown[] | undefined} */
+    let relinked
+    for (let j = 0; j < previous.length; j++) {
+      const id = previous[j]
+      const moved = typeof id === 'string' ? rewrittenIds.get(id) : undefined
+      if (!moved) continue
+      relinked ??= previous.slice()
+      relinked[j] = followRewrite(moved, agent, rewrittenIds)
+    }
+    // Copy only the rows that actually moved: an untouched row must stay the
+    // object the caller handed in, as every other pass here does. A predecessor
+    // that left the thread with nothing behind it drops out, leaving the empty
+    // array that says "earliest turn of this thread we know of".
+    if (relinked) {
+      out[i] = { ...row, previous_message_id: relinked.filter((id) => id !== undefined) }
+    }
+  }
+}
+
+/**
+ * Where a link into `moved` should point, for a row in agent thread `agent`.
+ *
+ * A predecessor still in the row's thread is simply renamed. One that settled
+ * into a DIFFERENT thread has left this chain, and following it would rebuild
+ * the cross-agent pointer LLP 0439 removed, so the row inherits that
+ * predecessor's own projection-time link instead: the merged chain is a list,
+ * and taking a node out of a list joins its neighbours. That neighbour may
+ * itself have moved, hence the walk, bounded by the map size so a cycle cannot
+ * spin. Links are 0- or 1-element (LLP 0026 #consequences), so `[0]` is the
+ * whole of one.
+ *
+ * @ref LLP 0440#successors-follow-the-rewrite [implements]: follow a renamed
+ * predecessor, splice past one that changed thread
+ *
+ * @param {SettledIdRewrite} moved
+ * @param {string | undefined} agent
+ * @param {Map<string, SettledIdRewrite>} rewrittenIds
+ * @returns {string | undefined}
+ */
+function followRewrite(moved, agent, rewrittenIds) {
+  let current = moved
+  for (let hops = rewrittenIds.size; hops > 0; hops--) {
+    if (current.agent === agent) return current.id
+    const prior = Array.isArray(current.previous) ? current.previous[0] : undefined
+    if (typeof prior !== 'string') return undefined
+    const next = rewrittenIds.get(prior)
+    if (!next) return prior
+    current = next
+  }
+  return undefined
 }
 
 /**
@@ -417,13 +678,131 @@ function cleanAttributes(attributes) {
   return next
 }
 
-/** @param {unknown} attributes */
-function readMatchKey(attributes) {
+/**
+ * Whether a row is a Claude OTEL user-prompt row that has not yet taken its
+ * transcript line's provenance: role `user`, native `provider_uuid`, captured
+ * on the OTEL lane, no fallback match key, and no `claude.origin` yet. The
+ * last clause is what makes a stamp idempotent under any later pass that
+ * revisits committed rows; at flush each row is seen once anyway.
+ *
+ * Cheap checks first: role and uuid reject tool-result and assistant rows,
+ * and every non-OTEL row, before the attributes column is parsed.
+ *
+ * @ref LLP 0560#wants [implements]: the predicate is the plugin's, answered
+ * from the row alone, and nothing about the answer is written anywhere
+ * @param {Record<string, unknown>} row
+ */
+function wantsProvenance(row) {
+  if (row.role !== 'user') return false
+  if (!stringValue(row.provider_uuid)) return false
+  const attributes = row.attributes
+  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
+  if (!isPlainObject(parsed)) return false
+  const gateway = parsed.gateway
+  if (!isPlainObject(gateway) || gateway.source !== 'otel') return false
+  const claude = parsed.claude
+  if (!isPlainObject(claude)) return true
+  return claude.match_key === undefined && claude.origin === undefined
+}
+
+/**
+ * Copy of `row` carrying the provenance its transcript `line` records and the
+ * row lacks: `origin` and `prompt_source` into `attributes.claude`, and the
+ * transcript-only columns (`entrypoint`, `user_type`, `permission_mode`, the
+ * parent links, the native type/subtype, the compaction fields, the minimized
+ * frame) only where the row holds nothing. Identity and attribution columns
+ * are deliberately not copied. Returns the input row itself when the line adds
+ * nothing, so a no-op stamp is not mistaken for a change, and leaves an
+ * attributes column it could not parse exactly as it was (see
+ * {@link stampSpawnedBy}).
+ *
+ * @ref LLP 0560#provenance-at-flush [implements]
+ * @param {Record<string, unknown>} row
+ * @param {TranscriptEntry} line
+ * @returns {Record<string, unknown>}
+ */
+function stampProvenance(row, line) {
+  const attributes = row.attributes
+  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
+  if (attributes !== undefined && attributes !== null && !isPlainObject(parsed)) return row
+  const next = { ...row }
+  let changed = false
+  /** @param {string} column @param {unknown} value */
+  const fill = (column, value) => {
+    if (value === undefined || value === null || value === '') return
+    const current = next[column]
+    if (current !== undefined && current !== null && current !== '') return
+    next[column] = value
+    changed = true
+  }
+  fill('parent_uuid', line.parent_uuid)
+  fill('logical_parent_uuid', line.logical_parent_uuid)
+  fill('entrypoint', line.entrypoint)
+  fill('user_type', line.user_type)
+  fill('permission_mode', line.permission_mode)
+  fill('provider_type', line.provider_type)
+  fill('provider_subtype', line.provider_subtype)
+  fill('is_compact_summary', line.is_compact_summary)
+  fill('compact_metadata', line.compact_metadata)
+  fill('raw_frame', minimizedRawFrame(line))
+  const base = isPlainObject(parsed) ? parsed : undefined
+  const stamped = withTurnOrigin(base, line)
+  if (stamped !== base) {
+    next.attributes = stamped
+    changed = true
+  }
+  return changed ? next : row
+}
+
+/**
+ * Whether a row is a sidechain row still missing its spawning tool call, the
+ * only shape the sidecar lookup can serve. Checks `agent_id` first: a main-loop
+ * row is rejected without parsing its attributes at all.
+ *
+ * @param {Record<string, unknown>} row
+ */
+function wantsSpawnedBy(row) {
+  if (!stringValue(row.agent_id)) return false
+  return readClaudeAttr(row.attributes, 'spawned_by_tool_use_id') === undefined
+}
+
+/**
+ * Copy of `row` carrying `claude.spawned_by_tool_use_id`, merged into whatever
+ * `attributes` already holds. Conservative like {@link upgradeRow}: an
+ * attributes column we could not parse into an object is left exactly as it
+ * was rather than replaced with a fresh object that would lose it.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {string} toolUseId
+ * @returns {Record<string, unknown>}
+ */
+function stampSpawnedBy(row, toolUseId) {
+  const attributes = row.attributes
+  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
+  if (attributes !== undefined && attributes !== null && !isPlainObject(parsed)) return row
+  const base = isPlainObject(parsed) ? parsed : {}
+  const claude = isPlainObject(base.claude) ? base.claude : {}
+  return { ...row, attributes: { ...base, claude: { ...claude, spawned_by_tool_use_id: toolUseId } } }
+}
+
+/**
+ * Read one string-valued key out of a row's `attributes.claude`, accepting the
+ * column as an object or as the JSON string a spooled row can carry.
+ *
+ * @param {unknown} attributes
+ * @param {string} key
+ */
+function readClaudeAttr(attributes, key) {
   const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
   if (!isPlainObject(parsed)) return undefined
   const claude = parsed.claude
   if (!isPlainObject(claude)) return undefined
-  return stringValue(claude.match_key)
+  return stringValue(claude[key])
+}
+
+/** @param {unknown} attributes */
+function readMatchKey(attributes) {
+  return readClaudeAttr(attributes, 'match_key')
 }
 
 /**

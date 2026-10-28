@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { compareStrings } from 'hypaware/core/util'
 
 /**
  * @import {
@@ -140,9 +141,7 @@ export async function listAntigravityConversations(appDataDir, opts = {}) {
     }
   }
 
-  const summaries = Array.from(byId.values()).sort((a, b) =>
-    a.conversation_id < b.conversation_id ? -1 : a.conversation_id > b.conversation_id ? 1 : 0
-  )
+  const summaries = Array.from(byId.values()).sort((a, b) => compareStrings(a.conversation_id, b.conversation_id))
   return { available: true, summaries }
 }
 

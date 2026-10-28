@@ -5,6 +5,7 @@
 **Systems:** Plugins, Sources
 **Author:** Brendan / Claude
 **Date:** 2026-08-10
+**Extended-by:** LLP 0444 (SQLite transcript storage and explicit storage-failure privacy handling)
 **Related:** LLP 0158 (#decision: the one reader whose filename contract this widens), LLP 0157 (#backfill: the provider that scans), LLP 0161 (#backfill-provider: native identity straight off the record), LLP 0170, LLP 0172 (#lane-b-sweep: the sweep that runs the same scan on a cadence), LLP 0193; issue #694
 
 > Extends [LLP 0158](./0158-one-reader-for-openclaw-session-jsonl.decision.md).

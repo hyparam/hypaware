@@ -139,12 +139,15 @@ export async function activate(ctx) {
     audience: 'everyday',
     summary: 'Show credential mode and sign-in state',
     usage: 'hyp client claude-account status',
-    help: 'Reports which credential this fleet uses (org_key or subscription) and whether this '
-      + 'machine can present one: for org_key, whether the key resolves from config or the named '
-      + "env var; for subscription, whether a token is stored and when it expires. It prints the "
+    help: 'Reports which credential this fleet uses (org_key or subscription) and whether one is '
+      + 'on hand: for org_key, whether the key is set in config or in the named env var; for '
+      + "subscription, whether a token is stored and the expiry recorded with it. It prints the "
       + 'token fingerprint only, never the token, so the output is safe to paste into a bug report. '
-      + "Exits nonzero when no credential resolves, so it doubles as a check before 'hyp "
-      + "client claude-desktop install'.",
+      + 'Exits 1 when nothing is on hand (no stored token, or an org_key that neither config nor '
+      + 'the named env var supplies) and when a stored token cannot be read. A stored token exits '
+      + '0 even past its recorded expiry: this reports presence, not resolvability, so a 0 is no '
+      + "promise that the credential will resolve or that 'hyp client claude-desktop install' will "
+      + 'complete.',
     run: async (argv, cmdCtx) => runStatus(cmdCtx, config, mode, stateDir),
   })
 

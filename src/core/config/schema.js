@@ -1,12 +1,13 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
-import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { LOCAL_CONFIG_BASENAME, localConfigPath } from '../runtime/paths.js'
 import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
-import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
+import { BUILTIN_REMOTE_ALIASES, BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
+import { parseRedactionConfig } from '../sinks/redaction.js'
 
 /**
  * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../hypaware-plugin-kernel-types.js'
@@ -24,7 +25,7 @@ import { isPlainObject } from '../util/json_util.js'
  * The path is `<HYP_HOME>/hypaware-config.json` per design §Setup
  * and Onboarding.
  */
-export const CONFIG_BASENAME = 'hypaware-config.json'
+export const CONFIG_BASENAME = LOCAL_CONFIG_BASENAME
 
 /**
  * Resolve the default config path under `HYP_HOME`. Callers that want
@@ -35,7 +36,7 @@ export const CONFIG_BASENAME = 'hypaware-config.json'
  * @returns {string}
  */
 export function defaultConfigPath(hypHome) {
-  return path.join(hypHome, CONFIG_BASENAME)
+  return localConfigPath(hypHome)
 }
 
 /**
@@ -54,13 +55,64 @@ export function defaultConfigPath(hypHome) {
  * and `collectHypAwareStatus` both read it, and the daemon must not import
  * the CLI walkthrough to ask one question about a config document.
  *
+ * One document is carved out of the plugins-array rule: the exact grep-only
+ * config the v1.36.0 migration's central-only lane forged. No composer output
+ * ever matched it, so classifying it answer-less discards no user's answer;
+ * see {@link isForgedGrepOnlyConfig}.
+ *
  * @ref LLP 0277#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
+ * @ref LLP 0426#readers-classify [implements]: the forged population heals at this read, not by a config rewrite
  * @param {HypAwareV2Config} config
  * @returns {boolean}
  */
 export function configRecordsPickAnswer(config) {
-  return Array.isArray(config.plugins)
+  return Array.isArray(config.plugins) && !isForgedGrepOnlyConfig(config)
 }
+
+/**
+ * Whether a config is, at the shape level, the one document the v1.36.0
+ * grep migration's central-only lane wrote as a machine's whole local
+ * config: `version: 2` plus a one-entry `plugins` array holding exactly
+ * `{ name: '@hypaware/grep' }`, and nothing else.
+ *
+ * Nothing the product writes matches it. The picker's composer has written
+ * `query.cache.retention.default_days` into every config since its first
+ * release, grep only enters a composed plugin list by riding
+ * `@hypaware/ai-gateway` (its manifest's `compose_with`), the attach lane
+ * appends client-adapter entries onto an existing config, and the migration
+ * itself declines the one append that would produce this document
+ * (grep_migration.js). So a match is the pre-fix migration's write or a
+ * hand-authored document that reproduces it, and reading it as "never
+ * picked" discards no answer a product surface recorded.
+ *
+ * The test is over the recognized keys, not the bytes, and not over whatever
+ * document shape the caller happens to hold: `collectHypAwareStatus` asks
+ * over `parseConfigShape` output (where `parsePluginEntry` has already
+ * dropped any entry key it does not recognize), while the pick lane asks
+ * over a raw `JSON.parse` of the same file. So the entry check ignores
+ * exactly the keys the parser drops, and a decorating key the parser keeps
+ * (`enabled`, `config`, or a pin field) defeats the match in both lanes:
+ * one document, one classification, whichever reader asks.
+ *
+ * @ref LLP 0426#forged-shape [implements]: exactly { version: 2, plugins: [{ name: grep }] } and nothing else is migration residue, not an answer
+ * @param {HypAwareV2Config} config
+ * @returns {boolean}
+ */
+export function isForgedGrepOnlyConfig(config) {
+  if (config.version !== 2) return false
+  if (!Array.isArray(config.plugins) || config.plugins.length !== 1) return false
+  const entry = config.plugins[0]
+  if (entry.name !== '@hypaware/grep') return false
+  const decorated = Object.keys(entry).some((key) => key !== 'name' && RECOGNIZED_PLUGIN_ENTRY_KEYS.has(key))
+  if (decorated) return false
+  return Object.keys(config).every((key) => key === 'version' || key === 'plugins')
+}
+
+// The entry keys `parsePluginEntry` keeps. A raw entry key outside this set
+// is one the parser drops, invisible to the reader holding the parsed
+// document, so the forged-shape test ignores it too. Extend this set and
+// `parsePluginEntry` together.
+const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'version', 'artifact_hash', 'source', 'recording'])
 
 /**
  * Guard a write to the user-owned **local** config layer
@@ -69,24 +121,25 @@ export function configRecordsPickAnswer(config) {
  * `init` still can). Behaviour:
  *
  * - **No existing config** → proceed.
- * - **Existing config, non-interactive** (no `confirmOverwrite`): refuse
- *   unless `force`; on `force`, copy the current file to
- *   `hypaware-config.json.bak-<ts>` first, then proceed.
- * - **Existing config, interactive** (`confirmOverwrite` supplied):
- *   prompt; on confirm, back up and proceed; on decline, abort.
+ * - **Existing config**: refuse unless `force`; on `force`, copy the
+ *   current file to `hypaware-config.json.bak-<ts>` first, then proceed.
+ *   An attended setup run passes `force`: the user just answered every
+ *   question, and the backup keeps the old file (LLP 0433).
  *
  * The helper only decides + backs up; the caller performs the write.
+ * With `dryRun` it only decides: the answer (and the `backupPath` a real
+ * run would write) is the same, and nothing is copied.
  *
  * @param {{
  *   targetPath: string,
  *   force?: boolean,
- *   confirmOverwrite?: (targetPath: string) => Promise<boolean>,
  *   now?: () => number,
+ *   dryRun?: boolean,
  * }} args
  * @returns {Promise<LocalConfigWriteGuard>}
- * @ref LLP 0031#local-layer-writers [implements]: init overwrite safety: refuse / --force / backup (non-interactive), prompt (interactive)
+ * @ref LLP 0031#local-layer-writers [implements]: init overwrite safety: refuse / --force / backup
  */
-export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwrite, now }) {
+export async function prepareLocalConfigWrite({ targetPath, force, now, dryRun }) {
   let exists = true
   try {
     await fs.access(targetPath)
@@ -95,12 +148,7 @@ export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwr
   }
   if (!exists) return { proceed: true }
 
-  if (confirmOverwrite) {
-    const confirmed = await confirmOverwrite(targetPath)
-    if (!confirmed) {
-      return { proceed: false, message: `keeping existing config at ${targetPath}` }
-    }
-  } else if (!force) {
+  if (!force) {
     return {
       proceed: false,
       message:
@@ -111,7 +159,7 @@ export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwr
 
   const stamp = new Date((now ?? Date.now)()).toISOString().replace(/[:.]/g, '-')
   const backupPath = `${targetPath}.bak-${stamp}`
-  await fs.copyFile(targetPath, backupPath)
+  if (!dryRun) await fs.copyFile(targetPath, backupPath)
   return { proceed: true, backupPath }
 }
 
@@ -304,6 +352,8 @@ export function parseConfigShape(value) {
     }
   }
 
+  const redaction = parseRedactionConfig(root.redaction, errors)
+
   for (const key of Object.keys(root)) {
     if (!RECOGNIZED_TOP_KEYS.has(key)) {
       errors.push({ pointer: `/${key}`, message: `unrecognized top-level key '${key}'` })
@@ -319,10 +369,11 @@ export function parseConfigShape(value) {
   if (query) config.query = query
   if (disambiguate) config.disambiguate = disambiguate
   if (autoUpdate !== undefined) config.auto_update = autoUpdate
+  if (redaction !== undefined) config.redaction = redaction
   return { ok: true, config }
 }
 
-const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update'])
+const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'redaction'])
 
 /**
  * Build the kernel `ConfigRegistry`. Plugins call `registerSection`
@@ -411,6 +462,10 @@ export function createConfigRegistry() {
 /* ---------- helpers ---------- */
 
 /**
+ * The keys this parser recognizes are mirrored in
+ * `RECOGNIZED_PLUGIN_ENTRY_KEYS` (the forged-shape test); extend both
+ * together.
+ *
  * @param {unknown} entry
  * @param {string} pointer
  * @param {ValidationError[]} errors
@@ -429,6 +484,9 @@ function parsePluginEntry(entry, pointer, errors) {
   if (obj.enabled !== undefined && typeof obj.enabled !== 'boolean') {
     errors.push({ pointer: `${pointer}/enabled`, message: 'enabled must be a boolean when present' })
   }
+  if (obj.recording !== undefined && typeof obj.recording !== 'boolean') {
+    errors.push({ pointer: `${pointer}/recording`, message: 'recording must be a boolean when present' })
+  }
   if (obj.config !== undefined && !isPlainObject(obj.config)) {
     errors.push({ pointer: `${pointer}/config`, message: 'config must be an object when present' })
   }
@@ -442,6 +500,7 @@ function parsePluginEntry(entry, pointer, errors) {
   /** @type {PluginConfigInstance} */
   const out = { name: obj.name }
   if (typeof obj.enabled === 'boolean') out.enabled = obj.enabled
+  if (typeof obj.recording === 'boolean') out.recording = obj.recording
   if (isPlainObject(obj.config)) out.config = /** @type {JsonObject} */ (obj.config)
   if (isNonEmptyString(obj.version)) out.version = obj.version
   if (isNonEmptyString(obj.artifact_hash)) out.artifact_hash = obj.artifact_hash
@@ -577,12 +636,13 @@ function parseQueryConfig(obj, pointer, errors) {
   // default_remote must name a defined target, so `--remote` with no arg
   // never silently resolves to nothing. A shipped built-in target counts as
   // defined, so a config may default to the central server without also
-  // restating its URL under `remotes`.
+  // restating its URL under `remotes`; so does a built-in's old name.
   if (obj.default_remote !== undefined) {
     const defaultName = obj.default_remote
     const defined =
       (result.remotes && Object.prototype.hasOwnProperty.call(result.remotes, defaultName)) ||
-      Object.prototype.hasOwnProperty.call(BUILTIN_REMOTES, defaultName)
+      Object.prototype.hasOwnProperty.call(BUILTIN_REMOTES, defaultName) ||
+      Object.prototype.hasOwnProperty.call(BUILTIN_REMOTE_ALIASES, defaultName)
     if (!isNonEmptyString(defaultName)) {
       errors.push({ pointer: `${pointer}/default_remote`, message: 'query.default_remote must be a non-empty string' })
     } else if (!defined) {
@@ -694,8 +754,13 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       // threshold set above that bound. A partition would converge and still
       // read as due on every growth tick, forever, with no error anywhere.
       // Compared on EFFECTIVE values: a config that raises only the average
-      // is paired with the default batch bound, which is the likelier way to
-      // write this mistake.
+      // is paired with the default batch bound, and one that lowers only the
+      // batch bound is paired with the default average and is rejected too.
+      //
+      // @ref LLP 0540#avg-below-batch-scope: the rule guards routine
+      // source-table compaction (the growing layout). The generation-swap
+      // writer rolls files at `target_file_bytes`, and that higher ceiling is
+      // deliberately not a reason to compare against it.
       //
       // Silent when either key already failed its own check: the written
       // value is gone, so the pairing this rule would report is with a

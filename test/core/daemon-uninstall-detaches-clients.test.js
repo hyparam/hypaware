@@ -69,7 +69,8 @@ test('the uninstall sweep reverses every attached client, claude and codex alike
     const claudeSettings = JSON.parse(await fs.readFile(claudePath, 'utf8'))
     assert.equal(claudeSettings.env.ANTHROPIC_BASE_URL, 'https://mine.example')
     assert.equal('_hypaware' in claudeSettings, false)
-    assert.equal(await fs.readFile(codexPath, 'utf8'), 'model_provider = "openai"\n')
+    assert.match(await fs.readFile(codexPath, 'utf8'), /^model_provider = "openai"\n/)
+    assert.match(await fs.readFile(codexPath, 'utf8'), /\[model_providers.hypaware\]/)
 
     // Quiet: the summary is the caller's to render, so the sweep itself says
     // nothing on stdout.
@@ -180,7 +181,7 @@ test('a never-attached openclaw config with its own providers is an honest no-op
 })
 
 test('uninstall detaches openclaw on a machine whose daemon was already stopped', async () => {
-  // The sequence README teaches (stop, then uninstall): a stale status file
+  // Stop, then uninstall: a stale status file
   // survives on disk, no pid, nothing to ask. The undo must not care - its
   // record is the entry's own signature, not any daemon fact (LLP 0210).
   const home = await stageHome()

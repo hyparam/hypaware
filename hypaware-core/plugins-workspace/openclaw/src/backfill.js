@@ -1,6 +1,5 @@
 // @ts-check
 
-import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import {
@@ -9,27 +8,30 @@ import {
   projectedExchangeItem,
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
+import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import {
   defaultOpenclawAgentsDir,
-  readOpenclawSessionHeader,
-  readOpenclawSessionMessages,
+  listOpenclawSessions,
+  openclawMessageEnvelope,
+  readOpenclawSession,
   SESSION_FILE_NAME,
 } from './session_file.js'
-import { compareStrings, isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
+import { normalizeBlockKind } from './match_key.js'
+import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillPlan, BackfillPlanContext, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { OpenclawSessionHeader, OpenclawSessionMessage } from './types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { OpenclawSessionHeader, OpenclawSessionMessage } from '../../../../hypaware-core/plugins-workspace/openclaw/src/types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
 /**
  * `@hypaware/openclaw` backfill provider.
  *
- * Imports local OpenClaw history into `ai_gateway_messages` by reading the
- * session JSONL OpenClaw writes under
- * `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`, through the one
+ * Imports local OpenClaw history into `ai_gateway_messages` from SQLite
+ * session windows and legacy `agents/<agentId>/sessions/<sessionId>.jsonl`,
+ * through the one
  * LLP 0158 reader (`session_file.js`) the settlement enricher also uses (R9:
  * neither consumer may hold its own parse).
  *
@@ -175,27 +177,24 @@ export function createOpenclawBackfillProvider(opts) {
     // @ref LLP 0172#lane-b-sweep [implements]: opt-in Lane B scheduling
     // metadata, tunable via `backfill.sweep_cron` (R7), defaulting to
     // every 5 minutes when the config key is absent.
-    sweep: { cron: resolveSweepCron(config) },
-    /**
-     * @param {BackfillPlanContext} _ctx
-     * @returns {Promise<BackfillPlan | undefined>}
-     */
-    async plan(_ctx) {
-      const files = await listSessionFiles(agentsDir)
-      return {
-        estimated_items: files.length,
-        sources: files.map((file) => file.filePath),
-      }
-    },
+    // @ref LLP 0041#consent-gating [constrained-by]: `backfill.on_join: false` is
+    // the operator's suppression of automatic history import, and the sweep is
+    // automatic history import, so the opt-out contributes no `sweep` field,
+    // as the Claude adapter does (LLP 0358#scheduled-sweep).
+    ...(sweepEnabled(config) ? { sweep: { cron: resolveSweepCron(config) } } : {}),
     async *run(ctx) {
-      yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver, config })
+      try { yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver, config }) }
+      catch (error) {
+        ctx.log.warn('openclaw.backfill.storage_unavailable', { component: COMPONENT, operation: 'backfill.scan', agents_dir: agentsDir, status: 'error', error_kind: 'storage_unavailable', error: errMessage(error) })
+        throw error
+      }
     },
   }
 }
 
 /**
- * Scan every session file under `agents/*<slash>sessions/*.jsonl`, project each
- * one, and yield a single `ai_gateway.projected_exchange` item per session.
+ * Scan native SQLite sessions and legacy JSONL, project each session,
+ * and yield a single `ai_gateway.projected_exchange` item per session.
  *
  * One item per session, not one per message record: the materializer allocates
  * a fresh conversation state per `materialize()` call, so splitting a session
@@ -241,16 +240,36 @@ async function* runOpenclawBackfill(args) {
   let sessionsIgnored = 0
   let messagesProjected = 0
   let recordsExcluded = 0
+  let sessionsFailed = 0
+  /** @type {unknown} */
+  let firstFailure
 
-  for (const { agentId, filePath } of await listSessionFiles(agentsDir, quiesceBeforeMs)) {
+  for await (const source of listOpenclawSessions(agentsDir)) {
+    const { agentId, path: filePath } = source
     if (ctx.signal?.aborted) break
+    if (source.mtimeMs > quiesceBeforeMs) continue
     filesSeen += 1
 
-    // The LLP 0158 reader answers `undefined` for a missing, empty, or
-    // non-header first line: "this file establishes nothing," which is a
-    // session that is simply not gated, never a throw.
-    const header = readOpenclawSessionHeader(filePath)
-    const sessionId = header?.sessionId ?? sessionIdFromPath(filePath)
+    // Preserve the early directory-policy gate before reading hot payloads.
+    // SQLite failures are explicit; an empty window has no messages yet.
+    let session
+    try {
+      session = await readOpenclawSession(source, { quietBeforeMs: quiesceBeforeMs, includeMessages: header => !header?.cwd || resolver.resolve(header.cwd).class !== 'ignore' })
+    } catch (error) {
+      // @ref LLP 0444#failure-policy [constrained-by]: the run still fails
+      // visibly, but only once every READABLE session has been yielded.
+      // Discovery is ordered, so throwing here would permanently strand
+      // every session sorted after the broken one - and the privacy drop
+      // this policy authorises at flush is paid for by exactly that
+      // recovery import, which must therefore still happen.
+      sessionsFailed += 1
+      firstFailure ??= error
+      log.warn('openclaw.backfill.session_read_failed', { component: COMPONENT, operation: 'backfill.scan', source_path: filePath, session_id: source.sessionId, status: 'error', error_kind: 'session_read_failed', error: errMessage(error) })
+      continue
+    }
+    if (!session) continue
+    const { header, messages: records } = session
+    const sessionId = header?.sessionId ?? source.sessionId ?? sessionIdFromPath(filePath)
 
     // @ref LLP 0161#backfill-provider [implements]: a usable `cwd` is resolved
     // once per FILE and an `ignore` verdict skips the whole file. The cwd is
@@ -289,22 +308,6 @@ async function* runOpenclawBackfill(args) {
           ...(policy.governedBy ? { governed_by: policy.governedBy } : {}),
         },
       }
-      continue
-    }
-
-    /** @type {OpenclawSessionMessage[]} */
-    let records
-    try {
-      records = await readOpenclawSessionMessages(filePath)
-    } catch (err) {
-      log.warn('openclaw.backfill.session_read_failed', {
-        component: COMPONENT,
-        operation: 'backfill.scan',
-        source_path: filePath,
-        status: 'error',
-        error_kind: 'session_read_failed',
-        error: errMessage(err),
-      })
       continue
     }
 
@@ -373,8 +376,11 @@ async function* runOpenclawBackfill(args) {
     sessions_ignored: sessionsIgnored,
     messages_projected: messagesProjected,
     records_excluded: recordsExcluded,
-    status: 'ok',
+    sessions_failed: sessionsFailed,
+    status: sessionsFailed > 0 ? 'error' : 'ok',
+    ...(sessionsFailed > 0 ? { error_kind: 'session_read_failed' } : {}),
   })
+  if (firstFailure !== undefined) throw firstFailure
 }
 
 /**
@@ -422,22 +428,33 @@ async function* runOpenclawBackfill(args) {
  * whole file, so a `--since`/`--until` cut can never sever a record from its
  * own turn's anchor and change its attribution.
  *
+ * Tool-call arguments are bound the same way: each kept `toolResult` carries
+ * the arguments of the latest call with its id that precedes it in the file,
+ * window or not. A result inside the window keeps its call's arguments when
+ * the call itself fell just outside it (#2001); a later call reusing the id,
+ * or a CLI-backend turn's call, never rebinds it.
+ *
  * @ref LLP 0193#decision [implements]: two-rung CLI-backend denylist over the
  * turn-scoped `(provider, api)` pair; unknown still fails closed
  * @ref LLP 0147 [constrained-by]: CLI-backend turns are the sibling adapters'
  * territory, so backfill excludes them from projection
  * @param {OpenclawSessionMessage[]} records
  * @param {{ sinceMs?: number, untilMs?: number }} [window]
- * @returns {{ projectable: Array<{ record: OpenclawSessionMessage, provider: string }>, excludedByProvider: Map<string, number> }}
+ * @returns {{ projectable: Array<{ record: OpenclawSessionMessage, provider: string, toolInput?: unknown }>, excludedByProvider: Map<string, number> }}
  */
 function partitionByBackend(records, window = {}) {
-  /** @type {Array<{ record: OpenclawSessionMessage, provider: string }>} */
+  /** @type {Array<{ record: OpenclawSessionMessage, provider: string, toolInput?: unknown }>} */
   const projectable = []
   /** @type {Map<string, number>} */
   const excludedByProvider = new Map()
+  /** @type {Map<string, unknown>} */
+  const callInputs = new Map()
   const effective = effectiveBackends(records)
 
   for (let i = 0; i < records.length; i++) {
+    const backend = effective[i]
+    const kept = backend?.provider !== undefined && !isCliBackend(backend)
+    if (kept) seedToolInputs(records[i], callInputs)
     // Same keep-if-unstamped rule as scan_util's `filterByWindow`: a record
     // with no parseable timestamp is kept rather than silently dropped.
     const ts = records[i].timestampMs
@@ -445,9 +462,13 @@ function partitionByBackend(records, window = {}) {
       if (window.sinceMs !== undefined && ts < window.sinceMs) continue
       if (window.untilMs !== undefined && ts > window.untilMs) continue
     }
-    const backend = effective[i]
-    if (backend?.provider !== undefined && !isCliBackend(backend)) {
-      projectable.push({ record: records[i], provider: backend.provider })
+    if (kept) {
+      const toolInput = toolResultInput(records[i], callInputs)
+      projectable.push({
+        record: records[i],
+        provider: /** @type {string} */ (backend?.provider),
+        ...(toolInput !== undefined ? { toolInput } : {}),
+      })
       continue
     }
     // `unknown` keeps a record with no attributable backend at all countable
@@ -456,6 +477,38 @@ function partitionByBackend(records, window = {}) {
     excludedByProvider.set(key, (excludedByProvider.get(key) ?? 0) + 1)
   }
   return { projectable, excludedByProvider }
+}
+
+/**
+ * The arguments of the call a `toolResult` record answers, as bound so far in
+ * file order, or `undefined` for any other record.
+ *
+ * @param {OpenclawSessionMessage} record
+ * @param {Map<string, unknown>} callInputs
+ * @returns {unknown}
+ */
+function toolResultInput(record, callInputs) {
+  if (record.role !== 'toolResult') return undefined
+  const id = stringValue(openclawMessageEnvelope(record.record).toolCallId)
+  return id ? callInputs.get(id) : undefined
+}
+
+/**
+ * Record each tool call's arguments by call id, in either spelling the
+ * session file may use (`toolCall`/`arguments` or canonical `tool_use`/`input`).
+ *
+ * @param {OpenclawSessionMessage} record
+ * @param {Map<string, unknown>} callInputs
+ */
+function seedToolInputs(record, callInputs) {
+  if (!Array.isArray(record.content)) return
+  for (const block of record.content) {
+    if (!isPlainObject(block) || typeof block.type !== 'string') continue
+    if (normalizeBlockKind(block.type) !== 'tool_use') continue
+    const id = stringValue(block.id)
+    const input = block.arguments ?? block.input
+    if (id && input !== undefined) callInputs.set(id, input)
+  }
 }
 
 /**
@@ -577,7 +630,7 @@ function siblingCoverageFor(provider) {
  *   agentId: string,
  *   sessionId: string,
  *   header: OpenclawSessionHeader | undefined,
- *   projectable: Array<{ record: OpenclawSessionMessage, provider: string }>,
+ *   projectable: Array<{ record: OpenclawSessionMessage, provider: string, toolInput?: unknown }>,
  *   clientName: string,
  * }} args
  * @returns {AiGatewayProjectedExchange | undefined}
@@ -588,8 +641,8 @@ function projectedExchangeFromSession(args) {
   const messages = []
   /** @type {string | undefined} */
   let provider
-  for (const { record, provider: recordProvider } of projectable) {
-    const message = projectedMessageFromRecord(record)
+  for (const { record, provider: recordProvider, toolInput } of projectable) {
+    const message = projectedMessageFromRecord(record, toolInput)
     if (!message) continue
     // Every row carries its own turn's provider: `recordProvider` is the
     // smeared effective backend (partitionByBackend), so the user prompt and
@@ -634,13 +687,21 @@ function projectedExchangeFromSession(args) {
  * Project one session-file message record into a normalized gateway message,
  * or `undefined` when it carries no projectable content.
  *
- * `content` passes through as the session file wrote it. It is not rewritten
- * into Anthropic wire block shapes: the session file is the authoritative
- * record here, and the two properties R11 actually depends on (the native
- * `message_id`, and the block count and order that fix each part's
- * `part_index`) pass through unchanged either way. A rewrite would be a second
- * copy of the block-kind knowledge `match_key.js` already owns, which is the
- * drift LLP 0150 documented shipping twice.
+ * `content` passes through as the session file wrote it, with two exceptions,
+ * both for tool traffic the gateway projector only recognizes in wire shape
+ * (#2001): an assistant `toolCall` block (or a synonym `match_key.js` folds to
+ * `tool_use`) becomes `{ type: "tool_use", id, name, input }`, and a
+ * `toolResult` record, whose `toolCallId`/`toolName`/`isError` live on the
+ * message rather than on a block, becomes one `tool_result` block carrying
+ * them, plus the paired call's arguments as `input`. Left verbatim, both
+ * landed with a literal `toolCall` part type and null tool columns. Call
+ * blocks keep their count and order, and a result record becomes exactly the
+ * one block the live lane writes for it (several output blocks fold into it,
+ * and an empty identified result still yields it), so each part's
+ * `part_index`, and therefore the `part_id` R11 rests on, is the one a
+ * settled live row carries; the
+ * block-kind table stays `match_key.js`'s, not a second copy here (the drift
+ * LLP 0150 documented shipping twice).
  *
  * `previous_message_id` is deliberately NOT set. The gateway chains each
  * message to its immediate predecessor in the same thread when a projector
@@ -648,9 +709,11 @@ function projectedExchangeFromSession(args) {
  * too; supplying a second copy here could only differ from it.
  *
  * @param {OpenclawSessionMessage} message
+ * @param {unknown} toolInput a `toolResult`'s paired call arguments, as
+ *   `partitionByBackend` bound them
  * @returns {AiGatewayProjectedMessage | undefined}
  */
-function projectedMessageFromRecord(message) {
+function projectedMessageFromRecord(message, toolInput) {
   // Through the LLP 0158 reader's normalized fields, never `message.record`:
   // OpenClaw nests `role`/`content` under the record line's `message`
   // envelope, so the top-level read this used to do found neither and dropped
@@ -658,16 +721,21 @@ function projectedMessageFromRecord(message) {
   const rawRole = stringValue(message.role)
   if (!rawRole) return undefined
   const content = message.content
+  // An identified tool result is one block however empty its output: the
+  // live lane writes a `tool_result` part for it, so it is never dropped here.
+  const toolResult = rawRole === 'toolResult' && stringValue(openclawMessageEnvelope(message.record).toolCallId) !== undefined
   // The gateway drops a message whose content normalizes to no blocks; doing it
   // here keeps `messages_projected` honest about what was actually emitted.
-  if (typeof content === 'string' ? content.length === 0 : !Array.isArray(content) || content.length === 0) {
+  if (!toolResult && (typeof content === 'string' ? content.length === 0 : !Array.isArray(content) || content.length === 0)) {
     return undefined
   }
 
   /** @type {AiGatewayProjectedMessage} */
   const projected = {
     role: normalizeRole(rawRole),
-    content: /** @type {any} */ (content),
+    content: /** @type {any} */ (rawRole === 'toolResult'
+      ? [toolResultBlock(message, content, toolInput)]
+      : Array.isArray(content) ? content.map(toolUseBlock) : content),
   }
   // Native identity, verbatim. This single line is what R11 rests on: the row
   // never reaches `computeMessageId`'s fallback hash, so it lands on the same
@@ -683,6 +751,48 @@ function projectedMessageFromRecord(message) {
   const attributes = messageAttributes(message)
   if (attributes) projected.attributes = attributes
   return projected
+}
+
+/**
+ * A session-file tool-call block in the wire `tool_use` shape the gateway
+ * projector reads tool columns from; any other block passes through as-is.
+ *
+ * @param {unknown} block
+ * @returns {unknown}
+ */
+function toolUseBlock(block) {
+  if (!isPlainObject(block) || typeof block.type !== 'string' || block.type === 'tool_use') return block
+  if (normalizeBlockKind(block.type) !== 'tool_use') return block
+  const input = block.arguments ?? block.input
+  /** @type {Record<string, unknown>} */
+  const out = { type: 'tool_use' }
+  if (block.id !== undefined) out.id = block.id
+  if (block.name !== undefined) out.name = block.name
+  if (input !== undefined) out.input = input
+  return out
+}
+
+/**
+ * A `toolResult` record folded into the one `tool_result` block the live
+ * lane writes for the same turn, carrying the message-level fields.
+ *
+ * @param {OpenclawSessionMessage} message
+ * @param {unknown} content
+ * @param {unknown} toolInput
+ * @returns {Record<string, unknown>}
+ */
+function toolResultBlock(message, content, toolInput) {
+  const envelope = openclawMessageEnvelope(message.record)
+  const id = stringValue(envelope.toolCallId)
+  /** @type {Record<string, unknown>} */
+  const out = { type: 'tool_result' }
+  if (id) out.tool_use_id = id
+  const name = stringValue(envelope.toolName)
+  if (name) out.name = name
+  out.content = content
+  if (typeof envelope.isError === 'boolean') out.is_error = envelope.isError
+  if (toolInput !== undefined) out.input = toolInput
+  return out
 }
 
 /**
@@ -769,68 +879,6 @@ function setNumber(target, key, source, aliases) {
 }
 
 /**
- * Every `agents/<agentId>/sessions/*.jsonl` under `agentsDir`, rotated names
- * included ({@link SESSION_FILE_NAME}), sorted so a run is deterministic. A
- * missing or unreadable directory at any level is an empty
- * result, never a throw: a machine with no OpenClaw install must scan to zero
- * sessions, not fail the whole `hyp backfill` run.
- *
- * `quiesceBeforeMs` (LLP 0172#45-the-quiesce-window, LLP 0170#decision),
- * when given, excludes any file whose `mtimeMs` is more recent than it: a
- * session still inside the quiesce window is skipped for THIS run, not
- * permanently, so a later run (once the file's mtime has aged past the
- * cutoff, or the daemon sweep's next tick) picks it back up.
- *
- * The parameter is optional for exactly one caller: `plan()`, which counts and
- * names what is there rather than importing it, so a window that hides files
- * from an estimate would only misreport. Every `run()` applies the window,
- * whichever surface drives it - `hyp backfill --client openclaw`, the
- * onboarding finale, and the daemon sweep all enter through the same `run()`,
- * and `runOpenclawBackfill` computes the cutoff once per run before this is
- * ever called. There is no "non-sweep, unfiltered" import path.
- *
- * @param {string} agentsDir
- * @param {number} [quiesceBeforeMs] Exclusive upper bound on `mtimeMs`.
- * @returns {Promise<Array<{ agentId: string, filePath: string }>>}
- */
-async function listSessionFiles(agentsDir, quiesceBeforeMs) {
-  /** @type {Array<{ agentId: string, filePath: string }>} */
-  const out = []
-  for (const agentId of await readDirNames(agentsDir, 'dir')) {
-    const sessionsDir = path.join(agentsDir, agentId, 'sessions')
-    for (const name of await readDirNames(sessionsDir, 'file')) {
-      if (!SESSION_FILE_NAME.test(name)) continue
-      const filePath = path.join(sessionsDir, name)
-      if (quiesceBeforeMs !== undefined && !(await isOutsideQuiesceWindow(filePath, quiesceBeforeMs))) continue
-      out.push({ agentId, filePath })
-    }
-  }
-  out.sort((a, b) => compareStrings(a.filePath, b.filePath))
-  return out
-}
-
-/**
- * Whether `filePath`'s mtime is old enough to clear the quiesce window: its
- * `mtimeMs` is at or before `quiesceBeforeMs`. A file that fails to stat
- * (removed between the directory read and this call) is treated as still
- * inside the window and excluded, the same fail-closed direction the
- * usage-policy gate above already takes for an unresolvable input: a
- * vanished file is not evidence a session has settled.
- *
- * @param {string} filePath
- * @param {number} quiesceBeforeMs
- * @returns {Promise<boolean>}
- */
-async function isOutsideQuiesceWindow(filePath, quiesceBeforeMs) {
-  try {
-    const stat = await fs.stat(filePath)
-    return stat.mtimeMs <= quiesceBeforeMs
-  } catch {
-    return false
-  }
-}
-
-/**
  * `quiesceMs` resolved from the plugin's own validated `config` slice, or
  * {@link DEFAULT_QUIESCE_MS} when `config.backfill.quiesce_ms` is absent
  * (no `config` supplied, no `backfill` block, or no `quiesce_ms` key).
@@ -845,6 +893,19 @@ function resolveQuiesceMs(config) {
   const backfill = isPlainObject(config) && isPlainObject(config.backfill) ? config.backfill : undefined
   const quiesceMs = backfill?.quiesce_ms
   return typeof quiesceMs === 'number' ? quiesceMs : DEFAULT_QUIESCE_MS
+}
+
+/**
+ * Whether this plugin entry wants the daemon to rerun its import on a
+ * schedule. Reads `on_join` through the kernel's single reader of the
+ * `backfill` policy block, so the scheduled lane and the join-time reconciler
+ * agree on what an opt-out means.
+ *
+ * @param {JsonObject | undefined} config
+ * @returns {boolean}
+ */
+function sweepEnabled(config) {
+  return readBackfillPolicy({ name: DEFAULT_PLUGIN_NAME, config }).onJoin !== false
 }
 
 /**
@@ -864,22 +925,6 @@ function resolveSweepCron(config) {
   const backfill = isPlainObject(config) && isPlainObject(config.backfill) ? config.backfill : undefined
   const sweepCron = backfill?.sweep_cron
   return typeof sweepCron === 'string' ? sweepCron : DEFAULT_SWEEP_CRON
-}
-
-/**
- * @param {string} dir
- * @param {'dir' | 'file'} kind
- * @returns {Promise<string[]>}
- */
-async function readDirNames(dir, kind) {
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true })
-    return entries
-      .filter((entry) => (kind === 'dir' ? entry.isDirectory() : entry.isFile()))
-      .map((entry) => entry.name)
-  } catch {
-    return []
-  }
 }
 
 /**

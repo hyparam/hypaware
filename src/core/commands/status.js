@@ -8,6 +8,7 @@ import { compareStrings } from '../util/compare_strings.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { productStatus } from '../product_telemetry/commands.js'
+import { versionInfo } from './misc.js'
 
 /**
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -16,7 +17,7 @@ import { productStatus } from '../product_telemetry/commands.js'
  */
 
 /**
- * `hyp status [--json]`
+ * `hyp status [--verbose] [--json]`
  *
  * Renders the V1 install state (config path, daemon install/run
  * state, active plugins, source/sink/client status, cache + retention
@@ -97,18 +98,26 @@ export async function runStatus(argv, ctx) {
           clientNames,
           datasets,
           cacheRoot: ctx.storage.cacheRoot,
+          info: versionInfo(ctx.env),
         })
         ctx.stdout.write(JSON.stringify({ ...payload, product_telemetry: productStatus(ctx.env) }, null, 2) + '\n')
         return 0
       }
-      renderStatusText({
+      const render = parsed.params.verbose === true ? renderStatusText : renderStatusSummary
+      const renderArgs = {
         report,
         clientNames,
         datasets,
         cacheRoot: ctx.storage.cacheRoot,
         stdout: ctx.stdout,
-      })
-      ctx.stdout.write(`product telemetry: ${productStatus(ctx.env).collection} (hyp telemetry status; hyp telemetry preview)\n`)
+        env: ctx.env,
+        info: versionInfo(ctx.env),
+      }
+      render(renderArgs)
+      const telemetry = productStatus(ctx.env)
+      if (parsed.params.verbose === true || telemetry.collection !== 'off') {
+        ctx.stdout.write(`product telemetry: ${telemetry.collection} (hyp telemetry status; hyp telemetry preview)\n`)
+      }
       return 0
     },
     { component: 'status' }
@@ -186,7 +195,9 @@ export function projectClientStatus(report, clients) {
 
     return {
       name: client.name,
+      ...(client.capture ? { capture: client.capture } : {}),
       configured: client.configured,
+      recording: client.configured && client.recording !== false,
       attachable: client.attachable !== false,
       attached: client.attached,
       mode: client.mode ?? null,
@@ -234,7 +245,8 @@ export function renderClientStatusText(rows, stdout) {
         ? (row.mode ? `attached (${row.mode})` : 'attached')
         : 'not attached'
       : 'attach n/a'
-    stdout.write(`  ${row.name}: ${row.configured ? 'configured' : 'not configured'}, ${attach}, ${row.provenance}\n`)
+    stdout.write(`  ${row.name}: ${row.recording ? 'recording' : 'not recording'}, ${attach}, ${row.provenance}\n`)
+    if (row.configured && !row.recording) stdout.write(`    to record it again: hyp client attach ${row.name}\n`)
     if (row.telemetry_endpoint || row.listener_endpoint) {
       const clientEndpoint = row.telemetry_endpoint ?? 'unknown client endpoint'
       const listenerEndpoint = row.listener_endpoint ?? 'listener not running'
@@ -244,14 +256,38 @@ export function renderClientStatusText(rows, stdout) {
     if (row.capture_health) {
       const events = row.capture_health.last_event_at ?? 'none'
       const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
-      const gap = row.capture_health.state === 'gap' ? ' [capture gap]' : ''
+      // `unknown` is the bounded confirmation read declining to answer, and
+      // the line says so rather than picking a side (LLP 0536 #rendering).
+      const gap = row.capture_health.state === 'gap'
+        ? ' [capture gap]'
+        : row.capture_health.state === 'unknown' ? ' [capture unconfirmed]' : ''
       stdout.write(`    capture: ${row.capture_health.state}; last event ${events}; last transcript activity ${transcripts}${gap}\n`)
     }
+    if (row.capture) renderOllamaCapture(row.capture, stdout, '    ')
     if (row.error) stdout.write(`    error: ${row.error}\n`)
     for (const entry of row.recent_entrypoints) {
       stdout.write(`    recent: ${entry.entrypoint}, ${entry.rows} row${entry.rows === 1 ? '' : 's'}, ${entry.last_seen}\n`)
     }
   }
+}
+
+/**
+ * The automatic Codex migrations (the scheduled sweep and the reconciler's
+ * attach) record their restart requirement only in the daemon log, and no
+ * persisted field says whether one ran or whether Codex was running at the
+ * time. So the note is conditional and shows for every recording
+ * transcript-mode Codex, which is the one row that is attach n/a with a
+ * probe declared.
+ * @ref LLP 0429#migration: running Codex clients must restart to reload their provider configuration
+ */
+const CODEX_RESTART_NOTE = 'If Codex was running when capture mode changed, restart it to use the new mode.'
+
+/**
+ * @param {HypAwareStatusReport['clients'][number] | undefined} client
+ * @returns {boolean}
+ */
+function needsCodexRestartNote(client) {
+  return client?.name === 'codex' && client.configured && client.recording !== false && client.attachable === false
 }
 
 /**
@@ -288,6 +324,193 @@ function listenerEndpointFromReport(report, sourceName) {
 }
 
 /**
+ * Compact status uses the existing report, without additional probes or reads.
+ * @param {{ report: HypAwareStatusReport, stdout: { write(chunk: string): unknown }, info?: ReturnType<typeof versionInfo> }} args
+ */
+// @ref LLP 0455#compact-view [implements]: policy and actionable health lead; inventory stays in --verbose
+export function renderStatusSummary({ report, stdout, info }) {
+  const clients = new Map(report.clients.map((c) => [c.name, c]))
+  const health = new Map(report.captureHealth.map((c) => [c.client, c]))
+  const syncing = new Set(report.clientSync?.syncing)
+  const localOnly = new Set(report.clientSync?.localOnly)
+  const names = new Set(report.clients.filter((c) => c.configured || c.attached || c.error).map((c) => c.name))
+  for (const name of syncing) names.add(name)
+  for (const name of localOnly) names.add(name)
+
+  const { needsAttention, degraded } = statusAttention(report)
+
+  // @ref LLP 0455#verdict-headline [implements]: the verdict rides on the existing heading, so the two-state cue keeps its words
+  stdout.write(`HypAware · ${needsAttention ? `Needs attention${degraded ? ' (degraded)' : ''}` : 'Healthy'}\n\n`)
+  // @ref LLP 0455#identity [implements]: which install answered and which gateway it forwards as lead the compact view
+  if (info) stdout.write(`  Version    ${info.version} · ${info.platform} ${info.arch}\n`)
+  stdout.write(`  Gateway    ${describeGateways(report.gateways)}\n`)
+  const daemon = report.daemon.running
+    ? (report.daemon.state && report.daemon.state !== 'healthy' ? printable(report.daemon.state) : 'Running')
+    : 'Not running'
+  stdout.write(`  Daemon     ${daemon}\n`)
+  const bytes = report.cache.totalBytes
+  const unit = bytes >= 1e9 ? 'GB' : bytes >= 1e6 ? 'MB' : bytes >= 1e3 ? 'KB' : 'B'
+  const divisor = unit === 'GB' ? 1e9 : unit === 'MB' ? 1e6 : unit === 'KB' ? 1e3 : 1
+  stdout.write(`  Storage    ${unit === 'GB' ? (bytes / divisor).toFixed(1) : Math.round(bytes / divisor)} ${unit} · ${report.retention.days}-day retention\n`)
+  const sharingUnknown = centralSharingUnknown(report)
+  stdout.write(`  Sharing    ${report.layered?.hasCentral ? 'Organization sync configured'
+    : sharingUnknown ? 'Unknown (organization config could not be read)' : 'No organization sync'}\n`)
+  renderSharingNotices(report, stdout)
+  if (report.selfUpdate?.line) stdout.write(`  ${printable(report.selfUpdate.line, MAX_ERROR_CHARS)}\n`)
+  if (report.assetCoverage) stdout.write(`  ${printable(report.assetCoverage, MAX_ERROR_CHARS)}\n`)
+  for (const s of report.sources) {
+    const line = sourceSummaryLine(s)
+    if (line) stdout.write(`  ${line}\n`)
+  }
+
+  stdout.write('\n  Clients                 Status                           Data\n')
+  if (names.size === 0) stdout.write('    None configured\n')
+  /** @type {string[]} */
+  const notRecording = []
+  for (const name of names) {
+    const client = clients.get(name)
+    const capture = health.get(name)
+    // One state per client (LLP 0466): recording, or not. "Settings missing"
+    // is the one contradiction, a client that should be recording whose
+    // wiring is gone, and the attention block carries its warning.
+    // @ref LLP 0466#status [implements]: a detached client reads "Not recording", with a hint and no warning
+    if (client && client.configured && client.recording === false) notRecording.push(name)
+    const state = client?.error ? 'Could not check'
+      : client && client.configured && client.recording === false ? 'Not recording'
+      : client?.capture ? describeOllamaCapture(client.capture)
+      : capture?.state === 'gap' ? 'Telemetry may be interrupted'
+      : client?.attached ? `Recording${client.mode ? ` (${printable(client.mode)})` : ''}`
+      : client?.attachable !== false && client?.configured ? 'Settings missing'
+      // A probe-less source listed only by its sharing policy has no client
+      // row, and it records whenever it is listed.
+      : !client || client.configured ? 'Recording'
+      : 'Not recording'
+    // A missing policy on an enrolled host is unknown, never permission to sync,
+    // and so is any policy on a host whose central layer cannot be read.
+    const sharing = localOnly.has(name) ? 'Local only' : syncing.has(name) ? 'Sync'
+      : report.layered?.hasCentral || sharingUnknown ? 'Unknown' : 'Local only'
+    stdout.write(`  ${printable(name, 22).padEnd(22)}  ${state.padEnd(31)}  ${sharing}\n`)
+  }
+  if (syncing.size > 0) stdout.write('\n  Sync = organization sharing policy, not delivery confirmation.\n')
+  for (const name of notRecording) {
+    stdout.write(`\n  To record ${printable(name)} again: hyp client attach ${printable(name)}\n`)
+  }
+  if (needsCodexRestartNote(clients.get('codex'))) stdout.write(`\n  ${CODEX_RESTART_NOTE}\n`)
+
+  const ollama = report.clients.find(c => c.name === 'ollama')
+  if (ollama?.capture) renderOllamaCapture(ollama.capture, stdout, '  ')
+
+  renderStatusAttention(report, stdout)
+  stdout.write('\nMore details: hyp status --verbose\n')
+}
+
+/** @param {HypAwareStatusReport} report */
+function statusAttention(report) {
+  const sourceProblems = report.sources.flatMap((s) => {
+    const reported = sourceHealth(s.health)
+    const line = sourceHealthLine(reported)
+    return line ? [`${printable(s.name)}: ${printable(reported?.lastError, MAX_ERROR_CHARS) || line}`] : []
+  })
+  const actions = report.clientActions?.actions.filter((a) => a.state !== 'done' && a.state !== 'n/a') ?? []
+  const gaps = report.captureHealth.filter((c) => c.state === 'gap')
+  const needsAttention = report.overall !== 'healthy' || report.diagnostics.length > 0 ||
+    sourceProblems.length > 0 || gaps.length > 0 || actions.length > 0 ||
+    report.cacheFlushFailuresTotal > 0 || report.clients.some((c) => c.error || c.capture?.state === 'failed') || !report.daemon.running
+  // The verdict and the severity that produces it: an error-severity
+  // diagnostic is what degrades `overall`, so reading both keeps the heading
+  // from reading as an advisory on a report whose verdict contradicts its own
+  // breakdown. Both are the collector's enums, never transcribed from
+  // `status.json`, and the heading prints a literal rather than either value.
+  const degraded = report.overall !== 'healthy' || report.diagnostics.some((d) => d.severity === 'error')
+
+  return { sourceProblems, actions, gaps, needsAttention, degraded }
+}
+
+/**
+ * Both text views lead readers to the same warnings and primary next steps.
+ * @param {HypAwareStatusReport} report
+ * @param {{ write(chunk: string): unknown }} stdout
+ */
+function renderStatusAttention(report, stdout) {
+  const { sourceProblems, actions, gaps, needsAttention } = statusAttention(report)
+  if (needsAttention) {
+    stdout.write('\nAttention\n')
+    if (!report.daemon.running) stdout.write('  ! Daemon is not running.\n')
+    for (const c of gaps) {
+      const events = c.lastEventAt === null ? 'no telemetry received yet' : `last telemetry ${formatEntrypointAge(c.lastEventAt)}`
+      const activity = c.lastTranscriptActivityAt === null ? 'no transcript activity seen' : `transcripts active ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
+      stdout.write(`  ! ${printable(c.client)}: ${activity}; ${events}.\n`)
+      stdout.write('    Next: hyp daemon restart\n')
+    }
+    for (const d of report.diagnostics) {
+      if (d.kind === 'capture_gap' && gaps.length > 0) continue
+      const message = d.kind === 'maintenance_partitions_skipped' && report.maintenance
+        ? `Cache maintenance left ${report.maintenance.skippedTotal} partition${report.maintenance.skippedTotal === 1 ? '' : 's'} fragmented (${formatEntrypointAge(report.maintenance.tickAt)}).`
+        : printable(d.message, MAX_ERROR_CHARS)
+      stdout.write(`  ! ${message}\n`)
+      if (d.repair[0]) stdout.write(`    Next: ${printable(d.repair[0], MAX_ERROR_CHARS)}\n`)
+    }
+    for (const problem of sourceProblems) stdout.write(`  ! ${problem}\n`)
+    for (const c of report.clients) {
+      if (c.error) stdout.write(`  ! ${printable(c.name)}: ${printable(c.error, MAX_ERROR_CHARS)}\n`)
+    }
+    for (const a of actions) {
+      stdout.write(`  ! ${printable(a.kind)} ${printable(a.requestKey)}: ${printable(a.state)}${a.reason ? ` (${printable(a.reason, MAX_ERROR_CHARS)})` : ''}\n`)
+      if (a.state === 'refused') stdout.write(`    Next: hyp client attach ${printable(a.requestKey)} (after fixing the cause)\n`)
+    }
+    // Preserve the bounded failure evidence and attempt tense from LLP 0330.
+    const failures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)
+    for (const f of failures) {
+      stdout.write(`    ${printable(f.table, 80)}: last flush attempt failed ${formatEntrypointAge(f.failedAt)}: ${printable(f.errorMessage, MAX_FLUSH_FAILURE_CHARS)}${f.stillCoolingDown ? ' [refresh cooling down]' : ''}\n`)
+    }
+    if (report.cacheFlushFailuresTotal > failures.length) {
+      stdout.write(`    ... and ${report.cacheFlushFailuresTotal - failures.length} more tables (hyp status --json lists them all)\n`)
+    }
+  } else {
+    stdout.write('\nNo issues detected.\n')
+  }
+}
+
+/**
+ * Privacy notices stay visible in both text views.
+ * @param {HypAwareStatusReport} report
+ * @param {{ write(chunk: string): unknown }} stdout
+ * @param {string} [indent]
+ */
+function renderSharingNotices(report, stdout, indent = '  ') {
+  // Never-silent withholding (LLP 0069 R9): only rendered when a directory
+  // is actually excluded, so an ordinary host's text output is unchanged.
+  if (report.usagePolicy && report.usagePolicy.localOnlyDirCount > 0) {
+    stdout.write(
+      `${indent}local-only:      withholding ${report.usagePolicy.localOnlyDirCount} directories from forwarding (recorded locally)\n`
+    )
+  }
+
+  // What happens the next time the user works somewhere new (LLP 0200).
+  // Enrolled hosts only: on a machine with no server the question has no
+  // stakes and the hook is inert (LLP 0106 #enrolled-only), so a solo
+  // host's text output is unchanged. Both modes are stated - the default
+  // is the one with data consequences, so it is exactly the one that must
+  // not be silent.
+  if (report.layered?.hasCentral && report.usagePolicy) {
+    stdout.write(
+      report.usagePolicy.folderAsk === 'sync'
+        ? `${indent}new folders:     sync without asking (\`hyp privacy folders ask\` to be asked instead)\n`
+        : `${indent}new folders:     asked about once each (\`hyp privacy folders sync\` to stop asking)\n`
+    )
+  }
+
+  // Never-silent first-sync hold (LLP 0100 R9): only rendered while a hold is
+  // actually live, so an ordinary (never-enrolled, or past-deadline) host's
+  // text output is unchanged.
+  if (report.firstSyncHoldDeadline !== null) {
+    stdout.write(
+      `${indent}first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
+    )
+  }
+}
+
+/**
  * Render the V1 status report as a stable JSON shape. Consumers may
  * pin keys without dispatching on platform; missing values surface as
  * `null` rather than being omitted, so smoke assertions can probe
@@ -301,11 +524,25 @@ function listenerEndpointFromReport(report, sourceName) {
  *   clientNames: string[],
  *   datasets: { name: string, plugin: string }[],
  *   cacheRoot: string,
+ *   info?: ReturnType<typeof versionInfo>,
  * }} args
  */
-export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
+export function renderStatusJson({ report, clientNames, datasets, cacheRoot, info }) {
+  const gateways = report.gateways ?? []
   return {
     overall: report.overall,
+    // Which install answered and the gateway id it forwards under. Additive:
+    // `gateway_id` is null on a host that never enrolled or has no id yet.
+    // @ref LLP 0455#identity [implements]: --json carries the same identity the text views print
+    identity: {
+      version: info?.version ?? null,
+      node: info?.node ?? null,
+      platform: info?.platform ?? null,
+      arch: info?.arch ?? null,
+      hyp_home: info?.hypHome ?? null,
+      gateway_id: gateways.find((g) => g.gatewayId !== null)?.gatewayId ?? null,
+      gateways: gateways.map((g) => ({ sink: g.sink, gateway_id: g.gatewayId, state: g.state })),
+    },
     config: {
       path: report.configPath,
       exists: report.configExists,
@@ -344,6 +581,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // @ref LLP 0385#sources-state-is-a-verdict [implements]: --json is a machine rendering of this report, not a second data source with different epistemics
     sources: report.sources.map((s) => {
       const health = sourceHealthJson(sourceHealth(s.health))
+      const summary = summaryLineOf(s)
       return {
         name: s.name,
         plugin: s.plugin,
@@ -353,6 +591,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
           : {}),
         ...(s.error ? { error: s.error } : {}),
         ...(health ? { health } : {}),
+        ...(summary !== undefined ? { summary_line: summary } : {}),
       }
     }),
     sinks: report.sinks.map((s) => ({
@@ -371,6 +610,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     client_attach: report.clients.map((c) => ({
       name: c.name,
       configured: c.configured,
+      recording: c.configured && c.recording !== false,
       // `attached` stays a boolean for every row so a consumer can keep
       // pinning it; `attachable: false` is what says the boolean carries no
       // information for this client (#544).
@@ -587,6 +827,35 @@ function sourceHealthJson(health) {
 }
 
 /**
+ * A source's own one-line summary (`details.summary_line`), when it publishes
+ * one and is running. Unlike the health line, it prints in every state,
+ * healthy included. Any source may publish one. A source that is not running is skipped, because its line was
+ * written by a run that is gone and would describe a past state as current.
+ *
+ * @param {{ state?: string, details?: object }} source
+ * @returns {string | undefined} the raw recorded line, for --json
+ * @ref LLP 0491#scope [implements]: keep the generic source summary independent of graph replication
+ */
+function summaryLineOf(source) {
+  if (source.state !== 'started') return undefined
+  const details = source.details
+  if (!details || typeof details !== 'object') return undefined
+  const line = /** @type {Record<string, unknown>} */ (details).summary_line
+  return typeof line === 'string' && line.trim() !== '' ? line : undefined
+}
+
+/**
+ * {@link summaryLineOf}, made safe for a terminal.
+ *
+ * @param {{ state?: string, details?: object }} source
+ * @returns {string | undefined}
+ */
+function sourceSummaryLine(source) {
+  const line = summaryLineOf(source)
+  return line === undefined ? undefined : printable(line, MAX_ERROR_CHARS) || undefined
+}
+
+/**
  * The one text line a source's own report earns, or nothing.
  *
  * Only a source saying something is wrong prints: a `lastError`, or a state
@@ -679,11 +948,19 @@ const MAX_CACHE_FLUSH_FAILURES = 8
  *   datasets: { name: string, plugin: string }[],
  *   cacheRoot: string,
  *   stdout: { write(chunk: string): unknown },
+ *   env?: NodeJS.ProcessEnv,
+ *   info?: ReturnType<typeof versionInfo>,
  * }} args
  */
-export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) {
+export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout, env, info }) {
+  const section = (/** @type {string} */ label) => stdout.write(`\n  ${label}:\n`)
   stdout.write('hypaware\n')
   stdout.write(`  overall:  ${report.overall}\n`)
+  if (info) {
+    stdout.write(`  version:  ${info.version} (node ${info.node}, ${info.platform} ${info.arch})\n`)
+    stdout.write(`  hyp_home: ${info.hypHome}\n`)
+  }
+  stdout.write(`  gateway:  ${describeGateways(report.gateways)}\n`)
   const configState = report.configExists
     ? (report.configValid ? 'ok' : 'invalid')
     : 'missing'
@@ -697,8 +974,13 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.selfUpdate?.line) {
     stdout.write(`  ${report.selfUpdate.line}\n`)
   }
+  if (report.assetCoverage) {
+    stdout.write(`  ${printable(report.assetCoverage, MAX_ERROR_CHARS)}\n`)
+  }
 
-  stdout.write('  active plugins:\n')
+  renderStatusAttention(report, stdout)
+
+  section('active plugins')
   if (report.activePlugins.length === 0) {
     stdout.write('    (none - no config or no plugins selected)\n')
   } else {
@@ -718,27 +1000,36 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  stdout.write('  sources:\n')
+  section('sources')
   if (report.sources.length === 0) {
     stdout.write('    (none)\n')
   } else {
     for (const s of report.sources) {
       stdout.write(`    - ${printable(s.name)}  (${printable(s.plugin)})  [${printable(s.state)}]${provenanceTag(report.layered, isCentralPlugin(report.layered, s.plugin))}\n`)
+      const summary = sourceSummaryLine(s)
+      if (summary) stdout.write(`        ${summary}\n`)
       const health = sourceHealthLine(sourceHealth(s.health))
       if (health) stdout.write(`        ${health}\n`)
     }
   }
 
-  stdout.write('  sinks:\n')
+  section('sinks')
   if (report.sinks.length === 0) {
-    stdout.write('    (none - keeping captured data local only)\n')
+    // No sink rows on a host whose central layer cannot be read is not a
+    // known absence: that layer may name destinations this report cannot see.
+    stdout.write(centralSharingUnknown(report)
+      ? '    (none visible - organization config could not be read)\n'
+      : '    (none - keeping captured data local only)\n')
   } else {
     for (const s of report.sinks) {
-      stdout.write(`    - ${printable(s.instance)}  (${printable(s.plugin)}, ${printable(s.kind)})${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
+      // A row recovered from the status file and backed by no live handle
+      // carries no plugin or kind (issue #2494): name what is known, never `(, )`.
+      const meta = [printable(s.plugin), printable(s.kind)].filter(Boolean).join(', ')
+      stdout.write(`    - ${printable(s.instance)}${meta ? `  (${meta})` : ''}${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
     }
   }
 
-  stdout.write('  clients:\n')
+  section('clients')
   // A probe that could not answer at all carries `error`, and the text surface
   // is where a human reads status. Collapsing such a client into `(none)`, or
   // printing it as a bare `not attached`, restores exactly the wrong negative
@@ -757,6 +1048,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       seen.add(c.name)
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
+      // @ref LLP 0466#status [implements]: the verbose row names the recording state beside the attach facts
+      if (c.configured && c.recording === false) state.push('not recording')
       // A client with no attach probe has no attach state to report: printing
       // `not attached` for it invites a `hyp client attach` that is a documented
       // no-op and can never change the line (#544). Where there is an attach,
@@ -780,6 +1073,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
             : 'not attached'
       )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
+      if (c.configured && c.recording === false) stdout.write(`        to record it again: hyp client attach ${c.name}\n`)
+      if (needsCodexRestartNote(c)) stdout.write(`        ${CODEX_RESTART_NOTE}\n`)
       // The probe's error is not this build's prose: a settings file that is
       // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
       // an excerpt of the file back. The client wrote that file, so it is
@@ -802,18 +1097,22 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(
       `    syncing: ${list(report.clientSync.syncing)} - local-only: ${list(report.clientSync.localOnly)}\n`
     )
+  } else if (centralSharingUnknown(report)) {
+    stdout.write('    syncing: unknown - local-only: unknown (organization config could not be read)\n')
   }
 
   // Which client surfaces have actually produced rows, and when (LLP 0164).
-  // This is the line that answers "did Codex Desktop traffic arrive?" and
-  // "did Claude Desktop's 3p route land?" without a query. Rendered only when
+  // This is the line that answers "did Claude Desktop's 3p route land?"
+  // without a query. It counts gateway entrypoints, so it names only clients
+  // whose traffic crosses the gateway: Codex left that path in LLP 0429 and
+  // Claude Code in LLP 0262, and neither appears here any more. Rendered only when
   // the daemon recorded something, so an install that has never captured
   // keeps the V1 text surface unchanged; the entrypoint strings are printed
   // verbatim because they are the client's to choose, and they are the exact
   // values a follow-up `ai_gateway_messages` query filters on.
   // @ref LLP 0164#status-reads-it-from-the-status-file [implements]: hyp status names recent client surfaces and their age
   if (report.recentEntrypoints.length > 0) {
-    stdout.write('  recent clients:\n')
+    section('recent clients')
     for (const e of report.recentEntrypoints) {
       const client = e.clientName ? `  (${e.clientName})` : ''
       stdout.write(
@@ -828,7 +1127,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // only knows what WAS captured, and a silent capture gap is precisely rows
   // that never arrived. Rendered only when a configured client is
   // otel-attached, so every other install's text surface is unchanged; the
-  // `[capture gap]` tag points at the diagnostics block, which carries the
+  // `[telemetry may be interrupted]` tag points at the diagnostics block, which carries the
   // repair.
   // @ref LLP 0257#status-and-health [implements]: hyp status renders last event seen vs last transcript activity
   //
@@ -852,15 +1151,28 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // @ref LLP 0330#capture-health-line [implements]: the stamp renders on the capture-health line
   // @ref LLP 0322#what-the-stamp-is-not [constrained-by]: a rendered stamp stays a reason for a paced retry, never a freshness claim
   if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
-    stdout.write('  capture health:\n')
+    section('capture health')
     for (const c of report.captureHealth) {
+      const tag = c.state === 'gap'
+        ? '  [telemetry may be interrupted]'
+        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
+      // A marker-less client captures by transcript sweep, not telemetry: its
+      // entry's one timestamp is the newest cached row, and it has no
+      // transcript-activity comparison to show.
+      // @ref LLP 0546#newest-partition: the transcript lane's entry carries the newest cached row
+      if (report.clients.some((r) => r.name === c.client && !r.attachable)) {
+        const rows = c.lastEventAt !== null
+          ? `last captured row ${formatEntrypointAge(c.lastEventAt)}`
+          : 'no captured rows yet'
+        stdout.write(`    - ${c.client}  ${rows}${tag}\n`)
+        continue
+      }
       const events = c.lastEventAt !== null
         ? `last event ${formatEntrypointAge(c.lastEventAt)}`
         : 'no events yet'
       const transcripts = c.lastTranscriptActivityAt !== null
         ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
         : 'no transcript activity'
-      const tag = c.state === 'gap' ? '  [capture gap]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
     const namedFailures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)
@@ -906,7 +1218,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // @ref LLP 0238#consequences [implements]: hyp status names all permitted hosts, so the standing grant stays informed and not just the moment it was asked for
   // @ref LLP 0239#terminals-predating-attach [implements]: and next to it, whether the launchd environment carries the variable
   if (report.proxyTrust) {
-    stdout.write('  proxy trust:\n')
+    section('proxy trust')
     stdout.write(`    ca fingerprint: ${report.proxyTrust.caFingerprint}\n`)
     stdout.write(`    permitted:      ${describePermittedHosts(report.proxyTrust.hosts)}\n`)
     stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
@@ -955,45 +1267,23 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  stdout.write(`  cache:           ${cacheRoot}\n`)
+  const ollama = report.clients.find(c => c.name === 'ollama')
+  if (ollama?.capture) renderOllamaCapture(ollama.capture, stdout, '    ')
+
+  section('storage')
+  stdout.write(`    cache:           ${cacheRoot}\n`)
   stdout.write(
-    `  cache retention: ${report.retention.days} days${
+    `    cache retention: ${report.retention.days} days${
       report.retention.source === 'default' ? ' (default)' : ''
     }\n`
   )
-  stdout.write(`  cache size:      ${report.cache.totalBytes} bytes\n`)
-  stdout.write(`  datasets:        ${datasets.length}\n`)
-  stdout.write(`  recent errors:   ${report.recentErrorCount}\n`)
+  stdout.write(`    cache size:      ${report.cache.totalBytes} bytes\n`)
+  stdout.write(`    datasets:        ${datasets.length}\n`)
+  stdout.write(`    recent errors:   ${report.recentErrorCount} (24h retained history, includes recovered failures)\n`)
 
-  // Never-silent withholding (LLP 0069 R9): only rendered when a directory
-  // is actually excluded, so an ordinary host's text output is unchanged.
-  if (report.usagePolicy && report.usagePolicy.localOnlyDirCount > 0) {
-    stdout.write(
-      `  local-only:      withholding ${report.usagePolicy.localOnlyDirCount} directories from forwarding (recorded locally)\n`
-    )
-  }
-
-  // What happens the next time the user works somewhere new (LLP 0200).
-  // Enrolled hosts only: on a machine with no server the question has no
-  // stakes and the hook is inert (LLP 0106 #enrolled-only), so a solo
-  // host's text output is unchanged. Both modes are stated - the default
-  // is the one with data consequences, so it is exactly the one that must
-  // not be silent.
-  if (report.layered?.hasCentral && report.usagePolicy) {
-    stdout.write(
-      report.usagePolicy.folderAsk === 'sync'
-        ? '  new folders:     sync without asking (`hyp privacy folders ask` to be asked instead)\n'
-        : '  new folders:     asked about once each (`hyp privacy folders sync` to stop asking)\n'
-    )
-  }
-
-  // Never-silent first-sync hold (LLP 0100 R9): only rendered while a hold is
-  // actually live, so an ordinary (never-enrolled, or past-deadline) host's
-  // text output is unchanged.
-  if (report.firstSyncHoldDeadline !== null) {
-    stdout.write(
-      `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
-    )
+  if (report.usagePolicy?.localOnlyDirCount || (report.layered?.hasCentral && report.usagePolicy) || report.firstSyncHoldDeadline !== null) {
+    section('sharing')
+    renderSharingNotices(report, stdout, '    ')
   }
 
   // Partitions the daemon's last maintenance tick deliberately left
@@ -1006,7 +1296,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.maintenance && report.maintenance.skippedTotal > 0) {
     const m = report.maintenance
     const breakdown = describeMaintenanceSkipReasons(m.reasons)
-    stdout.write('  maintenance:\n')
+    section('maintenance')
     stdout.write(
       `    ${m.skippedTotal} of ${m.partitionsVisited} partitions left fragmented, as of the tick ${formatEntrypointAge(m.tickAt)} (${breakdown})\n`
     )
@@ -1030,7 +1320,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // merge, listed here with their reason. Loud, but not an outage signal.
   // The gateway runs fine on the central config.
   if (report.layered && (report.layered.drops.length > 0 || report.layered.centralQueryIgnored)) {
-    stdout.write('  local config (not applied):\n')
+    section('local config (not applied)')
     for (const d of report.layered.drops) {
       const why = d.detail
         ? `${d.reason.replace(/_/g, ' ')}: ${d.detail.replace(/_/g, ' ')}`
@@ -1051,7 +1341,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     // here, so all of it is cleaned at the interpolation. An etag is whatever
     // the joined server put in the header; a `reason` and a timestamp are
     // this build's own vocabulary only if this build wrote the file.
-    stdout.write('  remote config:\n')
+    section('remote config')
     if (rc.runningEtag) stdout.write(`    running etag:  ${printable(rc.runningEtag)}\n`)
     if (rc.probation) {
       stdout.write(`    probation:     ${printable(rc.probation.etag)} until ${printable(rc.probation.until)}\n`)
@@ -1068,18 +1358,28 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // backfill-on-join target is configured or a pass has run; a `failed`
   // line is loud but informational. It never degrades `overall`.
   if (report.clientActions && report.clientActions.actions.length > 0) {
-    stdout.write('  client actions:\n')
+    section('client actions')
     for (const a of report.clientActions.actions) {
+      // Through `printable` like the Attention line above: every string on this
+      // row comes off a marker file, not from this build. `requestKey` is a
+      // marker name or a configured plugin and `kind` a marker store, while
+      // `reason`, `last_attempt` and `at` are read out of marker JSON behind a
+      // `typeof === 'string'` guard alone. Those two identifiers keep the label
+      // default like every other name on this surface; the reason and the two
+      // timestamps are unclamped, because at 120 characters the reason would be
+      // cut shorter than the Attention line already prints it and a timestamp is
+      // only useful exact. `state`, `rows` and `attempts` need nothing: they are
+      // literals of this build and numbers.
       let detail = ''
       if (a.state === 'done') {
         const bits = []
         if (a.rows !== undefined) bits.push(`${a.rows} rows`)
-        if (a.at) bits.push(`at ${a.at}`)
+        if (a.at) bits.push(`at ${printable(a.at, Infinity)}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
       } else if (a.state === 'failed') {
         const bits = []
-        if (a.reason) bits.push(a.reason)
-        if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
+        if (a.reason) bits.push(printable(a.reason, Infinity))
+        if (a.lastAttempt) bits.push(`last attempt ${printable(a.lastAttempt, Infinity)}`)
         if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
       } else if (a.state === 'refused') {
@@ -1090,24 +1390,37 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         // the attention signal without the action.
         // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
         const bits = []
-        if (a.reason) bits.push(a.reason)
-        const repair = `run 'hyp client attach ${a.requestKey}' after fixing the cause`
+        if (a.reason) bits.push(printable(a.reason, Infinity))
+        const repair = `run 'hyp client attach ${printable(a.requestKey)}' after fixing the cause`
         detail = bits.length > 0 ? `  (${bits.join(', ')})  ${repair}` : `  ${repair}`
       }
-      stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
+      stdout.write(`    - ${printable(a.kind)} ${printable(a.requestKey)}  [${a.state}]${detail}\n`)
     }
   }
 
   if (report.diagnostics.length > 0) {
-    stdout.write('  diagnostics:\n')
-    for (const d of report.diagnostics) {
+    section('diagnostics')
+    for (const [index, d] of report.diagnostics.entries()) {
+      if (index > 0) stdout.write('\n')
       const tag = d.severity === 'error' ? 'ERROR' : 'WARN '
-      stdout.write(`    [${tag}] ${d.kind}: ${d.message}\n`)
+      // Through `printable` like the Attention line above: a diagnostic's strings
+      // are not all this build's own. An unreadable config reaches `message` as
+      // `JSON.parse`'s excerpt of the file, a repair names config-supplied values,
+      // and `kind` is only nearly a closed set: `V1DiagnosticKind` spells one entry
+      // `gateway_missing_${string}_upstream`, and that `${string}` is a plugin
+      // manifest's `contributes.client.required_upstreams[0]`, which the manifest
+      // validator accepts opaquely and the catalog copies verbatim. The prose is
+      // unclamped because clamping is the Attention line's job, and `printable`'s
+      // 120-character default would cut real diagnostics shorter here than the
+      // summary already prints them; `kind` keeps that default, like every other
+      // identifier on this surface.
+      stdout.write(`    [${tag}] ${printable(d.kind)}: ${printable(d.message, Infinity)}\n`)
       for (const repair of d.repair) {
-        stdout.write(`        repair: ${repair}\n`)
+        stdout.write(`        repair: ${printable(repair, Infinity)}\n`)
       }
     }
   }
+  stdout.write('\n')
 }
 
 /**
@@ -1189,6 +1502,22 @@ export function formatEntrypointAge(lastSeen, nowMs = Date.now()) {
   if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
   return `${days}d ago`
+}
+
+/**
+ * Whether the report cannot establish this host's sharing at all: the
+ * collector found a central layer it could not read, which leaves
+ * `layered` and `clientSync` null exactly as on a host that never joined.
+ * Read off the collector's own `config_central_unreadable` diagnostic, so
+ * the text views and `--json` rest on the same evidence and nothing here
+ * probes the disk again.
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {boolean}
+ */
+// @ref LLP 0455#compact-view [implements]: an unreadable central layer is Unknown sharing, never No organization sync or Local only
+function centralSharingUnknown(report) {
+  return report.diagnostics.some((d) => d.kind === 'config_central_unreadable')
 }
 
 /**
@@ -1305,4 +1634,47 @@ function inferDatasetsFromPlugins(activePlugins) {
     )
   }
   return datasets.sort((a, b) => compareStrings(a.name, b.name))
+}
+
+/** @param {HypAwareStatusReport['clients'][number]['capture']} capture */
+function describeOllamaCapture(capture) {
+  return capture?.state === 'ready' ? 'Ready; no conversation traffic'
+    : capture?.state === 'observed' ? 'Observed; capture pending'
+    : capture?.state === 'persisted' ? 'Capture persisted'
+    : capture?.state === 'failed' ? 'Capture failed'
+    : capture?.state === 'disabled' ? 'Not recording' : 'Capture unconfirmed'
+}
+
+/**
+ * @ref LLP 0474#diagnostics [implements]: default and client status share cheap route, append and bounded failure evidence
+ * @param {NonNullable<HypAwareStatusReport['clients'][number]['capture']>} capture
+ * @param {{ write(chunk: string): unknown }} stdout
+ * @param {string} indent
+ */
+function renderOllamaCapture(capture, stdout, indent) {
+  stdout.write(`${indent}Ollama: ${describeOllamaCapture(capture)}\n`)
+  stdout.write(`${indent}  Configured capture root: ${printable(capture.configuredRoot ?? 'unknown', 2048)}\n`)
+  stdout.write(`${indent}  Live capture root${capture.routeConfirmed ? '' : ' (unconfirmed)'}: ${printable(capture.captureRoot ?? 'none', 2048)}\n`)
+  if (capture.lastPersisted) stdout.write(`${indent}  ${capture.historical ? 'Historical' : 'Last'} persisted capture: ${capture.lastPersisted}\n`)
+  const earlierFailure = capture.lastPersisted && capture.lastFailed && capture.lastPersisted > capture.lastFailed
+  if (capture.lastFailed) stdout.write(`${indent}  ${capture.historical ? 'Historical failure' : earlierFailure ? 'Earlier capture failure' : 'Capture failure'}: ${capture.reason ?? 'unconfirmed'} at ${capture.lastFailed}\n`)
+  stdout.write(`${indent}  Next: ${capture.next}\n`)
+}
+
+/**
+ * One line naming the gateway id(s) this host forwards under. The id is read
+ * from a file, so it is cleaned like any other value read back off disk.
+ *
+ * @param {HypAwareStatusReport['gateways']} gateways
+ * @returns {string}
+ */
+function describeGateways(gateways = []) {
+  if (gateways.length === 0) return 'Not enrolled'
+  return gateways.map((g) => {
+    const value = g.state === 'issued' ? printable(g.gatewayId)
+      : g.state === 'pending' ? 'Pending (not issued yet)'
+      : g.state === 'other_server' ? 'Enrolled with another server'
+      : 'Unreadable identity'
+    return gateways.length > 1 ? `${value} (${printable(g.sink)})` : value
+  }).join(', ')
 }

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/langgraph",
+  "version": "1.0.0",
+  "description": "Local JavaScript and Python LangGraph callback recorder with durable offline delivery.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "network",
+    "spawn_process",
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_state"
+  ],
+  "contributes": {
+    "client": {
+      "name": "langgraph",
+      "attach_probe": {
+        "format": "managed_file",
+        "settings_file": ".config/hypaware/langgraph.mjs",
+        "marker_text": "// HYPWARE_LANGGRAPH_RECORDER v1"
+      },
+      "skill_dir": "",
+      "backfill_provider": false
+    },
+    "picker": [
+      {
+        "name": "langgraph",
+        "label": "LangGraph (JavaScript / Python)",
+        "summary": "Connect your LangGraph application with a callback. Setup prints the code to add.",
+        "detect": { "project_dependencies": { "npm": "@langchain/langgraph", "python": "langgraph" } },
+        "compose": {
+          "plugin": {
+            "name": "@hypaware/langgraph"
+          }
+        }
+      }
+    ],
+    "sources": [
+      {
+        "name": "langgraph"
+      }
+    ],
+    "commands": [
+      {
+        "name": "session ignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)"
+      },
+      {
+        "name": "session unignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Resume recording this AI session"
+      },
+      {
+        "name": "session status",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Report whether this AI session is being dropped right now (fails closed)"
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "langgraph",
+        "summary": "LangGraph local recorder and attach settings."
+      }
+    ]
+  }
+}

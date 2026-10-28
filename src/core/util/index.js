@@ -31,3 +31,12 @@ export {
   stringValue,
   stripVolatileBlockFields,
 } from './json_util.js'
+export { withFileLock } from './file_lock.js'
+export { openBrowser } from './open_browser.js'
+export { canonicalOrigin } from '../remote/builtin_remotes.js'
+export {
+  isServiceStopCode,
+  readKeptServiceToken,
+  serviceTokenPath,
+  writeKeptServiceToken,
+} from '../remote/service_token.js'

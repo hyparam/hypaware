@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
-import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
@@ -24,13 +24,13 @@ import {
 // because every check that function makes is a check the echo satisfies.
 //
 // The decision on #451 is accept-and-document, so these tests do NOT assert
-// that the impostor is rejected - it cannot be, at this layer. They assert the
-// contract that replaces the rejection: every confirmed answer states that the
-// responder was never authenticated, in human output and in `--json`, on both
-// endpoint-discovery paths.
+// that the impostor is rejected - it cannot be, at this layer. They assert that
+// `--json` states the responder was never authenticated, on both
+// endpoint-discovery paths. The human output no longer carries a trust line.
 //
-// @ref LLP 0166#stated-not-proved [tests]: an unauthenticated responder is
-//   disclosed, on every confirmed answer, rather than silently trusted.
+// @ref LLP 0166#stated-not-proved [tests]: `endpoint_authenticated: false` on
+//   every answer.
+// @ref LLP 0463#human-output [tests]: no human `trust:` line.
 
 /* ------------------------------------------------------------------ */
 /* The impostor: a listener that echoes the token back                 */
@@ -61,29 +61,14 @@ test('an impostor that echoes the token is believed - and every answer discloses
       'the JSON must state that the responder was not authenticated'
     )
 
-    // And a human reader is told the same thing next to the answer, on the
-    // daemon_status path, which said nothing at all before.
     const human = fakeCtx({ env })
     assert.equal(await runSessionStatus([], human.ctx), 0)
     assert.match(human.stdout(), /session sess-spoofed: ignored/)
-    assert.match(
-      human.stdout(),
-      /nothing proves the responder .* is the HypAware gateway/,
-      'the human answer must say the responder is unauthenticated'
-    )
-    assert.match(
-      human.stdout(),
-      /only as trustworthy as this machine/,
-      'the disclosure must name the trust root: this machine'
-    )
-    assert.ok(
-      human.stdout().includes(base),
-      'and it must name the endpoint it trusted - on this path no other line does'
-    )
+    assert.doesNotMatch(human.stdout(), /^trust:/m)
   })
 })
 
-test('`hyp session ignore` carries the disclosure too, where a spoofed success reads as done', async () => {
+test('`hyp session ignore` --json carries the disclosure too, where a spoofed success reads as done', async () => {
   // The louder half of the harm in #451: `ignore` against an impostor prints a
   // confirmed `ignored` while nothing recorded the decision. The receipt no
   // longer promises a drop (LLP 0066 R14), but "this id is in the gateway drop
@@ -95,7 +80,7 @@ test('`hyp session ignore` carries the disclosure too, where a spoofed success r
     const human = fakeCtx({ env })
     assert.equal(await runSessionIgnore([], human.ctx), 0)
     assert.match(human.stdout(), /ignored - this id is in the gateway drop set/)
-    assert.match(human.stdout(), /nothing proves the responder .* is the HypAware gateway/)
+    assert.doesNotMatch(human.stdout(), /^trust:/m)
 
     const json = fakeCtx({ env })
     assert.equal(await runSessionIgnore(['--json'], json.ctx), 0)
@@ -112,8 +97,8 @@ test('the disclosure is unconditional: a real gateway answer carries it too', as
     const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-real' } })
     // `not_ignored` from the genuine route: still unauthenticated, still said.
     assert.equal(await runSessionStatus([], ctx.ctx), 1)
-    assert.match(ctx.stdout(), /not ignored - this session IS being recorded/)
-    assert.match(ctx.stdout(), /nothing proves the responder .* is the HypAware gateway/)
+    assert.match(ctx.stdout(), /session sess-real: not ignored\n/)
+    assert.doesNotMatch(ctx.stdout(), /^trust:/m)
 
     const json = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-real' } })
     await runSessionStatus(['--json'], json.ctx)
@@ -205,7 +190,7 @@ async function withControlServer(set, fn) {
  */
 function daemonHome(base) {
   const url = new URL(base)
-  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-impostor-'))
+  const hypHome = temporaryDirectory('hyp-session-impostor-')
   const stateRoot = path.join(hypHome, 'hypaware')
   fs.mkdirSync(path.join(stateRoot, 'run'), { recursive: true })
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'test-run', mode: 'foreground' }))
@@ -231,7 +216,7 @@ function fakeCtx(args) {
   let out = ''
   let err = ''
   const listen = args.endpoint ? args.endpoint.replace(/^https?:\/\//, '') : undefined
-  const hypHome = args.env?.HYP_HOME ?? fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-home-'))
+  const hypHome = args.env?.HYP_HOME ?? temporaryDirectory('hyp-session-home-')
   const ctx = {
     stdout: { write: (/** @type {string} */ s) => { out += s; return true } },
     stderr: { write: (/** @type {string} */ s) => { err += s; return true } },

@@ -26,6 +26,13 @@ export interface SelfUpdateState {
    */
   running_version?: string
   /**
+   * Why the daemon's automatic lanes are declining to apply, recorded by
+   * the pass that declines and cleared by a supervised one. Only
+   * `unsupervised` today: no service manager will relaunch the daemon.
+   * Read by `hyp status` only while that daemon is alive.
+   */
+  refusal?: 'unsupervised'
+  /**
    * A version that was installed and could not run here (its entrypoint
    * failed preflight, or boots on it kept failing). Never installed again;
    * cleared by a probe that finds something newer.
@@ -52,8 +59,13 @@ export interface SelfUpdateState {
   }
 }
 
-/** Where the running code came from; only a global npm install may apply. */
-export type SelfInstallProvenance = 'npx' | 'checkout' | 'global-candidate'
+/**
+ * Where the running code came from; only a global npm install may apply.
+ * `project-local` is a copy under a `node_modules` tree carrying a manifest,
+ * which `npm install -g` installs beside rather than replaces (issue #1622):
+ * a project's dependency, and also a pnpm or yarn global root (issue #1625).
+ */
+export type SelfInstallProvenance = 'npx' | 'checkout' | 'project-local' | 'global-candidate'
 
 /** Outcome of one self-update pass. */
 export interface SelfUpdatePassResult {

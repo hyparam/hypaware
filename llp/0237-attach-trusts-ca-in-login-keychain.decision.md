@@ -9,7 +9,10 @@
 **Extended-by:** LLP 0262 (accepted 2026-08-17; attaching the `claude`
 client asks for no keychain trust at all; this decision governs the clients
 still proxied, and `detach --purge` stays the removal path for a grant a
-migrated machine already made)
+migrated machine already made; no bundled client attaches by proxy and no
+attach path installs this any more, and the unused install helper was
+removed on 2026-09-24, leaving only the inspect and remove path for older
+grants)
 
 > On macOS, proxy-mode attach installs the interception CA into the user's
 > login keychain as a user-domain trusted root, via `security

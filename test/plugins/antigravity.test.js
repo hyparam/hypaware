@@ -135,7 +135,14 @@ test('both @hypaware/antigravity and @hypaware/antigravity-desktop pass manifest
     const loaded = await loadManifest(dir)
     assert.equal(loaded.ok, true, `${dir} manifest failed to load`)
     const report = await diagnosePlugin(dir)
-    assert.deepEqual(report.diagnostics, [], `${dir} reported doctor diagnostics: ${JSON.stringify(report.diagnostics)}`)
+    // The shared ai_gateway_messages dataset is owned by @hypaware/ai-gateway.
+    // Declaring it here would make this client a dataset owner and widen the
+    // fail-closed arming set (LLP 0192), so it stays undeclared, as for droid,
+    // opencode and cursor, and the doctor's one warning about it is expected.
+    const unexpected = report.diagnostics.filter(
+      (d) => !(d.kind === 'contribution_undeclared' && d.location === '/contributes/datasets' && d.message.includes("'ai_gateway_messages'"))
+    )
+    assert.deepEqual(unexpected, [], `${dir} reported doctor diagnostics: ${JSON.stringify(unexpected)}`)
   }
 })
 

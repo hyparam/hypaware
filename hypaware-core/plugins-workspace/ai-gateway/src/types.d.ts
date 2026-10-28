@@ -1,17 +1,38 @@
 import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
 import type {
   AiGatewayClientRegistration,
+  AiGatewayCaptureReason,
   AiGatewayExchangeProjector,
   AiGatewayRouteInput,
   AiGatewaySettlementEnricher,
   AiGatewayUpstreamPathRewrite,
   AiGatewayUpstreamPreset,
+  AiGatewayUpstreamAliasRoute,
   PluginActivationContext,
 } from '../../../../hypaware-plugin-kernel-types.d.ts'
-import type { Exchange } from './recorder.js'
+import type { Exchange, createNullExchange } from './recorder.js'
 import type { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
 
+export interface CaptureOutcomeEntry {
+  route: string
+  observed: number
+  persisted: number
+  failed: number
+  reasons: Partial<Record<AiGatewayCaptureReason, number>>
+  reason?: AiGatewayCaptureReason
+  last_outcome?: string
+  last_observed?: string
+  last_persisted?: string
+  last_failed?: string
+  persisted_id?: string
+  failed_id?: string
+  reported_at: number
+  reported_reason?: AiGatewayCaptureReason
+}
+
 export interface ExchangeInit {
+  recordingGeneration?: string
+  captureLimit?: number
   upstream: string
   provider: string | undefined
   method: string | undefined
@@ -39,12 +60,16 @@ export interface RecorderOptions {
 export interface GatewayProcessTransport {
   role: 'gateway' | 'processing'
   configure?(redactHeaders: readonly string[]): void
+  observeCapture?(callback: (route: string, reason: AiGatewayCaptureReason, id?: string) => void): void
   recorder?: {
     startExchange(init: ExchangeInit): Exchange
     drain(timeoutMs?: number): Promise<void>
   }
   finish?(exchange: Exchange, ignoredSessions: Set<string>): void
-  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>): () => Promise<void>
+  generation?: string
+  refreshRecording?(recording: boolean, generation: string, signal: AbortSignal): Promise<unknown>
+  settleVerification?(generation: string, signal: AbortSignal): Promise<unknown>
+  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>, refresh?: (recording: boolean, signal: AbortSignal, generation: string) => Promise<unknown>, settleVerification?: (generation: string, signal: AbortSignal) => Promise<unknown>): () => Promise<void>
   endpoint?: { host: string; port: number }
   snapshot?(): Record<string, number | boolean>
 }
@@ -109,6 +134,9 @@ export interface UpstreamConfig {
    * (LLP 0234); never a routing input.
    */
   record_prefix?: string
+  /** Runtime-only alias metadata; never compiled from persisted config. */
+  aliasOf?: string
+  captureMatch?: AiGatewayUpstreamAliasRoute['captureMatch']
 }
 
 export interface AiGatewayConfig {
@@ -149,6 +177,8 @@ export interface CompiledUpstream {
   match: ((input: AiGatewayRouteInput) => boolean) | undefined
   /** Validated outbound path-prefix swap, applied when the request is forwarded (LLP 0313). */
   rewrite?: AiGatewayUpstreamPathRewrite
+  aliasOf?: string
+  captureMatch?: AiGatewayUpstreamAliasRoute['captureMatch']
 }
 
 export interface ProxyOptions {
@@ -156,13 +186,15 @@ export interface ProxyOptions {
   upstreams: UpstreamConfig[]
   onExchangeFinished(exchange: Exchange): void | Promise<void>
   startExchange(init: {
+    recordingGeneration?: string
+    captureLimit?: number
     upstream: string
     provider: string | undefined
     method: string | undefined
     path: string | undefined
     requestHeaders: IncomingHttpHeaders
     upstreamPath?: string
-  }): Exchange
+  }): Exchange | ReturnType<typeof createNullExchange>
   /**
    * Handle a request under the reserved `/_hypaware/` control prefix. The
    * proxy short-circuits control requests BEFORE upstream matching (they
@@ -194,6 +226,11 @@ export interface ProxyOptions {
   upstreamProxy?: UpstreamProxy
   /** Agent that routes the intercepted upstream leg through {@link upstreamProxy}. */
   chainedAgent?: import('node:https').Agent
+  /**
+   * How long stop() lets an in-flight response finish before cutting it.
+   * A test seam, not a config key; defaults to `STOP_GRACE_MS`.
+   */
+  stopGraceMs?: number
   log?: {
     warn?(message: string, fields?: Record<string, unknown>): void
     info?(message: string, fields?: Record<string, unknown>): void
@@ -201,6 +238,7 @@ export interface ProxyOptions {
 }
 
 export interface StartedProxy {
+  recordingDetails?(): Record<string, unknown>
   host: string
   port: number
   /**
@@ -245,6 +283,8 @@ export interface ThreadChain {
  */
 export interface GatewayState {
   presets: Map<string, AiGatewayUpstreamPreset>
+  aliases: Map<string, { canonicalName: string, route: AiGatewayUpstreamAliasRoute }>
+  aliasRoutes: { name: string, canonical: string, path_prefix: string, base_url: string }[]
   clients: Map<string, AiGatewayClientRegistration>
   projectors: RegisteredProjector[]
   enrichers: Map<string, AiGatewaySettlementEnricher>
@@ -254,9 +294,8 @@ export interface GatewayState {
    * been asked to ignore. Lives on `GatewayState` (created once per plugin
    * activation, NOT per listener) so a config `reload()`, which tears down
    * and relaunches the listener, does not silently re-enable recording
-   * mid-session. No file, no cache column: dies with the daemon process.
-   * @ref LLP 0066#ephemeral [implements]: the set is deliberately process-local,
-   * which is the half of the caveat `EPHEMERAL_NOTE` has to keep telling users.
+   * mid-session. The persistent markers are loaded during activation.
+   * @ref LLP 0403#storage [implements]: activation loads saved exclusions.
    */
   ignoredSessions: Set<string>
 }
@@ -284,7 +323,7 @@ export type SessionIdResolution =
   | {
       ok: true
       sessionId: string
-      source: 'argument' | 'claude_env' | 'codex_rollout' | 'codex_env_rollout'
+      source: 'argument' | 'claude_env' | 'pi_env' | 'codex_rollout' | 'codex_env_rollout'
       evidence?: string
       threadId?: string
     }
@@ -363,7 +402,7 @@ export interface SessionStatusOutcome {
 export interface SessionStatusReport {
   status: 'ignored' | 'not_ignored' | 'unknown'
   session_id: string | null
-  session_id_source: 'argument' | 'claude_env' | 'codex_rollout' | 'codex_env_rollout' | null
+  session_id_source: 'argument' | 'claude_env' | 'pi_env' | 'codex_rollout' | 'codex_env_rollout' | null
   session_id_evidence: string | null
   /**
    * The Codex thread the invocation is in, when one was resolved. Distinct from

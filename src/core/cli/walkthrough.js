@@ -6,22 +6,27 @@ import path from 'node:path'
 import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
+import { loadConfigFile } from '../config/schema.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
+import { isEntryRecording } from '../config/client_recording.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
-import { GlobalInstallError } from './global_install.js'
+import { DurableBinRequiredError, GlobalInstallError } from './global_install.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
-import { daemonIncompleteNote } from '../daemon/platform.js'
+import { daemonIncompleteNote, platformIsSupported } from '../daemon/platform.js'
 import { ServiceOpError } from '../daemon/service_ops.js'
 import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { hypHomeFromEnv } from '../runtime/paths.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
-import { materializeClientAssets } from '../runtime/client_assets.js'
+import { CLAUDE_SKILL_RELOAD_HINT, copiedClaudeSkills, materializeClientAssets } from '../runtime/client_assets.js'
+import { loaderActivationKind } from '../runtime/loader.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
 import { queuedLineAsker } from './line_asker.js'
 import { withSpinner } from './spinner.js'
+import { joinNames } from './wizard/express.js'
+import { groupThousands } from '../util/format_number.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -35,7 +40,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, ClientRegistration, ClientRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, ClientPreflight, ClientRegistration, ClientRegistry, CommandActivationOutcome, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
  * @import { restartServiceDaemon as restartServiceDaemonFn, serviceDaemonStatus as serviceDaemonStatusFn } from '../../../src/core/daemon/install.js'
@@ -50,10 +55,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  *   PickerBackfillRunner,
  *   PickerSource,
  *   PickerExport,
- *   PickerPicks,
  *   PickerFinaleActions,
- *   PickerWalkthroughResult,
- *   RunPickerWalkthroughOptions,
  *   FinaleSummary,
  *   WalkthroughOptions,
  * } from '../../../src/core/cli/types.js'
@@ -75,10 +77,8 @@ export const LOCAL_INSTALL_RETENTION_DAYS = 120
  * @param {NodeJS.ProcessEnv} env
  */
 export function resolveHypHome(env) {
-  if (env.HYP_HOME) return env.HYP_HOME
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
-  const home = env.HOME || os.homedir()
-  return path.join(home, '.hyp')
+  return hypHomeFromEnv(env, env.HOME)
 }
 
 /**
@@ -153,7 +153,7 @@ function legacyNumberedPromptFactory(opts) {
       const defaulted = () =>
         question.enterKeepsChecked ? question.options.filter((o) => o.checked).map((o) => o.value) : []
       // Only a question that opted in re-asks, and then only once. Every
-      // other caller (the pick menus, `runPickerWalkthrough`) asks exactly
+      // other caller (the pick menus) asks exactly
       // as many times as it did before: once.
       const attempts = 1 + (question.enterKeepsChecked ? MAX_MALFORMED_REASKS : 0)
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -222,68 +222,6 @@ function legacyNumberedPromptFactory(opts) {
       // historical empty selection, because that is their enter too.
       // @ref LLP 0190#sync-gate [implements]: the spent budget lands on the stated default, not on an empty selection
       return defaulted()
-    } finally {
-      rl.close()
-    }
-  }
-}
-
-/**
- * Build the interactive "overwrite existing config?" confirm. Defaults
- * to **yes**: this lands at the end of an attended run, after every
- * question was answered, so a bare Enter has to complete the run the
- * user just walked - an enter that silently threw those answers away
- * read as the wizard failing. It is safe as a yes because nothing is
- * destroyed either way: the caller backs the file up before replacing
- * it, and the carried-over list below names what the rewrite keeps.
- *
- * The question says the file is *rewritten from the picks*, not merely
- * "overwritten": the write is a whole-file regeneration, and a user whose
- * mental model is "I am adjusting checkboxes" needs to know that before
- * the y/N. It also names what survives the regeneration, so the answer is
- * a decision about the picks rather than a bet on how much is lost.
- *
- * That is three facts, and as one paragraph they arrived as a wall of text
- * with the actual question buried at the end of it. So it is laid out
- * instead: the path on its own line, the consequence and the carried-over
- * list indented under it, and `Continue?` alone on the last line where a
- * reader's eye lands. Same facts, same order, scannable.
- *
- * A stdin that ends without a line (a terminal that dropped, a scripted
- * run whose input runs out before the commit point) is read through
- * `queuedLineAsker` rather than `rl.question`, whose promise is left
- * permanently unsettled at EOF. The unanswerable question falls to the
- * default it prints, which is the same answer a bare Enter gives, so the
- * on-screen `[Y/n]` stays the whole contract: EOF completes the run the
- * same way that Enter does, and the backup is taken either way.
- *
- * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
- * @returns {(targetPath: string) => Promise<boolean>}
- * @ref LLP 0183#say-so [implements]: the overwrite confirm states that the config is regenerated and what is carried over
- * @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default instead of waiting on an answer that can never come
- */
-export function defaultOverwriteConfirmFactory(opts) {
-  const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
-  const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
-  return async function (targetPath) {
-    const rl = readline.createInterface({ input, output, terminal: false })
-    const askLine = queuedLineAsker(rl, input, output)
-    try {
-      const answer = await askLine(
-        '\n' +
-        `This config will be rewritten from your picks:\n` +
-        `  ${targetPath}\n` +
-        '\n' +
-        '  Carried over: retention window, export destinations, hand-edited\n' +
-        '  settings, and plugins the picker does not manage. A backup is kept.\n' +
-        '\n' +
-        'Continue? [Y/n]: '
-      )
-      // Only an explicit no declines; a bare enter (and any stray answer)
-      // proceeds, matching the stated default. `null` is EOF, read as that
-      // same empty line so one parse serves both: the answer a spent stdin
-      // takes cannot drift from the default the printed question advertises.
-      return !/^n(o)?$/i.test((answer ?? '').trim())
     } finally {
       rl.close()
     }
@@ -468,7 +406,7 @@ function tuiBackfillConsentPromptFactory(opts) {
     const choice = await select({
       title: backfillConsentTitle(providers, retentionDays),
       options: [
-        { value: 'yes', label: 'Yes - import it now', summary: 'Reads local transcripts into the query cache.' },
+        { value: 'yes', label: 'Yes - import it now', summary: 'Includes your existing conversation history.' },
         { value: 'no', label: 'No - skip for now', summary: 'You can import later with hyp backfill.' },
       ],
       default: 'yes',
@@ -563,303 +501,9 @@ const PICKER_DISPLAY_ORDER = [
 ]
 
 /**
- * Phase 5 export options.
- *
- * @type {{ value: PickerExport, label: string, summary: string }[]}
- */
-const PICKER_EXPORTS = [
-  {
-    value: 'keep-local',
-    label: 'keep local query cache only',
-    summary: 'Stores recent rows locally for hyp query; nothing is exported elsewhere.',
-  },
-  {
-    value: 'local-parquet',
-    label: 'export local Parquet files',
-    summary: 'Writes scheduled Parquet exports under HYP_HOME/exports for external tools.',
-  },
-  {
-    value: 'configure-later',
-    label: 'configure later',
-    summary: 'Writes capture config now and leaves export sinks for a later config edit.',
-  },
-]
-
-
-/**
- * Drive the Phase 5 first-run picker walkthrough.
- *
- * The picker offers a
- * fixed set of user-facing source labels (Claude Code / Codex / raw
- * Anthropic / raw OpenAI / OTEL) and a fixed set of export labels
- * (`keep-local` / `local-parquet` / `configure-later`). These are
- * translated into a v2 config via {@link composePickerConfig}.
- *
- * When `opts.finale` is provided, the walkthrough also runs the
- * post-write actions described by the bead:
- *   - daemon install (dry-run or real)
- *   - attach for each picked client
- *   - skill install for each picked client
- *   - daemon restart (skipped in dry-run)
- *
- * Spans: `walkthrough.start`, `walkthrough.pick` (logs),
- * `walkthrough.write_config`, `daemon.install`, `client.attach`,
- * `skills.install`, `walkthrough.finish`.
- *
- * Superseded as `hyp init`'s entry point by `runInitWizard`
- * (LLP 0135 #orchestration), which drives the same pick/write/finale
- * machinery through the wizard's pick phase. Kept as the direct
- * programmatic surface existing tests and smokes exercise.
- *
- * @param {RunPickerWalkthroughOptions} opts
- * @returns {Promise<PickerWalkthroughResult>}
- * @ref LLP 0011#interactive-walkthrough [implements]: the pre-wizard walkthrough shape; hyp init now fronts it with runInitWizard
- */
-export async function runPickerWalkthrough(opts) {
-  const { capabilities, stdout, env } = opts
-  const log = getLogger('walkthrough')
-
-  // Autodetect installed client tools so the picker can pre-check them.
-  // Interactive only: when `picks` are supplied (`--yes` / `--dry-run` /
-  // presets) the selection is explicit and must stay deterministic, so
-  // detection is skipped entirely. Best-effort: a detector failure
-  // leaves the set empty rather than blocking onboarding.
-  // @ref LLP 0011#autodetect-vs-default [implements]: detection only seeds the initial checkbox; never forces a source on
-  const interactive = !opts.picks
-  /** @type {Set<PickerSource>} */
-  let detected = new Set()
-  if (interactive) {
-    const detect = opts.detect ?? defaultPickerDetect
-    try {
-      detected = await detect({ env })
-    } catch {
-      detected = new Set()
-    }
-  }
-
-  // The picker table is manifest-sourced now: each plugin declares its
-  // rows in `contributes.picker` (`@ref LLP 0130#picker-block`), replacing
-  // the retired hardcoded PICKER_SOURCES list. Both the interactive prompt
-  // options and `composePickerConfig`'s fold read from these descriptors.
-  const { descriptors: pickerDescriptors, composeWith } = await loadPickerCatalog()
-  const descriptorList = [...pickerDescriptors.values()]
-
-  await withSpan(
-    'walkthrough.start',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.start',
-      sources_available: descriptorList.length,
-      exports_available: PICKER_EXPORTS.length,
-      sources_detected: detected.size,
-      detected_sources: [...detected].join(','),
-      status: 'ok',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-
-  /** @type {PickerPicks} */
-  let picks
-  // Provenance of the export choice, for telemetry. Export is no longer
-  // asked interactively (local-parquet is the out-of-the-box default),
-  // so the origin is `user` only when an explicit `--export` flag was
-  // threaded in on the pre-baked path; otherwise the pick was defaulted.
-  let exportOrigin = 'default'
-  if (opts.picks) {
-    picks = opts.picks
-    exportOrigin = opts.exportOrigin ?? 'default'
-  } else {
-    const ask = opts.prompt ?? defaultPromptFactory(opts)
-
-    stdout.write('HypAware records the sessions, logs, and telemetry from your AI agents into one queryable history.\n\n')
-
-    try {
-      const sourceRaw = await ask({
-        pickType: 'sources',
-        title: 'What do you want to collect?',
-        // Hidden and platform-gated rows are absent from the menu but still
-        // pickable via `--source` (which takes the `opts.picks` path above and
-        // never reaches this prompt). A hidden row carries no probe, so nothing
-        // is silently unchecked by leaving it out. A platform-gated row may
-        // well be detected, and is withheld anyway: the gate answers a question
-        // about the integration that no probe about this machine can overturn
-        // (`@ref LLP 0368#platform-gate`).
-        options: visiblePickerDescriptors(descriptorList, opts.platform).map((d) => ({
-          value: d.id,
-          label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,
-          ...(d.summary ? { summary: d.summary } : {}),
-          ...(detected.has(/** @type {PickerSource} */ (d.id)) ? { checked: true } : {}),
-        })),
-      })
-      const sources = /** @type {PickerSource[]} */ (
-        sourceRaw.filter((v) => descriptorList.some((d) => d.id === v))
-      )
-
-      // Export destination is not asked interactively. A local query
-      // cache is always kept; on top of it we default to scheduled local
-      // Parquet exports so `npx hypaware` produces durable files out of
-      // the box. Other destinations (keep-local only, configure-later,
-      // S3, …) remain available via `hyp init --export <choice>` and by
-      // editing the written config later.
-      const exportChoice = /** @type {PickerExport} */ ('local-parquet')
-
-      // Retention is not asked either (LLP 0137): this legacy surface has
-      // no pathway fork, so it takes the flat default. The wizard applies
-      // the pathway-aware defaults; `--retention-days` overrides via picks.
-      picks = { sources, exportChoice, retentionDays: DEFAULT_RETENTION_DAYS }
-    } catch (err) {
-      if (isPromptCancelledError(err)) {
-        return await cancelledResult(opts)
-      }
-      throw err
-    }
-  }
-
-  for (const value of picks.sources) {
-    log.info('walkthrough.pick', {
-      [Attr.COMPONENT]: 'walkthrough',
-      pick_type: 'sources',
-      pick_value: value,
-    })
-  }
-  log.info('walkthrough.pick', {
-    [Attr.COMPONENT]: 'walkthrough',
-    pick_type: 'exports',
-    pick_value: picks.exportChoice,
-    pick_origin: exportOrigin,
-  })
-
-  const hypHome = resolveHypHome(env)
-  const config = composePickerConfig({
-    sources: picks.sources,
-    descriptors: pickerDescriptors,
-    exportChoice: picks.exportChoice,
-    retentionDays: picks.retentionDays,
-    hypHome,
-    composeWith,
-  })
-
-  const obsEnv = readObservabilityEnv(env)
-  const configPath = env.HYP_CONFIG
-    ? path.resolve(env.HYP_CONFIG)
-    : defaultConfigPath(obsEnv.hypHome)
-
-  // Guard against clobbering an existing local config (the non-destructive
-  // half of #111). Interactive runs prompt for confirmation;
-  // non-interactive runs require `--force`. Either path backs up the
-  // existing file before replacing it.
-  // @ref LLP 0031#local-layer-writers [implements]: init overwrite safety on the walkthrough write path
-  const overwriteConfirm = interactive
-    ? (opts.confirmOverwrite ?? defaultOverwriteConfirmFactory({ stdin: opts.stdin, stdout }))
-    : undefined
-  const guard = await prepareLocalConfigWrite({
-    targetPath: configPath,
-    force: opts.force,
-    ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
-  })
-  if (!guard.proceed) {
-    opts.stderr.write(`hyp setup: ${guard.message}\n`)
-    return overwriteAbortedResult({ opts, configPath, config, picks })
-  }
-  if (guard.backupPath) {
-    stdout.write(`Backed up existing config to ${guard.backupPath}\n`)
-  }
-
-  await withSpan(
-    'walkthrough.write_config',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.write_config',
-      config_path: configPath,
-      plugin_count: config.plugins?.length ?? 0,
-      ...(guard.backupPath ? { config_backed_up: true } : {}),
-      status: 'ok',
-    },
-    async () => {
-      await fs.mkdir(path.dirname(configPath), { recursive: true })
-      await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
-    },
-    { component: 'walkthrough' }
-  )
-
-  // @ref LLP 0180#decision [implements]: client-ness is read from the picked
-  // rows' manifest client contributions, not a name list copied per call site
-  const clientsPicked = derivePickedClients(
-    picks.sources,
-    pickerDescriptors,
-    await buildWalkthroughClientDescriptorMap()
-  )
-
-  /** @type {FinaleSummary | undefined} */
-  let finaleSummary
-  if (opts.finale) {
-    finaleSummary = await runPickerFinale({
-      finale: opts.finale,
-      clientsPicked,
-      capabilities,
-      ...(opts.clients ? { clients: opts.clients } : {}),
-      sources: opts.sources,
-      skills: opts.skills,
-      agents: opts.agents,
-      ...(opts.failedPlugins ? { failedPlugins: opts.failedPlugins } : {}),
-      config,
-      configPath,
-      env,
-      stdout,
-      stderr: opts.stderr,
-      retentionDays: picks.retentionDays,
-      // Interactive mode is the absence of pre-baked picks: only then do
-      // we prompt for backfill consent. `--yes` / `--dry-run` carry picks
-      // and backfill runs automatically.
-      interactive: !opts.picks,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
-      ...(opts.backfill ? { backfill: opts.backfill } : {}),
-      ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
-    })
-  }
-
-  const cancelled = finaleSummary?.cancelled === true
-  const exitCode = cancelled ? WALKTHROUGH_CANCEL_EXIT_CODE : 0
-
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      sources_picked: picks.sources.length,
-      export_picked: picks.exportChoice,
-      clients_picked: clientsPicked.length,
-      retention_days: picks.retentionDays,
-      config_path: configPath,
-      ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
-      status: cancelled ? 'cancelled' : 'ok',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-
-  if (cancelled) writeCancelledNotice(opts.stderr)
-
-  writeWalkthroughRunSummary({ stdout, configPath, finaleSummary })
-
-  return {
-    exitCode,
-    configPath,
-    config,
-    sourcesPicked: picks.sources,
-    exportPicked: picks.exportChoice,
-    clientsPicked,
-    retentionDays: picks.retentionDays,
-    ...(finaleSummary ? { finale: finaleSummary } : {}),
-  }
-}
-
-/**
  * Print the closing run summary: the written config path plus one line
  * per finale action that ran (daemon target, attaches, skills/agents
- * counts). Shared by `runPickerWalkthrough` and the wizard orchestrator so
- * both entry points end a run identically.
+ * counts), used by the wizard orchestrator.
  *
  * No "next: hyp query sql ..." hint: it named the `logs` dataset, which
  * only exists when `@hypaware/otel` is configured, so most installs ended
@@ -870,11 +514,12 @@ export async function runPickerWalkthrough(opts) {
  *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   configPath: string,
  *   finaleSummary?: FinaleSummary | undefined,
+ *   dryRun?: boolean,
  * }} args
  */
-export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }) {
+export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary, dryRun }) {
   stdout.write('\n')
-  stdout.write(`✓ Wrote ${configPath}\n`)
+  stdout.write(dryRun ? `(dry-run) Would write ${configPath}\n` : `✓ Wrote ${configPath}\n`)
   if (finaleSummary?.daemonInstall && !finaleSummary.daemonInstall.skipped) {
     const tag = finaleSummary.daemonInstall.dryRun ? '(dry-run) ' : ''
     if (finaleSummary.daemonInstall.targetPath) {
@@ -887,6 +532,10 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
     }
   }
   for (const a of finaleSummary?.attach ?? []) {
+    if (a.notRecording) {
+      stdout.write(`attach: ${a.client} not recording (detached); run 'hyp client attach ${a.client}' to record it\n`)
+      continue
+    }
     if (a.skipped) {
       stdout.write(`attach: ${a.client} already attached\n`)
       continue
@@ -1217,6 +866,7 @@ function composerManagedPlugins(descriptors, composeWith) {
  * @ref LLP 0183#carry-forward [implements]: a reconfigure keeps what the composer does not own; only the picked set is recomposed
  */
 function carryForwardExistingConfig(composed, existing, descriptors, composeWith) {
+  preserveOllamaUpstreams(composed, existing, descriptors)
   const existingPlugins = existing.plugins ?? []
   const existingSinks = existing.sinks ?? {}
   const composedSinks = composed.sinks ?? {}
@@ -1284,6 +934,107 @@ function carryForwardExistingConfig(composed, existing, descriptors, composeWith
   if (Object.keys(sinks).length > 0) merged.sinks = sinks
   else delete merged.sinks
   return merged
+}
+
+// @ref LLP 0474#setup [implements]: the Ollama extension preserves its transport and unmanaged entries, not every preset's list
+/**
+ * @param {HypAwareV2Config} composed
+ * @param {HypAwareV2Config} existing
+ * @param {Map<string, PickerDescriptor>} descriptors
+ */
+function preserveOllamaUpstreams(composed, existing, descriptors) {
+  const hasOllama = (/** @type {HypAwareV2Config} */ config) => config.plugins?.some(p => p.name === '@hypaware/ollama')
+  if (!hasOllama(composed) && !hasOllama(existing)) return
+  const prior = existing.plugins?.find(p => p.name === GATEWAY_PLUGIN)
+  if (!Array.isArray(prior?.config?.upstreams)) return
+  const owned = new Set([...descriptors.values()].flatMap(d => d.compose ? requestedUpstreams(d.compose).map(u => u.name) : []))
+  let gateway = composed.plugins?.find(p => p.name === GATEWAY_PLUGIN)
+  const fresh = Array.isArray(gateway?.config?.upstreams) ? gateway.config.upstreams : []
+  const old = prior.config.upstreams
+  const upstreams = fresh.map(u => {
+    if (u && typeof u === 'object' && !Array.isArray(u) && u.name === 'ollama') {
+      return old.find(p => p && typeof p === 'object' && !Array.isArray(p) && p.name === 'ollama') ?? u
+    }
+    return u
+  })
+  for (const u of old) {
+    if (u && typeof u === 'object' && !Array.isArray(u) && typeof u.name === 'string' && !owned.has(u.name)
+      && !upstreams.some(p => p && typeof p === 'object' && !Array.isArray(p) && p.name === u.name)) upstreams.push(u)
+  }
+  if (!gateway && upstreams.length > 0) {
+    gateway = { name: GATEWAY_PLUGIN }
+    composed.plugins ??= []
+    composed.plugins.unshift(gateway)
+  }
+  if (gateway) gateway.config = { ...gateway.config, upstreams }
+}
+
+/**
+ * Setup's client preflight (LLP 0532): ask each picked client's adapter, once
+ * and before anything is written, whether its attach is known to refuse or
+ * to capture less. Each verdict is said once on stderr. The refused clients
+ * are returned so the finale skips their attach; every other client is
+ * untouched. Only an adapter that defines `preflight` is asked, so a run
+ * that picked no such client runs no check at all. A detached client, one
+ * whose owner failed to activate, and a preflight that throws give no verdict.
+ *
+ * @param {{
+ *   clientsPicked: string[],
+ *   config: HypAwareV2Config,
+ *   capabilities: CapabilityRegistry,
+ *   clients?: ClientRegistry,
+ *   activations?: CommandActivationOutcome[],
+ *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ * }} args
+ * @returns {Promise<Set<string>>}
+ */
+export async function preflightPickedClients({ clientsPicked, config, capabilities, clients, activations, stderr }) {
+  /** @type {Set<string>} */
+  const refused = new Set()
+  /** @type {AiGatewayCapability | undefined} */
+  const gateway = clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')
+    ? capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
+    : undefined
+  const asked = clientsPicked
+    .map((client) => ({ client, adapter: clients?.getClient(client) ?? gateway?.getClient(client) }))
+    .filter((entry) => typeof entry.adapter?.preflight === 'function')
+  if (asked.length === 0) return refused
+  const notRecording = await detachedClients(asked.map((entry) => entry.client), config)
+  const failedOwners = failedClientOwners(asked.map((entry) => entry.client), activations)
+  for (const { client, adapter } of asked) {
+    if (notRecording.has(client) || failedOwners.has(client)) continue
+    /** @type {ClientPreflight} */
+    let verdict
+    try {
+      verdict = (await adapter?.preflight?.()) ?? {}
+    } catch {
+      continue
+    }
+    if (verdict.refuse) {
+      stderr.write(`${verdict.refuse}\n`)
+      refused.add(client)
+    } else if (verdict.warn) {
+      stderr.write(`note: ${verdict.warn}\n`)
+    }
+  }
+  return refused
+}
+
+/**
+ * The picked clients whose plugin entry says `recording: false` (LLP 0466).
+ *
+ * @param {string[]} clients
+ * @param {HypAwareV2Config} config
+ * @returns {Promise<Set<string>>}
+ */
+async function detachedClients(clients, config) {
+  const off = new Set((config.plugins ?? []).filter((entry) => !isEntryRecording(entry)).map((entry) => entry.name))
+  if (off.size === 0 || clients.length === 0) return new Set()
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+  return new Set(clients.filter((client) => {
+    const plugin = descriptors.get(client)?.plugin
+    return plugin !== undefined && off.has(plugin)
+  }))
 }
 
 /**
@@ -1600,8 +1351,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  * #dead-surface), threaded in because the finale is one *step* but
  * several acts, and the backfill consent question sits behind three of
  * them. A caller that has a consent surface to lose passes it; the
- * standalone picker walkthrough has no guard and passes nothing, which
- * leaves the question exactly as it was.
+ * direct finale caller may omit it.
  *
  * @param {{
  *   finale: PickerFinaleActions,
@@ -1612,6 +1362,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
  *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
  *   failedPlugins?: string[],
+ *   activations?: CommandActivationOutcome[],
  *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
@@ -1619,12 +1370,15 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   retentionDays: number,
  *   interactive: boolean,
+ *   force?: boolean,
  *   stdin?: NodeJS.ReadableStream,
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   skipAttachClients?: Set<string>,
- *   progress?: string,
+ *   preflightRefused?: Set<string>,
+ *   clientLabels?: Map<string, string>,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
  *   daemonService?: {
  *     restartServiceDaemon: typeof restartServiceDaemonFn,
@@ -1642,13 +1396,9 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
 export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
-  // Like the join lane, the finale is one step made of several actions
-  // (install, attach, assets, backfill consent, restart), so it states its
-  // position once where the lane starts rather than per action. Only the
-  // wizard sets this; `runPickerWalkthrough` and non-interactive runs leave
-  // it unset and the line is not printed.
-  // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
-  if (args.progress) stdout.write(`${args.progress}\n`)
+  // Each act is reported in one line, by the names the user picked from
+  // (LLP 0437 #finish).
+  const label = (/** @type {string} */ client) => args.clientLabels?.get(client) ?? client
   // `?? ''`, not os.homedir(): '' is the "no home, stay inert" sentinel this
   // whole finale keys on - the materialize/prune guards, the attach probe,
   // and the conditional homeDir spreads below all read it as "write
@@ -1724,7 +1474,8 @@ export async function runPickerFinale(args) {
           // walkthrough only signals whether binPath came from an
           // explicit --bin and reads the result back off the plan.
           binExplicit: finale.binPath !== undefined,
-          durableBin: { env, stdout, stderr },
+          force: args.force,
+          durableBin: { env, stdout, stderr, stdin: args.stdin, interactive: args.interactive },
           ...(homeDir ? { homeDir } : {}),
         }
         if (dryRun) {
@@ -1773,6 +1524,8 @@ export async function runPickerFinale(args) {
       },
       { component: 'walkthrough' }
     ).catch((err) => {
+      // @ref LLP 0404#install-policy [implements]: no attach after refusing a fragile daemon path
+      if (err instanceof DurableBinRequiredError) throw err
       const diagnosed = err instanceof ServiceOpError || err instanceof GlobalInstallError
       if (!diagnosed && !(err instanceof installMod.DaemonInstallError)) throw err
       installFailed = true
@@ -1811,8 +1564,15 @@ export async function runPickerFinale(args) {
   /** @param {string} name @returns {ClientRegistration | undefined} */
   const resolveAdapter = (name) => args.clients?.getClient(name) ?? gateway?.getClient(name)
   const anyAdapterPicked = clientsPicked.some((client) => resolveAdapter(client) !== undefined)
+  // A plugin whose `activate()` threw is left in the registry with whatever
+  // it registered before the throw, or with nothing. Neither is "this client
+  // has no adapter by design", so the owner's outcome is read first. A caller
+  // that passed no activations has said nothing about owners: that is
+  // unknown, so the lane neither invents a failure nor records a success
+  // beyond the reading it always had.
+  const failedOwners = failedClientOwners(clientsPicked, args.activations)
 
-  if (clientsPicked.length > 0 && (anyAdapterPicked || gateway)) {
+  if (clientsPicked.length > 0 && (anyAdapterPicked || gateway || failedOwners.size > 0)) {
     // Skipped when no daemon was installed (the join lane restarts only
     // after attach, so no CA can appear before it) and on dry runs; the
     // wait-or-skip decision itself lives in the helper. Also skipped when no
@@ -1825,9 +1585,33 @@ export async function runPickerFinale(args) {
         ...(args.waitForCaFn ? { waitForCaFn: args.waitForCaFn } : {}),
       })
     }
+    // A client the user detached stays detached through a reconfigure: the
+    // carried-forward plugin entry keeps its `recording: false`, and only an
+    // explicit `hyp client attach` turns it back on.
+    // @ref LLP 0466#reattach-paths [implements]: setup never silently re-attaches a detached client
+    const notRecording = await detachedClients(clientsPicked, config)
     for (const client of clientsPicked) {
+      if (notRecording.has(client)) {
+        summary.attach.push({ client, dryRun, ok: true, skipped: true, notRecording: true })
+        continue
+      }
       if (args.skipAttachClients?.has(client)) {
         summary.attach.push({ client, dryRun, ok: true, skipped: true })
+        continue
+      }
+      const failedOwner = failedOwners.get(client)
+      // Checked before the adapter lookup: a plugin that registered its
+      // adapter and then threw is never attached through.
+      // @ref LLP 0522#decision [implements]: a client whose owner threw is a failed attach, not an adapterless skip
+      if (failedOwner) {
+        reportFailedOwnerAttach({ client, owner: failedOwner, dryRun, stderr, summary })
+        continue
+      }
+      // The preflight already said why and how to retry; attaching would
+      // only repeat the refusal it predicted.
+      // @ref LLP 0532#refusal [implements]: a refused client is not attached, and the rest of the run goes on
+      if (args.preflightRefused?.has(client)) {
+        summary.attach.push({ client, dryRun, ok: false })
         continue
       }
       const adapter = resolveAdapter(client)
@@ -1836,6 +1620,8 @@ export async function runPickerFinale(args) {
         // that own skill/agent dirs but deliberately register no runtime
         // adapter (Claude Desktop, LLP 0115#no-attach-on-join). Desktop's
         // scheduled transcript lane needs no attach or configure phase.
+        // That reading holds only for an owner that activated: one that threw
+        // was taken out above.
         // @ref LLP 0180#decision [implements]: an adapterless client contribution skips the attach lane as not applicable
         summary.attach.push({ client, dryRun, ok: true, noAdapter: true })
         continue
@@ -1855,14 +1641,37 @@ export async function runPickerFinale(args) {
       // way the reconciler's attach action calls it.
       const attachEndpoint = adapter.requiresEndpoint === false ? undefined : endpoint
       try {
+        // The adapter's own report names files and capture modes; the
+        // finale says the one thing the user acts on instead. A dry run
+        // keeps the report: the files it would touch are what it is for.
+        let report = ''
         await adapter.attach({
           ...(attachEndpoint ? { endpoint: attachEndpoint } : {}),
           config: {},
-          stdout,
+          stdout: dryRun ? stdout : { write: (/** @type {string} */ chunk) => { report += chunk; return true } },
           stderr,
           dryRun,
         })
-        summary.attach.push({ client, dryRun, ok: true })
+        if (dryRun) {
+          summary.attach.push({ client, dryRun, ok: true })
+        } else {
+          // @ref LLP 0474#routes [implements]: a probe-less Ollama attach is a next-launch recipe, not a changed running client
+          // @ref LLP 0548#onboarding: LangGraph setup must show the application callback recipe
+          if (client === 'ollama' || client === 'langgraph') {
+            stdout.write(report)
+            summary.attach.push({ client, dryRun, ok: true })
+            continue
+          }
+          const outcome = attachReportOutcome(report)
+          summary.attach.push({ client, dryRun, ok: outcome.applied })
+          const name = label(client)
+          if (outcome.applied) {
+            stdout.write(outcome.restart
+              ? `✓ ${name} attached\n`
+              : `✓ ${name} attached (restart open ${name} sessions to start recording)\n`)
+          }
+          for (const line of outcome.kept) stdout.write(`${line}\n`)
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         stderr.write(`attach ${client} failed: ${message}\n`)
@@ -1874,8 +1683,11 @@ export async function runPickerFinale(args) {
   const descriptorMap = clientsPicked.length > 0 && (skills || agents)
     ? await buildWalkthroughClientDescriptorMap()
     : new Map()
+  // Skills and agents are part of the attach wiring a detach removed.
+  const notRecordingAssets = await detachedClients(clientsPicked, config)
+  const assetClients = clientsPicked.filter((client) => !notRecordingAssets.has(client))
 
-  if (clientsPicked.length > 0 && (skills || agents)) {
+  if (assetClients.length > 0 && (skills || agents)) {
     // Span name kept from when skills and agents were two steps: this is now
     // the one client-asset materialization, and it is what the release smoke
     // battery asserts on.
@@ -1891,11 +1703,10 @@ export async function runPickerFinale(args) {
         status: 'ok',
       },
       async (span) => {
-        const framed = framedStream(stdout)
         // No `stdout` here on purpose: the materializer's per-copy line is the
         // right output for `hyp skills install`, where the copies are the
         // command's subject, but in the finale a dozen path lines bury the one
-        // fact the step reports. The counts go out instead; the paths stay
+        // fact the step reports. One line goes out instead; the paths stay
         // available in the run summary and the span.
         //
         // Withholding the stream is exactly why the removals have to come back
@@ -1906,7 +1717,7 @@ export async function runPickerFinale(args) {
         // @ref LLP 0219#automatic-not-gated [implements]: the finale counts its
         //   removals out loud rather than reporting them down a stream it withholds
         const { installed, pruned } = await materializeClientAssets({
-          clients: clientsPicked,
+          clients: assetClients,
           descriptors: descriptorMap,
           homeDir,
           stateRoot: clientAssetStateRoot(env, homeDir),
@@ -1918,7 +1729,10 @@ export async function runPickerFinale(args) {
           dryRun,
           stderr,
         })
-        for (const line of clientAssetCountLines(installed, pruned, dryRun)) framed.write(`${line}\n`)
+        for (const line of clientAssetLines(installed, pruned, dryRun, label)) stdout.write(`${line}\n`)
+        // Said here and not again in the scripted run summary, so one setup
+        // prints it once.
+        if (copiedClaudeSkills(installed)) stdout.write(`${CLAUDE_SKILL_RELOAD_HINT}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
@@ -1929,8 +1743,7 @@ export async function runPickerFinale(args) {
           if (item.kind === 'skill') summary.skillsInstalled.push(entry)
           else summary.agentsInstalled.push(entry)
         }
-        // Trailing blank line so the next step (backfill prompt) stands apart.
-        if (framed.wrote()) stdout.write('\n')
+
         if (span && typeof span.setAttribute === 'function') {
           span.setAttribute('installed_count', installed.length)
         }
@@ -1948,6 +1761,7 @@ export async function runPickerFinale(args) {
     ...(args.backfill ? { backfill: args.backfill } : {}),
     ...(args.backfillConsentPrompt ? { backfillConsentPrompt: args.backfillConsentPrompt } : {}),
     ...(args.checkBoundary ? { checkBoundary: args.checkBoundary } : {}),
+    ...(args.autoAccept ? { autoAccept: true } : {}),
     clientsPicked,
     interactive: args.interactive,
     dryRun,
@@ -1958,6 +1772,7 @@ export async function runPickerFinale(args) {
     stderr,
     env,
     summary,
+    label,
   })
 
   // Re-running the picker regenerates the config from the picks alone, so a
@@ -2000,6 +1815,12 @@ export async function runPickerFinale(args) {
   // claim it would. A withheld restart keeps the summary's initial
   // `skipped: true` record, and `daemonInstall.failed` is where the run says
   // why.
+  //
+  // A platform with no service manager has nothing to restart either. A join
+  // that ended `daemon_incomplete` skips the install rather than failing it,
+  // so `installFailed` is false and the restart used to run straight into
+  // `unsupported platform`, printing `daemon restart failed:` under the note
+  // that had just said there is no background service to install (#1382).
   // @ref LLP 0317#install-means-running [constrained-by]: a pid, not "loaded", is what says a daemon is running
   if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
     const serviceOptions = { ...(homeDir ? { homeDir } : {}) }
@@ -2011,8 +1832,21 @@ export async function runPickerFinale(args) {
     // first `daemon/install.js`.
     try {
       const service = args.daemonService ?? await import('../daemon/install.js')
-      const restartable = !installFailed
-        || (await service.serviceDaemonStatus(serviceOptions)).pid !== undefined
+      let restartable = platformIsSupported(process.platform) && !installFailed
+      if (platformIsSupported(process.platform) && installFailed) {
+        const status = await service.serviceDaemonStatus(serviceOptions)
+        restartable = status.pid !== undefined
+        // A probe that could not reach the service manager has no pid to give
+        // whether or not a daemon is serving the old config, and the restart
+        // would drive the same manager that just failed to answer. The restart
+        // stays withheld, and the summary says why rather than reading as "no
+        // daemon to restart" (#1406). No line is printed: the install failure
+        // above already holds this fault's one diagnosis (#1393).
+        // @ref LLP 0545#withheld [implements]: an unreachable service manager is recorded on the summary, not printed
+        if (status.unreachable) {
+          summary.daemonRestart = { skipped: true, dryRun: false, ok: false, withheld: 'service_manager_unreachable' }
+        }
+      }
       if (restartable) {
         await service.restartServiceDaemon(serviceOptions)
         summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
@@ -2102,6 +1936,86 @@ export async function findAttachedNotConfiguredClients({ clientsPicked, config, 
 }
 
 /**
+ * Refuse a setup write that would leave a client attached through a proxy
+ * the new config turns off.
+ *
+ * A machine set up before LLP 0262 can still have Claude attached by proxy
+ * (its marker says `mode: "proxy"`), and no setup path composes `proxy_mode`
+ * any more, so a from-scratch re-init under `--force` would quietly turn the
+ * proxy off and capture would stop. The evidence is the client's own attach
+ * marker, read through the probe `hyp status` uses; the config's
+ * `proxy_mode` key proves nothing about what is attached. A refusal writes
+ * nothing, names the client and the commands that fix it, and runs neither.
+ *
+ * Bounded: one settings-file read per client whose probe is a JSON marker
+ * (the only marker that records a mode), and none at all for a fresh install,
+ * a config that keeps the proxy on, or a centrally governed gateway.
+ *
+ * @ref LLP 0524#check [implements]: refuse only when a config exists, the new one turns the proxy off, central does not own the gateway, and a marker says proxy
+ * @ref LLP 0524#unreadable [implements]: a settings file that cannot be read where it matters refuses rather than guesses, without quoting its contents
+ * @param {{
+ *   config: HypAwareV2Config,
+ *   configPath: string,
+ *   env: NodeJS.ProcessEnv,
+ *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ * }} args
+ * @returns {Promise<boolean>} true when the write may proceed
+ */
+export async function preflightLegacyProxyAttach({ config, configPath, env, stderr }) {
+  try {
+    await fs.access(configPath)
+  } catch {
+    return true
+  }
+  const gateway = (config.plugins ?? []).find((entry) => entry.name === GATEWAY_PLUGIN)
+  if (gateway && gateway.enabled !== false && gateway.config?.proxy_mode === true) return true
+  // @ref LLP 0524#central [implements]: a centrally named gateway is not the local write's to change, so there is nothing to refuse
+  if ((await readCentralPluginNames(env)).has(GATEWAY_PLUGIN)) return true
+  const homeDir = env.HOME ?? ''
+  if (!homeDir) return true
+
+  for (const [client, descriptor] of await buildWalkthroughClientDescriptorMap()) {
+    if (descriptor.attachProbe?.format !== 'json' || !descriptor.attachProbe.marker_key) continue
+    const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
+    /** @type {string | undefined} */
+    let reason
+    /** @type {string} */
+    let message = ''
+    if (probe.error) {
+      reason = 'attach_state_unreadable'
+      message =
+        `cannot read ${client}'s settings${probe.settingsPath ? ` (${probe.settingsPath})` : ''} to check ` +
+        `whether ${client} is still attached through the HypAware proxy, which this config turns off. ` +
+        `Nothing was changed. Fix that file, or run 'hyp client detach ${client}', then run setup again.`
+    } else if (probe.mode === 'proxy') {
+      reason = 'legacy_proxy_attachment'
+      message =
+        `${client} is still attached through the HypAware proxy, and this config turns the proxy off, ` +
+        `so ${client} would stop being captured. Nothing was changed. Move ${client} off the proxy ` +
+        `with 'hyp client attach ${client}', or remove the attach with 'hyp client detach ${client}', ` +
+        `then run setup again.`
+    }
+    if (!reason) continue
+    stderr.write(`hyp setup: ${message}\n`)
+    await withSpan(
+      'wizard.pick.write_config',
+      {
+        [Attr.COMPONENT]: 'wizard',
+        [Attr.OPERATION]: 'wizard.pick.write_config',
+        config_path: configPath,
+        status: 'aborted',
+        hyp_reason: reason,
+        hyp_client: client,
+      },
+      async () => {},
+      { component: 'wizard' }
+    )
+    return false
+  }
+  return true
+}
+
+/**
  * Name the stranded clients and the one command that clears each. The wizard
  * says what it found and what to run; it does not run it, because rewriting a
  * client's settings is not something a menu confirm asked for.
@@ -2139,8 +2053,6 @@ function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
  * hosts with no central layer (LLP 0185 #status-backstop).
  *
  * Only a caller that printed something substantial in between calls this.
- * `runPickerWalkthrough` writes a short run summary and stops, so it keeps the
- * single finale print and never repeats it onto the same screen.
  *
  * @ref LLP 0230#repeat-at-the-end [implements]: the repeat belongs to the caller whose own output buried the first print
  * @param {{
@@ -2178,6 +2090,7 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   clientsPicked: string[],
  *   interactive: boolean,
  *   dryRun: boolean,
@@ -2188,11 +2101,13 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   env: NodeJS.ProcessEnv,
  *   summary: FinaleSummary,
+ *   label?: (client: string) => string,
  * }} args
  * @returns {Promise<void>}
  */
 async function runFinaleBackfill(args) {
   const { backfill, clientsPicked, interactive, dryRun, retentionDays, until, stdout, stderr, env, summary } = args
+  const label = args.label ?? ((/** @type {string} */ client) => client)
   if (!backfill) return
   const available = new Set(backfill.available)
   const providers = clientsPicked.filter((c) => available.has(c))
@@ -2212,7 +2127,9 @@ async function runFinaleBackfill(args) {
   // places: a decline was read and answered, while this one was never
   // asked and its own "skipped" line goes to the stream that just died.
   let surfaceDead = false
-  if (interactive && asked.length > 0) {
+  // An express accept already said yes to the import (LLP 0201 #finale-import), so
+  // it runs as a scripted run's does, with no question to open.
+  if (interactive && !args.autoAccept && asked.length > 0) {
     // The last consent question in the run, and the only one inside the
     // finale: the install, the attach, and the asset copy above it have
     // each narrated first, so the surface can die between the caller's
@@ -2251,6 +2168,7 @@ async function runFinaleBackfill(args) {
       providers: providers.join(','),
       dry_run: dryRun,
       interactive,
+      auto_accept: args.autoAccept === true,
       consent,
       consent_cancelled: cancelled,
       consent_surface_dead: surfaceDead,
@@ -2264,13 +2182,13 @@ async function runFinaleBackfill(args) {
       // takes the sweep-backed providers down with it; a decline skips
       // only what was actually asked.
       if (cancelled) {
-        stdout.write('backfill: skipped (cancelled)\n')
+        stdout.write('Import skipped.\n')
         return
       }
       // The one thing that outlives a run whose surface died inside the
       // finale: the import did not happen, and it names the one command
       // that does it rather than the whole wizard, which would re-run the
-      // install, the attach and the overwrite confirm to redo one import.
+      // install and the attach to redo one import.
       // Said on stderr because stdout is the stream that just went, so
       // the decline's own line would be written into nothing - and
       // "declined" is not what happened anyway. It names `asked` rather
@@ -2279,7 +2197,7 @@ async function runFinaleBackfill(args) {
       // would claim more than was skipped.
       //
       // Guarded, like the two cancel notices it is modelled on
-      // (`writeCancelledNotice` below, the wizard's post-finale cancel):
+      // (the wizard's post-finale cancel):
       // a terminal that took stdout with it can have taken stderr too,
       // and this arm's whole contract is to warn and let the finale
       // finish - a warning that cannot be written must not cost the run
@@ -2290,7 +2208,7 @@ async function runFinaleBackfill(args) {
         try {
           stderr.write(
             `hyp setup: output closed - the local history import for ${asked.join(', ')} was skipped; ` +
-            `run 'hyp client history import ${asked.join(' ')}' to import it\n`
+            `run 'hyp backfill ${asked.join(' ')}' to import it\n`
           )
         } catch {
           // best-effort: whatever took stdout may have taken stderr too
@@ -2322,14 +2240,28 @@ async function runFinaleBackfill(args) {
           // the result line below replaces it; elsewhere it prints once.
           const startTag = dryRun ? '(dry-run) ' : ''
           const entry = await withSpinner(
-            { stdout, env, label: `${startTag}backfill ${provider}: importing local history…` },
+            {
+              stdout,
+              env,
+              label: `${startTag}Importing ${label(provider)} history…`,
+            },
             () => backfill.run({ provider, dryRun, retentionDays, until })
           )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
-          // The counts matter when something was imported or went wrong;
-          // a clean zero is one short line, not a scan report.
-          stdout.write(`${tag}backfill ${entry.provider}: ${describeBackfillResult(entry)}\n`)
+          // Only an import that wrote rows, failed, or could not run is news;
+          // a zero means there was nothing to do, and the scan counts go to
+          // the span.
+          // @ref LLP 0437#finish [implements]: an import reports only what it imported or a failure
+          // @ref LLP 0538#note [implements]: an import that could not run says so rather than reading as empty
+          if (!entry.ok || (entry.note && entry.scanned === 0)) {
+            stdout.write(`${tag}${label(provider)} import ${describeBackfillResult(entry)}\n`)
+          } else if (entry.rowsWritten > 0) {
+            const rows = entry.rowsWritten === 1 ? 'row' : 'rows'
+            stdout.write(entry.dryRun
+              ? `(dry-run) would import ${groupThousands(entry.rowsWritten)} ${rows} of ${label(provider)} history\n`
+              : `✓ Imported ${groupThousands(entry.rowsWritten)} ${rows} of ${label(provider)} history\n`)
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           // Guarded for the same reason the dead-surface notice above is,
@@ -2378,11 +2310,17 @@ async function runFinaleBackfill(args) {
  * about the history on disk and must not be reported as one. It states
  * what the scan found and claims no import outcome.
  *
- * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, dryRun?: boolean }} entry
+ * A run that scanned nothing because the importer could not run at all
+ * (no `opencode` on PATH) carries the provider's note, and says that
+ * instead, dry run or not: "nothing to import" would claim an empty history
+ * nobody read.
+ *
+ * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, dryRun?: boolean, note?: string }} entry
  * @returns {string}
  */
 export function describeBackfillResult(entry) {
   if (!entry.ok) return `failed (scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})`
+  if (entry.note && entry.scanned === 0) return `unavailable: ${entry.note}`
   if (entry.dryRun) return entry.scanned === 0 ? 'nothing to import' : `scanned ${entry.scanned}`
   if (entry.rowsWritten === 0) {
     return entry.scanned === 0 ? 'nothing to import' : `nothing new to import (scanned ${entry.scanned})`
@@ -2426,19 +2364,6 @@ export async function defaultPickerDetect(opts) {
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
   const detected = await detectPickerSources(catalog, opts.env)
   return /** @type {Set<PickerSource>} */ (detected)
-}
-
-/**
- * Load the manifest-sourced picker descriptors (`@ref LLP 0130#picker-block`)
- * from the bundled plugin catalog, in `PICKER_DISPLAY_ORDER`. This is the
- * replacement for the retired hardcoded `PICKER_SOURCES` table: the picker
- * prompt options and `composePickerConfig`'s fold both read from it.
- * Discovery failure yields an empty map rather than blocking init.
- *
- * @returns {Promise<Map<string, PickerDescriptor>>}
- */
-export async function loadPickerDescriptors() {
-  return (await loadPickerCatalog()).descriptors
 }
 
 /**
@@ -2560,6 +2485,79 @@ export function orderPickerDescriptors(descriptors) {
   return new Map(ordered.map((d) => [d.id, d]))
 }
 
+
+/**
+ * Map each picked client to the owning plugin whose `activate()` threw, read
+ * from the boot's own activation results: the owner is the plugin whose
+ * manifest contributes that client name. Built once per finale, and only over
+ * the picked names, so the cost is one pass over the activated plugins.
+ *
+ * A client no failed owner claims is absent from the map. That covers a
+ * healthy owner, a caller that passed no activations, and an owner that never
+ * reached activation (dep-graph elimination, profile withholding): none of
+ * those is a thrown `activate()`, and the attach lane keeps its existing
+ * reading for them.
+ *
+ * @param {string[]} clientsPicked
+ * @param {CommandActivationOutcome[] | undefined} activations
+ * @returns {Map<string, { plugin: string, errorKind: string }>}
+ */
+function failedClientOwners(clientsPicked, activations) {
+  /** @type {Map<string, { plugin: string, errorKind: string }>} */
+  const failed = new Map()
+  if (!activations || clientsPicked.length === 0) return failed
+  const picked = new Set(clientsPicked)
+  for (const outcome of activations) {
+    if (outcome.ok) continue
+    const client = outcome.plugin.manifest.contributes?.client?.name
+    if (typeof client !== 'string' || !picked.has(client) || failed.has(client)) continue
+    failed.set(client, {
+      plugin: outcome.plugin.manifest.name,
+      // Printed and logged, so only a kind the loader assigned itself.
+      errorKind: loaderActivationKind(outcome.errorKind),
+    })
+  }
+  return failed
+}
+
+/**
+ * Record and say that a picked client was not attached because its owning
+ * plugin did not activate. The line names the client, the plugin, and the
+ * error kind, then the repair: `hyp status` shows why the plugin failed, and
+ * `hyp client attach` attaches the client once it loads. The thrown message
+ * itself is never printed or logged: it is plugin text and may carry anything.
+ *
+ * @param {{
+ *   client: string,
+ *   owner: { plugin: string, errorKind: string },
+ *   dryRun: boolean,
+ *   stderr: { write(chunk: string): unknown },
+ *   summary: FinaleSummary,
+ * }} args
+ */
+function reportFailedOwnerAttach({ client, owner, dryRun, stderr, summary }) {
+  summary.attach.push({
+    client,
+    dryRun,
+    ok: false,
+    activationFailed: true,
+    plugin: owner.plugin,
+    errorKind: owner.errorKind,
+  })
+  getLogger('walkthrough').warn('walkthrough.attach_owner_not_active', {
+    [Attr.COMPONENT]: 'walkthrough',
+    [Attr.OPERATION]: 'client.attach',
+    [Attr.PLUGIN]: owner.plugin,
+    [Attr.ERROR_KIND]: owner.errorKind,
+    [Attr.STATUS]: 'failed',
+    hyp_client: client,
+    dry_run: dryRun,
+  })
+  stderr.write(
+    `${dryRun ? '(dry-run) ' : ''}attach ${client} failed: plugin ${owner.plugin} did not activate (${owner.errorKind}). ` +
+      `Run 'hyp status' to see why, then 'hyp client attach ${client}' once it loads.\n`
+  )
+}
 /**
  * Derive the finale's client list from the picked rows: a picked source
  * is a client pick iff its row's owning plugin contributes a client, and
@@ -2608,58 +2606,40 @@ export async function buildWalkthroughClientDescriptorMap() {
 }
 
 /**
- * One line per client naming how many skills and agents landed there, plus one
- * naming how many retired ones were taken off the machine, in the order the
- * copies were made.
+ * One line naming the clients that got skills (and agents), and one per
+ * client naming how many retired ones were taken off the machine. The
+ * install counts are left out: they describe our packaging, not anything
+ * the user chose. The removals keep their count, since the materializer's
+ * own stream is withheld here and a deletion must still be said.
  *
- * Counted per client rather than summed across them, because the sum is the
- * one number that is true of nobody: six skills copied to two clients is
- * twelve copies, and neither client got twelve. Names are left out entirely -
- * the user picked these clients a screen ago and did not choose the assets,
- * so the roster is not a decision they are being shown for review.
- *
- * The removals get a count and not the paths, unlike everywhere else, for that
- * same reason: this is a step summary in a wizard, and it is the *fact* of a
- * deletion the user needs at this moment, not a roster. What was removed stays
- * on the span and in `client_assets.pruned`.
- *
+ * @ref LLP 0219#automatic-not-gated [implements]: the finale counts its removals out loud rather than reporting them down a stream it withholds
  * @param {ClientAssetInstall[]} installed
  * @param {ClientAssetRemoval[]} pruned
  * @param {boolean} dryRun
+ * @param {(client: string) => string} label
  * @returns {string[]}
  */
-function clientAssetCountLines(installed, pruned, dryRun) {
-  /** @type {Map<string, { skills: number, agents: number, removedSkills: number, removedAgents: number }>} */
-  const byClient = new Map()
-  /** @param {string} client */
-  const counts = (client) => {
-    let entry = byClient.get(client)
-    if (!entry) byClient.set(client, (entry = { skills: 0, agents: 0, removedSkills: 0, removedAgents: 0 }))
-    return entry
+function clientAssetLines(installed, pruned, dryRun, label) {
+  /** @type {string[]} */
+  const lines = []
+  if (installed.length > 0) {
+    const clients = [...new Set(installed.map((i) => label(i.client)))]
+    const what = installed.some((i) => i.kind === 'agent') ? 'skills and agents' : 'skills'
+    lines.push(`${dryRun ? '(dry-run) would install' : '✓ Installed'} ${what} for ${joinNames(clients)}`)
   }
-  for (const item of installed) {
-    const entry = counts(item.client)
+  /** @type {Map<string, { skills: number, agents: number }>} */
+  const removed = new Map()
+  for (const item of pruned) {
+    let entry = removed.get(item.client)
+    if (!entry) removed.set(item.client, (entry = { skills: 0, agents: 0 }))
     if (item.kind === 'skill') entry.skills += 1
     else entry.agents += 1
   }
-  for (const item of pruned) {
-    const entry = counts(item.client)
-    if (item.kind === 'skill') entry.removedSkills += 1
-    else entry.removedAgents += 1
-  }
-  const installVerb = dryRun ? '(dry-run) would install' : 'installed'
-  const removeVerb = dryRun ? '(dry-run) would remove' : 'removed'
-  /** @type {string[]} */
-  const lines = []
-  for (const [client, entry] of byClient) {
-    const landed = []
-    if (entry.skills > 0) landed.push(plural(entry.skills, 'skill'))
-    if (entry.agents > 0) landed.push(plural(entry.agents, 'agent'))
-    if (landed.length > 0) lines.push(`${installVerb} ${landed.join(' and ')} for ${client}`)
+  for (const [client, entry] of removed) {
     const gone = []
-    if (entry.removedSkills > 0) gone.push(plural(entry.removedSkills, 'retired skill'))
-    if (entry.removedAgents > 0) gone.push(plural(entry.removedAgents, 'retired agent'))
-    if (gone.length > 0) lines.push(`${removeVerb} ${gone.join(' and ')} for ${client}`)
+    if (entry.skills > 0) gone.push(plural(entry.skills, 'retired skill'))
+    if (entry.agents > 0) gone.push(plural(entry.agents, 'retired agent'))
+    lines.push(`${dryRun ? '(dry-run) would remove' : 'Removed'} ${gone.join(' and ')} for ${label(client)}`)
   }
   return lines
 }
@@ -2674,119 +2654,31 @@ function plural(count, noun) {
 }
 
 /**
- * Wrap a finale stream so the first write is preceded by a blank line,
- * separating this step's output from the previous step's. A step that turns
- * out to print nothing (no assets matched the picked clients) leaves no empty
- * gap behind, which a plain leading `write('\n')` would.
+ * What the finale keeps from an adapter's attach report, which it otherwise
+ * withholds. The adapter contract returns nothing, so the report is the only
+ * signal: a line opening with `!` at column 0 says the attach did not apply,
+ * an indented `!` line is a warning on one that did, and a line opening with
+ * `restart` is the adapter's own next step, which replaces the finale's
+ * generic one. Those lines are kept verbatim; the rest (paths, settings
+ * values) stays withheld.
  *
- * @param {{ write(chunk: string): unknown }} stdout
- * @returns {{ write(chunk: string): unknown, wrote(): boolean }}
+ * @param {string} report
+ * @returns {{ applied: boolean, restart: boolean, kept: string[] }}
  */
-function framedStream(stdout) {
-  let wrote = false
-  return {
-    write(chunk) {
-      if (!wrote) {
-        stdout.write('\n')
-        wrote = true
-      }
-      return stdout.write(chunk)
-    },
-    wrote() { return wrote },
+export function attachReportOutcome(report) {
+  let applied = true
+  let restart = false
+  /** @type {string[]} */
+  const kept = []
+  for (const line of report.split('\n')) {
+    const text = line.trim()
+    if (text.startsWith('!')) {
+      if (line.startsWith('!')) applied = false
+      kept.push(line)
+    } else if (/^restart\b/i.test(text)) {
+      restart = true
+      kept.push(line)
+    }
   }
-}
-
-/**
- * Result returned when the overwrite guard refuses (non-interactive,
- * `--force` absent) or the user declines the interactive prompt. No
- * config is written; exit code 1 surfaces the refusal to the caller.
- *
- * @param {{
- *   opts: RunPickerWalkthroughOptions,
- *   configPath: string,
- *   config: HypAwareV2Config,
- *   picks: PickerPicks,
- * }} args
- * @returns {Promise<PickerWalkthroughResult>}
- */
-async function overwriteAbortedResult({ opts, configPath, config, picks }) {
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      config_path: configPath,
-      exit_code: 1,
-      status: 'aborted',
-      hyp_reason: 'config_exists',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-  return {
-    exitCode: 1,
-    configPath,
-    config,
-    sourcesPicked: picks.sources,
-    exportPicked: picks.exportChoice,
-    clientsPicked: [],
-    retentionDays: picks.retentionDays,
-  }
-}
-
-/**
- * Build the canonical cancel result returned by {@link runPickerWalkthrough}
- * when the user cancels via escape / ctrl+c. Writes a one-line cancel
- * notice to stderr so the dispatcher does not eat it silently, and
- * surfaces {@link WALKTHROUGH_CANCEL_EXIT_CODE} (130, matching SIGINT
- * convention) as the exit code. The returned object satisfies the
- * required shape of {@link PickerWalkthroughResult} but contains no
- * config (callers that key off `exitCode` already short-circuit on
- * non-zero values).
- *
- * @param {RunPickerWalkthroughOptions} opts
- * @returns {Promise<PickerWalkthroughResult>}
- */
-async function cancelledResult(opts) {
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      sources_picked: 0,
-      export_picked: '',
-      clients_picked: 0,
-      retention_days: DEFAULT_RETENTION_DAYS,
-      config_path: '',
-      exit_code: WALKTHROUGH_CANCEL_EXIT_CODE,
-      status: 'cancelled',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-  writeCancelledNotice(opts.stderr)
-  return {
-    exitCode: WALKTHROUGH_CANCEL_EXIT_CODE,
-    configPath: '',
-    config: /** @type {HypAwareV2Config} */ ({
-      version: 2,
-      plugins: [],
-      query: { cache: { retention: { default_days: DEFAULT_RETENTION_DAYS } } },
-    }),
-    sourcesPicked: [],
-    exportPicked: 'keep-local',
-    clientsPicked: [],
-    retentionDays: DEFAULT_RETENTION_DAYS,
-  }
-}
-
-/**
- * @param {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
- */
-function writeCancelledNotice(stderr) {
-  try {
-    stderr.write('hyp setup: cancelled\n')
-  } catch {
-    // best-effort: stderr might be closed during cleanup
-  }
+  return { applied, restart, kept }
 }

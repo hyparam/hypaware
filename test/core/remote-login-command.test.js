@@ -6,15 +6,17 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
 import { hasAppliedCentralConfig } from '../../src/core/config/apply.js'
 import { effectiveDefaultRemote } from '../../src/core/remote/builtin_remotes.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
+import { startLoginPoller } from '../../src/core/remote/login_poll.js'
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
 
 async function tmpHome() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-login-'))
+  return temporaryDirectory('hyp-login-')
 }
 
 /**
@@ -206,6 +208,26 @@ test('post-auth failures name their step rather than collapsing into the login f
   )
 })
 
+// @ref LLP 0404#install-policy [tests]: the login lane forwards the CLI decision to the installer it wraps
+test('--force and a pre-settled binPath reach enrollment verbatim', async () => {
+  const gwLogin = /** @type {any} */ (async () => gatewaySession())
+  const { ctx } = await makeCtx({ hypHome: await tmpHome() })
+  /** @type {any} */
+  let seen
+  const enroll = /** @type {any} */ (async (/** @type {any} */ args) => {
+    seen = args
+    return { provisioned: true, daemonCode: 3 }
+  })
+  const waitForAttach = /** @type {any} */ (async () => [])
+  await remoteLogin(['prod', '--force'], ctx, { login: gwLogin, enroll, waitForAttach, binPath: '/opt/hyp/bin/hypaware' })
+  assert.equal(seen.force, true)
+  assert.equal(seen.binPath, '/opt/hyp/bin/hypaware')
+  const { ctx: plain } = await makeCtx({ hypHome: await tmpHome() })
+  await remoteLogin(['prod'], plain, { login: gwLogin, enroll, waitForAttach })
+  assert.equal(seen.force, false)
+  assert.equal(seen.binPath, undefined)
+})
+
 test('a usage error and the exclusivity gate are distinguishable, both exit 2', async () => {
   const { ctx: usageCtx } = await makeCtx({ hypHome: await tmpHome() })
   assert.deepEqual(await remoteLogin(['prod', '--org'], usageCtx, {}), { exitCode: 2, reason: 'usage' })
@@ -215,6 +237,13 @@ test('a usage error and the exclusivity gate are distinguishable, both exit 2', 
   await writeCentralSeed(hypHome, 'https://elsewhere.example')
   const login = /** @type {any} */ (async () => { throw new Error('the browser must never open here') })
   assert.deepEqual(await remoteLogin(['prod'], ctx, { login }), { exitCode: 2, reason: 'connected_elsewhere' })
+
+  // The unreadable arm is the same gate refusing, so it reports the same
+  // reason, not a login failure (LLP 0179#outcome).
+  const unreadableHome = await tmpHome()
+  const { ctx: unreadableCtx } = await makeCtx({ hypHome: unreadableHome })
+  await writeUnreadableCentralSeed(unreadableHome)
+  assert.deepEqual(await remoteLogin(['prod'], unreadableCtx, { login }), { exitCode: 2, reason: 'connected_elsewhere' })
 })
 
 test('runRemoteLogin stays the exit-code adapter over the same run', async () => {
@@ -302,6 +331,21 @@ test('a configured persisted_path is honored and non-matching central sinks are 
   await assert.rejects(fs.access(otherPath))
 })
 
+// @ref LLP 0063#d3 [tests]: the wide pre-auth notice names the destination the way serverDisplayName does
+test('wide login notice names the destination before the browser opens', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, both } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(
+    both.join(''),
+    /^ {2}your recorded sessions are sent to hyp\.internal and a background$/m,
+    'the wide notice names the target host, not a hard-coded product'
+  )
+})
+
 test('compact login (the wizard join lane) prints one line per event and no privacy block', async () => {
   const hypHome = await tmpHome()
   const { ctx, both } = await makeCtx({ hypHome })
@@ -311,31 +355,25 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   assert.equal(code, 0)
   const text = both.join('')
   const lines = text.split('\n')
-  // LLP 0063 D3 mechanic 1 names what the notice must say, and asks for the
-  // copy to be pinned verbatim: it is the consent surface, so compact may lose
-  // the line breaks but not the hedge and not one of the three consequences
-  // (forwarding, org config that attaches clients and backfills local history,
-  // the background service).
+  // LLP 0063 D3 mechanic 1 asks for the notice copy to be pinned verbatim: it
+  // is the consent surface, so compact may lose the line breaks but not the
+  // hedge, the forwarding consequence, or the background service. The org
+  // config consequence D3 also lists is deliberately not in the copy (see the
+  // comment above the write in remote_commands.js).
   assert.match(
     text,
-    /^note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config \(which can attach clients and backfill existing local history\), and installs a background service \(Ctrl-C to cancel\)$/m,
-    'the pre-auth notice keeps its hedge and all three consequences, as one line'
+    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to hyp\.internal and a background service is installed\. Ctrl-C to cancel\.$/m,
+    'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
-  assert.match(text, /✓ Signed in to 'prod' as org /)
-  assert.match(text, /✓ Forwarding to the 'prod' server \(run 'hyp remote list' to see its URL\)/)
-  assert.match(text, /✓ First sync no later than .+; nothing has been uploaded yet/)
-  // Compact drops the privacy block, so the deadline line is the second half of
-  // the R1a pair: it names no server itself and reads as being about this target
-  // only while it sits directly under the forwarding line. The pair spans stdout
-  // and stderr, so adjacency is only visible in the interleaved capture.
-  // @ref LLP 0100#requirements [tests]: R1a - the compact pair holds only while the two lines stay consecutive
-  const forwardingAt = lines.findIndex((line) => line.startsWith("✓ Forwarding to the 'prod' server"))
-  assert.notEqual(forwardingAt, -1, 'the compact forwarding line is written')
-  assert.match(
-    lines[forwardingAt + 1] ?? '',
-    /^✓ First sync no later than .+; nothing has been uploaded yet$/,
-    'the deadline line comes next, with no other write between it and the forwarding line'
-  )
+  // Named the way the recap names it (LLP 0437 #server-name): the host, not
+  // the target key.
+  assert.match(text, /✓ Signed in to hyp\.internal as org /)
+  assert.doesNotMatch(text, /Signed in to 'prod'/)
+  // The deadline line still gives the hold's deadline and the fact that
+  // nothing has been sent. There is no forwarding line: the wizard's recap
+  // says what syncs to the cloud (LLP 0437 #recap).
+  assert.match(text, /✓ Nothing uploads until you say so, or .+ at the latest/)
+  assert.doesNotMatch(text, /Logs will sync to/)
   // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,
   // and the deadline itself just lapses (LLP 0101 #no-release), so the line
   // must not promise a prompt.
@@ -438,7 +476,8 @@ test('daemonIncompleteNote: a platform with no service manager is not told to re
   const note = daemonIncompleteNote('win32', 'enrolled')
   assert.match(note, /^note: enrolled, but /)
   assert.doesNotMatch(note, /hyp daemon install/)
-  assert.match(note, /nothing is captured on this machine/)
+  assert.match(note, /win32 has no background service to install\n$/)
+  assert.doesNotMatch(note, /nothing is captured/, 'foreground capture still works there, so no absolute')
 })
 
 test('an enrolling login whose attach poll throws still reports the timeout fallback, not a failure (Major 1)', async () => {
@@ -501,6 +540,22 @@ test('waitForClientAttach returns empty on timeout without hanging', async () =>
   const names = await waitForClientAttach({ env: {}, timeoutMs: 0, intervalMs: 1, probe, sleep })
   assert.deepEqual(names, [])
   assert.ok(calls >= 1)
+})
+
+test('waitForClientAttach stops after three seconds by default when no client attaches', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 0 })
+  let calls = 0
+  const names = await waitForClientAttach({
+    env: {},
+    probe: async () => {
+      calls += 1
+      return []
+    },
+    sleep: async (ms) => { t.mock.timers.tick(ms) },
+  })
+  assert.deepEqual(names, [])
+  assert.equal(Date.now(), 3000)
+  assert.equal(calls, 4)
 })
 
 test('waitForClientAttach swallows a probe that throws mid-poll and still times out to empty (Major 1)', async () => {
@@ -965,7 +1020,10 @@ test('a callback error maps to a clear org-selection message', async () => {
   assert.match(err.join(''), /re-run with --org <name>/)
 })
 
-test('a browser login timeout points at the headless escape hatches', async () => {
+// The poll lane prints the URL to open from any machine before it waits, so a
+// failure after the wait gets its own explanation and no static-token advice.
+// @ref LLP 0543#no-headless-hint [tests]:
+test('a browser login timeout does not append the headless hint', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({ hypHome })
   // A local failure with no server callbackError (e.g. the poll timeout an
@@ -976,7 +1034,101 @@ test('a browser login timeout points at the headless escape hatches', async () =
   const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 1)
   assert.match(err.join(''), /timed out/)
-  assert.match(err.join(''), /--token-file <path> or pipe it on stdin/)
+  assert.doesNotMatch(err.join(''), /--token-file/)
+  assert.doesNotMatch(err.join(''), /--no-browser/)
+})
+
+test('the real poll timeout reaches the CLI with its recovery guidance', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const fetchImpl = /** @type {any} */ (async () => new Response(JSON.stringify({ status: 'pending' }), { status: 200 }))
+  const login = /** @type {any} */ (async () => {
+    const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, timeoutMs: 0, sleep: async () => {} })
+    try {
+      return await poller.waitForCode()
+    } finally {
+      poller.close()
+    }
+  })
+  assert.deepEqual(await remoteLogin(['prod'], ctx, { login }), { exitCode: 1, reason: 'login_failed' })
+  const out = err.join('')
+  assert.match(out, /^hyp remote login: timed out waiting for the browser login to complete - finish any steps left in the browser, then retry the sign-in; if the browser already said setup succeeded, continue with that setup instead of starting it over$/m)
+  assert.doesNotMatch(out, /--token-file/)
+})
+
+/**
+ * A login seam that drives the real poller against `fetchImpl`, the way
+ * `loginWithBrowser` does, with a zero budget unless one is given.
+ *
+ * @param {any} fetchImpl
+ * @param {number} [timeoutMs]
+ */
+function realPollerLogin(fetchImpl, timeoutMs = 0) {
+  return /** @type {any} */ (async () => {
+    const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, timeoutMs, sleep: async () => {} })
+    try {
+      return await poller.waitForCode()
+    } finally {
+      poller.close()
+    }
+  })
+}
+
+// A server that predates the poll endpoint answers its own generic 404. The
+// poller's typed kind carries that out as its own reason, and the terminal
+// says what is wrong without advising a static token against it.
+// @ref LLP 0543#typed [tests]:
+test('a stale server reaches the outcome as no_poll_endpoint, with the upgrade message and no headless hint', async () => {
+  const { ctx, err } = await makeCtx({ hypHome: await tmpHome() })
+  const fetchImpl = /** @type {any} */ (async () => new Response(JSON.stringify({ error: 'unknown_path' }), { status: 404 }))
+  const outcome = await remoteLogin(['prod'], ctx, { login: realPollerLogin(fetchImpl, 60_000) })
+  assert.deepEqual(outcome, { exitCode: 1, reason: 'no_poll_endpoint' })
+  const out = err.join('')
+  assert.match(out, /^hyp remote login: this server does not support poll login yet - upgrade hypaware-server$/m)
+  assert.doesNotMatch(out, /--token-file/)
+  assert.doesNotMatch(out, /--no-browser/)
+  assert.doesNotMatch(out, /admin|member/)
+})
+
+// The reason is read off the poller's typed kind and nothing else: the same
+// English with no kind, or the same string arriving as a server refusal code,
+// stays retriable.
+test('no_poll_endpoint is never inferred from the message or from a callback error', async () => {
+  const { ctx: proseCtx } = await makeCtx({ hypHome: await tmpHome() })
+  const prose = /** @type {any} */ (async () => { throw new Error('this server does not support poll login yet - upgrade hypaware-server') })
+  assert.deepEqual(await remoteLogin(['prod'], proseCtx, { login: prose }), { exitCode: 1, reason: 'login_failed' })
+
+  const { ctx: refusalCtx } = await makeCtx({ hypHome: await tmpHome() })
+  const refusal = /** @type {any} */ (async () => {
+    throw Object.assign(new Error('login failed: no_poll_endpoint'), { callbackError: 'no_poll_endpoint', kind: 'no_poll_endpoint' })
+  })
+  assert.deepEqual(await remoteLogin(['prod'], refusalCtx, { login: refusal }), { exitCode: 1, reason: 'login_failed' })
+})
+
+// Any other 404 came from something between the client and the server (an
+// ingress error page, a proxy's own JSON) and is transient: the poller keeps
+// going, and a wait that runs out is the ordinary retriable timeout.
+test('a proxy 404 that runs the poll out is a retriable timeout, not a stale server', async () => {
+  for (const response of [
+    () => new Response('<html>404 Not Found</html>', { status: 404 }),
+    () => new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 }),
+  ]) {
+    const { ctx, err } = await makeCtx({ hypHome: await tmpHome() })
+    const fetchImpl = /** @type {any} */ (async () => response())
+    assert.deepEqual(await remoteLogin(['prod'], ctx, { login: realPollerLogin(fetchImpl) }), { exitCode: 1, reason: 'login_failed' })
+    assert.match(err.join(''), /timed out waiting for the browser login to complete/)
+    assert.doesNotMatch(err.join(''), /upgrade hypaware-server/)
+  }
+})
+
+// An ordinary denial at the provider rides the poll body as a D7 code and is
+// still the retriable `denied`, explained as before.
+test('a provider denial through the real poller is still denied', async () => {
+  const { ctx, err } = await makeCtx({ hypHome: await tmpHome() })
+  const fetchImpl = /** @type {any} */ (async () => new Response(JSON.stringify({ status: 'failed', error: 'access_denied' }), { status: 200 }))
+  assert.deepEqual(await remoteLogin(['prod'], ctx, { login: realPollerLogin(fetchImpl, 60_000) }), { exitCode: 1, reason: 'denied' })
+  assert.match(err.join(''), /^hyp remote login: login was denied at the provider$/m)
+  assert.doesNotMatch(err.join(''), /--token-file/)
 })
 
 test('a server callback error does not append the headless hint (it is already actionable)', async () => {
@@ -1134,9 +1286,9 @@ test('a missing target name resolves the default (built-in) target; a value flag
   const code = await runRemoteLogin(['--org', 'acme'], ctx, { login })
   assert.equal(code, 0)
   assert.ok(seen)
-  assert.match(seen.identityBase, /hypaware\.hyperparam\.app/)
+  assert.match(seen.identityBase, /api\.hypaware\.ai/)
   assert.equal(seen.org, 'acme')
-  assert.match(out.join(''), /logged in to 'hyperparam' as org 'acme'/)
+  assert.match(out.join(''), /logged in to 'hypaware' as org 'acme'/)
 })
 
 test('--org as the last arg with no value is a usage error', async () => {
@@ -1266,6 +1418,43 @@ test('the re-seed exit suppresses the durable hint under compact, like the enrol
   const code = await runRemoteLogin(['prod'], ctx, { login, compact: true })
   assert.equal(code, 0)
   assert.doesNotMatch(err.join(''), /hyp privacy set \[path\] local-only/)
+})
+
+test('a machine enrolled under the built-in target\'s previous host re-logs in as the same server: no leave, re-seeded, no second sink', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  // Enrolled by a login on a release whose built-in shipped the old host.
+  await writeCentralSeed(hypHome, 'https://hypaware.hyperparam.app')
+  let called = false
+  const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
+
+  const code = await runRemoteLogin([], ctx, { login })
+  assert.equal(code, 0)
+  assert.equal(called, true)
+  assert.doesNotMatch(err.join(''), /this machine is connected to/)
+  // A re-seed, not a second enrollment: the layer still names the one sink at
+  // the URL it saved, and the login-minted gateway landed in its identity.
+  const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'config-control', 'seed.json'), 'utf8'))
+  assert.deepEqual(Object.keys(seed.sinks), ['central'])
+  assert.equal(seed.sinks.central.config.url, 'https://hypaware.hyperparam.app')
+  const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
+  assert.equal(persisted.jwt, 'gw-jwt')
+})
+
+test('a hand-joined sink at the built-in target\'s previous host is re-seeded, not joined by a second sink at the new host', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hypaware.hyperparam.app', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin([], ctx, { login })
+  assert.equal(code, 0)
+  // No enrollment happened (no central layer), and the existing sink got the gateway.
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+  const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
+  assert.equal(persisted.jwt, 'gw-jwt')
 })
 
 /* --------------------------------------------------------------------------

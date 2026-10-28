@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { parquetReadObjects } from 'hyparquet'
+import { concat } from 'hyparquet/src/utils.js'
 import {
   fileCatalog,
   icebergDelete,
@@ -16,6 +17,7 @@ import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stag
 import { Attr, getMeter, withSpan } from '../observability/index.js'
 import { clearEscapeReport, discoverCachePartitions, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
 import { datasetsRoot, isConfirmedSymlink } from './paths.js'
+import { discardCacheCleanup } from './purge-cleanup.js'
 import { pendingSpoolMtimeSync } from './spool.js'
 import { reportPlantedSweepPath } from './sweep_guard.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
@@ -112,6 +114,29 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
   }
 
   /**
+   * Both whole-directory paths below destroy every generation this
+   * partition's cleanup journal names, so they drop it in the same critical
+   * section. They are not the only sites where a partition directory stops
+   * existing - `migrate.js`'s `retirePartition` renames one aside, keeping
+   * its generations - only the sites where the rows go with it. Everything
+   * else is `sweepEvictedCacheCleanups`'s to reclaim.
+   *
+   * A failure here is not the eviction's failure: the rows
+   * are already gone and the journal now names nothing, so it is left for
+   * `sweepEvictedCacheCleanups` to take on a later maintenance tick rather
+   * than turned into a retention error that would retry the removal forever.
+   *
+   * @param {string} partitionDir
+   */
+  async function dropCleanupJournal(partitionDir) {
+    try {
+      await discardCacheCleanup(cacheRoot, partitionDir)
+    } catch {
+      /* Swept later by maintenance, which re-checks the directory is absent. */
+    }
+  }
+
+  /**
    * Row-level purge for source-table layout partitions.
    *
    * @param {CachePartitionMeta} part
@@ -198,7 +223,7 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
           )
           if (positions.length === 0) continue
           candidateFileCount++
-          pendingDeletes.push(...positions.map(pos => ({ file_path: filePath, pos })))
+          concat(pendingDeletes, positions.map(pos => ({ file_path: filePath, pos })))
 
           while (pendingDeletes.length >= DELETE_BATCH_SIZE) {
             const batch = pendingDeletes.splice(0, DELETE_BATCH_SIZE)
@@ -317,9 +342,10 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
         status: 'ok',
       },
       async () => {
-        await withPartitionMutationLock(part.path, () =>
-          fs.promises.rm(part.path, { recursive: true, force: true })
-        )
+        await withPartitionMutationLock(part.path, async () => {
+          await fs.promises.rm(part.path, { recursive: true, force: true })
+          await dropCleanupJournal(part.path)
+        })
         // The directory is gone, so no later read of it can clear the
         // standing cursor refusals keyed on this path. Doing it here is free:
         // the path is in hand and the delete just happened
@@ -441,6 +467,7 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       async () => {
         await withPartitionMutationLock(partitionDir, async () => {
           fs.rmSync(partitionDir, { recursive: true, force: true })
+          await dropCleanupJournal(partitionDir)
         })
         // The directory is gone, so no later read of it can clear the
         // standing cursor refusals keyed on this path. Doing it here is free:

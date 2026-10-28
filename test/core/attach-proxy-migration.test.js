@@ -337,7 +337,7 @@ test('--json on a TTY: no prompt, exactly one pointer note, no write, stdout sta
     // seam instead accepts the migration and trips the question, stderr, and
     // config-unchanged assertions below, loudly and in place.
     const { ctx, stdout, stderr } = makeCtx({ home, tty: true, answer: 'y' })
-    const code = await runAttach(['--client', PROXY_CLIENT, '--json'], ctx)
+    const code = await runAttach([PROXY_CLIENT, '--json'], ctx)
     assert.equal(code, 0, stderr.text())
     // The askYesNo seam is never reached: its question never reaches stderr.
     assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
@@ -367,7 +367,7 @@ test('--json combined with non-TTY still emits the pointer exactly once, not twi
     await stageProxyClientPlugin(home)
     const before = readFileSync(localConfigPath(home), 'utf8')
     const { ctx, stdout, stderr } = makeCtx({ home, tty: false, answer: 'y' })
-    const code = await runAttach(['--client', PROXY_CLIENT, '--json'], ctx)
+    const code = await runAttach([PROXY_CLIENT, '--json'], ctx)
     assert.equal(code, 0, stderr.text())
     assert.ok(!stderr.text().includes(MIGRATION_QUESTION))
     // Both conditions (json and non-TTY) independently qualify for the
@@ -492,7 +492,7 @@ test('a --json claude attach on a TTY carries no base-URL pointer note either', 
     writeGatewayConfig(home)
     const before = readFileSync(localConfigPath(home), 'utf8')
     const { ctx, stdout, stderr } = makeCtx({ home, tty: true, answer: 'y' })
-    const code = await runAttach(['--client', 'claude', '--json'], ctx)
+    const code = await runAttach(['claude', '--json'], ctx)
     assert.equal(code, 0, stderr.text())
     assert.equal(stderr.text(), '')
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)

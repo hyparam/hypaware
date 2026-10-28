@@ -47,17 +47,9 @@ export async function runWizardExpressGate(opts) {
       options: [
         {
           value: 'defaults',
-          // "and sync" is claimed only where accepting would in fact sync
-          // everything named. Unenrolled, nothing forwards. Enrolled with a
-          // standing opt-out in the store, accepting *keeps* that opt-out
-          // (`sync_scope.js` returns `optedOutBefore` verbatim on this
-          // keypress), so the unqualified promise is false on exactly the
-          // reconfigure the retired sync gate handled with its
-          // "Sync all" / "Keep this" split. Dropping the clause rather than
-          // qualifying it reuses the shipped solo label and keeps the row
-          // one short line; the accept narration still states the split
-          // (LLP 0201 #narrate), so nothing goes unsaid.
-          // @ref LLP 0201#gate [implements]: the accept row claims sync only when the install can keep the promise
+          // A readable store lets the combined choice enable sharing for
+          // selected rows. An unreadable store keeps exports blocked.
+          // @ref LLP 0396#combined-selection [implements]: express accepts the same collection and sharing choice
           label: opts.enrolled && !opts.syncWithheld ? 'Record and sync everything' : 'Record everything',
           // The one row guaranteed to be read on the fast path, so the
           // tool names and the side-effect disclosure live here rather
@@ -76,30 +68,9 @@ export async function runWizardExpressGate(opts) {
         {
           value: 'choose',
           label: 'Customize',
-          // The decline row glosses the questions it opens (LLP 0201
-          // #decline): the menus, not another round of gates. All of
-          // them, in the order they open. An enrolled decline opens
-          // three (pick, sync, new-folder), and a gloss that named two
-          // of them understated what saying no leads to on the wizard's
-          // one consent screen. The clauses track the counted lanes'
-          // own labels ("Choose what to collect", "Choose what syncs",
-          // "Choose how new folders are handled", `steps.js`), so the
-          // row and the position lines it opens say the same thing.
-          // Unenrolled, the sync and new-folder lanes do not run
-          // (nothing forwards from a solo machine), so the gloss keeps
-          // naming only the menu that does.
-          //
-          // The middle clause can overstate by one on a fully fleet-managed
-          // machine, whose sync lane states its outcome and asks nothing
-          // (LLP 0276 #no-candidates). It stays: whether that lane asks
-          // depends on pick-menu answers this gate has not collected yet,
-          // so the row names the lanes a decline opens - true on every run -
-          // and the lane itself is the earliest surface that can say there
-          // is nothing left to choose, which it does.
-          // @ref LLP 0201#decline [implements]: the decline row names every question the decline opens
-          // @ref LLP 0338#gloss [constrained-by]: the gloss names lanes, not the questions this machine turns out to have, because the gate runs before the answers that decide them
+          // @ref LLP 0396#combined-selection [implements]: customize opens one collection and sharing choice
           summary: opts.enrolled
-            ? 'Choose what to record, what syncs, and how new folders are handled.'
+            ? 'Choose what to record and sync, and how new folders are handled.'
             : 'Choose what to record.',
         },
       ],

@@ -1,12 +1,35 @@
 # Manage clients and import history
 
-[Documentation](README.md) / Clients and history
+Use `hyp setup` to choose which AI clients to record. Setup configures those
+clients and imports supported session history. Ollama records explicitly routed
+new requests and has no history import. You can also run
+`hyp attach <client>` to configure a client and `hyp backfill <provider>` to
+import history. Ollama attach enables recording and prints
+[explicit host recipes](integrations/ollama.md#route-a-cli-or-sdk-client); it does not edit client files
+or the calling shell's or service's `OLLAMA_HOST`.
 
-Use `hyp setup` to select capture integrations. An **attach** then changes the
-selected client's settings so HypAware can observe new activity. **History
-import** reads supported existing transcripts into the local cache.
+[LangGraph](integrations/langgraph.md) is also an explicit application setup:
+choose it under **Customize**, or run `hyp client attach langgraph` later and
+add the printed JavaScript or Python callback to your application. It recovers
+events the callback saved while the collector was down, but does not import old
+checkpoints or automatically discover projects.
+
+[NanoClaw](integrations/nanoclaw.md) requires an explicit local installation
+root in the `@hypaware/nanoclaw` plugin configuration. It is not offered in the
+setup picker. Once configured, it recovers local v2 Claude transcripts every
+five minutes, including subagents.
 
 ## Choose and check a client
+
+[VS Code (GitHub Copilot)](integrations/copilot.md) uses the setup id `copilot`.
+Attach enables its native database exporters; reload VS Code afterward. Capture
+runs every minute for local single-folder workspaces, within VS Code's native
+history retention.
+
+[Factory Droid](integrations/droid.md) uses the setup id `droid`. Attach installs
+native transcript-change hooks; restart Droid afterward. Recovery imports local
+session files every five minutes. Hosted sessions without local transcripts
+are not captured.
 
 ```sh
 hyp setup
@@ -17,16 +40,11 @@ hyp client status codex
 On an existing installation, choose **Reconfigure** to add a client. Team-managed
 choices are locked; local additions remain yours to configure.
 
-| Client | Capture behavior |
-| --- | --- |
-| Claude Code (`claude`) | OTEL events and transient raw bodies, plus transcript recovery. Requires Claude Code 2.1.193 or newer; 2.1.214 adds full tool-decision detail. |
-| Codex (`codex`) | Gateway capture and local session-history import, covering CLI and Desktop. |
-| OpenCode (`opencode`) | Managed global JavaScript plugin and bounded `opencode export` recovery for CLI and Desktop. |
-| Claude Desktop (`claude-desktop`) | Scheduled transcript import by default. Also enables the shared Claude integration. |
-| OpenClaw (`openclaw`) | Gateway routing plus a scheduled transcript recovery lane. |
+Each client's capture behavior, requirements, and limits are on its
+[integration page](INTEGRATIONS.md), with its status.
 
 Available integrations depend on active plugins and the installed version.
-Check `hyp plugin list` and `hyp client history providers` for your
+Check `hyp plugin list` and `hyp backfill list` for your
 installation. Raw proxy sources do not configure an AI client; use a client
 integration for conversation capture.
 
@@ -35,8 +53,8 @@ integration for conversation capture.
 For a configured client, preview its changes and apply them:
 
 ```sh
-hyp client attach codex --dry-run
-hyp client attach codex
+hyp attach codex --dry-run
+hyp attach codex
 hyp client status codex
 hyp status
 ```
@@ -45,41 +63,38 @@ Attach is safe to repeat and preserves unrelated client settings. Start a new
 client process so it reads the updated configuration, complete a short turn,
 then check `hyp query overview` or search for a distinctive phrase with
 `hyp query grep`. Capture and cache visibility can take time to settle.
+For Ollama, starting a new process alone does not route it through capture:
+use the [printed CLI host or SDK constructor](integrations/ollama.md#route-a-cli-or-sdk-client).
 
-Claude Code attach writes managed environment settings in
-`~/.claude/settings.json`; it uses telemetry and does not change the API base
-URL. Codex attach manages a provider entry in `~/.codex/config.toml`.
-OpenCode attach writes a managed global plugin file.
-
-Claude Desktop's default transcript path does not require account sign-in or
-managed inference preferences. Its shared Claude integration can also import
-Claude Code history and attach Claude Code. The
-[Desktop reference](CLI_REFERENCE.md#claude-desktop-commands) explains how to
-control those shared behaviors and documents the optional experimental live route.
+For missing recordings, see [troubleshooting](TROUBLESHOOTING.md#no-new-recordings).
 
 ## Bring in existing history
 
-Discover provider IDs and inspect the plan before importing:
+Discover provider IDs and preview the scan before importing:
 
 ```sh
-hyp client history providers
-hyp client history plan codex --json
-hyp client history import codex --since 2026-09-01T00:00:00Z --dry-run
-hyp client history import codex --since 2026-09-01T00:00:00Z
+hyp backfill list
+hyp backfill codex --since 2026-09-01T00:00:00Z --dry-run
+hyp backfill codex --since 2026-09-01T00:00:00Z
 hyp cache status
 ```
 
-Choose the provider and dates you actually want. `plan` uses provider planning
-hooks; `import --dry-run` scans without writing. Inspect each provider's output
-because one provider can fail while others succeed.
+Both `codex` and `--since` are optional. Omit the provider to import from all
+enabled providers; use `--since` to choose a start date. Without it, the import
+uses the configured history window.
 
-Import writes the local cache. If exports are configured, eligible imported
-rows can subsequently leave through those sinks. Apply your
-[privacy markings](PRIVACY.md) before importing sensitive history.
+`backfill --dry-run` scans and
+projects without writing, so it previews the result but is not a cheap probe.
+Inspect each provider's output because one provider can fail while others
+succeed.
+
+> **Caution:** Import writes the local cache. If exports are configured, eligible imported
+> rows can subsequently leave through those sinks. Apply your
+> [privacy markings](PRIVACY.md) before importing sensitive history.
 
 Some integrations run scheduled recovery automatically. A positive
-`backfill.window_days` limits both join-time import and scheduled recovery;
-widening it can make older history eligible on the next sweep. The adapters
+`backfill.window_days` limits both join-time backfill and scheduled recovery;
+widening it can make older history eligible on the next sweep. `hyp detach` stops a client's schedules. The adapters
 differ in how `backfill.on_join` affects schedules, so consult the
 [recovery reference](CLI_REFERENCE.md#scheduled-recovery-sweeps-and-backfillwindow_days)
 before changing those settings.
@@ -87,23 +102,32 @@ before changing those settings.
 ## Stop capture or keep it local
 
 ```sh
-hyp client detach codex --dry-run
-hyp client detach codex
+hyp detach codex --dry-run
+hyp detach codex
 ```
 
-Detach reverses managed client settings and retains recorded history. To remove
-an integration from ongoing automatic capture and history recovery, reconfigure
-it with `hyp setup`; detaching settings alone does not remove configured
-transcript schedules. Team policy can require an integration.
+Detach stops recording this client: no new sessions from it reach the cache,
+including the scheduled transcript imports, and the running daemon picks this
+up without a restart. Detach also reverses the client's managed settings where supported. For Ollama,
+[verified detach](integrations/ollama.md#stop-and-resume-ollama-recording) keeps the running capture host
+forwarding without recording; it does not change a client's host.
+Recorded history is kept; [`hyp privacy purge`](PRIVACY.md) deletes it.
+`hyp status` then shows the client as "Not recording". Run `hyp attach codex`
+to record it again. If team policy requires the integration, detach refuses
+and changes nothing.
 
-To retain capture but withhold a locally owned client's data from team sync:
+To keep a client's recordings local, exclude a directory or session, or delete
+recorded rows, use [privacy controls](PRIVACY.md). For missing recordings, see
+[troubleshooting](TROUBLESHOOTING.md).
+
+## Install client skills
+
+Setup and `hyp attach` automatically install HypAware's skills in supported
+clients so your agent can look up recorded sessions. To reinstall the skills:
 
 ```sh
-hyp privacy client codex local-only
+hyp client skills install
 ```
 
-Returning that client to `sync` does not automatically upload previously
-withheld history; `hyp sync --history codex` is a separate, confirmed replay.
-For a single folder, live session, or permanent local deletion, see
-[privacy controls](PRIVACY.md). For missing recordings, see
-[troubleshooting](TROUBLESHOOTING.md).
+This installs skills for all eligible clients. For launching an agent on a
+question, see [queries](QUERYING.md#explore-recordings-with-your-agent).

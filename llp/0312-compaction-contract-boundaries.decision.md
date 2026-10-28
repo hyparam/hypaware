@@ -7,6 +7,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-25
 **Related:** LLP 0027, LLP 0085, LLP 0209, LLP 0217, LLP 0310
+**Extended-by:** LLP 0540 (#avg-below-batch, #round-cap-under-retention, #metadata-dueness: the avg rule guards routine source-table compaction, the round-cap invariant holds only above the floor, and the retained metadata set depends on commit rate)
 
 > In-place subset compaction (LLP 0310) rests on three properties nothing
 > stated: that a plugin's settle hook is safe to call speculatively, that

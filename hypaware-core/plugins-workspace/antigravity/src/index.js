@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { SHARED_SKILLS_DIR } from '../../../skills/index.js'
 import { ensureAiGatewayStorageContracts } from '../../ai-gateway/src/storage_contracts.js'
 import { attachAntigravityPlugin } from './attach.js'
 import { createAntigravityBackfillProvider } from './backfill.js'
@@ -71,13 +72,12 @@ export async function activateAntigravityVariant(ctx, variant = CLI_VARIANT) {
     path.dirname(fileURLToPath(import.meta.url)),
     '../../claude'
   )
-  const skillsRoot = path.join(claudePluginDir, 'skills')
   for (const name of SHARED_SKILLS) {
     ctx.skills.register({
       name,
       plugin: variant.pluginName,
       clients: [variant.clientName],
-      sourceDir: path.join(skillsRoot, name),
+      sourceDir: path.join(SHARED_SKILLS_DIR, name),
     })
   }
 

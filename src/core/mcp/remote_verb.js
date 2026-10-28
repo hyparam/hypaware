@@ -1,7 +1,7 @@
 // @ts-check
 
 import { readObservabilityEnv } from '../observability/env.js'
-import { effectiveRemotes } from '../remote/builtin_remotes.js'
+import { canonicalRemoteName, effectiveRemotes, legacyCredentialName } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, describeAuthRejection, resolveAccessJwt } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { createHttpMcpClient, isAuthStatus, orgReadRefusedMessage } from './client.js'
@@ -24,9 +24,46 @@ import { createHttpMcpClient, isAuthStatus, orgReadRefusedMessage } from './clie
  * @returns {Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode?: number }>}
  * @ref LLP 0033#two-truncations [implements]: server cap surfaced here as its own line; client cannot lift it
  */
-export async function runRemoteVerb({ verb, params, target, org, ctx }) {
+export async function runRemoteVerb({ verb, params, target: named, org, ctx }) {
+  return runRemoteRequest({ target: named, org, ctx,
+    request: (url, token) => callRemoteTool({ url, token, verb, params }) })
+}
+
+/**
+ * Read the host's declared schema through its existing MCP resource. Never
+ * substitute the local registry when a remote does not expose the resource.
+ * @param {{ dataset: string, target: string, org?: string, ctx: CommandRunContext }} args
+ */
+export async function readRemoteSchema({ dataset, target, org, ctx }) {
+  return runRemoteRequest({ target, org, ctx, request: async (url, token) => {
+    const client = createHttpMcpClient({ url, token })
+    await client.initialize()
+    const uri = `hypaware://dataset/${dataset}/schema`
+    const resource = await client.readResource(uri)
+    const text = resource?.contents?.find((/** @type {any} */ item) => item.uri === uri)?.text
+    if (typeof text !== 'string') throw new Error('remote returned no dataset schema text')
+    const schema = JSON.parse(text)
+    if (schema?.dataset !== dataset || !Array.isArray(schema.columns) ||
+        !schema.columns.every((/** @type {any} */ c) => c && typeof c.name === 'string' &&
+          typeof c.type === 'string' && typeof c.nullable === 'boolean')) {
+      throw new Error('remote returned an invalid dataset schema')
+    }
+    return { ok: true, result: schema, notices: [] }
+  } })
+}
+
+/**
+ * Share target resolution and credential refresh between tools and resources.
+ * @param {{ target: string, org?: string, ctx: CommandRunContext,
+ * request: (url: string, token: string) => Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode: number }> }} args
+ * @returns {Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode?: number }>}
+ */
+async function runRemoteRequest({ target: named, org, ctx, request }) {
   // Built-in targets (the shipped central server) layered under the user's
-  // own `query.remotes`, so `--remote hyperparam` works with no `remote add`.
+  // own `query.remotes`, so `--remote hypaware` works with no `remote add`,
+  // and the old built-in name `hyperparam` still reaches it.
+  const target = canonicalRemoteName(named, ctx.config)
+  const legacyTarget = legacyCredentialName(target, ctx.config)
   // Own-key read: an inherited Object.prototype member is truthy, so a target
   // named `constructor` walked past this refusal and was signposted as an
   // unrefreshable session rather than an unregistered target.
@@ -59,7 +96,7 @@ export async function runRemoteVerb({ verb, params, target, org, ctx }) {
   try {
     // The initial resolve can itself refresh (and fail) when the stored JWT is
     // already stale; map an invalid_grant here too, not only on the 401 retry.
-    resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+    resolved = await resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase })
   } catch (err) {
     return mapRefreshError(err, target)
   }
@@ -76,7 +113,7 @@ export async function runRemoteVerb({ verb, params, target, org, ctx }) {
   let lastAuthStatus = 401
   const op = async (/** @type {string} */ token) => {
     try {
-      return { authFailed: false, value: await callRemoteTool({ url: mcpUrl, token, verb, params }) }
+      return { authFailed: false, value: await request(mcpUrl, token) }
     } catch (err) {
       // Optional-chained like isAuthError below: a rejection is not guaranteed
       // to be an object, and a catch block that throws replaces the real
@@ -101,7 +138,7 @@ export async function runRemoteVerb({ verb, params, target, org, ctx }) {
   try {
     const out = await attachWithRefresh({
       resolved,
-      refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+      refresh: () => resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
       op,
     })
     if (!out.ok) return { ok: false, error: out.error, exitCode: 2 }
@@ -136,7 +173,7 @@ async function callRemoteTool({ url, token, verb, params }) {
     return { ok: false, error: text, exitCode: 1 }
   }
   const structured = toolResult?.structuredContent ?? parseTextContent(toolResult)
-  return { ok: true, result: structured, notices: serverCapNotices(structured) }
+  return { ok: true, result: structured, notices: serverCapNotices(verb, structured) }
 }
 
 /**
@@ -171,11 +208,20 @@ function isAuthError(err) {
  * cap (LLP 0033 §two-truncations). The exact field shape is server-owned
  * (out of tree); read it defensively.
  *
+ * @param {VerbRegistration} verb
  * @param {any} structured
  * @returns {string[]}
  */
-function serverCapNotices(structured) {
+function serverCapNotices(verb, structured) {
   if (!structured || typeof structured !== 'object' || !structured.truncated) return []
+  // A grep answer is capped by its hit limit, which grep's own render
+  // already reports (and its incomplete-walk notice beside it), and bulk
+  // Iceberg reads are not grep's way out. Only an answer of grep's shape
+  // drops this line: a malformed one keeps it, tool name or not.
+  if (verb.tool === 'grep_search' && Array.isArray(structured.hits) &&
+    typeof structured.truncated === 'boolean' && typeof structured.exhausted === 'boolean') {
+    return []
+  }
   const shown = Array.isArray(structured.rows) ? structured.rows.length : structured.row_count
   const cap = structured.server_cap?.rows ?? structured.cap?.rows ?? structured.limit
   const capPart = cap !== undefined ? ` (server cap rows:${cap})` : ''

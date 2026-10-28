@@ -1,12 +1,9 @@
 // @ts-check
 
 /**
- * The columns grep search covers, shared by every tier and by both
- * repositories. The client scans its own uncompacted files and reads
- * hypgrep sidecars over its compacted ones; the server scans its cache
- * and reads sidecars over its archive. All four paths import this one
- * set, so no tier can surface a match another tier cannot: a column
- * outside the set is neither indexed nor tested against any scanned row.
+ * The columns grep search covers, shared by local direct scans and the
+ * server's cache scans and archive indexes. A column outside the set is
+ * neither indexed nor tested against any scanned row.
  * Everything else stays reachable through SQL (`hyp query sql`, and the
  * server's `POST /v1/query`).
  *
@@ -17,7 +14,7 @@
  * its absence is a gap recorded rather than left to be rediscovered (the
  * discipline of server LLP 0157 #identifier-columns). It is the dataset's
  * one VARIANT column (iceberg `variant`, a JSON cell), and no tier in
- * either repository can produce a hit from it: both index workers filter
+ * either repository can produce a hit from it: the server's index worker filters
  * VARIANT out before building, and the server's shared row predicate gates
  * on `typeof value === 'string' && value !== ''`, which an object-valued
  * cell fails. A column in this set that cannot produce a hit is worse than
@@ -49,20 +46,13 @@ export const SEARCHABLE_COLUMNS = constantSet([
  * The one dataset grep search covers, on both repositories: the client
  * greps its own `ai_gateway_messages` cache, the server the same dataset's
  * cache and archive. Named here beside the columns it scopes so the search
- * service and the sidecar-build pass cannot disagree about which tables
- * carry indexes.
+ * service and the server agree about coverage.
  */
 export const GREP_DATASET = 'ai_gateway_messages'
 
 /**
- * The sidecar path beside a data file: hypgrep's own default, which is a
- * contract. Any reader with byte access to the cache can search a file
- * with the stock hypgrep CLI, no daemon involved. It lives beside the
- * allowlist for the same reason `GREP_DATASET` does: the build pass that
- * publishes a sidecar and the search service that probes for one must
- * spell this path identically, or the build writes an index nobody looks
- * for and every file silently falls back to the scan tier. Takes a
- * filesystem path or a `file://` URL; only the extension is rewritten.
+ * Legacy hypgrep sidecar naming, retained for cache cleanup. Local scans
+ * ignore these files; maintenance still reclaims them with their data files.
  *
  * @param {string} dataFile
  * @returns {string}
@@ -126,7 +116,7 @@ function constantSet(columns) {
  * The chain triple (`session_id`, `agent_id`, `conversation_id`) is read
  * by the chain predicate and the hit too, and is already searchable.
  *
- * Before either tier reads a file, `grep_service.js` intersects this list
+ * Before either tier reads a file, the local grep plugin intersects this list
  * with the file's physical schema. That keeps a narrower schema, an older
  * cache generation or the client's own `ai_gateway_messages` (which carries
  * no `received_at`) readable under hyparquet versions that reject an unknown

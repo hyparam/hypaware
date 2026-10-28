@@ -5,11 +5,21 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { parseCoreCommandArgv } from './command_args.js'
+import { coreUsage, parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
+import { isEntryRecording } from '../config/client_recording.js'
+import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { BUILTIN_REMOTES, effectiveDefaultRemote } from '../remote/builtin_remotes.js'
+import {
+  BUILTIN_REMOTES,
+  canonicalRemoteName,
+  effectiveDefaultRemote,
+  legacyCredentialName,
+  originOf,
+  sameServer,
+  serverDisplayName,
+} from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
   deriveIdentityBase,
@@ -19,22 +29,24 @@ import {
   remoteTokenEnvVar,
   removeToken,
   resolveAccessJwt,
+  serviceRefusal,
+  writeServiceRecord,
   writeSession,
   writeToken,
 } from '../remote/credentials.js'
-import { NO_FETCH_MESSAGE, describeRefreshError, expiryTimestamp } from '../remote/identity_client.js'
+import { NO_FETCH_MESSAGE, describeRefreshError, exchangeServiceToken, expiryTimestamp } from '../remote/identity_client.js'
+import { hasServiceTokenPrefix, isServiceTokenShape } from '../remote/service_token.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
 import { DURABLE_HINT } from '../commands/local_only.js'
 import { withSpinner } from './spinner.js'
 import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
-import { originOf } from '../remote/gateway_seed.js'
 import { readAllStdin } from './stdio.js'
-import { isPlainObject } from '../util/json_util.js'
+import { escapeForDisplay, hasDisplayUnsafeChars, isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
+import { isClientAttachable, loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { daemonIncompleteNote } from '../daemon/platform.js'
 
 /**
@@ -45,8 +57,9 @@ import { daemonIncompleteNote } from '../daemon/platform.js'
 /**
  * The default attach-wait budget. Named so the `runBrowserLogin` progress line
  * and the poll loop below quote the same number.
+ * @ref LLP 0498#client-attach [implements]: allow a quick reconcile, then leave remaining work to the daemon
  */
-export const ATTACH_WAIT_DEFAULT_MS = 30000
+export const ATTACH_WAIT_DEFAULT_MS = 3000
 
 /**
  * Wait for the daemon's first reconcile to attach a client after enrollment,
@@ -69,6 +82,12 @@ export const ATTACH_WAIT_DEFAULT_MS = 30000
  * with no published config, or a slow first pull), and the caller falls back to
  * pointing at `hyp status`.
  *
+ * When every configured client captures without a marker (transcript-mode
+ * Codex, a probe-less client), no poll could ever succeed, so there is no wait:
+ * the answer is `null` and the caller points at `hyp status` without claiming
+ * nothing is captured (#2071). A mixed install still waits for the clients
+ * that can attach.
+ *
  * @param {{
  *   env: NodeJS.ProcessEnv,
  *   homeDir?: string,
@@ -77,11 +96,13 @@ export const ATTACH_WAIT_DEFAULT_MS = 30000
  *   probe?: () => Promise<string[]>,
  *   sleep?: (ms: number) => Promise<void>,
  * }} opts
- * @returns {Promise<string[]>} attached client names (sorted), empty on timeout
+ * @returns {Promise<string[] | null>} attached client names (sorted), empty on timeout, `null` when no configured client writes a marker to wait for
  * @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile the follow-up made auto, not printing a pre-pull guess
  */
 export async function waitForClientAttach({ env, homeDir, timeoutMs = ATTACH_WAIT_DEFAULT_MS, intervalMs = 1000, probe, sleep = defaultSleep }) {
-  const attachProbe = probe ?? (await buildDefaultAttachProbe(env, homeDir))
+  const plan = probe ? { probe, markerless: false } : await buildDefaultAttachProbe(env, homeDir)
+  if (plan.markerless) return null
+  const attachProbe = plan.probe
   const deadline = Date.now() + timeoutMs
   for (;;) {
     /** @type {string[]} */
@@ -105,19 +126,46 @@ export async function waitForClientAttach({ env, homeDir, timeoutMs = ATTACH_WAI
 
 /**
  * Build the production attach probe: discover the (poll-invariant) client
- * descriptors once, then hand back a closure that re-reads their on-disk attach
- * markers on each call. Keeps plugin discovery / catalog build out of the poll
- * loop while the per-poll read stays a marker-only, throw-proof probe.
+ * descriptors and read the config once, then hand back a closure that re-reads
+ * their on-disk attach markers on each call. Keeps plugin discovery / catalog
+ * build and the config read out of the poll loop while the per-poll read stays
+ * a marker-only, throw-proof probe.
+ *
+ * `markerless` is true when at least one configured, recording client has a
+ * descriptor and none of them is attachable in its configured capture mode.
+ * No configured client at all is not markerless: the daemon's first org-config
+ * pull may still enable one, so that install keeps the wait.
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {string} [homeDir]
- * @returns {Promise<() => Promise<string[]>>}
+ * @returns {Promise<{ probe: () => Promise<string[]>, markerless: boolean }>}
  */
 async function buildDefaultAttachProbe(env, homeDir) {
-  const stateDir = readObservabilityEnv(env).stateDir
+  const { stateDir, hypHome } = readObservabilityEnv(env)
   const resolvedHome = homeDir ?? env.HOME ?? process.env.HOME ?? os.homedir()
   const descriptors = await loadClientDescriptors({ stateDir })
-  return () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
+  const probe = () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
+  const layered = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath: resolveConfigPath({ env, hypHome }) }).catch(() => null)
+  // A layer that exists but did not load is no evidence about capture mode,
+  // even when the other layer resolves: keep the wait. An absent layer is normal.
+  if (!layered || layerUnreadable(layered.localLoaded) || layerUnreadable(layered.centralLoaded)) return { probe, markerless: false }
+  const config = layered.effective
+  let configured = 0
+  for (const [clientName, descriptor] of descriptors) {
+    const entry = config?.plugins?.find((p) => p.name === descriptor.plugin)
+    if (!entry || entry.enabled === false || !isEntryRecording(entry)) continue
+    if (isClientAttachable(clientName, descriptor, config)) return { probe, markerless: false }
+    configured++
+  }
+  return { probe, markerless: configured > 0 }
+}
+
+/**
+ * @param {{ ok: boolean, errorKind?: string } | null | undefined} loaded
+ * @returns {boolean}
+ */
+function layerUnreadable(loaded) {
+  return !!loaded && !loaded.ok && loaded.errorKind !== 'config_missing'
 }
 
 /**
@@ -131,8 +179,8 @@ function defaultSleep(ms) {
 /**
  * The default gateway-bind wait budget. A restarted daemon has to re-read the
  * config, activate the newly-enabled adapter, and bind the gateway listener
- * before it publishes the port, so the budget matches the attach wait rather
- * than a single reconcile tick.
+ * before it publishes the port. Unlike the best-effort login observation,
+ * this wait protects an attach that needs a live gateway endpoint.
  */
 export const GATEWAY_BIND_WAIT_DEFAULT_MS = 30000
 
@@ -196,8 +244,8 @@ export async function waitForGatewayBind({
 
 /**
  * Wait for the daemon to converge on the org config after an enrolling
- * login, so the wizard's join phase can lock the org-owned picker rows
- * before it composes (LLP 0129). "Converged" means the apply engine has
+ * login. The wizard uses a zero budget to check once for org-owned picker
+ * rows without waiting (LLP 0498). "Converged" means the apply engine has
  * committed a pulled config to an active slot - the on-disk fact the
  * locked-row computation reads right after this wait - NOT that a client
  * attached: an org config that names no client for this machine converges
@@ -211,7 +259,7 @@ export async function waitForGatewayBind({
  * than blocking. Timing out is not an error here for the same reason it is
  * not one for `waitForClientAttach`.
  *
- * @ref LLP 0129#join-before-picker [implements]: the bounded org-config wait before the picker composes; budget and timeout fallback per the decision
+ * @ref LLP 0498#org-config [implements]: the wizard uses a single probe with a zero timeout
  * @ref LLP 0223 [implements]: convergence is the applied slot on disk, never the attach markers or the join seed
  * @param {{ env: NodeJS.ProcessEnv, probe?: () => boolean | Promise<boolean>, sleep?: (ms: number) => Promise<void> }} opts
  * @param {{ timeoutMs?: number, intervalMs?: number }} [waitOpts]
@@ -219,10 +267,9 @@ export async function waitForGatewayBind({
  */
 export async function waitForCentralConverge(
   { env, probe, sleep = defaultSleep },
-  // The wizard passes its own budget (ORG_CONFIG_WAIT_MS); the fallback here
-  // quotes the attach wait's own constant so a budget-less call stays bounded
-  // and the two cannot drift apart.
-  { timeoutMs = ATTACH_WAIT_DEFAULT_MS, intervalMs = 500 } = {}
+  // Keep the helper's existing default for callers that explicitly want a
+  // wait. Onboarding passes zero and never schedules a polling interval.
+  { timeoutMs = 30000, intervalMs = 500 } = {}
 ) {
   const stateRoot = readObservabilityEnv(env).stateDir
   const applied = probe ?? (() => hasAppliedCentralConfig({ stateRoot }))
@@ -236,7 +283,7 @@ export async function waitForCentralConverge(
       // A transient fs error mid-poll is "not converged this tick", never a
       // join failure: keep polling to the timeout fallback. But an fs error
       // that persists is indistinguishable at the wizard from the no-org-config
-      // steady state (both end in "didn't hear back"), so leave a signal for
+      // steady state (both leave the picker unlocked), so leave a signal for
       // the run that has to be diagnosed. Once per wait, not once per poll: a
       // durable EACCES would otherwise log for the whole budget.
       //
@@ -337,7 +384,7 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
     `${FIRST_SYNC_RULE}\n` +
     '  PRIVACY - review before first sync\n' +
     '\n' +
-    `  first sync to the '${serverName}' server is no later than\n` +
+    `  first sync to ${trustNoticeServer(serverName)} is no later than\n` +
     `  ${formatFirstSyncDeadline(deadlineMs)}\n` +
     '  and includes your backfilled history\n' +
     "  (run 'hyp remote list' to see that server's URL)\n" +
@@ -349,6 +396,41 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
     `${FIRST_SYNC_RULE}\n` +
     '\n'
   )
+}
+
+// A `scheme://` prefix: a URL passed where the name goes, which the
+// enrollment notice would then print as an autolinked dead URL (#412, #414).
+const URL_SHAPED_NAME = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//
+
+/**
+ * Why `name` cannot be a new remote target name, or `undefined` when it can.
+ * The name is printed inside the fixed-format enrollment notice, so it may
+ * not hide a line break, terminal control or bidi reordering, whitespace, or
+ * a URL. Anything else stays a name, non-ASCII included (`prodüktion-日本`).
+ *
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+export function remoteNameProblem(name) {
+  if (name.length === 0) return 'must not be empty'
+  if (hasDisplayUnsafeChars(name)) return 'must not contain control or bidirectional formatting characters'
+  if (/\s/.test(name)) return 'must not contain whitespace'
+  if (URL_SHAPED_NAME.test(name)) return 'must be a name, not a URL (the URL is the second argument)'
+  return undefined
+}
+
+/**
+ * How the enrollment notice names its server. A name `remote add` would now
+ * refuse can still arrive from a hand-edited or layered config, and stays
+ * usable for lookup, login and removal; the notice just does not print it,
+ * and the `hyp remote list` pointer beside it still recovers the target.
+ *
+ * @ref LLP 0100#requirements [constrained-by]: R1a - name the server, never its URL
+ * @param {string} name
+ * @returns {string}
+ */
+function trustNoticeServer(name) {
+  return remoteNameProblem(name) === undefined ? `the '${name}' server` : 'your configured server'
 }
 
 /**
@@ -373,6 +455,12 @@ export async function runRemoteAdd(argv, ctx) {
   if (!parsed.ok) return parsed.code
   const name = String(parsed.params.name)
   const url = String(parsed.params.url)
+  // The refusal does not echo the name: it is the hostile value being refused.
+  const nameProblem = remoteNameProblem(name)
+  if (nameProblem !== undefined) {
+    ctx.stderr.write(`hyp remote add: the remote name ${nameProblem}\n`)
+    return 2
+  }
   if (!/^https?:\/\//.test(url)) {
     ctx.stderr.write(`hyp remote add: url must be an http(s) URL (got ${url})\n`)
     return 2
@@ -413,7 +501,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string, fetchImpl?: typeof fetch }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs, and `binPath` is the CLI that lane already resolved for the daemon (LLP 0404)
  * @returns {Promise<number>}
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
@@ -435,7 +523,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean }} [deps]
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string, fetchImpl?: typeof fetch }} [deps] `fetchImpl` is the service-token exchange's seam
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0179#outcome [implements]: the login lane returns { exitCode, reason }; runRemoteLogin is the adapter that keeps the CLI contract a number
  */
@@ -479,13 +567,18 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // A bare `hyp remote login` (no target) signs in to the default target: an
   // explicit query.default_remote, else the shipped built-in central server.
   // @ref LLP 0062#bare-remote [implements]: bare `remote login` resolves the default target, the companion of bare `--remote`
-  const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
+  const named = /** @type {string | undefined} */ (gate.params.name)
+  const snapshot = await readRemoteSnapshot(ctx)
+  const name = snapshot.resolve(named)
   const forceBrowser = gate.params.browser === true
   const noBrowser = gate.params['no-browser'] === true
   // Enrollment opt-outs (LLP 0063): --no-forward signs in for queries only;
   // --no-daemon provisions the sink but leaves the service install by hand.
   const noForward = gate.params['no-forward'] === true
   const noDaemon = gate.params['no-daemon'] === true
+  // `--force` is `hyp daemon install`'s own flag, forwarded: keep a temporary
+  // CLI when a global one cannot be established (LLP 0404).
+  const force = gate.params.force === true
 
   const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
   const stdinPiped = !!stdin && !stdin.isTTY
@@ -501,7 +594,7 @@ export async function remoteLogin(argv, ctx, deps = {}) {
     if (host) {
       ctx.stderr.write('note: --host is ignored with a static token (it applies to the browser login flow)\n')
     }
-    return runStaticLogin(name, tokenFile, stdin, ctx)
+    return runStaticLogin(name, tokenFile, stdin, ctx, { remotes: snapshot.remotes, legacy: snapshot.legacyOf(name), fetchImpl: deps.fetchImpl })
   }
 
   // Browser flow. `--no-browser` selects it explicitly ("print the URL instead
@@ -509,7 +602,7 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // as a static token. A piped token *without* a browser-mode flag already took
   // the static path above (`useStatic`), so nothing is swallowed silently there;
   // only an explicit `--no-browser` ignores a pipe, by design.
-  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact: deps.compact === true }, ctx, {
+  return runBrowserLogin(name, { remotes: snapshot.remotes, org, host, noBrowser, noForward, noDaemon, force, compact: deps.compact === true, binPath: deps.binPath }, ctx, {
     login: deps.login ?? loginWithBrowser,
     seed: deps.seed ?? seedLoginGateway,
     enroll: deps.enroll ?? enrollCentralSink,
@@ -576,10 +669,11 @@ export function valueFlag(argv, flag) {
  * @param {string | undefined} tokenFile
  * @param {any} stdin
  * @param {CommandRunContext} ctx
+ * @param {{ remotes: Record<string, { url: string }>, legacy?: string, fetchImpl?: typeof fetch }} service what the `hsa_` branch needs: the target's URL, its earlier credential name, and the exchange's fetch seam
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0058#d8 [implements]: static token stays the documented headless fallback
  */
-async function runStaticLogin(name, tokenFile, stdin, ctx) {
+async function runStaticLogin(name, tokenFile, stdin, ctx, service) {
   /** @type {string} */
   let token
   try {
@@ -600,7 +694,85 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
     return { exitCode: 2, reason: 'usage' }
   }
 
+  if (hasServiceTokenPrefix(token)) return persistServiceToken(name, token, ctx, service)
   return persistStaticToken(name, token, ctx)
+}
+
+/**
+ * @param {string} name
+ * @param {string} legacy
+ * @param {CommandRunContext} ctx
+ * @returns {LoginOutcome}
+ */
+function refuseLegacySession(name, legacy, ctx) {
+  ctx.stderr.write(`hyp remote login: a login is stored for '${name}' under its earlier name '${legacy}', which an older hyp would use instead of the service token - run 'hyp remote remove ${name}' first, or store the service token in its own HYP_HOME\n`)
+  return { exitCode: 2, reason: 'usage' }
+}
+
+/**
+ * Store an org service secret (LLP 0547 D4): refuse a malformed one locally,
+ * exchange it once so a revoked or mistyped secret fails here rather than at
+ * the first query, then store it with the JWT it bought as `kind: 'service'`.
+ * The secret is never printed.
+ *
+ * @param {string} name
+ * @param {string} token a non-empty, trimmed token carrying the `hsa_` prefix
+ * @param {CommandRunContext} ctx
+ * @param {{ remotes: Record<string, { url: string }>, legacy?: string, fetchImpl?: typeof fetch }} service
+ * @returns {Promise<LoginOutcome>}
+ * @ref LLP 0547#remote-login [implements]: exchange before storing, so the server's refusal code surfaces at login
+ */
+async function persistServiceToken(name, token, ctx, { remotes, legacy, fetchImpl }) {
+  if (!isServiceTokenShape(token)) {
+    ctx.stderr.write("hyp remote login: the token starts with 'hsa_' but is not a whole service token - copy it again from HypAware\n")
+    return { exitCode: 2, reason: 'usage' }
+  }
+  const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
+  if (!entry) {
+    ctx.stderr.write(`hyp remote login: '${name}' is not a configured target - add it with 'hyp remote add ${name} <url>' before storing a service token\n`)
+    return { exitCode: 2, reason: 'usage' }
+  }
+  const identityBase = deriveIdentityBase(entry.url)
+  if (!identityBase) {
+    ctx.stderr.write(`hyp remote login: cannot derive the identity endpoint from '${entry.url}'\n`)
+    return { exitCode: 2, reason: 'usage' }
+  }
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  // An older hyp does not read a service record, and falls back to the
+  // session stored under this target's earlier name; refuse while one is
+  // there, so no hyp queries as that person in place of the service account.
+  // This early read only saves an exchange: the write below rechecks under
+  // the store lock, since a session can land while the exchange is awaited.
+  if (legacy !== undefined) {
+    /** @type {Record<string, unknown>} */
+    let creds
+    try {
+      creds = await readCredentials(stateDir)
+    } catch (err) {
+      ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
+      return { exitCode: 1, reason: 'store_failed' }
+    }
+    if (Object.hasOwn(creds, legacy)) return refuseLegacySession(name, legacy, ctx)
+  }
+  /** @type {Awaited<ReturnType<typeof exchangeServiceToken>>} */
+  let exchanged
+  try {
+    exchanged = await exchangeServiceToken({ identityBase, serviceToken: token, fetchImpl })
+  } catch (err) {
+    ctx.stderr.write(`hyp remote login: ${serviceRefusal(err, name) ?? (err instanceof Error ? err.message : String(err))}\n`)
+    return { exitCode: 1, reason: 'login_failed' }
+  }
+  /** @type {boolean} */
+  let stored
+  try {
+    stored = await writeServiceRecord(stateDir, name, { secret: token, ...exchanged }, { unlessStored: legacy })
+  } catch (err) {
+    ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
+    return { exitCode: 1, reason: 'store_failed' }
+  }
+  if (!stored) return refuseLegacySession(name, /** @type {string} */ (legacy), ctx)
+  ctx.stdout.write(`stored service token for '${name}'${exchanged.org ? ` (org ${exchanged.org})` : ''}\n`)
+  return { exitCode: 0, reason: 'ok' }
 }
 
 /**
@@ -645,13 +817,12 @@ async function persistStaticToken(name, token, ctx) {
  * from one command, unless `--no-forward` declines it.
  *
  * @param {string} name
- * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, compact?: boolean }} opts
+ * @param {{ remotes: Record<string, { url: string }>, org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, force?: boolean, compact?: boolean, binPath?: string }} opts
  * @param {CommandRunContext} ctx
  * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach }} deps
  * @returns {Promise<LoginOutcome>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact = false }, ctx, { login, seed, enroll, waitForAttach }) {
-  const remotes = await readConfiguredRemotes(ctx)
+async function runBrowserLogin(name, { remotes, org, host, noBrowser, noForward, noDaemon, force, compact = false, binPath }, ctx, { login, seed, enroll, waitForAttach }) {
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
     ctx.stderr.write(`hyp remote login: '${name}' is not a configured target - add it first with 'hyp remote add ${name} <url>'\n`)
@@ -701,7 +872,9 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     return { exitCode: 2, reason: 'connected_elsewhere' }
   }
   const connectedOrigins = enrollment.origins
-  const alreadyEnrolled = targetOrigin !== null && connectedOrigins.includes(targetOrigin)
+  // Same server, not same origin: a machine enrolled under a host the built-in
+  // target has since moved away from is enrolled to this server (BUILTIN_ORIGIN_ALIASES).
+  const alreadyEnrolled = connectedOrigins.some((origin) => sameServer(origin, entry.url))
   if (!alreadyEnrolled && connectedOrigins.length > 0) {
     ctx.stderr.write(`hyp remote login: this machine is connected to ${connectedOrigins[0]}\n`)
     ctx.stderr.write("  disconnect first ('hyp leave'), then log in to the new server\n")
@@ -712,27 +885,31 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // sign-in is the accepting act. Phrased conditionally because the client
   // can't know pre-auth whether the server will mint a gateway credential.
   // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
+  // @ref LLP 0407#dropped [constrained-by]: the notice names two consequences in plain words; the org-config clause is left out by decision
   // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice, its
-  // placement, its conditional phrasing, and all three consequences D3
-  // enumerates, and drops only the line breaks: one line, still before the
-  // browser. The hedge is not shortenable - the client still cannot know
-  // pre-auth whether a gateway will be minted, so a flat "signing in forwards
-  // your logs" is false against a forwarding-off org. Neither is the org-config
-  // clause: applying org config is what attaches clients and backfills the
-  // history already on disk, and no reader infers that from "forwards captured
-  // logs". This notice is the whole consent surface, so a consequence dropped
-  // here is one the user is never told before they authenticate.
+  // placement, and its conditional phrasing, and drops only the line breaks:
+  // one line, still before the browser. The hedge is not shortenable - the
+  // client still cannot know pre-auth whether a gateway will be minted, so a
+  // flat "signing in sends your logs" is false against a forwarding-off org.
+  // The notice names two consequences in plain words: logs go to the target's
+  // server (HypAware Cloud or its host, as serverDisplayName names it; the
+  // compact sign-in line uses the same name, the wide one keeps the target
+  // key), and a background service is installed. D3's third consequence
+  // (org config that can attach clients and backfill local history) is left
+  // out on purpose: it confused new users more than it informed them, and the
+  // wizard's later steps show what gets recorded before anything is written.
   // The '--no-forward' sentence is the one thing left out: the wizard's lane
   // runs a bare login (LLP 0134 #no-token-join) and cannot pass the flag, and
   // the fork already offered the no-forwarding pathway as a choice.
   if (!alreadyEnrolled && !noForward) {
+    const destination = serverDisplayName(entry.url)
     if (compact) {
-      ctx.stderr.write('note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config (which can attach clients and backfill existing local history), and installs a background service (Ctrl-C to cancel)\n')
+      ctx.stderr.write(`If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to ${destination} and a background service is installed. Ctrl-C to cancel.\n`)
     } else {
-      ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
-      ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
-      ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
-      ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team:\n')
+      ctx.stderr.write(`  your recorded sessions are sent to ${destination} and a background\n`)
+      ctx.stderr.write('  service is installed.\n')
+      ctx.stderr.write("  Re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
     }
   }
 
@@ -756,22 +933,19 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   } catch (err) {
     const callbackError = /** @type {any} */ (err)?.callbackError
     ctx.stderr.write(`hyp remote login: ${explainLoginError(callbackError, err)}\n`)
-    // A server-surfaced callback error (org selection, membership) is already
-    // actionable. A local failure - most importantly a timeout, which is what a
-    // headless box hits when the opener silently fails - is not, so point at the
-    // headless escape hatches rather than leaving the user stuck (LLP 0058 D8).
-    if (!callbackError) {
-      ctx.stderr.write("  (on a machine with no browser, pass a static token with --token-file <path> or pipe it on stdin; --no-browser prints the URL to open elsewhere)\n")
-    }
+    // No headless hint follows: the poll lane already printed the URL to open
+    // from any machine before it waited, and a static token cures neither a
+    // server too old for the poll lane nor a pickup lost in transit.
+    // @ref LLP 0543#no-headless-hint [implements]: a poll-lane failure gets its own explanation and no static-token advice
     // The server's own refusal code, carried out as the reason: this is the
     // fact the wizard used to reconstruct by matching explainLoginError's
     // English back out of stderr (LLP 0179#no-prose-control-flow).
-    return { exitCode: 1, reason: loginFailureReason(callbackError) }
+    return { exitCode: 1, reason: loginFailureReason(callbackError, /** @type {any} */ (err)?.kind) }
   }
   // The single-use code is already spent by here, so a write failure (most
   // likely a lock timeout under a concurrent hyp process) is not a login
-  // failure: say the sign-in worked but the store did not, and do not print the
-  // headless hint, which would wrongly imply the browser flow itself failed.
+  // failure: say the sign-in worked but the store did not, without implying
+  // the browser flow itself failed.
   try {
     await writeSession(stateDir, name, session)
   } catch (err) {
@@ -779,7 +953,14 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     ctx.stderr.write("  (re-run 'hyp remote login' once any other hyp process releases the credentials lock)\n")
     return { exitCode: 1, reason: 'store_failed' }
   }
-  ctx.stdout.write(compact ? `✓ Signed in to '${name}' as org '${session.org}'\n` : `logged in to '${name}' as org '${session.org}'\n`)
+  // The compact lane is the wizard's, whose lines name the server the way the
+  // recap does; the wide lane keeps the target name `hyp remote list` maps,
+  // escaped so a hand-edited name cannot leave the terminal in a state that
+  // carries into the notice below (#414).
+  // @ref LLP 0437#server-name [implements]: the wizard's sign-in line reads as HypAware Cloud or the host, never the target key
+  ctx.stdout.write(compact
+    ? `✓ Signed in to ${serverDisplayName(entry.url)} as org '${session.org}'\n`
+    : `logged in to '${escapeForDisplay(name)}' as org '${session.org}'\n`)
 
   // No gateway credential (server didn't mint one, or --no-forward): query-only
   // login, nothing to forward. --no-forward with a minted gateway discards it
@@ -843,7 +1024,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     /** @type {Awaited<ReturnType<typeof enrollCentralSink>>} */
     let result
     try {
-      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon, compact })
+      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon, compact, binPath, force })
     } catch (err) {
       ctx.stderr.write(`hyp remote login: signed in, but enrollment failed: ${err instanceof Error ? err.message : String(err)}\n`)
       return { exitCode: 1, reason: 'enroll_failed' }
@@ -860,16 +1041,16 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // the fact you need to act on (which server to `hyp leave`) and a label
     // would not do. Those still print bare origins, and deliberately so.
     //
-    // Pair the name with its lookup: `name` can come from
+    // The wide lane pairs the name with its lookup: `name` can come from
     // `effectiveDefaultRemote` on a bare login, so it is not always something
-    // the user typed, and no other line in this login recovers the URL.
+    // the user typed, and no other line in that lane recovers the URL. The
+    // compact lane (the wizard's join) says nothing here: the wizard's recap
+    // states what syncs, naming the server as "HypAware Cloud" or its host,
+    // a moment later (LLP 0437 #recap, #server-name).
     // Revisit if the server root ever becomes a real landing page.
-    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target and pairs it with its lookup
-    // @ref LLP 0387#adjacency [constrained-by]: the compact branch is also the deadline line's half of R1a - drop the name or the lookup here and the compact privacy block below has neither
-    if (compact) {
-      ctx.stdout.write(`✓ Forwarding to the '${name}' server (run 'hyp remote list' to see its URL)\n`)
-    } else {
-      ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
+    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL
+    if (!compact) {
+      ctx.stdout.write(`forwarding logs to ${trustNoticeServer(name)}\n`)
       ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
     }
     // Print the deadline once, ahead of every exit branch below (--no-daemon,
@@ -878,20 +1059,22 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // install itself goes, so the message stays true in all three. Absent only
     // when the best-effort marker write above failed (LLP 0100 R1's message
     // rides the hold, never invents one that was not actually written).
-    // Compact prints the deadline alone. The wizard that asked for it states
-    // the rest of R1 (the backfill statement, the skill hint, the release verb)
-    // in its closing privacy narration, which every path through it reaches -
-    // the ordinary close and `narrateEnrolledAbort` alike - so the full block
-    // here would say everything twice on the same run.
+    // Compact prints the deadline alone; the rest of R1 lands after it. On the
+    // ordinary attended close `hyp sync`'s own plan carries the skill hint and
+    // the release verb, and the wizard's narration stands down for it
+    // (`offerFollows`). On every path that skips the offer (aborts,
+    // non-interactive, dry runs, and `narrateEnrolledAbort`) the wizard's
+    // closing privacy narration carries them instead. Either way the full
+    // block here would say everything twice on the same run.
     // The line states the deadline and the fact the hold guarantees, and
     // nothing about being prompted: the send-now offer (LLP 0203) runs only on
     // an attended, uncancelled, non-dry close, and at the deadline itself the
     // hold simply lapses (LLP 0101 #no-release). A promise of an ask here
     // would be false on exactly the paths where it would matter.
-    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the backfill statement, the skill hint, and the release verb
-    // @ref LLP 0387#adjacency [implements]: compact meets R1a as a pair - the forwarding line directly above carries the server name and the 'hyp remote list' lookup for both lines
+    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the skill hint and the release verb land after it, from `hyp sync`'s plan on the attended close and from the wizard's narration on every path that skips the offer
+    // @ref LLP 0407#dropped: the backfill statement is no longer made on the attended close
     if (holdDeadline !== null && compact) {
-      ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; nothing has been uploaded yet\n`)
+      ctx.stderr.write(`✓ Nothing uploads until you say so, or ${formatFirstSyncDeadline(holdDeadline)} at the latest\n`)
     } else if (holdDeadline !== null) {
       ctx.stderr.write(firstSyncHoldMessage(holdDeadline, name))
     }
@@ -919,7 +1102,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // status`, never silent (LLP 0061 D4).
     // @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile, replacing the interim pre-pull hint
     // Announce the wait: the reconcile is async and can take the full budget on a
-    // no-config / slow-pull org, and blocking silently for up to 30s reads as a
+    // no-config / slow-pull org, and blocking silently even briefly reads as a
     // hang. One line on stderr before we start polling, then the result below.
     // Compact: the same wait behind a spinner that clears itself, so the line
     // that announced the wait is not left behind once the answer is in.
@@ -928,10 +1111,14 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     const attached = compact
       ? await withSpinner({ stdout: ctx.stdout, env: ctx.env, label: 'Attaching clients...' }, wait)
       : await wait()
-    if (attached.length > 0) {
-      ctx.stdout.write(compact ? `✓ Capturing ${attached.join(', ')}\n` : `capturing ${attached.join(', ')}\n`)
-    } else {
-      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
+    // Compact reports nothing: the wizard's recap says what is recorded,
+    // and its finish step attaches the clients itself.
+    if (!compact) {
+      ctx.stdout.write(attached === null
+        ? "Check 'hyp status' for capture activity.\n"
+        : attached.length > 0
+          ? `capturing ${attached.join(', ')}\n`
+          : "no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
     if (!compact) ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }
@@ -988,11 +1175,18 @@ const LOGIN_ORG_SELECTION_MESSAGE = 'this account has more than one org - re-run
  * OAuth error): retriable is the safe reading, since the alternative tells a
  * user to stop trying over a code we do not understand.
  *
+ * With no callback error, the poller's own typed `kind` names the one local
+ * failure that is not retriable: a server that predates the poll endpoint.
+ * It is read only there, so a server refusal can never be reported as one.
+ *
  * @param {string | undefined} callbackError
+ * @param {string | undefined} [kind] the poller's error kind, when it threw the error
  * @returns {LoginOutcome['reason']}
  * @ref LLP 0179#outcome [implements]: the D7 code the terminal explains, reported rather than re-derived
+ * @ref LLP 0543#typed [implements]: `no_poll_endpoint` comes from the poller's kind, never from `callbackError` or the message
  */
-function loginFailureReason(callbackError) {
+function loginFailureReason(callbackError, kind) {
+  if (!callbackError) return kind === 'no_poll_endpoint' ? 'no_poll_endpoint' : 'login_failed'
   switch (callbackError) {
     case 'no_membership':
       return 'no_membership'
@@ -1032,9 +1226,23 @@ function explainLoginError(callbackError, err) {
   }
 }
 
+/** LLP 0298#mint's lifetime for the CI enrollment token, in days. */
+const ENROLLMENT_EXPIRES_DAYS = 365
+
 /**
- * `hyp remote mint [name] [--label <label>] [--expires-days <n>]`: mint a
- * long-lived CI enrollment token against the target server and print it once.
+ * The enrollment mint's server ceiling, in days. Checked in the enrollment
+ * branch rather than the shared schema: the agent mint's ceiling is a
+ * per-deployment setting with no upper bound, so a schema maximum would refuse
+ * values that server accepts (LLP 0494#cli-mint). It also keeps an exponent
+ * like `1e30`, which passes `Number.isInteger`, off the wire (issue #972).
+ */
+const ENROLLMENT_MAX_EXPIRES_DAYS = 3650
+
+/**
+ * `hyp remote mint [name] [--scope query] [--label <label>] [--expires-days <n>]`:
+ * mint a long-lived CI enrollment token against the target server and print it
+ * once. With `--scope query` it mints a personal agent token instead
+ * ({@link runAgentMint}).
  *
  * The token is the CI counterpart of an operator-distributed bootstrap token
  * (LLP 0063 D6): the server binds it to one gateway row created at mint time,
@@ -1055,11 +1263,21 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   if (!gate.ok) return gate.code
   // Bare `hyp remote mint` targets the default remote, like bare `remote login`.
   // @ref LLP 0062#bare-remote [implements]: bare `remote mint` resolves the default target
-  const name = /** @type {string | undefined} */ (gate.params.name) ?? effectiveDefaultRemote(ctx.config)
+  const named = /** @type {string | undefined} */ (gate.params.name)
   const label = /** @type {string | undefined} */ (gate.params.label)
-  // Bounded and defaulted by the schema (LLP 0293), so no second check here.
-  const expiresDays = /** @type {number} */ (gate.params['expires-days'])
-  const remotes = await readConfiguredRemotes(ctx)
+  if (gate.params.scope === 'query') {
+    return runAgentMint({ named, label, expiresDays: /** @type {number | undefined} */ (gate.params['expires-days']) }, ctx, deps)
+  }
+  // The schema (LLP 0293) owns the minimum; the ceiling is this branch's, like
+  // the default: the agent mint sends neither and takes the server's.
+  const expiresDays = /** @type {number | undefined} */ (gate.params['expires-days']) ?? ENROLLMENT_EXPIRES_DAYS
+  if (expiresDays > ENROLLMENT_MAX_EXPIRES_DAYS) {
+    ctx.stderr.write(`hyp remote mint: --expires-days expects an integer from 1 to ${ENROLLMENT_MAX_EXPIRES_DAYS} (got ${expiresDays})\n`)
+    ctx.stderr.write(`usage: ${coreUsage('remote mint')}\n`)
+    return 2
+  }
+  const { remotes, legacyOf, resolve } = await readRemoteSnapshot(ctx)
+  const name = resolve(named)
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
     ctx.stderr.write(`hyp remote mint: unknown remote target '${name}' - add it with 'hyp remote add ${name} <url>'\n`)
@@ -1085,10 +1303,11 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   }
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const legacyTarget = legacyOf(name)
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
   let resolved
   try {
-    resolved = await resolveAccessJwt({ target: name, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl })
+    resolved = await resolveAccessJwt({ target: name, legacyTarget, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl })
   } catch (err) {
     const { sessionExpired, message } = describeRefreshError(err, name)
     ctx.stderr.write(`hyp remote mint: ${message}\n`)
@@ -1096,6 +1315,11 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   }
   if (!resolved.ok) {
     ctx.stderr.write(`hyp remote mint: ${resolved.error}\n`)
+    return 2
+  }
+  // Minting needs a person's session; the server refuses a service JWT too.
+  if (resolved.kind === 'service') {
+    ctx.stderr.write(`hyp remote mint: '${name}' holds a service token, which cannot mint - sign in as a person with 'hyp remote login ${name}'\n`)
     return 2
   }
 
@@ -1120,7 +1344,7 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   try {
     out = await attachWithRefresh({
       resolved,
-      refresh: () => resolveAccessJwt({ target: name, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl, forceRefresh: true }),
+      refresh: () => resolveAccessJwt({ target: name, legacyTarget, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl, forceRefresh: true }),
       op,
     })
   } catch (refreshErr) {
@@ -1211,7 +1435,10 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   // say a positional token lands in shell history and process listings - which
   // on a CI runner means `ps` and any `set -x` trace.
   ctx.stderr.write(`  setup:    printf '%s' "$HYP_CI_TOKEN" | hyp join ${joinTarget} --no-daemon\n`)
-  ctx.stderr.write('            hyp daemon run --foreground &\n')
+  // Exit 75 is the staged restart a foreground daemon cannot do for itself
+  // (LLP 0017), so the recipe relaunches on it and keeps any other exit code.
+  // @ref LLP 0017#staged-restart-for-config-replacement [constrained-by]: the invoker of a foreground daemon loops on 75
+  ctx.stderr.write('            ( rc=75; while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done; exit "$rc" ) &\n')
   ctx.stderr.write('  teardown: hyp sync --yes\n')
   return 0
 }
@@ -1232,6 +1459,427 @@ function readExpiry(value) {
   }
 }
 
+/** The path hypaware-server serves a member's own agent tokens at. */
+const AGENT_TOKENS_PATH = '/v1/org/tokens/mine'
+
+/**
+ * The agent-token endpoint `<base>/v1/org/tokens/mine`, from the one
+ * registered target URL: the API base, not the identity base the enrollment
+ * mint posts to. A target registered as `<base>/v1/mcp` (LLP 0084 D2) has
+ * that suffix stripped first, as the reports endpoint does; the target's own
+ * query string is dropped, since the route takes the org from the session.
+ * Returns `null` for an unparseable URL.
+ *
+ * @param {string} url
+ * @returns {string | null}
+ */
+function agentTokensEndpoint(url) {
+  /** @type {URL} */
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  let base = parsed.pathname.replace(/\/+$/, '')
+  if (base.endsWith('/v1/mcp')) base = base.slice(0, -'/v1/mcp'.length)
+  return `${parsed.origin}${base}${AGENT_TOKENS_PATH}`
+}
+
+/**
+ * One request on the caller's own agent tokens, through the session client
+ * `hyp remote mint` already uses: `resolveAccessJwt` for the bearer, one
+ * forced refresh and retry on a 401 (LLP 0058 D5). Writes nothing under
+ * HYP_HOME beyond what a due session refresh already writes.
+ *
+ * The answer comes back parsed for the caller to map; the refusals every
+ * agent-token command shares are written here (exit 1), so the three
+ * commands word them alike.
+ *
+ * @param {{ command: string, named: string | undefined, method: string, suffix?: string, body?: Record<string, unknown> }} request
+ * @param {CommandRunContext} ctx
+ * @param {{ fetchImpl?: typeof fetch }} deps
+ * @returns {Promise<{ ok: true, status: number, json: any, retryAfter: string | null, bearerOrg: string | null, server: string, name: string } | { ok: false, code: number }>}
+ */
+async function agentTokensRequest({ command, named, method, suffix = '', body }, ctx, deps) {
+  const fail = (/** @type {string} */ line, /** @type {number} */ code) => {
+    ctx.stderr.write(`hyp ${command}: ${line}\n`)
+    return /** @type {{ ok: false, code: number }} */ ({ ok: false, code })
+  }
+  const { remotes, legacyOf, resolve } = await readRemoteSnapshot(ctx)
+  const name = resolve(named)
+  const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
+  if (!entry) return fail(`unknown remote target '${name}' - add it with 'hyp remote add ${name} <url>'`, 2)
+  const identityBase = deriveIdentityBase(entry.url)
+  const endpoint = agentTokensEndpoint(entry.url)
+  if (!identityBase || !endpoint) return fail(`cannot derive the server endpoint from '${entry.url}'`, 2)
+  const doFetch = deps.fetchImpl ?? /** @type {typeof fetch | undefined} */ (globalThis.fetch)
+  if (typeof doFetch !== 'function') return fail(NO_FETCH_MESSAGE, 1)
+
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const legacyTarget = legacyOf(name)
+  /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
+  let resolved
+  try {
+    resolved = await resolveAccessJwt({ target: name, legacyTarget, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl })
+  } catch (err) {
+    const { sessionExpired, message } = describeRefreshError(err, name)
+    return fail(message, sessionExpired ? 2 : 1)
+  }
+  if (!resolved.ok) {
+    // A person who connected only through an MCP client such as Claude holds
+    // no session here, and /v1/org/tokens/mine refuses every other credential.
+    if (method !== 'POST') {
+      return fail(
+        `${resolved.error}\n` +
+          `an MCP connection made only through a client such as Claude has no session on this computer: ` +
+          `sign in with 'hyp remote login ${name}' to list or revoke it here, or remove HypAware from the client's connectors`,
+        2,
+      )
+    }
+    return fail(resolved.error, 2)
+  }
+
+  // The bearer of the last attempt, the one the answer below belongs to.
+  let sentToken = ''
+  /** @param {string} token @returns {Promise<{ authFailed: boolean, value: { ok: true, response: Response } | { ok: false, error: string } }>} */
+  const op = async (token) => {
+    sentToken = token
+    /** @type {Response} */
+    let response
+    try {
+      response = await doFetch(`${endpoint}${suffix}`, {
+        method,
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${token}`,
+          ...(body ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      })
+    } catch (err) {
+      return { authFailed: false, value: { ok: false, error: err instanceof Error ? err.message : String(err) } }
+    }
+    return { authFailed: response.status === 401, value: { ok: true, response } }
+  }
+
+  /** @type {{ ok: true, value: { ok: true, response: Response } | { ok: false, error: string }, authFailed: boolean } | { ok: false, error: string }} */
+  let out
+  try {
+    out = await attachWithRefresh({
+      resolved,
+      refresh: () => resolveAccessJwt({ target: name, legacyTarget, env: ctx.env, stateDir, identityBase, fetchImpl: deps.fetchImpl, forceRefresh: true }),
+      op,
+    })
+  } catch (refreshErr) {
+    const { sessionExpired, message } = describeRefreshError(refreshErr, name)
+    return fail(message, sessionExpired ? 2 : 1)
+  }
+  if (!out.ok) return fail(out.error, 2)
+  if (out.authFailed) {
+    // @ref LLP 0494#refusals [implements]: a 401 that survives the retry means sign in again; a static or env credential has no sid, so its line names the browser login that gets one
+    if (isRefreshable(resolved)) {
+      return fail(`'${name}' refused the session (HTTP 401) - sign in again with 'hyp remote login ${name}'`, 1)
+    }
+    if (resolved.source === 'env') {
+      // The override read may be the one under the built-in's old name.
+      const envVar = !ctx.env[remoteTokenEnvVar(name)] && legacyTarget !== undefined ? remoteTokenEnvVar(legacyTarget) : remoteTokenEnvVar(name)
+      return fail(
+        `'${name}' refused the ${envVar} override (HTTP 401) - agent tokens need a session; ` +
+          `unset it and sign in with 'hyp remote login ${name}'`,
+        1,
+      )
+    }
+    return fail(
+      `'${name}' refused the stored static token (HTTP 401) - agent tokens need a session; ` +
+        `sign in with the browser: 'hyp remote login ${name}'`,
+      1,
+    )
+  }
+  if (!out.value.ok) return fail(out.value.error, 1)
+
+  const response = out.value.response
+  /** @type {string} */
+  let text = ''
+  try {
+    text = await response.text()
+  } catch {
+    // an unreadable body maps like an empty one
+  }
+  /** @type {any} */
+  let json
+  try {
+    json = text ? JSON.parse(text) : undefined
+  } catch {
+    json = undefined
+  }
+  if (response.status === 403 || response.status === 404) {
+    const error = errorCode(json)
+    // @ref LLP 0494#refusals [implements]: one line per server code, exit 1
+    if (error === 'browser_session') {
+      return fail(`the credential stored for '${name}' is a browser session - run 'hyp remote login ${name}' from the CLI`, 1)
+    }
+    if (error === 'read_only_session') {
+      return fail(`this session cannot ${method === 'POST' ? 'mint agent tokens' : 'manage agent tokens'} (it is read-only or an impersonation)`, 1)
+    }
+    // An older server has no /mine arms, so the request falls to its org
+    // admin gate (403 role_required for a member) or past it (404 for an
+    // admin). A 404 that names unknown_org_token is the revoke's own answer.
+    if (error === 'role_required' || (response.status === 404 && error !== 'unknown_org_token')) {
+      return fail(`'${name}' does not serve agent tokens yet (HTTP ${response.status}) - the server predates them`, 1)
+    }
+  }
+  return {
+    ok: true,
+    status: response.status,
+    json,
+    retryAfter: response.headers?.get?.('retry-after') ?? null,
+    bearerOrg: bearerOrgClaim(sentToken),
+    server: serverLabel(name, remotes),
+    name,
+  }
+}
+
+/**
+ * How a message names the server a remote target points at: the server's own
+ * name (HypAware Cloud for the built-in), with the local remote name added
+ * only when more than one remote is configured, so the server alone could be
+ * the wrong one to read.
+ *
+ * @param {string} name
+ * @param {Record<string, { url: string }>} remotes
+ * @returns {string}
+ * @ref LLP 0552#messages [implements]: the server's name, the remote name only when several are configured
+ */
+function serverLabel(name, remotes) {
+  const server = serverDisplayName(remotes[name].url)
+  return Object.keys(remotes).length > 1 ? `${server} ('${name}')` : server
+}
+
+/**
+ * The `org` claim of a bearer JWT, read for display only: the server scopes
+ * /v1/org/tokens/mine by the org its verified claims name, so the bearer that
+ * got the answer is the one source that names it. Null for a token that is
+ * not a JWT or carries no org.
+ *
+ * @param {string} token
+ * @returns {string | null}
+ */
+function bearerOrgClaim(token) {
+  const payload = token.split('.')[1]
+  if (!payload) return null
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    return isPlainObject(claims) && typeof claims.org === 'string' && claims.org !== '' ? claims.org : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The `error` code of a server refusal body, if it carries one.
+ *
+ * @param {unknown} json
+ * @returns {string | undefined}
+ */
+function errorCode(json) {
+  return isPlainObject(json) && typeof json.error === 'string' ? json.error : undefined
+}
+
+/**
+ * A refusal the commands below do not name, worded from the server's code and
+ * detail.
+ *
+ * @param {string} what
+ * @param {number} status
+ * @param {unknown} json
+ * @returns {string}
+ */
+function genericRefusal(what, status, json) {
+  const error = errorCode(json)
+  const detail = isPlainObject(json) && typeof json.detail === 'string' ? json.detail.slice(0, 200) : ''
+  return `${what} failed (HTTP ${status}${error ? ` ${error}` : ''})${detail ? ` - ${detail}` : ''}`
+}
+
+/**
+ * `hyp remote mint [name] --scope query [--label <label>] [--expires-days <n>]`:
+ * mint the caller a personal agent token, a standalone credential that reads
+ * and publishes as them after their session has ended, and print it once.
+ *
+ * @param {{ named: string | undefined, label: string | undefined, expiresDays: number | undefined }} args
+ * @param {CommandRunContext} ctx
+ * @param {{ fetchImpl?: typeof fetch }} deps
+ * @returns {Promise<number>}
+ * @ref LLP 0494#cli-mint [implements]: POST <api base>/v1/org/tokens/mine; the body is {} plus ttl_seconds only when asked and label when given, so the server owns the default lifetime
+ */
+async function runAgentMint({ named, label, expiresDays }, ctx, deps) {
+  const command = 'remote mint'
+  const answer = await agentTokensRequest({
+    command,
+    named,
+    method: 'POST',
+    body: {
+      ...(expiresDays !== undefined ? { ttl_seconds: expiresDays * 86400 } : {}),
+      ...(label !== undefined ? { label } : {}),
+    },
+  }, ctx, deps)
+  if (!answer.ok) return answer.code
+  const { status, json, name } = answer
+  if (status < 200 || status >= 300) {
+    const error = errorCode(json)
+    const detail = isPlainObject(json) && typeof json.detail === 'string' ? json.detail.slice(0, 200) : ''
+    /** @type {string} */
+    let line
+    if (status === 400 && error === 'invalid_label') {
+      line = `the label must be 1 to 64 letters, digits, spaces, '.', '_' or '-'${detail ? ` (${detail})` : ''}`
+    } else if (status === 400 && error === 'invalid_ttl' && detail) {
+      // The server names its ceiling, a per-deployment setting the CLI does not copy.
+      line = detail
+    } else if (status === 429 && error === 'token_limit' && answer.retryAfter === null) {
+      line = `you have ten live agent tokens on ${answer.server} - list them with 'hyp remote tokens ${name}' and revoke one`
+    } else if (status === 429 && error === 'token_limit') {
+      // The retained bound counts revoked tokens too, so revoking frees
+      // nothing; the server's detail says when the next one frees.
+      line = `${detail || 'too many unexpired agent tokens'} (retry after ${answer.retryAfter}s)`
+    } else {
+      line = genericRefusal('mint', status, json)
+    }
+    ctx.stderr.write(`hyp ${command}: ${line}\n`)
+    return 1
+  }
+  const token = isPlainObject(json) && typeof json.token === 'string' && json.token.length > 0 ? json.token : undefined
+  if (!token) {
+    ctx.stderr.write(`hyp ${command}: the server's mint response carried no token\n`)
+    return 1
+  }
+  const jti = typeof json.jti === 'string' ? json.jti : undefined
+  const mintedLabel = typeof json.label === 'string' ? json.label : undefined
+  const expiresAt = readExpiry(json.expires_at)
+  const detail = [jti ? `jti ${jti}` : '', mintedLabel ? `label ${mintedLabel}` : '', expiresAt ? `expires ${expiresAt}` : ''].filter(Boolean).join(', ')
+  const revoke = `hyp remote tokens revoke ${jti ?? '<jti>'}${name === effectiveDefaultRemote(ctx.config) ? '' : ` --remote ${name}`}`
+  // @ref LLP 0494#cli-mint [implements]: stdout is the token alone; nothing is kept client-side, so this print is its only copy
+  ctx.stderr.write(`minted agent token for ${answer.server}${detail ? ` (${detail})` : ''}\n`)
+  ctx.stdout.write(`${token}\n`)
+  ctx.stderr.write(
+    "it reads the org's recorded history and can mark recommendations, publish reports and delete reports, " +
+      `as you, until it expires or is revoked with '${revoke}'\n`,
+  )
+  ctx.stderr.write('store it in the secret store of the agent or CI job that needs it now - it is not shown again\n')
+  // @ref LLP 0494#cli-mint [implements]: the token is for headless use; a member at their own computer already has their session
+  ctx.stderr.write(`at your own computer you do not need one: 'hyp mcp serve --remote ${name}' uses your session\n`)
+  return 0
+}
+
+/**
+ * `hyp remote tokens [name] [--json]`: the caller's own agent tokens on a
+ * target, revoked ones included until they expire, then their own live MCP
+ * OAuth connections. Never a token value: the server holds none to return.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @param {{ fetchImpl?: typeof fetch }} [deps] test seam for the request
+ * @returns {Promise<number>}
+ * @ref LLP 0494#cli-tokens [implements]: GET /v1/org/tokens/mine, printing jti, label, created, expires and revoked
+ * @ref LLP 0494#cli-connections [implements]: the same reply's connections, printing id, client, org, created and expires
+ */
+export async function runRemoteTokens(argv, ctx, deps = {}) {
+  const command = 'remote tokens'
+  const gate = parseCoreCommandArgv(command, argv, ctx)
+  if (!gate.ok) return gate.code
+  const named = /** @type {string | undefined} */ (gate.params.name)
+  const answer = await agentTokensRequest({ command, named, method: 'GET' }, ctx, deps)
+  if (!answer.ok) return answer.code
+  const { name } = answer
+  if (answer.status < 200 || answer.status >= 300) {
+    ctx.stderr.write(`hyp ${command}: ${genericRefusal('listing', answer.status, answer.json)}\n`)
+    return 1
+  }
+  const rows = isPlainObject(answer.json) && Array.isArray(answer.json.tokens) ? answer.json.tokens : undefined
+  if (!rows) {
+    ctx.stderr.write(`hyp ${command}: the server's token list was unreadable\n`)
+    return 1
+  }
+  // Named fields only, so a field a later server adds is never printed by
+  // accident.
+  const tokens = rows.filter(isPlainObject).map((t) => ({
+    jti: typeof t.jti === 'string' ? t.jti : '',
+    ...(typeof t.label === 'string' ? { label: t.label } : {}),
+    mintedAt: typeof t.mintedAt === 'string' ? t.mintedAt : null,
+    exp: typeof t.exp === 'number' ? t.exp : null,
+    revoked: t.revoked === true,
+    revokedAt: typeof t.revokedAt === 'string' ? t.revokedAt : null,
+  }))
+  // A server that predates MCP connections sends no array; that lists none.
+  const connectionRows = isPlainObject(answer.json) && Array.isArray(answer.json.connections) ? answer.json.connections : []
+  const org = answer.bearerOrg
+  const connections = connectionRows.filter(isPlainObject).map((c) => ({
+    id: typeof c.id === 'string' ? c.id : '',
+    client: typeof c.client_name === 'string' ? c.client_name : typeof c.redirect_host === 'string' ? c.redirect_host : null,
+    org,
+    createdAt: typeof c.created_at === 'string' ? c.created_at : null,
+    expiresAt: typeof c.expires_at === 'string' ? c.expires_at : null,
+  }))
+  if (gate.params.json === true) {
+    ctx.stdout.write(JSON.stringify({ tokens, connections }, null, 2) + '\n')
+    return 0
+  }
+  if (tokens.length === 0) {
+    ctx.stdout.write(`no agent tokens on ${answer.server} - mint one with 'hyp remote mint ${name} --scope query'\n`)
+  } else {
+    ctx.stdout.write('jti\tlabel\tcreated\texpires\trevoked\n')
+    for (const t of tokens) {
+      const revoked = t.revoked ? t.revokedAt ?? 'yes' : 'no'
+      ctx.stdout.write(`${t.jti}\t${t.label ?? '-'}\t${t.mintedAt ?? '-'}\t${readExpiry(t.exp) ?? '-'}\t${revoked}\n`)
+    }
+  }
+  if (connections.length > 0) {
+    ctx.stdout.write(`\nMCP connections on ${answer.server}:\n`)
+    ctx.stdout.write('id\tclient\torg\tcreated\texpires\n')
+    for (const c of connections) {
+      ctx.stdout.write(`${c.id}\t${escapeForDisplay(c.client ?? '-')}\t${c.org ?? '-'}\t${c.createdAt ?? '-'}\t${c.expiresAt ?? '-'}\n`)
+    }
+  }
+  return 0
+}
+
+/**
+ * `hyp remote tokens revoke <jti> [--remote <name>]`: revoke one of the
+ * caller's own agent tokens, or one of their MCP connections by its id (the
+ * route takes both). The server answers a second revoke of the same id with
+ * 200 again.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @param {{ fetchImpl?: typeof fetch }} [deps] test seam for the request
+ * @returns {Promise<number>}
+ * @ref LLP 0494#cli-tokens [implements]: DELETE /v1/org/tokens/mine/<jti>, the member's own revoke
+ * @ref LLP 0494#cli-connections [implements]: a connection id rides the same DELETE; the reply names it as id, not jti
+ */
+export async function runRemoteTokensRevoke(argv, ctx, deps = {}) {
+  const command = 'remote tokens revoke'
+  const gate = parseCoreCommandArgv(command, argv, ctx)
+  if (!gate.ok) return gate.code
+  const jti = /** @type {string} */ (gate.params.jti)
+  const named = /** @type {string | undefined} */ (gate.params.remote)
+  const answer = await agentTokensRequest({ command, named, method: 'DELETE', suffix: `/${encodeURIComponent(jti)}` }, ctx, deps)
+  if (!answer.ok) return answer.code
+  const { name } = answer
+  if (answer.status === 404) {
+    ctx.stderr.write(`hyp ${command}: ${answer.server} has no agent token or MCP connection ${jti} of yours - list them with 'hyp remote tokens ${name}'\n`)
+    return 1
+  }
+  if (answer.status < 200 || answer.status >= 300) {
+    ctx.stderr.write(`hyp ${command}: ${genericRefusal('revoke', answer.status, answer.json)}\n`)
+    return 1
+  }
+  const json = answer.json
+  // The server mints connection ids as `oauth-<hex>`; the prefix names one
+  // even from a server whose reply does not.
+  const connection = jti.startsWith('oauth-') || (isPlainObject(json) && typeof json.id === 'string' && typeof json.jti !== 'string')
+  ctx.stdout.write(`revoked ${connection ? 'connection' : 'agent token'} ${jti} on ${answer.server}\n`)
+  return 0
+}
+
 /**
  * `hyp remote list`: targets + token status (`stored` / `env` / `missing`),
  * never the token itself.
@@ -1243,15 +1891,17 @@ export async function runRemoteList(argv, ctx) {
   const parsed = parseCoreCommandArgv('remote list', argv, ctx)
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
-  const remotes = await readConfiguredRemotes(ctx)
+  const { remotes, legacyOf } = await readRemoteSnapshot(ctx)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const stored = await readCredentials(stateDir)
   const names = Object.keys(remotes).sort()
 
   /** @param {string} name */
   const tokenStatus = (name) => {
-    if (typeof ctx.env[remoteTokenEnvVar(name)] === 'string' && ctx.env[remoteTokenEnvVar(name)]) return 'env'
-    return Object.hasOwn(stored, name) && stored[name] ? 'stored' : 'missing'
+    const legacy = legacyOf(name)
+    const keys = legacy === undefined ? [name] : [name, legacy]
+    if (keys.some((key) => typeof ctx.env[remoteTokenEnvVar(key)] === 'string' && ctx.env[remoteTokenEnvVar(key)])) return 'env'
+    return keys.some((key) => Object.hasOwn(stored, key) && stored[key]) ? 'stored' : 'missing'
   }
 
   if (json) {
@@ -1281,11 +1931,18 @@ export async function runRemoteList(argv, ctx) {
 export async function runRemoteRemove(argv, ctx) {
   const parsed = parseCoreCommandArgv('remote remove', argv, ctx)
   if (!parsed.ok) return parsed.code
-  const name = String(parsed.params.name)
+  let name = String(parsed.params.name)
   let removedConfig = false
+  /** @type {string | undefined} */
+  let legacy
   const configPath = localConfigPath(ctx)
   try {
     await mutateLocalConfig(configPath, (config) => {
+      // Resolved from the file this edit holds, so the name, the entry deleted
+      // and the credentials cleared below all mean the same target.
+      const snapshot = /** @type {any} */ ({ query: { remotes: ownRemotes(config) } })
+      name = canonicalRemoteName(name, snapshot)
+      legacy = legacyCredentialName(name, snapshot)
       if (isPlainObject(config.query) && isPlainObject(config.query.remotes) && Object.hasOwn(config.query.remotes, name)) {
         delete config.query.remotes[name]
         removedConfig = true
@@ -1300,6 +1957,8 @@ export async function runRemoteRemove(argv, ctx) {
   let removedToken = false
   try {
     removedToken = await removeToken(stateDir, name)
+    // A session stored under the built-in's old name is this target's too.
+    if (legacy !== undefined && (await removeToken(stateDir, legacy))) removedToken = true
   } catch (err) {
     // removeToken now contends for the cross-process credentials lock and can
     // throw a lock timeout. The config edit above already landed, so report the
@@ -1337,6 +1996,22 @@ function localConfigPath(ctx) {
  * @returns {Promise<Record<string, { url: string }>>}
  */
 async function readConfiguredRemotes(ctx) {
+  return (await readRemoteSnapshot(ctx)).remotes
+}
+
+/**
+ * The configured targets and, from the same read of the config file, the
+ * target a typed name (or, with none, the default) means and the old name its
+ * credential may still be stored under (legacyCredentialName). One snapshot
+ * for all three, so a config edit landing mid-command cannot pair a
+ * credential stored for the built-in with some other server's URL, or act on
+ * a target other than the one the URL belongs to.
+ *
+ * @ref LLP 0552#credentials [implements]: the fallback's eligibility and the URL it is sent to come from one config read
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<{ remotes: Record<string, { url: string }>, resolve: (named: string | undefined) => string, legacyOf: (name: string) => string | undefined }>}
+ */
+async function readRemoteSnapshot(ctx) {
   // Ship the built-in targets under any user-defined ones, so `remote login`
   // and `remote list` see the central server even before a `remote add`; a
   // user entry of the same name overrides it.
@@ -1348,13 +2023,27 @@ async function readConfiguredRemotes(ctx) {
   // `Object.hasOwn`, since the names they look up are operator-supplied too.
   /** @type {[string, { url: string }][]} */
   const pairs = Object.entries(BUILTIN_REMOTES)
-  const config = await readLocalConfigRaw(localConfigPath(ctx))
-  if (isPlainObject(config.query) && isPlainObject(config.query.remotes)) {
-    for (const [name, entry] of Object.entries(config.query.remotes)) {
-      if (isPlainObject(entry) && typeof entry.url === 'string') pairs.push([name, { url: entry.url }])
-    }
+  const raw = await readLocalConfigRaw(localConfigPath(ctx))
+  const own = ownRemotes(raw)
+  for (const [name, entry] of Object.entries(own)) {
+    if (isPlainObject(entry) && typeof entry.url === 'string') pairs.push([name, { url: entry.url }])
   }
-  return Object.fromEntries(pairs)
+  const snapshot = /** @type {any} */ ({ query: { remotes: own, default_remote: isPlainObject(raw.query) ? raw.query.default_remote : undefined } })
+  return {
+    remotes: Object.fromEntries(pairs),
+    resolve: (named) => named === undefined ? effectiveDefaultRemote(snapshot) : canonicalRemoteName(named, snapshot),
+    legacyOf: (name) => legacyCredentialName(name, snapshot),
+  }
+}
+
+/**
+ * The user's own `query.remotes` map from a raw config file, or an empty map.
+ *
+ * @param {any} config
+ * @returns {Record<string, unknown>}
+ */
+function ownRemotes(config) {
+  return isPlainObject(config.query) && isPlainObject(config.query.remotes) ? config.query.remotes : {}
 }
 
 /**

@@ -21,7 +21,7 @@ import {
  * @import { CommandRegistration, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
-// `hyp ignore --local-only` / `hyp unignore --local-only` (LLP 0081 T6,
+// `hyp privacy set <path> local-only` / `hyp privacy unset <path> local-only` (LLP 0081 T6,
 // LLP 0072 #cli): the durable, non-login authoring path over the
 // machine-local `local-only` list (LLP 0071). Unlike `test/core/ignore-command.test.js`
 // (the dotfile verbs), these commands never touch the repo tree, the write
@@ -97,13 +97,13 @@ function stateDirOf(hypHome) {
 
 /* ---------------------------- ignore --local-only -------------------------- */
 
-test('hyp ignore --local-only adds the git repo root to the machine-local list, never touching the repo', async () => {
+test('hyp privacy set <path> local-only adds the explicitly selected git repo root to the machine-local list, never touching the repo', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     mkdirSync(path.join(root, '.git'))
     const sub = path.join(root, 'src', 'deep')
     mkdirSync(sub, { recursive: true })
 
-    const res = await run('ignore', ['--local-only'], { cwd: sub, hypHome })
+    const res = await run('privacy set', [root, 'local-only'], { cwd: sub, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /marked .* as local-only/)
 
@@ -116,24 +116,24 @@ test('hyp ignore --local-only adds the git repo root to the machine-local list, 
   })
 })
 
-test('hyp ignore --local-only [path] overrides the repo-root default', async () => {
+test('hyp privacy set <path> local-only [path] marks exactly the requested directory', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     mkdirSync(path.join(root, '.git'))
     const target = path.join(root, 'pkg')
     mkdirSync(target)
 
-    const res = await run('ignore', ['--local-only', target], { cwd: root, hypHome })
+    const res = await run('privacy set', [target, 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     const dirs = await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(dirs, [target])
   })
 })
 
-test('hyp ignore --local-only accepts a nonexistent, non-repo path (R4)', async () => {
+test('hyp privacy set <path> local-only accepts a nonexistent, non-repo path (R4)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const target = path.join(root, 'never', 'created')
 
-    const res = await run('ignore', ['--local-only', target], { cwd: root, hypHome })
+    const res = await run('privacy set', [target, 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.ok(!existsSync(target), 'the target itself is never created')
 
@@ -142,16 +142,16 @@ test('hyp ignore --local-only accepts a nonexistent, non-repo path (R4)', async 
   })
 })
 
-test('hyp ignore --local-only is idempotent: adding the same directory twice is a no-op success', async () => {
+test('hyp privacy set <path> local-only is idempotent: adding the same directory twice is a no-op success', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     mkdirSync(path.join(root, '.git'))
 
-    const first = await run('ignore', ['--local-only'], { cwd: root, hypHome })
+    const first = await run('privacy set', [root, 'local-only'], { cwd: root, hypHome })
     assert.equal(first.code, 0)
     const after1 = await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(after1, [root])
 
-    const second = await run('ignore', ['--local-only'], { cwd: root, hypHome })
+    const second = await run('privacy set', [root, 'local-only'], { cwd: root, hypHome })
     assert.equal(second.code, 0)
     assert.match(second.stdout, /already local-only/)
     const after2 = await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) })
@@ -159,7 +159,7 @@ test('hyp ignore --local-only is idempotent: adding the same directory twice is 
   })
 })
 
-test('hyp ignore --local-only on a directory under an already-listed ancestor is a no-op (ancestor-governed)', async () => {
+test('hyp privacy set <path> local-only on a directory under an already-listed ancestor is a no-op (ancestor-governed)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     mkdirSync(path.join(root, '.git'))
     const sub = path.join(root, 'a', 'b')
@@ -169,22 +169,22 @@ test('hyp ignore --local-only on a directory under an already-listed ancestor is
 
     // An explicit path prevents the repo-root default from re-deriving
     // `root`; the ancestor-governed check must still catch it.
-    const res = await run('ignore', ['--local-only', sub], { cwd: root, hypHome })
+    const res = await run('privacy set', [sub, 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /already local-only/)
-    assert.match(res.stdout, new RegExp(localOnlyListPath(stateDirOf(hypHome)).replace(/[.\\]/g, '\\$&')))
+    assert.match(res.stdout, /machine-local policy store/)
 
     const dirs = await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(dirs, [root], 'the sub-directory is not added; the ancestor entry alone still governs it')
   })
 })
 
-test('hyp ignore --local-only on a path already governed by a stricter .hypignore is a no-op naming the dotfile', async () => {
+test('hyp privacy set <path> local-only on a path already governed by a stricter .hypignore is a no-op naming the dotfile', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     mkdirSync(path.join(root, '.git'))
     writeFileSync(path.join(root, '.hypignore'), 'ignore\n')
 
-    const res = await run('ignore', ['--local-only'], { cwd: root, hypHome })
+    const res = await run('privacy set', [root, 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /already ignore/)
     assert.match(res.stdout, new RegExp(path.join(root, '.hypignore').replace(/[.\\]/g, '\\$&')))
@@ -196,22 +196,22 @@ test('hyp ignore --local-only on a path already governed by a stricter .hypignor
 
 /* --------------------------- unignore --local-only -------------------------- */
 
-test('hyp unignore --local-only removes an exact entry and is idempotent', async () => {
+test('hyp privacy unset <path> local-only removes an exact entry and is idempotent', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [root] })
 
-    const first = await run('unignore', ['--local-only'], { cwd: root, hypHome })
+    const first = await run('privacy unset', [root, 'local-only'], { cwd: root, hypHome })
     assert.equal(first.code, 0)
     assert.match(first.stdout, /removed 1 local-only entry/)
     assert.deepEqual(await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) }), [])
 
-    const second = await run('unignore', ['--local-only'], { cwd: root, hypHome })
+    const second = await run('privacy unset', [root, 'local-only'], { cwd: root, hypHome })
     assert.equal(second.code, 0, 'unignoring an already-clean path still succeeds (R5)')
     assert.match(second.stdout, /not local-only/)
   })
 })
 
-test('hyp unignore --local-only [path] removes every governing (equal-or-ancestor) entry', async () => {
+test('hyp privacy unset <path> local-only [path] removes every governing (equal-or-ancestor) entry', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const sub = path.join(root, 'a', 'b')
     mkdirSync(sub, { recursive: true })
@@ -220,7 +220,7 @@ test('hyp unignore --local-only [path] removes every governing (equal-or-ancesto
 
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [root, unrelated] })
 
-    const res = await run('unignore', ['--local-only', sub], { cwd: root, hypHome })
+    const res = await run('privacy unset', [sub, 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, new RegExp(root.replace(/[.\\]/g, '\\$&')))
 
@@ -229,7 +229,7 @@ test('hyp unignore --local-only [path] removes every governing (equal-or-ancesto
   })
 })
 
-test('hyp unignore --local-only does not remove a sibling that merely shares a string prefix', async () => {
+test('hyp privacy unset <path> local-only does not remove a sibling that merely shares a string prefix', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const scope = path.join(root, 'my_app')
     const sibling = path.join(root, 'myXapp')
@@ -237,7 +237,7 @@ test('hyp unignore --local-only does not remove a sibling that merely shares a s
     mkdirSync(sibling, { recursive: true })
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [sibling] })
 
-    const res = await run('unignore', ['--local-only', scope], { cwd: root, hypHome })
+    const res = await run('privacy unset', [scope, 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /not local-only/)
     assert.deepEqual(await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) }), [sibling])
@@ -252,7 +252,7 @@ test('hyp unignore --local-only does not remove a sibling that merely shares a s
 //
 // @ref LLP 0050#canonicalization [tests]: marking and unmarking identify a directory, not a spelling
 
-test('hyp ignore --private on the real path upgrades an entry declared by its symlink spelling, not duplicating it', async () => {
+test('hyp privacy set <path> ignore on the real path upgrades an entry declared by its symlink spelling, not duplicating it', async () => {
   await withSandbox(async ({ root: sandbox, hypHome }) => {
     const root = realpathSync(sandbox)
     const real = path.join(root, 'real', 'proj')
@@ -261,14 +261,14 @@ test('hyp ignore --private on the real path upgrades an entry declared by its sy
     symlinkSync(real, link)
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [link] })
 
-    const res = await run('ignore', ['--private', real], { cwd: root, hypHome })
+    const res = await run('privacy set', [real, 'ignore'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(entries, [{ dir: real, class: 'ignore' }], 'the one entry for that directory now says ignore')
   })
 })
 
-test('hyp unignore --local-only by symlink spelling removes an entry declared canonically', async () => {
+test('hyp privacy unset <path> local-only by symlink spelling removes an entry declared canonically', async () => {
   await withSandbox(async ({ root: sandbox, hypHome }) => {
     const root = realpathSync(sandbox)
     const real = path.join(root, 'real', 'proj')
@@ -279,7 +279,7 @@ test('hyp unignore --local-only by symlink spelling removes an entry declared ca
     mkdirSync(unrelated)
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [real, unrelated] })
 
-    const res = await run('unignore', ['--local-only', link], { cwd: root, hypHome })
+    const res = await run('privacy unset', [link, 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.deepEqual(
       await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) }),
@@ -291,25 +291,25 @@ test('hyp unignore --local-only by symlink spelling removes an entry declared ca
 
 /* ------------------------------ ignore --check ------------------------------ */
 
-test('hyp ignore --check reports the local-only class and the list file as the governor', async () => {
+test('hyp privacy show reports the local-only class and the list file as the governor', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [root] })
 
-    const res = await run('ignore', ['--check'], { cwd: root, hypHome })
+    const res = await run('privacy show', [], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /class: local-only/)
     assert.match(res.stdout, /ignored: no/, 'local-only is not the (fully suppressed) ignore class')
-    assert.match(res.stdout, new RegExp(localOnlyListPath(stateDirOf(hypHome)).replace(/[.\\]/g, '\\$&')))
+    assert.match(res.stdout, /machine-local policy store/)
   })
 })
 
-test('hyp ignore --check --json reports local-only class + governedBy pointing at the list file', async () => {
+test('hyp privacy show --json reports local-only class + governedBy pointing at the list file', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const sub = path.join(root, 'nested')
     mkdirSync(sub, { recursive: true })
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [root] })
 
-    const res = await run('ignore', ['--check', '--json'], { cwd: sub, hypHome })
+    const res = await run('privacy show', ['--json'], { cwd: sub, hypHome })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'local-only')
@@ -318,11 +318,11 @@ test('hyp ignore --check --json reports local-only class + governedBy pointing a
   })
 })
 
-test('hyp ignore --check still reports the dotfile ignore class + its governing file (unaffected by an empty list)', async () => {
+test('hyp privacy show still reports the dotfile ignore class + its governing file (unaffected by an empty list)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     writeFileSync(path.join(root, '.hypignore'), 'ignore\n')
 
-    const res = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
+    const res = await run('privacy show', ['--json'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'ignore')
@@ -331,7 +331,7 @@ test('hyp ignore --check still reports the dotfile ignore class + its governing 
   })
 })
 
-test('hyp ignore --check counts residual cached rows for a local-only scope (recorded, withheld from forwarding)', async () => {
+test('hyp privacy show counts residual cached rows for a local-only scope (recorded, withheld from forwarding)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const scope = path.join(root, 'proj')
     mkdirSync(scope, { recursive: true })
@@ -344,7 +344,7 @@ test('hyp ignore --check counts residual cached rows for a local-only scope (rec
     ]
     const { query, storage } = makeAiGatewayCache(rows)
 
-    const res = await run('ignore', ['--check', '--json'], { cwd: scope, hypHome, query, storage })
+    const res = await run('privacy show', ['--json'], { cwd: scope, hypHome, query, storage })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'local-only')
@@ -352,21 +352,21 @@ test('hyp ignore --check counts residual cached rows for a local-only scope (rec
   })
 })
 
-test('hyp ignore --check on a clean path with a populated-but-non-matching list reports full/no residue', async () => {
+test('hyp privacy show on a clean path with a populated-but-non-matching list reports full/no residue', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const other = path.join(root, 'other-project')
     mkdirSync(other, { recursive: true })
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [other] })
 
-    const res = await run('ignore', ['--check'], { cwd: root, hypHome })
+    const res = await run('privacy show', [], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.match(res.stdout, /class: full/)
+    assert.match(res.stdout, /class: sync/)
     assert.match(res.stdout, /governed-by: \(none\)/)
     assert.match(res.stdout, /residual-cached-rows: 0/)
   })
 })
 
-test('hyp ignore --check scopes the residual count to the entry the gate used, not the longest declared string', async () => {
+test('hyp privacy show scopes the residual count to the entry the gate used, not the longest declared string', async () => {
   await withSandbox(async ({ root: sandbox, hypHome }) => {
     const root = realpathSync(sandbox)
     const scope = path.join(root, 'r')
@@ -386,7 +386,7 @@ test('hyp ignore --check scopes the residual count to the entry the gate used, n
       { cwd: '/elsewhere', repo_root: '/elsewhere' },
     ])
 
-    const res = await run('ignore', ['--check', '--json'], { cwd: deep, hypHome, query, storage })
+    const res = await run('privacy show', ['--json'], { cwd: deep, hypHome, query, storage })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'local-only')

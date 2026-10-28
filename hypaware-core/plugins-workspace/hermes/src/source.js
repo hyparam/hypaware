@@ -9,14 +9,8 @@
  * @ref LLP 0122#source [implements]: start probes `state_db` (missing ->
  *   idle, present -> open + load watermark + start the poll timer),
  *   `status()`/`reload()`/`stop()`.
- * @ref LLP 0122#watermark [implements]: the per-tick change-detection and
- *   whole-session re-projection loop, leaning on the shared
- *   `ai_gateway.projected_exchange` materializer's pre-write `part_id`
- *   dedupe (`aiGatewayBackfillMaterializer`, ai-gateway `dataset.js`) to
- *   turn a whole-session re-projection into "append only the new tail".
- *   The watermark itself persists in the plugin's kernel-managed state
- *   dir (`watermark.js`), the same sidecar-file pattern
- *   `context-graph-enrich`/`vector-search` use for their own cursors.
+ * @ref LLP 0449#reconciliation [implements]: reconcile whole visible sessions,
+ *   including rewinds and in-place edits, through the shared cache writer.
  * @ref LLP 0118#requirements [implements]: spec R9, no `~/.hermes/state.db`
  *   -> idle mode, `status()` reports it, no error noise, and the same poll
  *   timer re-probes each tick so an install that appears later is picked up
@@ -28,7 +22,7 @@
  *
  * @import { BackfillItem, JsonObject, PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
- * @import { HermesWatermarkState } from './types.js'
+ * @import { HermesBatchEntry, HermesWatermarkState } from './types.js'
  * @import { HermesStateDb } from './state_db.js'
  */
 
@@ -37,12 +31,13 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
+import { isPartitionMutationBusy } from '../../../../src/core/util/mutation_guard.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { AI_GATEWAY_MESSAGES_DATASET, PROJECTED_EXCHANGE_KIND } from '../../../../src/core/backfill/scan_util.js'
 import { resolveHermesEnabled } from './config.js'
 import { HermesStateDbError } from './errors.js'
-import { HERMES_CLIENT_NAME, projectHermesSession } from './projector.js'
+import { HERMES_CLIENT_NAME, hermesReconcileScope, projectHermesSession } from './projector.js'
 import { openHermesStateDb } from './state_db.js'
 import { readHermesWatermark, writeHermesWatermark } from './watermark.js'
 
@@ -53,6 +48,35 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000
 
 /** The cache partition segment hermes's poll writes land under, distinct from `hyp backfill`'s `backfill` segment. */
 export const HERMES_PARTITION_SEGMENT = 'hermes'
+
+/**
+ * How many changed sessions one poll tick reconciles. The tick reconciles
+ * them as one batch, a single metadata load and commit per cache partition,
+ * then persists the watermark once, so a restart repeats at most this one
+ * uncommitted batch. Changed sessions past the budget wait for the next tick,
+ * which keeps a pass that flags every session (a first tick, a lost sidecar,
+ * the LLP 0449 fingerprint upgrade) from holding daemon start for the whole
+ * history. A session another writer holds is deferred and does not count.
+ * @ref LLP 0527#tick-budget [implements]: start commits at most one batch whatever the history size.
+ */
+export const HERMES_SESSIONS_PER_TICK = 64
+
+/**
+ * The batch also stops admitting sessions once it holds this many projected
+ * rows. The check runs before each session and a session is projected whole,
+ * so the last one admitted can carry the batch past this by its own size. The
+ * first session is always admitted, so one oversized session still makes
+ * progress.
+ */
+export const HERMES_ROWS_PER_TICK = 4096
+
+/**
+ * Delay before a catch-up tick when a healthy tick left changed sessions
+ * past its budget, so a large repair pass converges in seconds of wall time
+ * rather than one batch per poll interval, while each batch still yields the
+ * event loop to the daemon.
+ */
+export const HERMES_CATCH_UP_DELAY_MS = 1000
 
 /**
  * Mutable poll-tick state for one `startHermesSource` lifetime. Exported
@@ -71,6 +95,7 @@ export const HERMES_PARTITION_SEGMENT = 'hermes'
  *   watermark: HermesWatermarkState,
  *   rowsWritten: number,
  *   sessionsTracked: number,
+ *   sessionsPending: number,
  *   lastPollAt: string | undefined,
  *   lastError: string | undefined,
  *   idleLogged: boolean,
@@ -99,21 +124,41 @@ export async function startHermesSource(ctx) {
   let handle = null
   /** @type {Promise<void> | null} */
   let inFlight = null
+  /** @type {NodeJS.Timeout | null} */
+  let catchUp = null
+
+  // A healthy tick that left changed sessions past its budget asks for
+  // another one soon. A failed tick never does: it waits for the poll timer,
+  // so a persistent failure cannot spin.
+  function scheduleCatchUp() {
+    if (stopped || catchUp || runner.lastError || runner.sessionsPending === 0) return
+    catchUp = setTimeout(() => {
+      catchUp = null
+      runTick()
+    }, HERMES_CATCH_UP_DELAY_MS)
+    if (typeof catchUp.unref === 'function') catchUp.unref()
+  }
+
+  function runTick() {
+    if (stopped || inFlight) return
+    inFlight = runHermesPollTick(runner, activeCtx).finally(() => {
+      inFlight = null
+      scheduleCatchUp()
+    })
+  }
 
   // @ref LLP 0122#source [implements]: the initial probe/open/first-poll
   // happens synchronously during start, not only on the first timer fire.
+  // @ref LLP 0527#tick-budget [implements]: that first poll is one budgeted
+  // batch; any remainder is reconciled by catch-up ticks after start returns.
   await runHermesPollTick(runner, activeCtx)
 
   function startTimer() {
-    handle = setInterval(() => {
-      if (stopped || inFlight) return
-      inFlight = runHermesPollTick(runner, activeCtx).finally(() => {
-        inFlight = null
-      })
-    }, runner.pollIntervalMs)
+    handle = setInterval(runTick, runner.pollIntervalMs)
     if (typeof handle.unref === 'function') handle.unref()
   }
   startTimer()
+  scheduleCatchUp()
 
   return {
     async status() {
@@ -164,6 +209,10 @@ export async function startHermesSource(ctx) {
       if (handle) {
         clearInterval(handle)
         handle = null
+      }
+      if (catchUp) {
+        clearTimeout(catchUp)
+        catchUp = null
       }
       if (inFlight) await inFlight.catch(() => {})
       if (runner.db) {
@@ -225,13 +274,13 @@ export function createHermesPollRunner(ctx) {
     homeDir,
     stateDir: ctx.paths.stateDir,
     resolver: createUsagePolicyResolver({ localOnlyListPath: localOnlyList }),
-    // Seed only: `runHermesPollTick` re-mints this per tick so the shared
-    // materializer re-scans committed rows every tick (LLP 0122#watermark).
+    // Diagnostic identity, refreshed once per poll.
     devRunId: randomUUID(),
     db: null,
     watermark: {},
     rowsWritten: 0,
     sessionsTracked: 0,
+    sessionsPending: 0,
     lastPollAt: undefined,
     lastError: undefined,
     idleLogged: false,
@@ -241,32 +290,22 @@ export function createHermesPollRunner(ctx) {
 /**
  * Run one poll tick against `runner`, mutating it in place: probe/open when
  * idle, list changed sessions against the persisted watermark, re-project
- * each changed session whole and write through the shared
- * `ai_gateway.projected_exchange` materializer, then persist the advanced
- * watermark. Never throws: a `state_db` read/open error degrades
- * `runner.lastError` + logs, matching LLP 0122#sqlite's "degrade status
+ * up to {@link HERMES_SESSIONS_PER_TICK} changed sessions whole through the
+ * shared `ai_gateway.projected_exchange` materializer, reconcile them as one
+ * batch, then persist the advanced watermark once, whether the tick finished
+ * or broke part-way. Sessions past the budget are counted in
+ * `runner.sessionsPending` for the next tick. Never throws: a `state_db` read/open
+ * error degrades `runner.lastError` + logs, matching LLP 0122#sqlite's "degrade status
  * rather than error the daemon" and spec R9's "idle cleanly, no error
  * noise" for the specific missing-file case.
  *
- * @ref LLP 0122#watermark [implements]
+ * @ref LLP 0449#detection [implements]
  * @ref LLP 0118#requirements [implements]: spec R9
  * @param {HermesPollRunner} runner
  * @param {PluginActivationContext} ctx
  * @returns {Promise<void>}
  */
 export async function runHermesPollTick(runner, ctx) {
-  // @ref LLP 0122#watermark [implements]: refresh the dedupe scan every tick.
-  // The shared `ai_gateway.projected_exchange` materializer memoizes its
-  // committed-`part_id` seen-set per `devRunId` and never refreshes it while
-  // the id is stable. A daemon runner that reused one id for its whole
-  // lifetime therefore never re-observed rows committed between ticks (by an
-  // earlier tick, a `hyp backfill`, or - before the activation fix - a
-  // concurrent CLI poll), so whole-session re-projection re-appended the
-  // already-written prefix instead of dropping it (issue #348). Minting a
-  // fresh id per tick forces a fresh committed scan, so an already-written
-  // prefix is dropped on every re-projection (spec R2). The id is minted once
-  // per tick (not per session), so sessions within a tick still share one scan
-  // and dedupe against each other.
   runner.devRunId = randomUUID()
   try {
     await withSpan(
@@ -289,54 +328,181 @@ export async function runHermesPollTick(runner, ctx) {
 
         const db = runner.db
         if (!db) return // unreachable, narrows the type for TS below
-        const sessions = await db.listSessions()
         const changed = await db.listChangedSessions(runner.watermark)
-        runner.sessionsTracked = sessions.length
+        // The change scan already walked every session; its marks count them.
+        runner.sessionsTracked = db.snapshot?.length ?? 0
         span.setAttribute('sessions_examined', changed.length)
 
         let rowsAppended = 0
+        let sessionsDeferred = 0
+        let sessionsPending = 0
         if (changed.length > 0) {
-          const sessionsById = new Map(sessions.map((s) => [s.id, s]))
-          for (const change of changed) {
-            const session = sessionsById.get(change.session_id)
-            if (!session) continue
-            const messages = await db.listMessagesForSession(change.session_id)
-            // @ref LLP 0122#watermark [implements]: the whole session is
-            // re-projected every time, never a partial batch, so identity
-            // (message_index / previous_message_id chains / part ids)
-            // never depends on when the session was first observed.
-            const item = await projectHermesSession({
-              session,
-              messages,
-              sourcePath: runner.stateDbPath,
-              clientName: HERMES_CLIENT_NAME,
-              homeDir: runner.homeDir,
-              resolver: runner.resolver,
-              log: ctx.log,
-            })
-            if (item) {
-              rowsAppended += await writeProjectedItem(runner, ctx, item)
-            }
+          // @ref LLP 0449#detection [constrained-by]: a fingerprint is persisted
+          // only after its session reconciled, so a flush can never make a
+          // restart skip work that did not finish.
+          let pendingMarks = 0
+          let sessionsPersisted = 0
+          /** @param {HermesBatchEntry} entry */
+          const markCommitted = (entry) => {
             // Watermark advances whether or not the item produced rows
             // (usage-policy drop, or nothing new to write): the session
             // was still examined through to its current state, and not
             // advancing would re-examine (and, for a drop, re-log) it
-            // every tick forever.
-            runner.watermark[String(change.session_id)] = {
-              max_message_id: change.max_message_id,
-              ended_at: change.ended_at,
+            // every tick forever. It names the view just committed, not
+            // the earlier change scan, so a rewind between the two is
+            // seen again on the next tick.
+            runner.watermark[String(entry.session_id)] = {
+              max_message_id: entry.mark.max_message_id,
+              ended_at: entry.mark.ended_at,
+              fingerprint: entry.mark.fingerprint,
             }
+            pendingMarks += 1
           }
-          writeHermesWatermark(runner.stateDir, runner.watermark)
+          /** @type {HermesBatchEntry[]} */
+          const batch = []
+          /** @type {(() => void)[]} */
+          const releases = []
+          let admitted = 0
+          let batchRows = 0
+          // The first session whose read or projection broke. The sessions
+          // admitted before it still commit, so a session that always fails
+          // holds back only itself and what sorts after it.
+          /** @type {{ err: unknown, sessionId: string | number } | null} */
+          let failure = null
+          /** @type {{ err: unknown, sessionId: string | number | null, entries: HermesBatchEntry[] } | null} */
+          let commitFailure = null
+          try {
+            for (const change of changed) {
+              if (failure || admitted >= HERMES_SESSIONS_PER_TICK || (admitted > 0 && batchRows >= HERMES_ROWS_PER_TICK)) {
+                sessionsPending += 1
+                continue
+              }
+              // @ref LLP 0449#read-commit-guard [implements]: claim before the
+              // authoritative read, hold through the commit. A scope another
+              // writer holds is deferred with its watermark untouched, so the
+              // next tick re-lists it and reads whatever that writer left.
+              // @ref LLP 0527#batched-reconcile [constrained-by]: every claim in
+              // the batch is held until the batch commit returns.
+              try {
+                releases.push(ctx.storage.claimReconcileScope?.(AI_GATEWAY_MESSAGES_DATASET,
+                  hermesReconcileScope(HERMES_CLIENT_NAME, change.session_id)) ?? (() => {}))
+              } catch (claimErr) {
+                if (!isPartitionMutationBusy(claimErr)) {
+                  failure = { err: claimErr, sessionId: change.session_id }
+                  continue
+                }
+                sessionsDeferred += 1
+                ctx.log.info('hermes.session_deferred', {
+                  component: 'hermes',
+                  operation: 'hermes.poll',
+                  status: 'deferred',
+                  error_kind: 'cache_partition_mutation_busy',
+                  session_id: String(change.session_id),
+                })
+                continue
+              }
+              admitted += 1
+              try {
+                const snapshot = await db.readSessionSnapshot(change.session_id)
+                // Deleted since the change scan; nothing to project or mark.
+                if (!snapshot) continue
+                // @ref LLP 0449#reconciliation [implements]: replace shifted parts
+                // and removed suffixes from a complete visible transcript.
+                const item = await projectHermesSession({
+                  session: snapshot.session,
+                  messages: snapshot.messages,
+                  sourcePath: runner.stateDbPath,
+                  clientName: HERMES_CLIENT_NAME,
+                  homeDir: runner.homeDir,
+                  resolver: runner.resolver,
+                  log: ctx.log,
+                })
+                const prepared = item ? await prepareProjectedItem(runner, ctx, item) : null
+                rowsAppended += prepared?.appended ?? 0
+                if (prepared?.snapshot) batchRows += prepared.snapshot.rows.length
+                batch.push({ session_id: change.session_id, mark: snapshot.mark, snapshot: prepared?.snapshot })
+              } catch (err) {
+                failure = { err, sessionId: change.session_id }
+              }
+            }
+            const committed = await commitHermesBatch(ctx, batch, markCommitted)
+            rowsAppended += committed.written
+            if (committed.failed) commitFailure = { ...committed.failed, entries: batch }
+          } finally {
+            for (const release of releases) release()
+          }
+          const tickError = failure?.err ?? commitFailure?.err
+          try {
+            if (pendingMarks > 0) {
+              writeHermesWatermark(runner.stateDir, runner.watermark)
+              sessionsPersisted = pendingMarks
+              pendingMarks = 0
+            }
+          } catch (flushErr) {
+            // The marks stay in memory, so this tick's work is not repeated
+            // in-process, but nothing re-triggers a flush for them:
+            // `listChangedSessions` reads the in-memory map, so these
+            // sessions are not "changed" again. They reach disk only if some
+            // other session changes later, since a flush rewrites the whole
+            // map; a restart before then re-scans them, which is the benign
+            // pre-fix behaviour. Record the failure with the tick's progress:
+            // when a reconcile is the tick's error nothing else reports an
+            // unwritable sidecar, and when the flush is the tick's error this
+            // record is the one that names the write as the step that broke.
+            ctx.log.warn('hermes.watermark_flush_failed', {
+              component: 'hermes',
+              operation: 'hermes.poll',
+              error_kind: errorKind(flushErr),
+              error: flushErr instanceof Error ? flushErr.message : String(flushErr),
+              sessions_persisted: sessionsPersisted,
+              sessions_examined: changed.length,
+            })
+            // A sidecar write that fails while degrading must not replace the
+            // error that got us here, which is the one worth reporting.
+            if (!tickError) throw flushErr
+          }
+          // These fire only when a read, projection or reconcile is what
+          // broke: a flush failure names the write above, never a session
+          // whose reconcile completed.
+          for (const broke of [failure, commitFailure]) {
+            if (!broke) continue
+            /** @type {Record<string, unknown>} */
+            const fields = {
+              component: 'hermes',
+              operation: 'hermes.poll',
+              status: 'partial',
+              error_kind: errorKind(broke.err),
+              sessions_persisted: sessionsPersisted,
+              sessions_examined: changed.length,
+            }
+            if (broke.sessionId !== null) {
+              fields.session_id = String(broke.sessionId)
+            } else if ('entries' in broke) {
+              // A batch commit failed as a whole: name the batch it held.
+              fields.sessions_in_batch = broke.entries.length
+              fields.first_session_id = String(broke.entries[0]?.session_id)
+              fields.last_session_id = String(broke.entries[broke.entries.length - 1]?.session_id)
+            }
+            ctx.log.warn('hermes.session_reconcile_failed', fields)
+          }
+          if (tickError) {
+            runner.sessionsPending = sessionsPending
+            throw tickError
+          }
         }
 
         runner.rowsWritten += rowsAppended
+        runner.sessionsPending = sessionsPending
         span.setAttribute('rows_appended', rowsAppended)
+        span.setAttribute('sessions_deferred', sessionsDeferred)
+        span.setAttribute('sessions_pending', sessionsPending)
         ctx.log.info('hermes.poll_tick', {
           component: 'hermes',
           operation: 'hermes.poll',
           state_db: runner.stateDbPath,
           sessions_examined: changed.length,
+          sessions_deferred: sessionsDeferred,
+          sessions_pending: sessionsPending,
           rows_appended: rowsAppended,
         })
       },
@@ -400,17 +566,17 @@ async function tryOpen(runner, ctx) {
 /**
  * Materialize one projected-exchange `BackfillItem` through the shared
  * `ai_gateway.projected_exchange` materializer (`@hypaware/ai-gateway`,
- * required by hermes's manifest) and append the resulting rows.
+ * required by hermes's manifest). A reconcile item comes back as a scoped
+ * snapshot for the tick's batch commit; any other item is appended here.
  *
- * @ref LLP 0122#watermark [implements]: relies on the materializer's
- *   pre-write `part_id` dedupe to turn a whole-session re-projection into
- *   "append only the new tail".
+ * @ref LLP 0449#reconciliation [implements]: authoritative snapshots retain
+ *   equal parts, replace changed parts and remove withdrawn parts.
  * @param {HermesPollRunner} runner
  * @param {PluginActivationContext} ctx
  * @param {BackfillItem} item
- * @returns {Promise<number>} rows appended
+ * @returns {Promise<{ appended: number, snapshot?: HermesBatchEntry['snapshot'] }>}
  */
-async function writeProjectedItem(runner, ctx, item) {
+async function prepareProjectedItem(runner, ctx, item) {
   const materializer = ctx.backfillMaterializers.get(PROJECTED_EXCHANGE_KIND)
   if (!materializer) {
     ctx.log.error('hermes.materializer_missing', {
@@ -418,7 +584,7 @@ async function writeProjectedItem(runner, ctx, item) {
       operation: 'hermes.poll',
       kind: PROJECTED_EXCHANGE_KIND,
     })
-    return 0
+    return { appended: 0 }
   }
   const rows = await materializer.materialize(item, {
     env: ctx.env,
@@ -426,7 +592,7 @@ async function writeProjectedItem(runner, ctx, item) {
     storage: ctx.storage,
     devRunId: runner.devRunId,
   })
-  if (!Array.isArray(rows) || rows.length === 0) return 0
+  if (!Array.isArray(rows) || (rows.length === 0 && !item.reconcile)) return { appended: 0 }
 
   const dataset = ctx.query.getDataset?.(AI_GATEWAY_MESSAGES_DATASET)
   if (!dataset) {
@@ -435,16 +601,81 @@ async function writeProjectedItem(runner, ctx, item) {
       operation: 'hermes.poll',
       dataset: AI_GATEWAY_MESSAGES_DATASET,
     })
-    return 0
+    return { appended: 0 }
   }
   const schemaColumns = dataset.schema?.columns ?? []
+  if (item.reconcile) {
+    if (!ctx.storage.reconcileRowsBatch && !ctx.storage.reconcileRows) {
+      throw new Error('Hermes capture requires local snapshot reconciliation support')
+    }
+    return { appended: 0, snapshot: { rows, scope: item.reconcile, columns: schemaColumns } }
+  }
   await ctx.storage.appendRowsToPartition(
     AI_GATEWAY_MESSAGES_DATASET,
     [HERMES_PARTITION_SEGMENT],
     schemaColumns,
     rows
   )
-  return rows.length
+  return { appended: rows.length }
+}
+
+/**
+ * Commit the tick's batch and mark each session it settled. Sessions with no
+ * snapshot are already settled. The snapshots go to the cache in one
+ * `reconcileRowsBatch` call; when that fails, or the storage has no batch
+ * call, they are retried one at a time in session order, so a session that
+ * cannot commit holds back only itself and the sessions after it, as it did
+ * before batching, and the failure names it. Reconciling a snapshot twice is
+ * idempotent, so a retry after a partly committed batch is safe.
+ *
+ * @ref LLP 0527#batched-reconcile [implements]: one cache commit per partition per tick.
+ * @param {PluginActivationContext} ctx
+ * @param {HermesBatchEntry[]} batch
+ * @param {(entry: HermesBatchEntry) => void} markCommitted
+ * @returns {Promise<{ written: number, failed?: { err: unknown, sessionId: string | number | null } }>}
+ */
+async function commitHermesBatch(ctx, batch, markCommitted) {
+  const pending = []
+  for (const entry of batch) {
+    if (entry.snapshot) pending.push(entry)
+    else markCommitted(entry)
+  }
+  if (!pending.length) return { written: 0 }
+  const storage = ctx.storage
+  if (storage.reconcileRowsBatch) {
+    try {
+      const written = await storage.reconcileRowsBatch(AI_GATEWAY_MESSAGES_DATASET,
+        /** @type {NonNullable<HermesBatchEntry['snapshot']>} */ (pending[0].snapshot).columns,
+        pending.map(entry => {
+          const { rows, scope } = /** @type {NonNullable<HermesBatchEntry['snapshot']>} */ (entry.snapshot)
+          return { rows, scope }
+        }))
+      for (const entry of pending) markCommitted(entry)
+      return { written }
+    } catch (err) {
+      if (!storage.reconcileRows) return { written: 0, failed: { err, sessionId: null } }
+      ctx.log.warn('hermes.batch_reconcile_failed', {
+        component: 'hermes',
+        operation: 'hermes.poll',
+        status: 'retrying',
+        error_kind: errorKind(err),
+        error: err instanceof Error ? err.message : String(err),
+        sessions_in_batch: pending.length,
+      })
+    }
+  }
+  const reconcileRows = /** @type {NonNullable<typeof storage.reconcileRows>} */ (storage.reconcileRows)
+  let written = 0
+  for (const entry of pending) {
+    const { rows, scope, columns } = /** @type {NonNullable<HermesBatchEntry['snapshot']>} */ (entry.snapshot)
+    try {
+      written += await reconcileRows(AI_GATEWAY_MESSAGES_DATASET, columns, rows, scope)
+    } catch (err) {
+      return { written, failed: { err, sessionId: entry.session_id } }
+    }
+    markCommitted(entry)
+  }
+  return { written }
 }
 
 /** @param {unknown} err @returns {string} */

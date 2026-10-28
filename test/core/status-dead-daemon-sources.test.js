@@ -6,7 +6,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { statusFilePath } from '../../src/core/runtime/paths.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { runDaemonStatus } from '../../src/core/commands/daemon.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
@@ -172,6 +173,65 @@ test('a live pid the daemon did not take does not revive its predecessor\'s sour
   const block = sourcesBlock(renderText(report))
   assert.ok(!block.includes('[started]'), 'but not by the daemon that wrote the snapshot')
   assert.match(block, /ai-gateway.*\[stopped\]/)
+})
+
+/**
+ * @param {string} hypHome
+ * @param {string[]} [argv]
+ */
+async function daemonStatus(hypHome, argv = []) {
+  const stdout = makeBuf()
+  const code = await runDaemonStatus(argv, /** @type {any} */ ({
+    env: { HYP_HOME: hypHome },
+    stdout,
+    stderr: makeBuf(),
+  }))
+  assert.equal(code, 0)
+  return stdout.text()
+}
+
+test('hyp daemon status does not render an exited daemon\'s sources as started', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
+  // The third surface over the same file (issue #1415). The daemon line
+  // already says `(no live process)`; the rows under it must not contradict it.
+  writeSnapshot(stateRoot)
+
+  const text = await daemonStatus(hypHome)
+  assert.match(text, /^daemon: healthy \(no live process\)/)
+  const block = sourcesBlock(text)
+  assert.ok(!block.includes(': started'), 'no source claims to be started')
+  assert.match(block, /ai-gateway \(@hypaware\/ai-gateway\): stopped/)
+  assert.match(block, /otlp \(@hypaware\/otel\): failed - bind refused/, 'a failed source keeps its verdict')
+
+  const file = await fs.readFile(statusFilePath(stateRoot), 'utf8')
+  const recorded = JSON.parse(await daemonStatus(hypHome, ['--json']))
+  assert.deepEqual(recorded, { running: false, ...JSON.parse(file) }, '--json stays the file\'s copy')
+})
+
+test('hyp daemon status still renders a running daemon\'s sources as started', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
+  writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
+  writeSnapshot(stateRoot)
+
+  const block = sourcesBlock(await daemonStatus(hypHome))
+  assert.match(block, /ai-gateway \(@hypaware\/ai-gateway\): started/)
+  assert.match(block, /otlp \(@hypaware\/otel\): failed - bind refused/)
+})
+
+test('hyp daemon status does not revive a predecessor\'s sources under a reissued pid', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
+  writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: process.pid + 1,
+    healthyAt: new Date().toISOString(),
+    uptimeMs: 0,
+    sources: [{ name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: 'started' }],
+    sinks: [],
+  }))
+
+  const block = sourcesBlock(await daemonStatus(hypHome))
+  assert.match(block, /ai-gateway \(@hypaware\/ai-gateway\): stopped/)
 })
 
 test('a status file whose sources are not a list does not break the report', async (t) => {

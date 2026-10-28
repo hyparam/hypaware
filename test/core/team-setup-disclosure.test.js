@@ -7,7 +7,7 @@
 // customize. The doc therefore has a branch in it, written as the
 // "If you choose Customize" subsection. Everything after that heading is
 // nested inside it until the next heading, and the thing that follows it
-// is the upload-hold callout - the doc's one pointer to the review window,
+// is the first-sync hold callout - the doc's one pointer to the review window,
 // the `hypaware-privacy` skill, and PRIVACY.md.
 //
 // Landing that callout inside the Customize branch hides it from the
@@ -33,7 +33,7 @@ const DOC = 'docs/TEAM_SETUP.md'
 // the gate. Matched on a distinctive fragment rather than the whole
 // paragraph so rewording it stays free; moving it does not.
 const UNCONDITIONAL_CLAIMS = [
-  { what: 'the upload-hold callout', find: 'Nothing is uploaded immediately.' },
+  { what: 'the first-sync hold callout', find: 'Choose **n** to review your recordings first.' },
   { what: 'the pointer to the privacy skill', find: 'hypaware-privacy' },
   { what: 'the pointer to PRIVACY.md', find: './PRIVACY.md' },
 ]

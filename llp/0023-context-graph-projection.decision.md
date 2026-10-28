@@ -8,7 +8,8 @@
 **Revised:** 2026-06-15
 **Related:** LLP 0005, LLP 0006, LLP 0013, LLP 0015, LLP 0016, LLP 0021
 **Extended-by:** [LLP 0392](./0392-github-capture-projects-automatically.spec.md)
-(source-scoped projection capability and automatic GitHub projection)
+(source-scoped projection capability and automatic GitHub projection),
+LLP 0428 (precise evidence, bounded action derivation and explicit refresh)
 
 > `@hypaware/context-graph` materializes a node/edge **activity graph** from any
 > source that contributes a projection contract. The first is `ai_gateway_messages`
@@ -147,6 +148,10 @@ entirely; nothing here can block or OOM the daemon.
 The graph plugin still registers no source or timer, but a source may now
 request its own dataset projection through the capability, so GitHub capture
 runs one inside the daemon tick that captured the rows.
+
+**Extended-by:** [LLP 0512](./0512-local-session-graph-projects-automatically.spec.md#lifecycle).
+The AI gateway connector also requests automatic local session projection from
+its daemon source. The graph engine itself still owns no background timer.
 
 ## Merge policy
 

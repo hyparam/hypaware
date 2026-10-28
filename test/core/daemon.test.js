@@ -9,13 +9,13 @@ import path from 'node:path'
 
 import { renderDaemonInstall, serviceDaemonStatus } from '../../src/core/daemon/install.js'
 import { ServiceOpError, ensureFsOp } from '../../src/core/daemon/service_ops.js'
-import { runDaemon } from '../../src/core/daemon/runtime.js'
+import { collectSinkSnapshots, recoverSinkSnapshots, runDaemon } from '../../src/core/daemon/runtime.js'
 import {
   probeClientAttachFromDescriptor,
   readStatusFile,
-  statusFilePath,
   writeStatusFile,
 } from '../../src/core/daemon/status.js'
+import { statusFilePath } from '../../src/core/runtime/paths.js'
 import {
   ClientSettingsPathError,
   resolveClientSettingsPath,
@@ -359,7 +359,7 @@ test('renderDaemonInstall renders a deterministic systemd dry-run payload', () =
   assert.equal(plan.serviceKind, 'systemd unit: hypaware.service')
   assert.equal(plan.targetPath, '/home/hyp/.config/systemd/user/hypaware-test.service')
   assert.equal(plan.configPath, '/home/hyp/.hyp/hypaware-config.json')
-  assert.match(plan.content, /^ExecStart=\/usr\/local\/bin\/node \/opt\/hypaware\/bin\/hypaware\.js daemon run --foreground --config \/home\/hyp\/\.hyp\/hypaware-config\.json$/m)
+  assert.match(plan.content, /^ExecStart=\/usr\/local\/bin\/node \/opt\/hypaware\/bin\/hypaware\.js daemon run --config \/home\/hyp\/\.hyp\/hypaware-config\.json$/m)
   assert.match(plan.content, /^RestartSec=9$/m)
   assert.match(plan.content, /^Environment="HYP_ENV=test value"$/m)
   assert.deepEqual(plan.manageCommands[0], ['systemctl', '--user', 'daemon-reload'])
@@ -450,6 +450,54 @@ test('serviceDaemonStatus degrades to "not loaded" when the service manager cann
   assert.equal(status.installed, true)
   assert.equal(status.loaded, false)
   assert.equal(status.pid, undefined)
+  assert.equal(status.unreachable, true, 'the degraded answer says the probe never ran (#1406)')
+})
+
+test('serviceDaemonStatus marks a service manager that answered with a failure as unreachable', async () => {
+  // The dead-user-bus shape (#1406): systemctl spawns and exits 1 with "Failed
+  // to connect to bus" rather than throwing, and launchctl answers with an exit
+  // other than 113. Neither is "not loaded" as observed, so both say so; a
+  // unit systemd does not know, and launchd's 113, stay plain not loaded.
+  const unitDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-svc-status-bus-'))
+  await fs.writeFile(path.join(unitDir, 'hypaware.service'), '[Unit]\n')
+  /** @param {{ exitCode: number, stdout: string, stderr: string }} result */
+  const systemctlAnswering = (result) => /** @type {SystemctlAdapter} */ (new Proxy(/** @type {any} */ ({}), {
+    get() {
+      return async () => result
+    },
+  }))
+  const noBus = await serviceDaemonStatus({
+    platform: 'linux',
+    unitDir,
+    systemctl: systemctlAnswering({ exitCode: 1, stdout: '', stderr: 'Failed to connect to bus: No medium found' }),
+  })
+  assert.equal(noBus.loaded, false)
+  assert.equal(noBus.unreachable, true, 'a systemctl that could not reach the bus is not a unit that is not loaded')
+  const unknown = await serviceDaemonStatus({
+    platform: 'linux',
+    unitDir,
+    systemctl: systemctlAnswering({ exitCode: 0, stdout: 'LoadState=not-found\nActiveState=inactive\nMainPID=0\n', stderr: '' }),
+  })
+  assert.equal(unknown.loaded, false)
+  assert.equal('unreachable' in unknown, false, 'systemd answering "not-found" is an observation, not a failed probe')
+
+  const plistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-svc-status-launchd-'))
+  await fs.writeFile(path.join(plistDir, 'com.hyperparam.hypaware.plist'), '<plist/>')
+  /** @param {number} exitCode */
+  const launchctlPrinting = (exitCode) => ({
+    print: async () => ({ exitCode, stdout: '', stderr: '' }),
+    bootstrap: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    bootout: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    kickstart: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+  })
+  const notInDomain = await serviceDaemonStatus({ platform: 'darwin', plistDir, userDomain: 'gui/501', launchctl: launchctlPrinting(113) })
+  assert.equal(notInDomain.loaded, false)
+  assert.equal('unreachable' in notInDomain, false, '113 is launchd saying the service is not in its domain')
+  const failed = await serviceDaemonStatus({ platform: 'darwin', plistDir, userDomain: 'gui/501', launchctl: launchctlPrinting(5) })
+  assert.equal(failed.loaded, false)
+  assert.equal(failed.unreachable, true, 'any other nonzero print is launchctl failing to answer')
+  await fs.rm(unitDir, { recursive: true, force: true })
+  await fs.rm(plistDir, { recursive: true, force: true })
 })
 
 // `ensureFsOp` exists so an EACCES on the plist/unit directory reaches the
@@ -612,6 +660,78 @@ test('runDaemon reload re-merges the central layer (does not re-read local alone
       started: 'central',
       reloaded: 'central',
     })
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a configured sink that fails to materialize degrades the boot, and a reload keeps it degraded (#2547)', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-sink-degraded-'))
+  let handle
+  try {
+    const installDir = await stageReloadPlugin(hypHome)
+    await writeLock(path.join(hypHome, 'hypaware'), {
+      schema_version: 1,
+      plugins: {
+        '@third-party/reload-fixture': {
+          name: '@third-party/reload-fixture',
+          version: '0.1.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-05-22T00:00:00.000Z',
+        },
+      },
+    })
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    // The fixture registers a source and no sink, so this instance cannot materialize.
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@third-party/reload-fixture', config: { value: 'before' } }],
+      sinks: { broken: { plugin: '@third-party/reload-fixture' } },
+    }))
+
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'sink-degraded-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+    })
+
+    const snap = handle.snapshot()
+    assert.equal(snap.state, 'degraded')
+    assert.deepEqual(snap.sources.map((s) => s.state), ['started'])
+    assert.equal(snap.warnings?.length, 1)
+    assert.match(snap.warnings[0], /^sink_materialize_failed: sink 'broken' \(sink_contribution_missing\): /)
+
+    // Reload does not materialize sinks, so it is no evidence the sink came up.
+    await handle.reload()
+    assert.equal(handle.snapshot().state, 'degraded')
+    const onDisk = readStatusFile(path.join(hypHome, 'hypaware'))
+    assert.equal(onDisk?.state, 'degraded')
+
+    await handle.stop()
+    await handle.done
+    handle = undefined
+
+    const raw = await fs.readFile(path.join(hypHome, 'hypaware', 'logs', 'daemon.log'), 'utf8')
+    const events = raw.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(events.some((e) => e.event === 'daemon.healthy'), false)
+    const failed = events.find((e) => e.event === 'daemon.sink_materialize_failed')
+    assert.equal(failed?.hyp_component, 'daemon')
+    assert.equal(failed?.instance, 'broken')
+    assert.equal(failed?.error_kind, 'sink_contribution_missing')
+    const degraded = events.find((e) => e.event === 'daemon.degraded')
+    assert.deepEqual(degraded?.failed_sinks, [{ instance: 'broken', error_kind: 'sink_contribution_missing' }])
+    assert.deepEqual(degraded?.failed_sources, [])
   } finally {
     if (handle) {
       await handle.stop()
@@ -786,3 +906,127 @@ export async function activate(ctx) {
   )
   return installDir
 }
+
+// @ref LLP 0406#installed-services [tests]: bare run and old installed-unit argv both start and stop in the invoking process
+for (const flags of [[], ['--foreground'], ['-f']]) {
+  test(`daemon run ${flags.join(' ')} starts and stops without a required mode flag`, async () => {
+    const { spawn } = await import('node:child_process')
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-daemon-run-argv-'))
+    const configPath = path.join(root, 'config.json')
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    const child = spawn(process.execPath, [path.resolve('bin/hypaware.js'), 'daemon', 'run', ...flags, '--config', configPath], {
+      env: { ...process.env, HOME: root, HYP_HOME: root, HYP_DEV_TELEMETRY: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    let stopped = false
+    const timeout = setTimeout(() => child.kill('SIGKILL'), 20000)
+    child.stdout.on('data', chunk => {
+      stdout += chunk
+      if (!stopped && stdout.includes('daemon: running')) {
+        stopped = true
+        child.kill('SIGTERM')
+      }
+    })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    try {
+      const code = await new Promise((resolve, reject) => {
+        child.once('error', reject)
+        child.once('close', resolve)
+      })
+      assert.equal(code, 0, stderr)
+      assert.match(stdout, /daemon: running/)
+      assert.match(stdout, /daemon: stopped/)
+    } finally {
+      clearTimeout(timeout)
+      child.kill('SIGKILL')
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+}
+
+// Issue #2337 / LLP 0453. `hyp status` warns while a destination holds an
+// export failure no later success has answered, which makes the last-success
+// stamp the fixed point the whole warning is defined against. The daemon
+// rebuilt its sink snapshots from an empty map on every boot, so a restart
+// reset every destination to "never succeeded" and a destination that had
+// recovered came back warning - a warning nothing could clear, because the
+// success that would have cleared it had already happened. No new file and no
+// new config key: the stamp already rides `status.json`'s own sink rows, and
+// the boot reads them back out of the snapshot it is about to overwrite.
+// @ref LLP 0453#warning-rule [tests]: historical success survives daemon exit, so a restart cannot resurrect a cleared warning
+test('a boot recovers lastSuccessAt from the status file, and only that', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-sink-success-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  try {
+    /** @type {any} */
+    const prior = {
+      state: 'stopped',
+      pid: 4242,
+      startedAt: '2026-09-29T00:00:00.000Z',
+      uptimeMs: 1000,
+      runId: 'prior',
+      mode: 'detached',
+      sources: [],
+      sinks: [
+        { instance: 'central', plugin: '@hypaware/central', kind: 'request', lastTickAt: '2026-09-29T01:00:00.000Z', lastSuccessAt: '2026-09-29T00:59:00.000Z' },
+        // Never succeeded: nothing to carry, and seeding a blank row would
+        // make an absent stamp indistinguishable from a recorded one.
+        { instance: 'never', plugin: '@hypaware/central', kind: 'request', lastTickAt: '2026-09-29T01:00:00.000Z' },
+        // Unparseable: a garbled file may lose recovery evidence, never
+        // invent it, so this destination stays at "never succeeded".
+        { instance: 'garbled', lastSuccessAt: 'not a date' },
+        { instance: '', lastSuccessAt: '2026-09-29T00:59:00.000Z' },
+        null,
+      ],
+    }
+    writeStatusFile(stateRoot, prior)
+
+    const sinkSnapshots = recoverSinkSnapshots(stateRoot)
+    assert.deepEqual([...sinkSnapshots.values()], [
+      { instance: 'central', plugin: '', kind: '', lastSuccessAt: '2026-09-29T00:59:00.000Z' },
+    ], 'only a row with a usable stamp and a usable name is carried forward')
+
+    // The seam the boot runs: the live handles rebuild the rows over the
+    // recovered map. The stamp survives, the live plugin and kind replace the
+    // blanks, and `lastTickAt` is absent - it is what says this daemon has
+    // ticked, and a recovered one would say so before the first tick ran.
+    const runtime = /** @type {any} */ ({
+      sinks: {
+        listHandles: () => [
+          { instanceName: 'central', plugin: '@hypaware/central', kind: 'request' },
+          { instanceName: 'never', plugin: '@hypaware/central', kind: 'request' },
+        ],
+      },
+    })
+    assert.deepEqual(collectSinkSnapshots({ runtime, sinkSnapshots }), [
+      { instance: 'central', plugin: '@hypaware/central', kind: 'request', lastSuccessAt: '2026-09-29T00:59:00.000Z' },
+      { instance: 'never', plugin: '@hypaware/central', kind: 'request' },
+    ])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Best effort, because a boot is not the place to fail on a state file. An
+// unreadable snapshot costs the stamps, which reads as "never succeeded" and
+// warns; it must never cost the daemon.
+// @ref LLP 0453#warning-rule [tests]: a snapshot that cannot be read yields no stamps rather than a failed boot
+test('an absent or unreadable status file yields no recovered stamps', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-sink-success-bad-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  try {
+    assert.deepEqual(recoverSinkSnapshots(stateRoot), new Map(), 'no daemon has ever run here')
+
+    const statusPath = statusFilePath(stateRoot)
+    await fs.mkdir(path.dirname(statusPath), { recursive: true })
+    await fs.writeFile(statusPath, '{ truncated')
+    assert.deepEqual(recoverSinkSnapshots(stateRoot), new Map(), 'a half-written snapshot is not a parse error at boot')
+
+    await fs.writeFile(statusPath, JSON.stringify({ sinks: 'central' }))
+    assert.deepEqual(recoverSinkSnapshots(stateRoot), new Map(), 'a sinks field that is not a list spreads into nothing')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})

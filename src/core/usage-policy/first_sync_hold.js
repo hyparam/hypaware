@@ -1,13 +1,11 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
-import path from 'node:path'
 import process from 'node:process'
 
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { usagePolicyPath } from '../runtime/paths.js'
 
-const FIRST_SYNC_HOLD_SUBDIR = 'usage-policy'
-const FIRST_SYNC_HOLD_FILENAME = 'first-sync-hold.json'
 const FIRST_SYNC_HOLD_VERSION = 1
 
 /**
@@ -114,7 +112,7 @@ export function formatFirstSyncDeadline(deadlineMs) {
  */
 export function firstSyncHoldMarkerPath(stateDir) {
   if (!stateDir) throw new Error('firstSyncHoldMarkerPath: stateDir is required')
-  return path.join(stateDir, FIRST_SYNC_HOLD_SUBDIR, FIRST_SYNC_HOLD_FILENAME)
+  return usagePolicyPath(stateDir, 'first-sync-hold')
 }
 
 /**

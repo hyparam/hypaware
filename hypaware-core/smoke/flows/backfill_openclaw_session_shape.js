@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { DatabaseSync } from 'node:sqlite'
 
 import { Attr, installObservability, runRoot } from '../../../src/core/observability/index.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
@@ -169,6 +170,20 @@ export async function run({ harness, expect }) {
       && v.timestamp === '2026-05-20T10:00:02.000Z'
       && v.message?.timestamp === '2026-05-20T10:00:09.000Z',
   )
+
+  // @ref LLP 0444#verification [tests]: run the complete import and rerun
+  // checks against SQLite-only history, keeping the other smoke's JSONL lane.
+  const databaseDir = path.join(fixture.agentsDir, agentId, 'agent')
+  await fs.mkdir(databaseDir, { recursive: true })
+  const db = new DatabaseSync(path.join(databaseDir, 'openclaw-agent.sqlite'))
+  try {
+    db.exec(`CREATE TABLE session_windows (session_id TEXT PRIMARY KEY, updated_at INTEGER, transcript_updated_at INTEGER);
+      CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, PRIMARY KEY(session_id, seq));`)
+    const quietAt = Date.now() - 4 * 60 * 1000
+    db.prepare('INSERT INTO session_windows VALUES (?, ?, ?)').run(sessionId, quietAt, quietAt)
+    for (const [seq, record] of staged.entries()) db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?)').run(sessionId, seq, JSON.stringify(record))
+  } finally { db.close() }
+  await fs.rm(fixture.filePath)
 
   const previousHome = process.env.HOME
   process.env.HOME = fakeHome

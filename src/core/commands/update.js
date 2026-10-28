@@ -66,7 +66,8 @@ export async function runUpdate(argv, ctx) {
     // reports. Pass the diagnostic events through; the routine ones are
     // already this command's own output.
     log: (event, fields) => {
-      if (event !== 'self_update.error' && event !== 'self_update.registry_override_ignored') return
+      if (event !== 'self_update.error' && event !== 'self_update.registry_override_ignored' &&
+          event !== 'self_update.skills_install_failed' && event !== 'self_update.skills_install_warning') return
       try { ctx.stderr.write(`${event} ${JSON.stringify(fields ?? {})}\n`) } catch { /* stderr gone */ }
     },
   })
@@ -146,8 +147,19 @@ export async function runUpdate(argv, ctx) {
     )
     return 1
   }
-  if (result.reason === 'checkout' || result.reason === 'npx') {
-    const how = result.reason === 'checkout' ? 'a source checkout' : 'an npx cache'
+  // None of the three is the global root `npm install -g` replaces, so each is
+  // told which copy it is running rather than that an install failed.
+  //
+  // The third arm names the tree and stops there, for the reason
+  // `describeEphemeralBinPath` does (issue #1625): `project-local` is decided
+  // by a manifest beside the outermost `node_modules`, and pnpm's `global/<n>`
+  // and yarn's `config/yarn/global` carry one too, so asserting a project here
+  // would send those users looking for a checkout they do not have. The repair
+  // named below is right for all of them.
+  if (result.reason === 'checkout' || result.reason === 'npx' || result.reason === 'project-local') {
+    const how = result.reason === 'checkout'
+      ? 'a source checkout'
+      : result.reason === 'npx' ? 'an npx cache' : 'a node_modules tree'
     ctx.stderr.write(
       `hyp update: ${result.latest} is available but this install runs from ${how}, ` +
       `which never self-updates. Install with 'npm install -g ${identity.name}' instead.\n`
@@ -205,4 +217,3 @@ async function restartDaemonIfRunning(ctx, version, daemonInstall) {
   }
   return 0
 }
-

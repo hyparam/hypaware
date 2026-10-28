@@ -42,10 +42,14 @@ function tmpPathFor(filePath) {
 /**
  * Write `data` to `filePath` atomically: temp file in the same
  * directory (same filesystem, so the rename is atomic), then rename
- * over the target. Parent directories are created on demand unless
+ * over the target. A given `mode` is the file's exact mode, whatever the
+ * process umask. Parent directories are created on demand unless
  * `mkdir: false` is passed (hot callers whose directory is already
  * guaranteed to exist skip the per-write `mkdir` syscall). The temp
- * file is removed on failure.
+ * file is removed on failure. With fsync, sync the file before rename and
+ * the immediate containing directory after publication, one open+sync; a
+ * caller that also needs an ancestor durable (a `.purge-cleanup` entry
+ * living inside `cacheRoot`, say) syncs that ancestor itself.
  *
  * @param {string} filePath
  * @param {string | Uint8Array} data
@@ -97,8 +101,16 @@ export async function atomicWriteFile(filePath, data, options = {}) {
     } else {
       await fs.writeFile(tmpPath, data, mode !== undefined ? { mode } : 'utf8')
     }
+    // The create mode is narrowed by the process umask, so set it outright.
+    if (mode !== undefined) await fs.chmod(tmpPath, mode)
     await fs.rename(tmpPath, filePath)
     renamed = true
+    if (fsync) {
+      // @ref LLP 0417#cache-reclamation [implements]: journal admission must survive before delete commits
+      const directory = path.dirname(filePath)
+      const handle = await fs.open(directory, 'r')
+      try { await handle.sync() } finally { await handle.close() }
+    }
   } finally {
     if (!renamed) {
       try {
@@ -128,6 +140,7 @@ export function atomicWriteFileSync(filePath, data, options = {}) {
   const tmpPath = tmpPathFor(filePath)
   try {
     fsSync.writeFileSync(tmpPath, data, mode !== undefined ? { mode } : 'utf8')
+    if (mode !== undefined) fsSync.chmodSync(tmpPath, mode)
     fsSync.renameSync(tmpPath, filePath)
   } catch (err) {
     try {
