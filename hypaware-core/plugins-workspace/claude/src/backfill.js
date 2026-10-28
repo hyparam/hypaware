@@ -13,6 +13,7 @@ import {
   loadTranscriptFile,
   walkTranscriptRoots,
   withToolUseResult,
+  withTurnOrigin,
 } from './transcripts.js'
 import { createSessionContextReader, pickLatestMatching } from './session_context.js'
 import { deriveRepoFromCwd } from './git_repo.js'
@@ -688,7 +689,7 @@ function projectedMessageFromEntry(entry, agentMeta, stampUsage) {
   // subagent's `claude.spawned_by_tool_use_id` above survives. @ref LLP 0035#one-carrier
   const usageAttrs = stampUsage ? anthropicMessageAttributes(entry) : undefined
   if (usageAttrs) message.attributes = { ...(message.attributes ?? {}), ...usageAttrs }
-  message.attributes = /** @type {any} */ (withToolUseResult(message.attributes, entry))
+  message.attributes = /** @type {any} */ (withTurnOrigin(withToolUseResult(message.attributes, entry), entry))
   if (entry.timestampMs !== undefined) message.message_created_at = new Date(entry.timestampMs).toISOString()
   return message
 }
