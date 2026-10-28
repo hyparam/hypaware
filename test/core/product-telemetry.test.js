@@ -1213,12 +1213,13 @@ test('persisted backoff defers expiry only until the daemon five-minute flush', 
   )
 })
 
-test('eligible delivery scans once and sends the oldest surviving batch', async (t) => {
+test('eligible delivery scans once and packs the surviving batches oldest first', async (t) => {
   const root = temp(t)
   const policy = enroll(root)
   assert(policy.binding)
   const queue = createOutbox(root, { now: () => NOW })
-  queue.append(batch(NOW - 1000), policy.binding)
+  const newer = batch(NOW - 1000)
+  queue.append(newer, policy.binding)
   const oldest = batch(NOW - 2000)
   queue.append(oldest, policy.binding)
   queue.append(batch(), binding)
@@ -1240,10 +1241,11 @@ test('eligible delivery scans once and sends the oldest surviving batch', async 
       return new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
     })
   }).drain()
-  assert.equal(sent?.batch_id, oldest?.batch_id)
-  // One enumeration plus identity checks before unlinking three copies.
-  assert.equal(queueReads, QUEUE_SLOTS + 3)
-  assert.equal(queue.entries().length, 1)
+  assert.deepEqual(sent?.records, [...(oldest?.records ?? []), ...(newer?.records ?? [])])
+  // One enumeration, identity checks before unlinking four copies, one read
+  // of each packed batch and the sealed write.
+  assert.equal(queueReads, QUEUE_SLOTS + 7)
+  assert.equal(queue.entries().length, 0)
 })
 
 // With telemetry off there is no queue directory, so the fixed slot sweep is
@@ -1392,4 +1394,144 @@ test('a successful claude-hook run queues no batch, a failed one still does', as
   )
   await invoke(env, 'status')
   assert.equal(createOutbox(root).entries().length, 2, 'other commands still queue a batch')
+})
+
+/**
+ * A receiver that acknowledges every POST and records each body.
+ * @param {string[]} posts @param {{lose?: number}} [options]
+ */
+function receiver(posts, { lose = 0 } = {}) {
+  return /** @type {typeof fetch} */ (
+    async (_, init) => {
+      if (!init?.method) return capability()
+      posts.push(String(init.body))
+      if (lose > 0) {
+        lose--
+        throw new Error('lost ack')
+      }
+      return new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+    }
+  )
+}
+
+test('many CLI invocations pack into a few full uploads', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  enroll(root)
+  /** @type {string[]} */
+  const posts = []
+  let offset = 0
+  // Each invocation is its own CLI process and sender, 80 of them in an hour.
+  const drain = async () => {
+    const delivery = createDelivery(root, {
+      now: () => Date.now() + offset,
+      fetchFn: receiver(posts)
+    })
+    await delivery.drain()
+    delivery.close()
+  }
+  const runs = 80
+  for (let i = 0; i < runs; i++) {
+    await drain()
+    await invoke(env, 'status')
+    offset += 45_000
+  }
+  assert(posts.length <= runs / 20, `${posts.length} uploads for ${runs} invocations`)
+  offset += 3600_000
+  for (let i = 0; i < 4; i++) await drain()
+  assert.equal(createOutbox(root).entries().length, 0, 'everything is delivered once the hold ends')
+  const bodies = posts.map((p) => JSON.parse(p))
+  assert.equal(
+    bodies.flatMap((b) => b.records).filter((r) => r.name === 'cli.invocation').length,
+    runs,
+    'every invocation is delivered exactly once'
+  )
+  assert.equal(new Set(bodies.map((b) => b.batch_id)).size, bodies.length)
+  for (const body of bodies) assert.equal(validateBatch(body, Date.now() + offset), null)
+  assert(posts.every((p) => Buffer.byteLength(p) <= 32768))
+  assert(bodies.some((b) => b.records.length > 90), 'a busy hour sends full batches')
+})
+
+test('a packed upload retries byte-identically and later batches never join it', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  assert(policy.binding)
+  let now = NOW
+  const queue = createOutbox(root, { now: () => now })
+  for (let i = 3; i > 0; i--) queue.append(batch(NOW - i * 1000), policy.binding)
+  /** @type {string[]} */
+  const posts = []
+  const fetchFn = receiver(posts, { lose: 1 })
+  await createDelivery(root, { fetchFn, now: () => now, random: () => 0 }).drain()
+  assert.equal(JSON.parse(posts[0]).records.length, 3)
+  assert.equal(queue.entries().length, 1, 'the packed upload replaced its sources')
+  queue.append(batch(now), policy.binding)
+  now += 10_000
+  await createDelivery(root, { fetchFn, now: () => now }).drain()
+  assert.equal(posts[1], posts[0], 'the retry reuses the batch id and bytes')
+  assert.equal(queue.entries().length, 1)
+  now += 3600_000
+  await createDelivery(root, { fetchFn, now: () => now }).drain()
+  assert.equal(posts.length, 3)
+  assert.notEqual(JSON.parse(posts[2]).batch_id, JSON.parse(posts[0]).batch_id)
+  assert.equal(JSON.parse(posts[2]).records.length, 1)
+  assert.equal(queue.entries().length, 0)
+})
+
+test('a pack interrupted before unlinking its sources sends their records once', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  assert(policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  for (let i = 3; i > 0; i--) queue.append(batch(NOW - i * 1000), policy.binding)
+  const slots = path.join(root, 'queue-v1')
+  const before = new Map(
+    fs.readdirSync(slots).map((f) => [f, fs.readFileSync(path.join(slots, f))])
+  )
+  const packed = queue.next(policy.binding)
+  assert(packed)
+  // Put the unlinked sources back, as if the process died after the seal.
+  for (const [file, bytes] of before)
+    if (!fs.existsSync(path.join(slots, file))) fs.writeFileSync(path.join(slots, file), bytes)
+  assert.equal(queue.entries().length, 3)
+  /** @type {string[]} */
+  const posts = []
+  await createDelivery(root, { fetchFn: receiver(posts), now: () => NOW }).drain()
+  assert.deepEqual(posts, [packed.wire])
+  assert.equal(queue.entries().length, 0)
+})
+
+test('packing never mixes bindings, roles or versions', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  assert(policy.binding)
+  let now = NOW
+  const queue = createOutbox(root, { now: () => now })
+  const event = (/** @type {number} */ at) =>
+    /** @type {any} */ (productEvent('heartbeat', { uptime_s: 1 }, at))
+  const cli = batch(NOW - 4000)
+  const daemon = productBatch(createProductResource({ role: 'daemon' }), [event(NOW - 3000)], NOW)
+  const older = productBatch(createProductResource({ version: '1.0.0' }), [event(NOW - 2000)], NOW)
+  const other = batch(NOW - 5000)
+  for (const b of [cli, daemon, older]) assert(queue.append(b, policy.binding))
+  assert(queue.append(other, binding), 'a copy from another consent generation')
+  /** @type {string[]} */
+  const posts = []
+  for (let i = 0; i < 4; i++) {
+    await createDelivery(root, { fetchFn: receiver(posts), now: () => now }).drain()
+    now += 3600_000
+  }
+  const sent = posts.map((p) => JSON.parse(p))
+  assert.equal(sent.length, 3)
+  assert.deepEqual(
+    sent.map((b) => [b.resource['service.role'], b.resource['service.version'], b.records.length]),
+    [
+      ['cli', PRODUCT_VERSION, 1],
+      ['daemon', PRODUCT_VERSION, 1],
+      ['cli', '1.0.0', 1]
+    ]
+  )
+  assert(!posts.some((p) => p.includes(/** @type {any} */ (other).batch_id)))
 })

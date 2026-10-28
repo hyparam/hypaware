@@ -12,6 +12,7 @@
 **Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 **Extended-by:** LLP 0465 (adds report save to the finite command vocabulary)
 **Extended-by:** LLP 0561 (milestones are sent; MCP tool calls, query fields and populated error codes join the vocabulary)
+**Extended-by:** LLP 0562 (delivery packs unsent CLI batches into sealed uploads and holds CLI uploads to one an hour unless full)
 **Extended-by:** hypaware-server LLP 0503#machine-enrolled (a server-repo document, not this repo's numbering: settles vendor sharing for three fields only, see #policy)
 
 ## Contract {#contract}
