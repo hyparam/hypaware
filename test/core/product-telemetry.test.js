@@ -1306,3 +1306,90 @@ test('status reads no slot when the queue directory does not exist', async (t) =
   assert.equal(slotReads, QUEUE_SLOTS)
   assert.equal(productStatus(env).collection, 'local')
 })
+
+/** @param {string} root */
+function queuedMilestones(root) {
+  return createOutbox(root)
+    .entries()
+    .flatMap((e) => JSON.parse(e.wire).records)
+    .filter((r) => r.name === 'installation.milestone')
+    .map((r) => r.attributes.milestone)
+}
+
+/** @param {NodeJS.ProcessEnv} env @param {string} command @param {number} [code] */
+async function invoke(env, command, code = 0) {
+  const { withProductInvocation, noteInvocation } = await import(
+    '../../src/core/product_telemetry/client.js'
+  )
+  return withProductInvocation(command.split(' '), env, async () => {
+    noteInvocation({ command, kind: 'execution' })
+    return code
+  })
+}
+
+test('the first successful query is a milestone once per consent generation', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  await invoke(env, 'query schema')
+  await invoke(env, 'query sql', 1)
+  assert.deepEqual(queuedMilestones(root), [], 'schema reads and failed queries are not a first query')
+  await invoke(env, 'query sql')
+  await invoke(env, 'query grep')
+  assert.deepEqual(queuedMilestones(root), ['first_query'])
+  writePolicy(root, 'local')
+  await invoke(env, 'query overview')
+  assert.deepEqual(queuedMilestones(root), ['first_query'], 'a new generation reports its own first query')
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(root, 'milestones.json'), 'utf8')).binding,
+    effectivePolicy(root).binding
+  )
+})
+
+test('the daemon reports first capture once rows are written, keeping the CLI marker', async (t) => {
+  const { noteProductPipeline } = await import('../../src/core/product_telemetry/client.js')
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  await invoke(env, 'query sql')
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  let now = NOW
+  const client = createProductClient({ env, role: 'daemon', now: () => now })
+  t.after(() => client.close())
+  now += 300000
+  t.mock.timers.tick(30000)
+  assert.equal(queuedMilestones(root).includes('first_capture'), false, 'no rows written, no capture milestone')
+  noteProductPipeline('write', { rows: 3, bytes: 100 })
+  now += 300000
+  t.mock.timers.tick(30000)
+  noteProductPipeline('write', { rows: 3, bytes: 100 })
+  now += 300000
+  t.mock.timers.tick(30000)
+  assert.deepEqual(queuedMilestones(root).sort(), ['first_capture', 'first_query'])
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(root, 'milestones.json'), 'utf8')).reached.sort(),
+    ['first_capture', 'first_query']
+  )
+})
+
+test('a successful claude-hook run queues no batch, a failed one still does', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  await invoke(env, 'claude-hook session-context')
+  await invoke(env, 'claude-hook classify-cwd')
+  assert.equal(createOutbox(root).entries().length, 0, 'hooks fire on every Claude session')
+  await invoke(env, 'claude-hook session-context', 1)
+  const records = createOutbox(root)
+    .entries()
+    .flatMap((e) => JSON.parse(e.wire).records)
+  assert.deepEqual(
+    records.filter((r) => r.name !== 'installation.inventory').map((r) => r.name),
+    ['cli.invocation', 'coded.failure']
+  )
+  await invoke(env, 'status')
+  assert.equal(createOutbox(root).entries().length, 2, 'other commands still queue a batch')
+})

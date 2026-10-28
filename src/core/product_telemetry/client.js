@@ -1,6 +1,7 @@
 // @ts-check
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import {
   createProductResource,
@@ -8,11 +9,21 @@ import {
   productBatch,
   productEvent
 } from './collection.js'
-import { createOutbox } from './outbox.js'
+import { createOutbox, readSmallJson } from './outbox.js'
 import { createDelivery } from './delivery.js'
 import { effectivePolicy, productRoot } from './policy.js'
 import { COMMANDS } from './contract.js'
 import { isHelpFlag } from '../cli/group_help.js'
+import { atomicWriteJsonSync } from '../util/fs_atomic.js'
+
+// Commands that read captured data. `query schema` only describes tables.
+const QUERY_COMMANDS = [
+  'query graph neighbors',
+  'query grep',
+  'query overview',
+  'query sql',
+  'query vector search'
+]
 
 /** @type {AsyncLocalStorage<{invocation: {command:string,kind:string,degraded:boolean,records:Record<string,any>[],startDelivery:()=>void,setAdapters:(adapters:string[])=>void}, depth:number}>} */
 const invocationContext = new AsyncLocalStorage()
@@ -111,6 +122,14 @@ export async function withProductInvocation(
       duration_ms: performance.now() - startedAt
     })
     if (summary) state.records.push(summary)
+    if (
+      result === 'success' &&
+      state.kind === 'execution' &&
+      QUERY_COMMANDS.includes(state.command)
+    ) {
+      const reached = client.milestone('first_query')
+      if (reached) state.records.push(reached)
+    }
     if (code !== 0 && result !== 'cancelled') {
       const failure = productEvent('coded.failure', {
         component: 'cli',
@@ -120,7 +139,9 @@ export async function withProductInvocation(
       })
       if (failure) state.records.push(failure)
     }
-    client.emit(state.records)
+    // @ref LLP 0561#hooks [implements]: a successful hook run queues nothing
+    if (!(result === 'success' && state.command.startsWith('claude-hook ')))
+      client.emit(state.records)
     client.close()
   }
 }
@@ -152,6 +173,41 @@ export function createProductClient({
   }
   /** @type {NodeJS.Timeout|null} */
   let timer = null
+  /** Milestones this process has seen recorded, so a reached one costs no read. */
+  const reached = new Set()
+  /**
+   * The installation.milestone event the first time `name` is reached in this
+   * consent generation, else null. The marker is re-read before each write so a
+   * CLI and the daemon recording different milestones do not erase each other.
+   * @ref LLP 0561#milestones [implements]: once per consent generation, marked before it is queued
+   * @param {'first_capture'|'first_query'} name
+   */
+  function milestone(name) {
+    if (closed || !initial.binding || reached.has(name)) return null
+    try {
+      const file = path.join(root, 'milestones.json')
+      const saved = readSmallJson(file, 4096)
+      const marked =
+        saved?.binding === initial.binding && Array.isArray(saved.reached)
+          ? saved.reached.filter((v) => typeof v === 'string').slice(0, 8)
+          : []
+      if (marked.includes(name)) {
+        reached.add(name)
+        return null
+      }
+      const event = productEvent('installation.milestone', { milestone: name }, now())
+      if (!event) return null
+      atomicWriteJsonSync(
+        file,
+        { version: 1, binding: initial.binding, reached: [...marked, name] },
+        { mode: 0o600, dirMode: 0o700 }
+      )
+      reached.add(name)
+      return event
+    } catch {
+      return null
+    }
+  }
   /** @param {Record<string,any>[]} records */
   function emit(records) {
     if (
@@ -204,7 +260,10 @@ export function createProductClient({
             { uptime_s: process.uptime() },
             time
           )
+          const captured =
+            pipeline.write.rows > 0 ? milestone('first_capture') : null
           emit([
+            ...(captured ? [captured] : []),
             ...runtime.flush(),
             ...flushPipeline(lastFlush, time),
             ...(heartbeat ? [heartbeat] : [])
@@ -246,6 +305,7 @@ export function createProductClient({
     emit,
     startDelivery,
     pause,
+    milestone,
     setAdapters(values) {
       adapters = values.slice(0, 32)
       inventoryDue = true
