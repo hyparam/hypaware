@@ -1,5 +1,6 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,6 +15,7 @@ import { attachAntigravityPlugin } from './attach.js'
 import { createAntigravityBackfillProvider } from './backfill.js'
 import {
   DEFAULT_ANTIGRAVITY_CLI_SUBDIR,
+  resolveAntigravityAppDataDir,
   validateAntigravityConfig,
 } from './config.js'
 import { startAntigravitySource } from './source.js'
@@ -126,13 +128,43 @@ export async function activateAntigravityVariant(ctx, variant = CLI_VARIANT) {
           `${result.changed ? 'Would install' : 'Antigravity plugin already current at'} ${result.settingsPath}. ` +
           'Dry run: nothing was written.\n'
         )
-      } else {
+      } else if (result.changed) {
         attachCtx.stdout.write(
-          `${result.changed ? 'Installed' : 'Antigravity plugin already current at'} ${result.settingsPath}.\n`
+          `Installed ${result.settingsPath}. Restart Antigravity to load it.\n` +
+          `  It adds the ${SHARED_SKILLS.join(', ')} skills and the ${SHARED_AGENT} subagent from ${path.dirname(result.settingsPath)}.\n`
         )
+      } else {
+        attachCtx.stdout.write(`Antigravity plugin already current at ${result.settingsPath}.\n`)
+      }
+      if (!attachCtx.json) {
+        const appDataDir = resolveAntigravityAppDataDir({
+          config: ctx.config,
+          env: ctx.env,
+          defaultAppDataSubdir: variant.defaultAppDataSubdir,
+        })
+        // The picker offers a variant only when its detect file exists; a
+        // direct attach can reach here without one.
+        const detectFile = variant.entrypoint === 'cli' ? 'settings.json' : 'conversation_summaries.db'
+        if (!(await pathExists(path.join(appDataDir, detectFile)))) {
+          const label = variant.entrypoint === 'cli' ? 'Antigravity CLI' : 'Antigravity Desktop'
+          attachCtx.stdout.write(`  ${label} not found at ${appDataDir}; the plugin will load once it is installed.\n`)
+        }
       }
     },
   })
+}
+
+/**
+ * @param {string} filePath
+ * @returns {Promise<boolean>}
+ */
+async function pathExists(filePath) {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**

@@ -8,6 +8,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
+import { dispatch } from '../../src/core/cli/dispatch.js'
 import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { readObservabilityEnv } from '../../src/core/observability/env.js'
@@ -17,7 +19,9 @@ import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js
 import { loadManifest } from '../../src/core/manifest.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { diagnosePlugin } from '../../src/core/plugin_doctor/diagnose.js'
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createActivationContext, createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { resolveConfigPath } from '../../src/core/runtime/boot.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 import { writeLocalOnlyEntries } from '../../src/core/usage-policy/local_only.js'
 import {
@@ -787,4 +791,87 @@ test('backfill provider takes its sweep cadence from backfill.sweep_cron and dro
   assert.deepEqual(createAntigravityBackfillProvider().sweep, { cron: '*/5 * * * *' })
   assert.deepEqual(createAntigravityBackfillProvider({ config: { backfill: { sweep_cron: '0 * * * *' } } }).sweep, { cron: '0 * * * *' })
   assert.equal(createAntigravityBackfillProvider({ config: { backfill: { on_join: false } } }).sweep, undefined)
+})
+
+/** @returns {{ write(chunk: unknown): boolean, text(): string }} */
+function makeBuf() {
+  let value = ''
+  return {
+    write(chunk) { value += String(chunk); return true },
+    text() { return value },
+  }
+}
+
+test('attach output names the restart, the skills and subagent, and a missing install', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-agy-attach-out-'))
+  try {
+    const manifestLoaded = await loadManifest(CLI_PLUGIN_DIR)
+    assert.equal(manifestLoaded.ok, true)
+    if (!manifestLoaded.ok) return
+    const runtime = createKernelRuntime({ cacheRoot: path.join(root, 'cache') })
+    const stateDir = path.join(root, 'state')
+    const ctx = createActivationContext({
+      runtime,
+      plugin: { name: '@hypaware/antigravity', version: '1.0.0', manifest: manifestLoaded.manifest, rootDir: CLI_PLUGIN_DIR },
+      paths: { rootDir: CLI_PLUGIN_DIR, stateDir, cacheDir: stateDir, tempDir: stateDir },
+      config: {},
+      env: { HOME: root, HYP_HOME: path.join(root, 'hypaware') },
+    })
+    await activateAntigravityCli(ctx)
+    const client = runtime.clients.getClient('antigravity')
+    assert.ok(client)
+
+    const first = makeBuf()
+    await client.attach(/** @type {any} */ ({ stdout: first, stderr: makeBuf(), dryRun: false, json: false }))
+    assert.match(first.text(), /Installed .*plugin\.json\. Restart Antigravity to load it\./)
+    assert.match(first.text(), /hypaware-query, hypaware-reference, hypaware-privacy skills and the hypaware-analyst subagent/)
+    assert.match(first.text(), /Antigravity CLI not found at .*antigravity-cli; the plugin will load once it is installed\./)
+
+    await fs.mkdir(path.join(root, '.gemini', 'antigravity-cli'), { recursive: true })
+    await fs.writeFile(path.join(root, '.gemini', 'antigravity-cli', 'settings.json'), '{}\n')
+    const second = makeBuf()
+    await client.attach(/** @type {any} */ ({ stdout: second, stderr: makeBuf(), dryRun: false, json: false }))
+    assert.equal(second.text(), `Antigravity plugin already current at ${path.join(root, '.gemini', 'config', 'plugins', 'hypaware', 'plugin.json')}.\n`)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('detaching one variant names the still-recording sibling that shared its plugin manifest', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-agy-detach-sibling-'))
+  const env = { ...process.env, HOME: home, HYP_HOME: home, HYP_CONFIG: '' }
+  try {
+    const configPath = resolveConfigPath({ env, hypHome: home })
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins: [
+        { name: '@hypaware/antigravity', enabled: true, config: {} },
+        { name: '@hypaware/antigravity-desktop', enabled: true, config: {} },
+      ],
+    }, null, 2) + '\n')
+    await attachAntigravityPlugin({ version: '1.0.0', env, homeDir: home })
+
+    const registry = createCommandRegistry()
+    registerCoreCommands(registry)
+    const kernel = createKernelRuntime({ commandRegistry: registry })
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(['detach', 'antigravity'], { stdout, stderr, registry, kernel, env })
+    assert.equal(code, 0, stderr.text())
+    assert.match(stdout.text(), /Detached antigravity/)
+    assert.match(
+      stdout.text(),
+      /This also removed the plugin for antigravity-desktop, which is still recording\. Run 'hyp attach antigravity-desktop' to restore it\./
+    )
+
+    // Once the sibling is detached too, there is no one left to warn about.
+    await attachAntigravityPlugin({ version: '1.0.0', env, homeDir: home })
+    const again = makeBuf()
+    assert.equal(await dispatch(['detach', 'antigravity-desktop'], { stdout: again, stderr, registry, kernel, env }), 0, stderr.text())
+    assert.match(again.text(), /Detached antigravity-desktop/)
+    assert.doesNotMatch(again.text(), /This also removed the plugin/)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
 })
