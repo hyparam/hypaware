@@ -2,7 +2,7 @@
 
 import { createOutbox } from './outbox.js'
 import { effectivePolicy, safeDestination } from './policy.js'
-import { validateBatch } from './contract.js'
+import { SCHEMA_VERSIONS, validateBatch } from './contract.js'
 
 // @ref LLP 0562#cadence [implements]: one CLI upload an hour unless a batch is full
 export const CLI_SEND_INTERVAL_MS = 3600_000
@@ -63,7 +63,8 @@ export function createDelivery(
       if (!entry) return
       // Disk is a trust boundary too: corruption or an old writer must not
       // turn the exact-byte replay path into an arbitrary payload exporter.
-      if (validateBatch(JSON.parse(entry.wire), now()) !== null) {
+      const batch = JSON.parse(entry.wire)
+      if (validateBatch(batch, now()) !== null) {
         outbox.remove(entry)
         outbox.noteDrop()
         return
@@ -75,6 +76,9 @@ export function createDelivery(
       const destination = /** @type {string} */ (safeDestination(effective.policy.url))
       const target = destination + '/v1/telemetry'
       const attempt = Math.min(16, (previous.attempt ?? 0) + 1)
+      // The versions the receiver last advertised. Emission reads this to
+      // decide whether it may build v2 records for this binding.
+      let versions = receiverVersions(previous)
       /** @param {string} state @param {number} [delay] */
       function pause(state, delay = 3600_000) {
         outbox.saveDelivery({
@@ -83,7 +87,8 @@ export function createDelivery(
           attempt,
           next_at: now() + delay,
           last_success_at: previous.last_success_at ?? null,
-          cli_sent_at: previous.cli_sent_at ?? null
+          cli_sent_at: previous.cli_sent_at ?? null,
+          schema_versions: versions
         })
       }
       let token = effective.identity.jwt
@@ -169,6 +174,16 @@ export function createDelivery(
         pause('incompatible_receiver')
         return
       }
+      versions = receiverVersions(capabilities)
+      // @ref LLP 0561#rollout [implements]: a batch never reaches a receiver that does not list its version
+      if (!versions.includes(batch.schema_version)) {
+        // Queued while the receiver listed v2, which it no longer does. It
+        // would be refused as a schema error and discarded, so it goes now.
+        outbox.remove(entry)
+        outbox.noteDrop()
+        pause('permanent_rejection', 0)
+        return
+      }
       // Re-read policy and credentials after the network boundary. A disable,
       // re-enrollment or consent generation change invalidates this send.
       const current = effectivePolicy(root)
@@ -189,7 +204,8 @@ export function createDelivery(
             next_at: 0,
             last_success_at: now(),
             cli_sent_at:
-              entry.role === 'cli' ? now() : (previous.cli_sent_at ?? null)
+              entry.role === 'cli' ? now() : (previous.cli_sent_at ?? null),
+            schema_versions: versions
           })
           return
         }
@@ -233,7 +249,8 @@ export function createDelivery(
             now() +
             Math.min(3600_000, 1000 * 2 ** attempt) * (0.5 + random() / 2),
           last_success_at: previous?.last_success_at ?? null,
-          cli_sent_at: (same && previous.cli_sent_at) || null
+          cli_sent_at: (same && previous.cli_sent_at) || null,
+          schema_versions: same ? receiverVersions(previous) : [1]
         })
       } catch {}
     } finally {
@@ -254,6 +271,17 @@ export function createDelivery(
       controller?.abort()
     }
   }
+}
+
+/**
+ * The known versions in a capability answer or saved delivery state; v1 when
+ * nothing usable was recorded.
+ * @param {any} value @returns {number[]}
+ */
+export function receiverVersions(value) {
+  const listed = Array.isArray(value?.schema_versions) ? value.schema_versions : []
+  const known = SCHEMA_VERSIONS.filter((v) => listed.includes(v))
+  return known.length ? known : [1]
 }
 
 /** @param {Response} response @returns {Promise<any>} */

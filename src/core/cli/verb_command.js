@@ -5,6 +5,9 @@ import fs from 'node:fs/promises'
 import { useColor } from './stdio.js'
 import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
 import { VerbUsageError } from './verb_errors.js'
+import { invocationSurface, noteInvocation } from '../product_telemetry/client.js'
+import { queryResult } from '../product_telemetry/collection.js'
+import { isQueryCommand } from '../product_telemetry/contract.js'
 
 /**
  * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration, VerbRenderResult } from '../../../hypaware-plugin-kernel-types.js'
@@ -167,6 +170,7 @@ export async function runVerbCommand(verb, argv, ctx, body = verb) {
 
   /** @type {unknown} */
   let result
+  const query = isQueryCommand(verb.name)
   if (ctrl.controls.remote !== undefined) {
     // `--refresh` is a local-cache control; the server owns its freshness,
     // so combining it with `--remote` is a hard error, not a silent ignore.
@@ -195,10 +199,13 @@ export async function runVerbCommand(verb, argv, ctx, body = verb) {
     // @ref LLP 0033#two-truncations [implements]: server cap and client display budget are two separate stderr lines
     for (const line of remote.notices) ctx.stderr.write(line + '\n')
     result = remote.result
+    if (query) noteInvocation({ query: queryResult(verb.tool, result, 'remote', invocationSurface()) })
   } else {
     try {
       result = await body.operation.call(verb, parsed.params, buildOperationContext(ctx, ctrl.controls.refresh))
+      if (query) noteInvocation({ query: queryResult(verb.tool, result, 'local', invocationSurface()) })
     } catch (err) {
+      noteInvocation({ error: err, fallback: query && !(err instanceof VerbUsageError) ? 'query_failed' : undefined })
       ctx.stderr.write(`hyp ${verb.name}: ${err instanceof Error ? err.message : String(err)}\n`)
       // An operation refusing its own arguments exits like the codec's own
       // refusal above, usage line included. Only a schema of independent

@@ -6,7 +6,7 @@
 **Author:** Hernan / Claude
 **Date:** 2026-10-27
 **Extends:** LLP 0393 (#contract: three additions to the finite v1 vocabulary; #policy unchanged), LLP 0408 (#policy: the same consent covers the additions)
-**Related:** LLP 0021 (operational telemetry stays separate), LLP 0425 (#tool-owner: MCP tool resolution)
+**Related:** LLP 0021 (operational telemetry stays separate), LLP 0425 (#tool-owner: MCP tool resolution), LLP 0562 (#pack: CLI batches pack into full uploads), hypaware-server LLP 0666 (the receiver side: wire version 2 and its advert)
 
 > The operator console needs to answer "how is HypAware used": which installs
 > query, what they query, whether it helps, and whether a person or an agent is
@@ -65,38 +65,55 @@ The console therefore cannot count successful hook runs from this channel.
 ## MCP tool calls {#mcp}
 
 A new event `mcp.tool_call` is sent once per `tools/call` handled by
-`hyp mcp serve`:
+`hyp mcp serve`, including calls refused as an unknown tool or bad arguments:
 
 | Field | Values |
 |---|---|
-| `tool` | A finite allow-list of core and bundled-plugin tool names in `contract.js` (`query_sql`, `grep_search`, `graph_neighbors`, the recommendation tools, and so on); any other tool becomes `other` |
-| `outcome` | The existing outcome vocabulary |
-| `error_code` | The finite error codes (see #errors) |
-| `duration_ms` | Bounded as elsewhere |
-| query fields | When the tool is a query, the fields in #query |
+| `tool` | `query_sql`, `grep_search`, `graph_neighbors`, `session_evidence`, `list_recommendations`, `get_recommendation`, `set_recommendation_status`, `open_recommendations`, `fix_recommendation`, `check_team_history`; any other tool becomes `other` |
+| `outcome` | `success`, or `failure` for a protocol error or an `isError` result |
+| `error_code` | The finite error codes (see #errors); `other` on success |
+| `duration_ms` | Whole milliseconds, 0 to one day |
+| query fields | Only when the tool is a query tool (the first four) and the call succeeded; see #query |
+
+The lists in `contract.js` are the receiver's (LLP 0666#vocabulary). Adding a
+tool is a receiver change first.
 
 Records are buffered in the serving process and appended to the outbox in
 batches (at most once per minute or every 100 records, whichever comes first).
 They are also flushed on shutdown, so a chatty agent does not cost one queue
-slot per call. `mcp serve` itself keeps its single `cli.invocation`.
+slot per call. A flush that would overflow one outbox slot (32 KiB) is split
+rather than dropped. `mcp serve` itself keeps its single `cli.invocation`. The
+MCP server reports each call through an observer hook; with collection off no
+observer is installed and a call does no telemetry work.
 
 ## Query fields {#query}
 
-Successful and failed query executions, from the CLI and from MCP, carry four
-more fields. Each field takes its value from a fixed list:
+Query executions that produced a result, from the CLI and from MCP, carry four
+more fields. They travel together: all four or none. A query that failed
+before it resolved anything sends none, and its failure is in `error_code`.
+On the CLI they ride the `cli.invocation` of a `query ...` command; on MCP,
+the `mcp.tool_call` of a query tool. Each field takes its value from a fixed
+list:
 
 | Field | Question it answers | Values |
 |---|---|---|
-| `datasets` | What data do they query? | The tables the query resolved, each mapped to a fixed list of bundled dataset names (`ai_gateway_messages`, `claude_telemetry_events`, `logs`, `traces`, `metrics`, `github_events`, `node`, `edge`, ...), else `other`; at most 4, de-duplicated |
-| `location` | Their machine or the org server? | `local`, `remote` |
-| `rows` | Did it find anything? | `0`, `1-10`, `11-100`, `101-1000`, `>1000`, `unknown` |
+| `datasets` | What data do they query? | The datasets the result names (`query_sql` lists the tables it resolved), else the tool's own (`grep_search` reads `ai_gateway_messages`, `graph_neighbors` reads `node` and `edge`). Each is mapped to `ai_gateway_messages`, `claude_telemetry_events`, `logs`, `traces`, `metrics`, `github_events`, `node`, `edge`, `session_summaries_daily`, `audit_events`, `product_events`, `product_metrics`, else `other`; at most 4, de-duplicated, possibly empty |
+| `location` | Their machine or the org server? | `local`, `remote` (`--remote`) |
+| `rows` | Did it find anything? | The length of the result's row list (`rows`, `hits` or `neighbors`) as `0`, `1-10`, `11-100`, `101-1000`, `>1000`; `unknown` when the result has none |
 | `surface` | A person or an agent? | `cli`, `mcp`, `agent_shell`, `unknown` |
 
 `agent_shell` means the CLI ran with an environment marker that a known agent
-harness sets for the shell commands it runs (Claude Code, Codex, and similar).
-The marker is detected, never forwarded. Without a marker the surface is `cli`.
-This undercounts agents that set no marker; it never sends anything the user
-typed.
+harness sets for the shell commands it runs. The markers are listed in
+`contract.js` (`AGENT_SHELL_MARKERS`: `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
+`CODEX_THREAD_ID`, `CODEX_SANDBOX`, `GEMINI_CLI`, `CURSOR_AGENT`). Only a
+marker's presence is read; its value is never read or forwarded. Without a
+marker the surface is `cli`. This undercounts agents that set no marker; it
+never sends anything the user typed.
+
+The CLI fields are recorded at the verb boundary (`runVerbCommand`), so they
+cover the verb-backed queries: `query sql`, `query grep` and `query graph
+neighbors`, local or remote. `query overview` and `query vector search` are
+plain commands and send none yet.
 
 Query text, table names outside the allow-list, column names, filters, and row
 contents are never sent.
@@ -104,13 +121,27 @@ contents are never sent.
 ## Error codes {#errors}
 
 The v1 `ERROR_CODES` vocabulary already exists, but the client fills it with
-`other` (or `startup_failed`). The CLI boundary, the MCP event and the daemon
-lifecycle now map failures they can classify onto the existing codes
-(`unavailable`, `timeout`, `unauthorized`, `revoked`, `invalid_config`,
-`disk_full`, `rate_limited`, `query_failed`, ...). The mapping is by error class
-or code, never by message text. One code is added: `budget_exceeded`, for a
-query refused by its scan budget, which is distinct from a query that failed.
-Unclassified failures stay `other`.
+`other` (or `startup_failed`). The CLI boundary (`coded.failure`), the MCP
+event and the daemon's boot failure (`daemon.lifecycle`) now map failures they
+can classify onto the existing codes. The mapping is by error `code` or class
+`name`, on the error and up to two `cause`s, never by message text:
+
+| Code | From |
+|---|---|
+| `disk_full` | `ENOSPC`, `EDQUOT` |
+| `timeout` | `ETIMEDOUT`, `TimeoutError`, `ServiceCommandTimeoutError` |
+| `unavailable` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH` |
+| `unauthorized` | `invalid_grant` |
+| `revoked` | `service_token_revoked`, `service_account_disabled` |
+| `query_failed` | `GrepQueryError`, `timestamp_literal_uncoercible`; and any other failure a query verb's operation or query tool throws |
+| `budget_exceeded` | `QueryExecutionBudgetError` (`query_budget_exceeded`) |
+
+One code is added: `budget_exceeded`, for a query refused by its execution
+budget, which is distinct from a query that failed. It is a v2 code; a v1
+batch carries it as `query_failed`. A daemon boot failure nothing classifies
+stays `startup_failed`; any other unclassified failure stays `other`. A
+`--remote` failure arrives as a message, not an error, so it stays `other`.
+`invalid_config` and `rate_limited` have no typed error to map from yet.
 
 ## Rollout {#rollout}
 
@@ -119,17 +150,34 @@ new key or event is refused as a schema error, and the outbox discards such a
 batch as poison (LLP 0393 #outbox). The receiver must therefore ship first, and
 the client must not send the additions to a receiver that does not accept them.
 
-Proposed gate: the receiver advertises the additions in its capability
-response (a new `schema_versions` entry, `2`). Delivery records the last
-capability it saw in its state file. Emission constructs the extended records
-only once that state shows the receiver accepts them, and the v1 shape
-otherwise. Milestones are v1 and need no gate.
+The additions are wire version 2: v1 plus exactly the fields, event and code
+above (hypaware-server LLP 0666#advert). The receiver lists the versions it
+accepts in `schema_versions` of its `GET /v1/telemetry` capability answer.
 
-## Open questions {#open}
+- Delivery saves the known versions of the last capability answer it saw
+  (`schema_versions`, default `[1]`) in its state file beside the binding.
+- Emission builds a `schema_version: 2` batch only when that state is for the
+  current binding and lists 2. Otherwise it builds v1: `mcp.tool_call` records
+  are left out, query fields are stripped and `budget_exceeded` becomes
+  `query_failed`. Records are built in the v2 shape and projected at batch
+  time, so the gate lives in one place. The version is per batch.
+- A batch is never sent to a receiver whose current answer does not list its
+  version. A v2 batch queued before the receiver stopped advertising v2 is
+  discarded unsent and counted as loss, and emission falls back to v1 from the
+  next batch. Packing never merges batches of different versions.
 
-1. Is a schema version bump the right gate, or should the capability response
-   list accepted events and fields individually?
-2. Which environment markers define `agent_shell`, and is the list kept in
-   `contract.js` beside the other vocabularies?
-3. Should `datasets` include plugin-registered datasets by name when the plugin
-   is bundled, or only kernel and bundled-plugin tables known at release?
+Milestones are v1 and need no gate. Until the first upload after a v2 receiver
+ships, the client still sends v1, so the first batch from each host after the
+upgrade carries no additions.
+
+## Settled questions {#open}
+
+1. **Gate.** A schema version bump, not a per-event or per-field capability
+   list (hypaware-server LLP 0666#advert). The version is checked once, at the
+   envelope, and a later addition is version 3, advertised the same way.
+2. **`agent_shell` markers.** The list lives in `contract.js` beside the other
+   vocabularies (`AGENT_SHELL_MARKERS`, see #query). A new harness is a client
+   change only, since the surface value itself is unchanged.
+3. **Datasets.** Only the fixed list known at release, which is the
+   receiver's. A plugin dataset, bundled or not, is `other` until it is added
+   to the receiver's list and then the client's.
