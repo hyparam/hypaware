@@ -35,6 +35,11 @@ Answer briefly with the recommendation, supporting evidence, and material
 uncertainty. Do not create a file unless the user requests a saved or published
 artifact. For that artifact, read [reports.md](reports.md).
 
+When proposing a fix, name its target, the observed incident it addresses, and
+the query and period that would measure its effect. Offer deeper analysis only
+when it could change the recommendation; completed answers need no fixed menu.
+Do not derive workflow fixes from errors encountered while querying this session.
+
 ## Evidence and durable changes
 
 When the user asks you to analyze recorded sessions and recommend changes:

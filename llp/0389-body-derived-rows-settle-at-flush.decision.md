@@ -8,7 +8,10 @@
 **Related:** LLP 0027, LLP 0252, LLP 0254 (narrowed here), LLP 0262
 **Extended-by:** [LLP 0435](./0435-tool-ids-resolve-the-owning-thread.decision.md)
 (a body-derived tool row resolves its thread by tool id, retiring this doc's
-closing consequence that a subagent's never settles)
+closing consequence that a subagent's never settles);
+[LLP 0560](./0560-otel-prompt-rows-take-provenance-at-flush.decision.md)
+(the same flush pass also stamps an event-derived user-prompt row with its
+line's provenance, without touching the identity #scope-of-0254 keeps final)
 **Tracker:** hyparam/hypaware#1464
 
 > LLP 0254 retired flush-time settlement on the OTEL path because events carry

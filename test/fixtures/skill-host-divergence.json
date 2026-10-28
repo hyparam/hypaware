@@ -28,9 +28,9 @@
       "hash": "6577f0b50915c4f1"
     },
     "hypaware-query": {
-      "neutralOnly": 13,
+      "neutralOnly": 6,
       "claudeOnly": 0,
-      "hash": "fae00b5f9efa0ec8"
+      "hash": "3d8620f99143f901"
     },
     "hypaware-reference": {
       "neutralOnly": 5,
@@ -50,9 +50,9 @@
       "hash": "62476c134ec5aec9"
     },
     "hypaware-query": {
-      "neutralOnly": 13,
+      "neutralOnly": 6,
       "codexOnly": 3,
-      "hash": "ee4805be46d9ce37"
+      "hash": "0eb93bd968d1d25f"
     },
     "hypaware-reference": {
       "neutralOnly": 5,

@@ -1469,3 +1469,64 @@ test('scheduled repair covers markerless 1.38 configs but skips gateway, manual 
     await env.cleanup()
   }
 })
+
+test('content_item_kinds is promoted onto each user row and merges with the exchange namespace', async () => {
+  const env = await stageEnv()
+  try {
+    /** @type {Array<{ timestamp: string, payload: Record<string, unknown> }>} */
+    const rolloutItems = [
+      {
+        timestamp: '2026-10-20T10:00:00.000Z',
+        payload: {
+          type: 'message', role: 'user',
+          content: [{ type: 'input_text', text: '# AGENTS.md\nbe terse' }, { type: 'input_text', text: '<environment_context>cwd</environment_context>' }],
+          internal_chat_message_metadata_passthrough: { content_item_kinds: ['agents_md.instructions', 'environments.environment_context'] },
+        },
+      },
+      {
+        timestamp: '2026-10-20T10:00:01.000Z',
+        payload: {
+          type: 'message', role: 'user',
+          content: [{ type: 'input_text', text: 'look at this' }, { type: 'input_image', image_url: 'data:image/png;base64,AA==' }, { type: 'input_text', text: 'and fix it' }],
+          internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text', 'user.image', 'user.text'] },
+        },
+      },
+      {
+        timestamp: '2026-10-20T10:00:02.000Z',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'older rollout, no metadata' }] },
+      },
+      {
+        timestamp: '2026-10-20T10:00:03.000Z',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] },
+      },
+    ]
+    await writeModernRollout(env, '2026/10/20/rollout-kinds.jsonl', { ...modernConversation('sess-kinds'), items: rolloutItems })
+
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    assert.equal(items.length, 1)
+    const rows = await materialize(items[0])
+    const userRows = rowsByRole(rows, 'user')
+    assert.equal(userRows.length, 5, 'two text parts + two text parts (image dropped) + one')
+    const attrsOf = (/** @type {string} */ text) => {
+      const row = userRows.find((r) => r.content_text === text)
+      assert.ok(row, text)
+      return /** @type {any} */ (row.attributes)
+    }
+
+    // Harness-injected content under the user role is labeled as such.
+    assert.deepEqual(attrsOf('# AGENTS.md\nbe terse').codex.content_item_kinds, ['agents_md.instructions', 'environments.environment_context'])
+    // An image-attached turn keeps the full array, not a truncated one.
+    assert.deepEqual(attrsOf('look at this').codex.content_item_kinds, ['user.text', 'user.image', 'user.text'])
+    // Message-level codex keys merge with the exchange-level namespace rather
+    // than replacing it.
+    assert.equal(attrsOf('look at this').codex.thread_source, 'user')
+    assert.equal(attrsOf('look at this').codex.identity_source, 'gateway_fallback')
+    assert.equal(attrsOf('look at this').gateway.source, 'backfill')
+    // A rollout without the metadata gets no key: missing means unknown.
+    assert.equal(attrsOf('older rollout, no metadata').codex.content_item_kinds, undefined)
+    assert.equal(attrsOf('older rollout, no metadata').codex.thread_source, 'user')
+  } finally {
+    await env.cleanup()
+  }
+})

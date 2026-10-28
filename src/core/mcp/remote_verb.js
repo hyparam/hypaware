@@ -25,6 +25,40 @@ import { createHttpMcpClient, isAuthStatus, orgReadRefusedMessage } from './clie
  * @ref LLP 0033#two-truncations [implements]: server cap surfaced here as its own line; client cannot lift it
  */
 export async function runRemoteVerb({ verb, params, target: named, org, ctx }) {
+  return runRemoteRequest({ target: named, org, ctx,
+    request: (url, token) => callRemoteTool({ url, token, verb, params }) })
+}
+
+/**
+ * Read the host's declared schema through its existing MCP resource. Never
+ * substitute the local registry when a remote does not expose the resource.
+ * @param {{ dataset: string, target: string, org?: string, ctx: CommandRunContext }} args
+ */
+export async function readRemoteSchema({ dataset, target, org, ctx }) {
+  return runRemoteRequest({ target, org, ctx, request: async (url, token) => {
+    const client = createHttpMcpClient({ url, token })
+    await client.initialize()
+    const uri = `hypaware://dataset/${dataset}/schema`
+    const resource = await client.readResource(uri)
+    const text = resource?.contents?.find((/** @type {any} */ item) => item.uri === uri)?.text
+    if (typeof text !== 'string') throw new Error('remote returned no dataset schema text')
+    const schema = JSON.parse(text)
+    if (schema?.dataset !== dataset || !Array.isArray(schema.columns) ||
+        !schema.columns.every((/** @type {any} */ c) => c && typeof c.name === 'string' &&
+          typeof c.type === 'string' && typeof c.nullable === 'boolean')) {
+      throw new Error('remote returned an invalid dataset schema')
+    }
+    return { ok: true, result: schema, notices: [] }
+  } })
+}
+
+/**
+ * Share target resolution and credential refresh between tools and resources.
+ * @param {{ target: string, org?: string, ctx: CommandRunContext,
+ * request: (url: string, token: string) => Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode: number }> }} args
+ * @returns {Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode?: number }>}
+ */
+async function runRemoteRequest({ target: named, org, ctx, request }) {
   // Built-in targets (the shipped central server) layered under the user's
   // own `query.remotes`, so `--remote hypaware` works with no `remote add`,
   // and the old built-in name `hyperparam` still reaches it.
@@ -79,7 +113,7 @@ export async function runRemoteVerb({ verb, params, target: named, org, ctx }) {
   let lastAuthStatus = 401
   const op = async (/** @type {string} */ token) => {
     try {
-      return { authFailed: false, value: await callRemoteTool({ url: mcpUrl, token, verb, params }) }
+      return { authFailed: false, value: await request(mcpUrl, token) }
     } catch (err) {
       // Optional-chained like isAuthError below: a rejection is not guaranteed
       // to be an object, and a catch block that throws replaces the real

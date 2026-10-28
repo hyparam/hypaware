@@ -207,11 +207,12 @@ Replace `team` with a configured target. A bare `--remote` uses the default.
 For target configuration and query-only sign-in, see
 [remote access](TEAM_SETUP.md#manage-remote-access).
 
-`hyp cache status`, `hyp query schema`, and `hyp query overview` describe local
-state. They are not a remote inventory. A remote can have different
-datasets, retention, and permissions; query it directly to establish what
-is available. The remote enforces visibility and rejects
-`--include-local-only`.
+`hyp cache status` and `hyp query overview` describe local state. They are
+not a remote inventory. A remote can have different datasets, retention, and
+permissions; query it directly to establish what is available. To see a remote
+dataset's columns, add `--remote` to `hyp query schema`, which resolves the
+target the same way `hyp query sql` does. The remote enforces visibility and
+rejects `--include-local-only`.
 
 ## Follow relationships in the activity graph
 
