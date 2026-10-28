@@ -9,6 +9,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
 import { isActionRefused } from '../../src/core/config/action_refusal.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
@@ -17,6 +19,7 @@ import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { diagnosePlugin } from '../../src/core/plugin_doctor/diagnose.js'
 import { createActivationContext, createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
+import { writeLocalOnlyEntries } from '../../src/core/usage-policy/local_only.js'
 import {
   ANTIGRAVITY_PLUGIN_MARKER,
   activate as activateAntigravityCli,
@@ -472,10 +475,11 @@ test('projectAntigravityConversation drops conversations whose cwd resolves to .
   })
 
   assert.equal(projected.skipped, 'hypignore')
-  assert.equal(ignoredSessions.has('conv-ignored'), true)
+  // A path-level ignore is not a session opt-out: the set may persist markers
+  assert.equal(ignoredSessions.has('conv-ignored'), false)
 })
 
-test('backfill provider plans, collects, honors since window, and caches sweep fingerprints', async () => {
+test('backfill provider collects, honors since window, and caches sweep fingerprints', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-agy-backfill-'))
   const appDataDir = path.join(root, '.gemini', 'antigravity')
   const stateDir = path.join(root, 'state', 'antigravity-desktop')
@@ -522,15 +526,17 @@ test('backfill provider plans, collects, honors since window, and caches sweep f
   })
 
   const testPaths = { rootDir: root, stateDir, cacheDir: stateDir, tempDir: stateDir }
-  const plan = await provider.plan({
+  const allItems = []
+  for await (const item of provider.collect({
     config: { app_data_dir: appDataDir },
     env: { HOME: root },
     homeDir: root,
     paths: testPaths,
-  })
-  assert.equal(plan.available, true)
+  })) {
+    allItems.push(item)
+  }
   // Excludes `cli-conv` because DESKTOP_VARIANT has excludeCliSyncedSummaries: true
-  assert.equal(plan.estimatedItems, 2)
+  assert.deepEqual(allItems.map((i) => i.session_id).sort(), ['old-conv', 'recent-conv'])
 
   // `since` filter excludes `old-conv`
   const sinceItems = []
@@ -675,4 +681,110 @@ test('startAntigravitySource materializes conversations into ai_gateway_messages
   await handle.stop()
   const stoppedStatus = await handle.status?.()
   assert.equal(stoppedStatus?.state, 'stopped')
+})
+
+test('backfill reads the kernel local-only list and saved session opt-outs', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-agy-policy-'))
+  const env = { HOME: root, HYP_HOME: path.join(root, 'hyp') }
+  const stateRoot = readObservabilityEnv(env).stateDir
+  const appDataDir = path.join(root, '.gemini', 'antigravity-cli')
+  const privateDir = path.join(root, 'private-repo')
+  await fs.mkdir(privateDir, { recursive: true })
+
+  await seedSummariesDb(appDataDir, [
+    { conversation_id: 'kept-conv', step_count: 1, last_modified_time: '2026-04-15T00:00:00.000Z', source: CLI_TRAJECTORY_SOURCE },
+    {
+      conversation_id: 'private-conv',
+      step_count: 1,
+      last_modified_time: '2026-04-15T00:00:00.000Z',
+      source: CLI_TRAJECTORY_SOURCE,
+      workspace_uris: JSON.stringify([pathToFileURL(privateDir).href]),
+    },
+    { conversation_id: 'opted-out-conv', step_count: 1, last_modified_time: '2026-04-15T00:00:00.000Z', source: CLI_TRAJECTORY_SOURCE },
+  ])
+  for (const id of ['kept-conv', 'private-conv', 'opted-out-conv']) {
+    await writeTranscript(appDataDir, id, [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-04-15T00:00:00.000Z', content: `<USER_REQUEST>hello ${id}</USER_REQUEST>` },
+    ])
+  }
+
+  // `hyp usage local-only` writes under the kernel state root, not a plugin state dir
+  await writeLocalOnlyEntries({ stateDir: stateRoot, entries: [{ dir: privateDir, class: 'local-only' }] })
+  const ignoredSessions = new SessionIgnoreSet(stateRoot)
+  // A marker written after the set loaded (another process) still applies on the next run
+  new SessionIgnoreSet(stateRoot).add('opted-out-conv')
+
+  const provider = createAntigravityBackfillProvider({ deriveRepo: async () => ({}), ignoredSessions })
+  const items = []
+  for await (const item of provider.collect({ config: { app_data_dir: appDataDir }, env, homeDir: root })) {
+    items.push(item)
+  }
+  assert.deepEqual(items.map((i) => i.session_id).sort(), ['kept-conv', 'private-conv'])
+  const privateItem = items.find((i) => i.session_id === 'private-conv')
+  assert.equal(JSON.stringify(privateItem).includes('"usage_class":"local-only"'), true)
+  const keptItem = items.find((i) => i.session_id === 'kept-conv')
+  assert.equal(JSON.stringify(keptItem).includes('usage_class'), false)
+})
+
+test('startAntigravitySource skips saved session opt-outs and stays degraded when listing throws', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-agy-source-fail-'))
+  const env = { HOME: root, HYP_HOME: path.join(root, 'hyp') }
+  const stateRoot = readObservabilityEnv(env).stateDir
+  const appDataDir = path.join(root, '.gemini', 'antigravity-cli')
+  const stateDir = path.join(root, 'state', 'plugins', 'antigravity')
+  const cacheRoot = path.join(root, 'cache')
+  await fs.mkdir(stateDir, { recursive: true })
+
+  await seedSummariesDb(appDataDir, [
+    { conversation_id: 'kept-conv', step_count: 1, last_modified_time: '2026-04-15T00:00:00.000Z', source: CLI_TRAJECTORY_SOURCE },
+    { conversation_id: 'opted-out-conv', step_count: 1, last_modified_time: '2026-04-15T00:00:00.000Z', source: CLI_TRAJECTORY_SOURCE },
+  ])
+  for (const id of ['kept-conv', 'opted-out-conv']) {
+    await writeTranscript(appDataDir, id, [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-04-15T00:00:00.000Z', content: `<USER_REQUEST>hello ${id}</USER_REQUEST>` },
+    ])
+  }
+
+  const manifestLoaded = await loadManifest(CLI_PLUGIN_DIR)
+  assert.equal(manifestLoaded.ok, true)
+  if (!manifestLoaded.ok) return
+  const runtime = createKernelRuntime({ cacheRoot })
+  const ctx = createActivationContext({
+    runtime,
+    plugin: { name: '@hypaware/antigravity', version: '1.0.0', manifest: manifestLoaded.manifest, rootDir: CLI_PLUGIN_DIR },
+    paths: { rootDir: CLI_PLUGIN_DIR, stateDir, cacheDir: cacheRoot, tempDir: stateDir },
+    config: { app_data_dir: appDataDir, poll_interval: '60s' },
+    env,
+  })
+  await activateAntigravityCli(ctx)
+  assert.ok(runtime.commands.get('session ignore'))
+
+  const ignoredSessions = new SessionIgnoreSet(stateRoot)
+  new SessionIgnoreSet(stateRoot).add('opted-out-conv')
+  const handle = await startAntigravitySource(ctx, {
+    deriveRepo: async () => ({}),
+    ignoredSessions,
+    setIntervalFn: /** @type {any} */ (() => ({ unref() {} })),
+    clearIntervalFn: () => {},
+  })
+  await handle.reload?.(/** @type {any} */ ({ app_data_dir: appDataDir, poll_interval: '60s' }))
+  assert.equal((await handle.status?.())?.details?.sessions_projected, 1)
+  const rows = []
+  for await (const row of runtime.storage.readRows(runtime.storage.cacheTablePath('ai_gateway_messages', ['antigravity']))) {
+    rows.push(row)
+  }
+  assert.deepEqual([...new Set(rows.map((r) => r.session_id))], ['kept-conv'])
+
+  // A summaries db that cannot be opened fails the tick, not the daemon
+  await fs.writeFile(path.join(appDataDir, 'conversation_summaries.db'), 'not a database')
+  await handle.reload?.(/** @type {any} */ ({ app_data_dir: appDataDir, poll_interval: '60s' }))
+  const failed = await handle.status?.()
+  assert.equal(failed?.state, 'degraded')
+  await handle.stop()
+})
+
+test('backfill provider takes its sweep cadence from backfill.sweep_cron and drops the sweep when on_join is false', () => {
+  assert.deepEqual(createAntigravityBackfillProvider().sweep, { cron: '*/5 * * * *' })
+  assert.deepEqual(createAntigravityBackfillProvider({ config: { backfill: { sweep_cron: '0 * * * *' } } }).sweep, { cron: '0 * * * *' })
+  assert.equal(createAntigravityBackfillProvider({ config: { backfill: { on_join: false } } }).sweep, undefined)
 })

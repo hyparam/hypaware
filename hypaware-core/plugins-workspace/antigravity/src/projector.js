@@ -152,7 +152,6 @@ export async function projectAntigravityConversation(args) {
     const decision = resolver.resolve(cwd)
     const resolvedClass = decision?.class
     if (resolvedClass === 'ignore') {
-      ignoredSessions?.add(conversationId)
       return { skipped: 'hypignore' }
     }
     if (resolvedClass === 'local-only' || resolvedClass === 'full') {

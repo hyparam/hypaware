@@ -4,7 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { SHARED_SKILLS_DIR } from '../../../skills/index.js'
+import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../ai-gateway/src/session_command.js'
 import { ensureAiGatewayStorageContracts } from '../../ai-gateway/src/storage_contracts.js'
 import { attachAntigravityPlugin } from './attach.js'
 import { createAntigravityBackfillProvider } from './backfill.js'
@@ -52,11 +56,16 @@ export async function activateAntigravityVariant(ctx, variant = CLI_VARIANT) {
 
   ensureAiGatewayStorageContracts(ctx)
 
+  const localPolicyPath = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
+
   ctx.backfills.register(
     createAntigravityBackfillProvider({
       variant,
       config: ctx.config,
       paths: ctx.paths,
+      localOnlyListPath: localPolicyPath,
+      ignoredSessions,
     })
   )
 
@@ -65,8 +74,10 @@ export async function activateAntigravityVariant(ctx, variant = CLI_VARIANT) {
     plugin: variant.pluginName,
     summary: `Poll ~/${variant.defaultAppDataSubdir}/conversation_summaries.db and brain transcripts, projecting changed conversations into ai_gateway_messages.`,
     configSection: variant.configSectionName,
-    start: (sourceCtx) => startAntigravitySource(sourceCtx, { variant }),
+    start: (sourceCtx) => startAntigravitySource(sourceCtx, { variant, localOnlyListPath: localPolicyPath, ignoredSessions }),
   })
+
+  registerSessionCommands(ctx, variant.pluginName)
 
   const claudePluginDir = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -122,6 +133,41 @@ export async function activateAntigravityVariant(ctx, variant = CLI_VARIANT) {
       }
     },
   })
+}
+
+/**
+ * @param {PluginActivationContext} ctx
+ * @param {string} pluginName
+ */
+function registerSessionCommands(ctx, pluginName) {
+  if (ctx.commands.get('session ignore')) return
+  for (const command of [
+    {
+      name: 'session ignore',
+      summary: 'Stop recording this AI session on every local recorder (saved until explicitly unignored)',
+      usage: 'hyp session ignore [session-id] [--json]',
+      run: runSessionIgnore,
+    },
+    {
+      name: 'session unignore',
+      summary: 'Resume recording this AI session',
+      usage: 'hyp session unignore [session-id] [--json]',
+      run: runSessionUnignore,
+    },
+    {
+      name: 'session status',
+      summary: 'Report whether this AI session is being dropped right now (fails closed)',
+      usage: 'hyp session status [session-id] [--json]',
+      run: runSessionStatus,
+    },
+  ]) {
+    ctx.commands.register({
+      ...command,
+      plugin: pluginName,
+      category: 'capture-movement',
+      audience: 'everyday',
+    })
+  }
 }
 
 /**

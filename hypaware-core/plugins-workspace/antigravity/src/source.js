@@ -1,13 +1,14 @@
 // @ts-check
 
 import { randomUUID } from 'node:crypto'
-import path from 'node:path'
 
 import {
   AI_GATEWAY_MESSAGES_DATASET,
   PROJECTED_EXCHANGE_KIND,
   projectedExchangeItem,
 } from '../../../../src/core/backfill/scan_util.js'
+import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/matcher.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/local_only.js'
 import {
@@ -51,6 +52,8 @@ const DEFAULT_VARIANT = /** @type {AntigravityVariantOptions} */ ({
  * @param {PluginActivationContext} ctx
  * @param {AntigravitySummariesOptions & {
  *   variant?: Partial<AntigravityVariantOptions>,
+ *   localOnlyListPath?: string,
+ *   ignoredSessions?: Set<string>,
  *   deriveRepo?: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  *   setIntervalFn?: typeof setInterval,
  *   clearIntervalFn?: typeof clearInterval,
@@ -72,12 +75,12 @@ export async function startAntigravitySource(ctx, opts = {}) {
   })
   let pollIntervalMs = parsePollIntervalMs(currentConfig.poll_interval)
 
-  const stateRoot = path.dirname(ctx.paths.stateDir)
-  let resolver = createUsagePolicyResolver({
-    localOnlyListPath: localOnlyListPath(stateRoot),
-  })
+  // The local-only list lives under the kernel state root, not under this
+  // plugin's scoped state dir (`<root>/plugins/@hypaware/<name>`).
+  const localPolicyPath = opts.localOnlyListPath ?? localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
+  let resolver = createUsagePolicyResolver({ localOnlyListPath: localPolicyPath })
   /** @type {Set<string>} */
-  let ignoredSessions = new Set()
+  const ignoredSessions = opts.ignoredSessions ?? new Set()
 
   /** @type {AntigravityWatermarkState} */
   let watermarks = await loadWatermarkState(ctx.paths.stateDir, appDataDir)
@@ -99,26 +102,31 @@ export async function startAntigravitySource(ctx, opts = {}) {
   async function runTick() {
     if (stopped || !enabled) return
 
-    const listed = await listAntigravityConversations(appDataDir, {
-      ...opts,
-      excludeCliSyncedSummaries: variant.excludeCliSyncedSummaries,
-    })
-
-    if (!listed.available) {
-      if (listed.reason === 'no_node_sqlite') {
-        lastState = 'degraded'
-        lastMessage = 'node:sqlite builtin is unavailable on this Node runtime'
-      } else {
-        lastState = 'ready'
-        lastMessage = `waiting for ${appDataDir}`
-      }
-      pollsCompleted += 1
-      return
-    }
-
+    // Everything a tick awaits stays inside this try: the interval callback
+    // does not catch, and an unhandled rejection would end the daemon.
     try {
-      /** @type {Array<{ item: AiGatewayProjectedExchange, transcriptPath: string }>} */
-      const itemsToEmit = []
+      // @ref LLP 0403#storage [implements]: reload saved session opt-outs once
+      // per poll; a store that cannot load throws here and the tick captures nothing
+      refreshSessionIgnores(ignoredSessions)
+
+      const listed = await listAntigravityConversations(appDataDir, {
+        ...opts,
+        excludeCliSyncedSummaries: variant.excludeCliSyncedSummaries,
+      })
+
+      if (!listed.available) {
+        if (listed.reason === 'no_node_sqlite') {
+          lastState = 'degraded'
+          lastMessage = 'node:sqlite builtin is unavailable on this Node runtime'
+        } else {
+          lastState = 'ready'
+          lastMessage = `waiting for ${appDataDir}`
+        }
+        pollsCompleted += 1
+        return
+      }
+
+      const tickDevRunId = randomUUID()
       /** @type {AntigravityWatermarkState} */
       const nextWatermarks = {}
       /** @type {Map<string, Promise<{ git_remote?: string, repo_root?: string }>>} */
@@ -157,8 +165,10 @@ export async function startAntigravitySource(ctx, opts = {}) {
           repoCache,
         })
 
+        // Materialize as each conversation projects, so a first tick over a
+        // long history holds one transcript's rows at a time, not all of them.
         if (projected.item) {
-          itemsToEmit.push({ item: projected.item, transcriptPath: located.transcriptPath })
+          await emitExchange(projected.item, located.transcriptPath, tickDevRunId)
         }
         nextWatermarks[convId] = {
           size,
@@ -170,43 +180,6 @@ export async function startAntigravitySource(ctx, opts = {}) {
 
       if (!watermarksChanged && Object.keys(watermarks).length !== Object.keys(nextWatermarks).length) {
         watermarksChanged = true
-      }
-
-      if (itemsToEmit.length > 0) {
-        const materializer = ctx.backfillMaterializers.get(PROJECTED_EXCHANGE_KIND)
-        if (!materializer) {
-          throw new Error(`missing backfill materializer '${PROJECTED_EXCHANGE_KIND}'`)
-        }
-        const dataset = ctx.query.getDataset?.(AI_GATEWAY_MESSAGES_DATASET)
-        if (!dataset) {
-          throw new Error(`dataset '${AI_GATEWAY_MESSAGES_DATASET}' is not registered`)
-        }
-        const schemaColumns = dataset.schema?.columns ?? []
-        const tickDevRunId = randomUUID()
-
-        for (const { item, transcriptPath } of itemsToEmit) {
-          const envelope = projectedExchangeItem(item, {
-            client_name: variant.clientName,
-            native_id: item.session_id,
-            source_path: transcriptPath,
-          })
-          const rows = await materializer.materialize(envelope, {
-            env: ctx.env,
-            log: ctx.log,
-            storage: ctx.storage,
-            devRunId: tickDevRunId,
-          })
-          if (Array.isArray(rows) && rows.length > 0) {
-            await ctx.storage.appendRowsToPartition(
-              AI_GATEWAY_MESSAGES_DATASET,
-              [variant.clientName],
-              schemaColumns,
-              rows
-            )
-            rowsMaterialized += rows.length
-          }
-          sessionsProjected += 1
-        }
       }
 
       if (watermarksChanged) {
@@ -226,6 +199,45 @@ export async function startAntigravitySource(ctx, opts = {}) {
         error: msg,
       })
     }
+  }
+
+  /**
+   * Materialize one projected conversation and append its rows.
+   *
+   * @param {AiGatewayProjectedExchange} item
+   * @param {string} transcriptPath
+   * @param {string} devRunId
+   */
+  async function emitExchange(item, transcriptPath, devRunId) {
+    const materializer = ctx.backfillMaterializers.get(PROJECTED_EXCHANGE_KIND)
+    if (!materializer) {
+      throw new Error(`missing backfill materializer '${PROJECTED_EXCHANGE_KIND}'`)
+    }
+    const dataset = ctx.query.getDataset?.(AI_GATEWAY_MESSAGES_DATASET)
+    if (!dataset) {
+      throw new Error(`dataset '${AI_GATEWAY_MESSAGES_DATASET}' is not registered`)
+    }
+    const envelope = projectedExchangeItem(item, {
+      client_name: variant.clientName,
+      native_id: item.session_id,
+      source_path: transcriptPath,
+    })
+    const rows = await materializer.materialize(envelope, {
+      env: ctx.env,
+      log: ctx.log,
+      storage: ctx.storage,
+      devRunId,
+    })
+    if (Array.isArray(rows) && rows.length > 0) {
+      await ctx.storage.appendRowsToPartition(
+        AI_GATEWAY_MESSAGES_DATASET,
+        [variant.clientName],
+        dataset.schema?.columns ?? [],
+        rows
+      )
+      rowsMaterialized += rows.length
+    }
+    sessionsProjected += 1
   }
 
   function scheduleLoop() {
@@ -297,10 +309,7 @@ export async function startAntigravitySource(ctx, opts = {}) {
       })
       const nextPollMs = parsePollIntervalMs(currentConfig.poll_interval)
 
-      resolver = createUsagePolicyResolver({
-        localOnlyListPath: localOnlyListPath(stateRoot),
-      })
-      ignoredSessions = new Set()
+      resolver = createUsagePolicyResolver({ localOnlyListPath: localPolicyPath })
 
       if (nextAppDataDir !== appDataDir) {
         appDataDir = nextAppDataDir

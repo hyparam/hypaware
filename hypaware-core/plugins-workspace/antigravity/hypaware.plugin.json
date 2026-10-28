@@ -50,6 +50,11 @@
         "description": "Poll ~/.gemini/antigravity-cli/conversation_summaries.db and brain transcripts, projecting changed conversations into ai_gateway_messages."
       }
     ],
+    "commands": [
+      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)" },
+      { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Resume recording this AI session" },
+      { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
+    ],
     "skills": [
       { "name": "hypaware-query", "clients": ["antigravity"] },
       { "name": "hypaware-reference", "clients": ["antigravity"] },

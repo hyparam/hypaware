@@ -1,7 +1,5 @@
 // @ts-check
 
-import os from 'node:os'
-import path from 'node:path'
 
 import {
   AI_GATEWAY_MESSAGES_DATASET,
@@ -9,6 +7,9 @@ import {
   projectedExchangeItem,
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
+import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
+import { refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/matcher.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/local_only.js'
 import { DEFAULT_ANTIGRAVITY_CLI_SUBDIR, resolveAntigravityAppDataDir } from './config.js'
@@ -22,6 +23,7 @@ import { listAntigravityConversations, statConversationTranscript } from './summ
  *   BackfillContribution,
  *   BackfillItem,
  *   BackfillRunContext,
+ *   JsonObject,
  *   PluginPaths,
  * } from '../../../../hypaware-plugin-kernel-types.js'
  * @import {
@@ -51,19 +53,11 @@ const DEFAULT_VARIANT = /** @type {AntigravityVariantOptions} */ ({
  *   config?: Record<string, unknown> | null,
  *   paths?: PluginPaths,
  *   deriveRepo?: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
+ *   localOnlyListPath?: string,
+ *   ignoredSessions?: Set<string>,
  * }} [opts]
  * @returns {BackfillContribution & {
  *   target: string,
- *   plan: (planCtx?: { config?: Record<string, unknown> | null, env?: NodeJS.ProcessEnv, homeDir?: string, paths?: PluginPaths }) => Promise<{
- *     provider: string,
- *     plugin: string,
- *     available: boolean,
- *     reason?: string,
- *     target: string,
- *     estimatedItems?: number,
- *     summary: string,
- *     details?: { app_data_dir: string, sessions: number },
- *   }>,
  *   collect: (collectCtx: {
  *     config?: Record<string, unknown> | null,
  *     env?: NodeJS.ProcessEnv,
@@ -112,15 +106,16 @@ export function createAntigravityBackfillProvider(opts = {}) {
     })
     if (!listed.available) return
 
-    const effectivePaths = collectCtx.paths ?? opts.paths
-    const stateRoot = effectivePaths?.stateDir
-      ? path.dirname(effectivePaths.stateDir)
-      : path.join(collectCtx.homeDir ?? collectCtx.env?.HOME ?? os.homedir(), '.hyp', 'hypaware')
+    // The local-only list sits under the kernel state root, not this plugin's
+    // own state dir, which is where `hyp usage local-only` writes it.
     const resolver = createUsagePolicyResolver({
-      localOnlyListPath: localOnlyListPath(stateRoot),
+      localOnlyListPath: opts.localOnlyListPath
+        ?? localOnlyListPath(readObservabilityEnv(collectCtx.env ?? process.env).stateDir),
     })
-    /** @type {Set<string>} */
-    const ignoredSessions = new Set()
+    // @ref LLP 0403#storage [implements]: honor `hyp session ignore` markers, fail closed when unreadable
+    const ignoredSessions = opts.ignoredSessions ?? new Set()
+    refreshSessionIgnores(ignoredSessions)
+    if (sessionIgnoreLoadError(ignoredSessions)) throw new Error('Antigravity session exclusions are unreadable')
     /** @type {Map<string, Promise<{ git_remote?: string, repo_root?: string }>>} */
     const repoCache = new Map()
 
@@ -204,64 +199,17 @@ export function createAntigravityBackfillProvider(opts = {}) {
     }
   }
 
+  const policy = readBackfillPolicy({ name: variant.pluginName, config: /** @type {JsonObject | undefined} */ (opts.config ?? undefined) })
+  const configuredCron = /** @type {{ backfill?: { sweep_cron?: unknown } } | null | undefined} */ (opts.config)?.backfill?.sweep_cron
+  // `backfill.sweep_cron` sets the scheduled sweep cadence and `on_join: false` turns the sweep off.
+  const sweepCron = typeof configuredCron === 'string' ? configuredCron : '*/5 * * * *'
   return {
     name: variant.clientName,
     plugin: variant.pluginName,
     target: ANTIGRAVITY_BACKFILL_TARGET,
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: `Import ${variant.clientName} conversations from ${variant.defaultAppDataSubdir} SQLite summaries and JSONL transcripts`,
-    sweep: { cron: '*/5 * * * *' },
-
-    async plan(planCtx = {}) {
-      const appDataDir = resolveAntigravityAppDataDir({
-        config: planCtx.config ?? opts.config ?? null,
-        env: planCtx.env,
-        ...(planCtx.homeDir !== undefined ? { homeDir: planCtx.homeDir } : {}),
-        defaultAppDataSubdir: variant.defaultAppDataSubdir,
-      })
-
-      const listed = await listAntigravityConversations(appDataDir, {
-        ...opts,
-        excludeCliSyncedSummaries: variant.excludeCliSyncedSummaries,
-      })
-      if (!listed.available) {
-        const reason = listed.reason === 'no_node_sqlite'
-          ? `node:sqlite builtin is unavailable on this Node runtime (cannot read ${appDataDir}/conversation_summaries.db)`
-          : `No Antigravity data found at ${appDataDir}`
-        return {
-          provider: variant.clientName,
-          plugin: variant.pluginName,
-          available: false,
-          reason,
-          target: ANTIGRAVITY_BACKFILL_TARGET,
-          estimated_items: 0,
-          sources: [appDataDir],
-          notes: [reason],
-          summary: `${variant.clientName}: unavailable (${reason})`,
-        }
-      }
-
-      let transcriptCount = 0
-      for (const summary of listed.summaries) {
-        const located = await statConversationTranscript(appDataDir, summary.conversation_id)
-        if (located) transcriptCount += 1
-      }
-
-      return {
-        provider: variant.clientName,
-        plugin: variant.pluginName,
-        available: true,
-        target: ANTIGRAVITY_BACKFILL_TARGET,
-        estimated_items: transcriptCount,
-        estimatedItems: transcriptCount,
-        sources: [appDataDir],
-        summary: `${variant.clientName}: ${transcriptCount} conversation(s) in ${appDataDir}`,
-        details: {
-          app_data_dir: appDataDir,
-          sessions: transcriptCount,
-        },
-      }
-    },
+    ...(policy.onJoin !== false ? { sweep: { cron: sweepCron } } : {}),
 
     async *collect(collectCtx) {
       for await (const { item } of collectExchanges(collectCtx)) {
