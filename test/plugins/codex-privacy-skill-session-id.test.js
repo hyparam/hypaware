@@ -44,7 +44,7 @@ import { fileURLToPath } from 'node:url'
 
 const SKILL = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  '../../hypaware-core/plugins-workspace/codex/skills/hypaware-privacy/SKILL.md'
+  '../../hypaware-core/skills/hypaware-privacy/codex.md'
 )
 
 const text = fs.readFileSync(SKILL, 'utf8')

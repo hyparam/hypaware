@@ -28,7 +28,7 @@ import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { clientAssetStateRoot, digestClientAsset, readClientAssetLedger, writeClientAssetLedger } from '../../src/core/runtime/client_asset_ledger.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
-import { NEUTRAL_SKILLS_DIR, NEUTRAL_SKILL_NAMES } from '../../hypaware-core/skills/index.js'
+import { SHARED_SKILLS_DIR, SHARED_SKILL_NAMES } from '../../hypaware-core/skills/index.js'
 
 /** @import { TestContext } from 'node:test' */
 /** @import { PluginSkillClient } from '../../hypaware-plugin-kernel-types.js' */
@@ -80,7 +80,7 @@ async function snapshot(dir) {
  * @returns {Map<string, string>}
  */
 function withoutOurs(snap) {
-  return new Map([...snap].filter(([rel]) => !NEUTRAL_SKILL_NAMES.some((name) => rel === `skills/${name}` || rel.startsWith(`skills/${name}${path.sep}`))))
+  return new Map([...snap].filter(([rel]) => !SHARED_SKILL_NAMES.some((name) => rel === `skills/${name}` || rel.startsWith(`skills/${name}${path.sep}`))))
 }
 
 /**
@@ -116,7 +116,7 @@ async function hermesHome(t, inject = {}) {
  * A kernel holding the Hermes plugin's own four skills plus whatever other
  * plugins contribute, so a test controls the whole contribution set. Booted
  * plugins are skipped when a kernel is injected, so the four are registered
- * here exactly as `registerNeutralSkills` registers them.
+ * here exactly as `registerSkills` registers them.
  *
  * @param {TestContext} t
  * @param {(home: string) => Promise<{ name: string, plugin: string, clients: PluginSkillClient[], body: string }[]>} contributions
@@ -125,8 +125,8 @@ async function hermesHomeWith(t, contributions) {
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
   const kernel = createKernelRuntime({ commandRegistry: registry })
-  for (const name of NEUTRAL_SKILL_NAMES) {
-    kernel.skills.register({ name, plugin: '@hypaware/hermes', clients: ['hermes'], sourceDir: path.join(NEUTRAL_SKILLS_DIR, name) })
+  for (const name of SHARED_SKILL_NAMES) {
+    kernel.skills.register({ name, plugin: '@hypaware/hermes', clients: ['hermes'], sourceDir: path.join(SHARED_SKILLS_DIR, name) })
   }
   const ctx = await hermesHome(t, { kernel, registry })
   for (const { name, plugin, clients, body } of await contributions(ctx.home)) {
@@ -145,7 +145,7 @@ async function hermesHomeWith(t, contributions) {
 async function isNeutralCopy(skillsDir, name) {
   assert.deepEqual(
     await snapshot(path.join(skillsDir, name)),
-    await snapshot(path.join(NEUTRAL_SKILLS_DIR, name)),
+    await snapshot(path.join(SHARED_SKILLS_DIR, name)),
     `${name} is the neutral tree, byte for byte`
   )
 }
@@ -161,11 +161,11 @@ test('hermes attach writes only the four hypaware-* skill directories and detach
 
   const attached = await run(['client', 'attach', 'hermes'])
   assert.equal(attached.code, 0, attached.stderr)
-  assert.deepEqual(await ourDirs(skillsDir), [...NEUTRAL_SKILL_NAMES].sort())
-  for (const name of NEUTRAL_SKILL_NAMES) {
+  assert.deepEqual(await ourDirs(skillsDir), [...SHARED_SKILL_NAMES].sort())
+  for (const name of SHARED_SKILL_NAMES) {
     assert.deepEqual(
       await snapshot(path.join(skillsDir, name)),
-      await snapshot(path.join(NEUTRAL_SKILLS_DIR, name)),
+      await snapshot(path.join(SHARED_SKILLS_DIR, name)),
       `${name} is the neutral tree, byte for byte`
     )
   }
@@ -214,7 +214,7 @@ test('client skills install --client hermes is removed by detach the same way', 
 
   const installed = await run(['client', 'skills', 'install', '--client', 'hermes'])
   assert.equal(installed.code, 0, installed.stderr)
-  assert.deepEqual(await ourDirs(skillsDir), [...NEUTRAL_SKILL_NAMES].sort())
+  assert.deepEqual(await ourDirs(skillsDir), [...SHARED_SKILL_NAMES].sort())
   assert.deepEqual(withoutOurs(await snapshot(hermesDir)), before)
 
   const detached = await run(['client', 'detach', 'hermes'])
@@ -239,7 +239,7 @@ test('a third-party clients:[all] skill never touches ~/.hermes/skills, through 
   const attached = await run(['client', 'attach', 'hermes'])
   assert.equal(attached.code, 0, attached.stderr)
   assert.deepEqual(withoutOurs(await snapshot(hermesDir)), before, 'attach left everything but the four alone')
-  for (const name of NEUTRAL_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
+  for (const name of SHARED_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
   assert.doesNotMatch(attached.stdout, /my-own-skill/)
 
   const installed = await run(['skills', 'install'])
@@ -262,14 +262,14 @@ test('another plugin registering a hypaware-* name never lands under ~/.hermes/s
 
   const attached = await run(['client', 'attach', 'hermes'])
   assert.equal(attached.code, 0, attached.stderr)
-  for (const name of NEUTRAL_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
+  for (const name of SHARED_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
   // Naming hermes outright is worth a line; an `all` contribution is not.
   assert.match(attached.stderr, /skill 'hypaware-query' targets hermes, which accepts only HypAware's own skills; skipped/)
   assert.doesNotMatch(attached.stderr, /'hypaware-report' targets hermes/)
 
   const installed = await run(['client', 'skills', 'install', '--client', 'hermes'])
   assert.equal(installed.code, 0, installed.stderr)
-  for (const name of NEUTRAL_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
+  for (const name of SHARED_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
 })
 
 test('a hypaware-* directory HypAware never wrote survives hermes attach and then detach', async (t) => {
@@ -285,8 +285,8 @@ test('a hypaware-* directory HypAware never wrote survives hermes attach and the
   assert.equal(attached.code, 0, attached.stderr)
   assert.deepEqual(await snapshot(theirs), theirsBefore)
   assert.match(attached.stderr, /skill 'hypaware-query' at .* was not installed by HypAware or has changed since; left in place/)
-  assert.deepEqual(await ourDirs(skillsDir), [...NEUTRAL_SKILL_NAMES].sort())
-  for (const name of NEUTRAL_SKILL_NAMES.filter((n) => n !== 'hypaware-query')) await isNeutralCopy(skillsDir, name)
+  assert.deepEqual(await ourDirs(skillsDir), [...SHARED_SKILL_NAMES].sort())
+  for (const name of SHARED_SKILL_NAMES.filter((n) => n !== 'hypaware-query')) await isNeutralCopy(skillsDir, name)
 
   const detached = await run(['client', 'detach', 'hermes'])
   assert.equal(detached.code, 0, detached.stderr)
@@ -306,7 +306,7 @@ test('hermes re-attach leaves an edited hypaware-* copy in place and refreshes t
   assert.equal(reattached.code, 0, reattached.stderr)
   assert.deepEqual(await fs.readFile(edited), editedBytes)
   assert.match(reattached.stderr, /skill 'hypaware-report' at .* was not installed by HypAware or has changed since; left in place/)
-  for (const name of NEUTRAL_SKILL_NAMES.filter((n) => n !== 'hypaware-report')) await isNeutralCopy(skillsDir, name)
+  for (const name of SHARED_SKILL_NAMES.filter((n) => n !== 'hypaware-report')) await isNeutralCopy(skillsDir, name)
 
   // The record of the copy we did write survives the skip, so detach still
   // knows the edited copy as ours-but-changed and says so.
@@ -347,7 +347,7 @@ test('a recorded third-party hermes skill survives detach, re-attach and skills 
 
   const reattached = await run(['client', 'attach', 'hermes'])
   assert.equal(reattached.code, 0, reattached.stderr)
-  for (const name of NEUTRAL_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
+  for (const name of SHARED_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
   assert.deepEqual(await snapshot(foreign), foreignBefore, 're-attach left foreign-tool alone')
   assert.doesNotMatch(reattached.stdout, /foreign-tool/)
 
@@ -355,7 +355,7 @@ test('a recorded third-party hermes skill survives detach, re-attach and skills 
   await fs.rm(path.join(skillsDir, 'hypaware-privacy'), { recursive: true })
   const installed = await run(['skills', 'install'])
   assert.equal(installed.code, 0, installed.stderr)
-  for (const name of NEUTRAL_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
+  for (const name of SHARED_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
   assert.deepEqual(await snapshot(foreign), foreignBefore, 'skills install left foreign-tool alone')
   assert.doesNotMatch(installed.stdout, /retired skill 'foreign-tool'/)
 

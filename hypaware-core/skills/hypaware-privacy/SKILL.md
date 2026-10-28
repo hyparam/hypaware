@@ -1,6 +1,6 @@
 ---
 name: hypaware-privacy
-description: 'Audit what HypAware has captured from AI client sessions on this machine and act on it: review recorded directories and individual chats for secrets, credentials, and personal content, suggest specific chats to ignore, mark directories (ignore / local-only / sync), and offer separate purges of sensitive rows. Also use for "which chats should I ignore", "don''t record this", "pause logging", or "resume recording"; handle direct recording controls without a full audit. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine''s first org sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync", "what will ship to the server", or "what will sync to the cloud". Surveys this machine''s local cache; rows already forwarded are out of scope except where a session purge deletes them.'
+description: 'Audit what HypAware has captured from AI client sessions (including Claude and Codex) on this machine and act on it: review recorded directories and individual chats for secrets, credentials, and personal content, suggest specific chats to ignore, mark directories (ignore / local-only / sync), and offer separate purges of sensitive rows. Also use for "which chats should I ignore", "don''t record this", "pause logging", or "resume recording"; handle direct recording controls without a full audit. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine''s first org sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync", "what will ship to the server", or "what will sync to the cloud". Surveys this machine''s local cache; rows already forwarded are out of scope except where a session purge deletes them.'
 ---
 
 # HypAware privacy review: audit what was captured, decide what leaves
@@ -38,6 +38,12 @@ privacy review. Verify the command receipt and report failures accurately.
   transcript backfill. A forked session has a new id and needs its own
   exclusion. Ignoring does not purge prior records; unignoring permits older
   transcript content to be imported again.
+  In Claude, the managed SessionStart hook exports `CLAUDE_CODE_SESSION_ID`
+  to Bash commands in attached local Desktop Code sessions. Start or resume
+  after upgrading so it runs. If absent, use an explicitly verified Claude ID
+  or report that opt-out is unconfirmed; never substitute a Codex ID from the
+  same folder. In Claude or Codex, read the matching Step 1 reference below
+  for client-specific receipt checks before claiming success.
 - Decide what happens in new folders - by default they sync with no
   question; `hyp privacy folders ask` asks once per new folder instead, and
   `hyp privacy folders sync` returns to the default. It gates the question
@@ -48,6 +54,15 @@ privacy review. Verify the command receipt and report failures accurately.
 This flow governs **HypAware's own surfaces only** - what the local cache holds and what the sink forwards. It is not a data-loss-prevention system. Content a user pasted into a synced session, or anything outside HypAware's capture, is out of scope. Be honest that `ignore`/`local-only`/`purge` bound HypAware, not the user's whole machine.
 
 ## Step 1 - Protect this session first (R3)
+
+**Choose the current client before running this step.** In Claude, read and
+follow [claude.md](claude.md) for Step 1. In Codex, read and follow
+[codex.md](codex.md) for Step 1. Those references preserve the client-specific
+session identification, recorder checks, and narrowly scoped fallbacks.
+For every other client, use the generic Step 1 below. Do not use another
+client's session variables or fallback. All clients return to Step 2 here.
+
+### Other clients
 
 The review conversation will discuss the most sensitive content on the machine, so it must never itself become a captured, forwardable transcript. **Before surveying anything**, opt this session out of capture and **verify it took effect**. On failure, say so plainly and continue **only** with the user's explicit consent.
 

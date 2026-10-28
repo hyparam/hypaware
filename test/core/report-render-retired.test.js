@@ -9,7 +9,5 @@ test('the client ships no report renderer or rendering dependency', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
   assert.equal(pkg.dependencies.marked, undefined)
   assert.equal(pkg.exports['./core/reports'], undefined)
-  for (const host of ['claude', 'codex']) {
-    assert.equal(fs.existsSync(new URL(`../../hypaware-core/plugins-workspace/${host}/skills/hypaware-report/assets`, import.meta.url)), false)
-  }
+  assert.equal(fs.existsSync(new URL('../../hypaware-core/skills/hypaware-report/assets', import.meta.url)), false)
 })

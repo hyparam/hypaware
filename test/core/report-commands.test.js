@@ -2998,8 +2998,6 @@ test('report generate help names the shipped skill\'s draft folder and says publ
   const root = path.resolve(import.meta.dirname, '../..')
   for (const copy of [
     'hypaware-core/skills/hypaware-report/SKILL.md',
-    'hypaware-core/plugins-workspace/claude/skills/hypaware-report/SKILL.md',
-    'hypaware-core/plugins-workspace/codex/skills/hypaware-report/SKILL.md',
   ]) {
     const skill = (await fs.readFile(path.join(root, copy), 'utf8')).replace(/\s+/g, ' ')
     assert.match(skill, /Draft in `\.\/hypaware-report-<from>-to-<to>\/` or the requested destination\. Append `-2`, `-3`, etc\. if it exists/, copy)

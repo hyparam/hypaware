@@ -1,10 +1,14 @@
 # Scoped analyst assignment
 
+Use the current client's delegation policy in [the report skill](../SKILL.md#investigation).
 Each slice is one question with its own scope and budget: read-only, no
-`--remote`, and a short summary back. If this client can run a scoped worker,
-give it this assignment and keep any tool restrictions or tighter budget the
-client applies. If it cannot, run the slice yourself under the same scope and
-budget, and keep only its summary for synthesis.
+`--remote`, and a short summary back. Preserve the worker's model and tool
+restrictions. In Claude, launch the registered `hypaware-analyst`; in Codex,
+assign that role to an available worker type and inherit the model unless the
+user chose another. For those clients, a missing worker or delegation tool
+requires the user's choice before substituting or running a single-agent report.
+Other clients without scoped workers run the slice themselves under the same
+scope and budget, keeping only its summary for synthesis.
 
 Give each worker only its question, dates/filters and row counts, relevant
 schema, comparison buckets when useful, and applicable rules from [querying.md](querying.md),

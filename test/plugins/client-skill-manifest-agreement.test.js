@@ -112,6 +112,7 @@ for (const client of CLIENTS) {
         `${client} registers "${skill.name}" but ${clientSkillTree(client)}/${skill.name}/SKILL.md does not exist. ` +
           'Attach would try to install a skill that was renamed or removed.',
       )
+      assert.equal(skill.sourceDir, path.join(clientSkillsDir(repoRoot, client), skill.name), 'every client must register the authoritative shared source')
       assert.ok(
         fs.existsSync(path.join(skill.sourceDir, 'SKILL.md')),
         `${client} registers "${skill.name}" with sourceDir ${skill.sourceDir}, which has no SKILL.md`,
