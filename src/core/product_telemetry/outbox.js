@@ -144,8 +144,12 @@ export function createOutbox(root, { now = Date.now } = {}) {
             id: batch.batch_id,
             records: batch.records.length,
             role: batch.resource?.['service.role'],
-            // Batches from different CLI processes of one version pack together.
-            group: JSON.stringify({ ...batch.resource, 'process.id': null }),
+            // Batches from different CLI processes of one version, built for
+            // one wire version, pack together.
+            group: JSON.stringify([
+              batch.schema_version,
+              { ...batch.resource, 'process.id': null }
+            ]),
             sealed: entry.sealed === true,
             sources: Array.isArray(entry.sources) ? entry.sources : []
           }

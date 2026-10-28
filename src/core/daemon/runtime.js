@@ -2,7 +2,7 @@
 
 import process from 'node:process'
 import { createProductClient, productAdapters } from '../product_telemetry/client.js'
-import { productEvent } from '../product_telemetry/collection.js'
+import { errorCode, productEvent } from '../product_telemetry/collection.js'
 
 import {
   Attr,
@@ -445,7 +445,7 @@ export async function runDaemon(opts = {}) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     fileLog.error('daemon.boot_failed', { message })
-    lifecycle('ready', 'failure', 'startup_failed')
+    lifecycle('ready', 'failure', errorCode(err) ?? 'startup_failed')
     product.close()
     persist({ state: 'degraded', warnings: [`${BOOT_FAILED_WARNING_PREFIX}: ${message}`] })
     clearPidFile(runtimeStateRoot)

@@ -667,6 +667,7 @@ async function dispatchInternal(argv, opts) {
             const err = error instanceof Error ? error : new Error(String(error))
             span.recordException(err)
             span.setAttribute('error_kind', 'unhandled_exception')
+            noteInvocation({ error: err })
             stderr.write(`hyp ${matched.command.name}: ${err.message}\n`)
             exitCode = 1
           } finally {

@@ -4,15 +4,17 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import {
+  cliSurface,
   createProductResource,
   createRuntimeSummary,
+  errorCode,
   productBatch,
   productEvent
 } from './collection.js'
 import { createOutbox, readSmallJson } from './outbox.js'
-import { createDelivery } from './delivery.js'
+import { createDelivery, receiverVersions } from './delivery.js'
 import { effectivePolicy, productRoot } from './policy.js'
-import { COMMANDS } from './contract.js'
+import { COMMANDS, MAX_BATCH_BYTES, MAX_RECORDS, QUERY_TOOLS } from './contract.js'
 import { isHelpFlag } from '../cli/group_help.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 
@@ -25,10 +27,15 @@ const QUERY_COMMANDS = [
   'query vector search'
 ]
 
-/** @type {AsyncLocalStorage<{invocation: {command:string,kind:string,degraded:boolean,records:Record<string,any>[],startDelivery:()=>void,setAdapters:(adapters:string[])=>void}, depth:number}>} */
+/** @type {AsyncLocalStorage<{invocation: {command:string,kind:string,degraded:boolean,query:Record<string,any>|null,errorCode:string|null,records:Record<string,any>[],flushers:(()=>void)[],surface:string,emit:(records:Record<string,any>[])=>void,milestone:(name:'first_capture'|'first_query')=>Record<string,any>|null,startDelivery:()=>void,setAdapters:(adapters:string[])=>void}, depth:number}>} */
 const invocationContext = new AsyncLocalStorage()
 
-/** @param {{command?:string,kind?:string,degraded?:boolean,adapters?:string[]}} value */
+/**
+ * `query` carries a finished query's fields (see `queryResult`); `error` is a
+ * failure the boundary classifies by class or code, with `fallback` used when
+ * it cannot.
+ * @param {{command?:string,kind?:string,degraded?:boolean,adapters?:string[],query?:Record<string,any>,error?:unknown,fallback?:string}} value
+ */
 export function noteInvocation(value) {
   const current = invocationContext.getStore()
   if (!current || current.depth > 1) return
@@ -39,6 +46,15 @@ export function noteInvocation(value) {
   if (value.kind !== undefined) current.invocation.kind = value.kind
   if (value.degraded) current.invocation.degraded = true
   if (value.adapters) current.invocation.setAdapters(value.adapters)
+  if (value.query) current.invocation.query = value.query
+  if (value.error !== undefined)
+    current.invocation.errorCode =
+      errorCode(value.error) ?? value.fallback ?? current.invocation.errorCode
+}
+
+/** The surface a query from this invocation reports: `cli` or `agent_shell`. */
+export function invocationSurface() {
+  return invocationContext.getStore()?.invocation.surface ?? 'unknown'
 }
 
 /** @param {number} code */
@@ -100,7 +116,13 @@ export async function withProductInvocation(
     command: 'unknown',
     kind: 'unknown',
     degraded: false,
+    query: /** @type {Record<string,any>|null} */ (null),
+    errorCode: /** @type {string|null} */ (null),
     records: /** @type {Record<string,any>[]} */ ([]),
+    flushers: /** @type {(()=>void)[]} */ ([]),
+    surface: cliSurface(env),
+    emit: client.emit,
+    milestone: client.milestone,
     startDelivery: client.startDelivery,
     setAdapters: client.setAdapters
   }
@@ -119,7 +141,8 @@ export async function withProductInvocation(
       outcome: result === 'success' && state.degraded ? 'degraded' : result,
       exit_class:
         result === 'cancelled' ? 'cancelled' : code === 0 ? 'zero' : 'nonzero',
-      duration_ms: performance.now() - startedAt
+      duration_ms: performance.now() - startedAt,
+      query: state.query
     })
     if (summary) state.records.push(summary)
     if (
@@ -134,11 +157,13 @@ export async function withProductInvocation(
       const failure = productEvent('coded.failure', {
         component: 'cli',
         operation: 'start',
-        error_code: state.kind === 'unknown' ? 'startup_failed' : 'other',
+        error_code:
+          state.kind === 'unknown' ? 'startup_failed' : (state.errorCode ?? 'other'),
         occurrence_count: 1
       })
       if (failure) state.records.push(failure)
     }
+    for (const flush of state.flushers) flush()
     // @ref LLP 0561#hooks [implements]: a successful hook run queues nothing
     if (!(result === 'success' && state.command.startsWith('claude-hook ')))
       client.emit(state.records)
@@ -220,12 +245,27 @@ export function createProductClient({
       const inventory = inventoryDue
         ? productEvent('installation.inventory', { adapters }, now())
         : null
-      const batch = productBatch(
-        resource,
-        inventory ? [inventory, ...records] : records,
-        now()
-      )
-      if (batch && queue.append(batch, initial.binding)) inventoryDue = false
+      const all = inventory ? [inventory, ...records] : records
+      // @ref LLP 0561#rollout [implements]: v2 records only once delivery saw this binding's receiver advertise v2
+      const saved = queue.readDelivery()
+      const version =
+        saved?.binding === initial.binding &&
+        receiverVersions(saved).includes(2)
+          ? 2
+          : 1
+      // A buffered MCP flush can hold more than one slot's worth, so split
+      // by records and, halving, by the slot's stored byte cap.
+      for (let i = 0; i < all.length; ) {
+        let n = Math.min(MAX_RECORDS, all.length - i)
+        let batch = productBatch(resource, all.slice(i, i + n), now(), version)
+        while (n > 1 && batch && storedBytes(batch) > MAX_BATCH_BYTES) {
+          n = Math.ceil(n / 2)
+          batch = productBatch(resource, all.slice(i, i + n), now(), version)
+        }
+        if (batch && queue.append(batch, initial.binding) && i === 0)
+          inventoryDue = false
+        i += n
+      }
       if (effectivePolicy(root).binding !== initial.binding)
         queue.prune(effectivePolicy(root).binding)
     } catch {
@@ -420,6 +460,75 @@ function flushPipeline(start, end) {
       )
   }
   return records
+}
+
+/** The outbox slot's size for `batch`, as `append` measures it. @param {Record<string,any>} batch */
+function storedBytes(batch) {
+  return Buffer.byteLength(
+    JSON.stringify({ binding: 'f'.repeat(64), wire: JSON.stringify(batch) })
+  )
+}
+
+// @ref LLP 0561#mcp [implements]: buffered in the serving process, appended once a minute or every 100 records
+export const MCP_FLUSH_MS = 60_000
+export const MCP_FLUSH_RECORDS = 100
+
+/**
+ * A buffer for `mcp.tool_call` records in a long-lived `hyp mcp serve`, or null
+ * when collection is off. Per call it builds one small record; the outbox is
+ * touched only on flush, which the invocation boundary also runs on shutdown.
+ * @param {{now?:()=>number}} [options]
+ */
+export function createMcpCallRecorder({ now = Date.now } = {}) {
+  const current = invocationContext.getStore()
+  if (!current || current.depth > 1) return null
+  const invocation = current.invocation
+  /** @type {Record<string,any>[]} */
+  let buffer = []
+  /** @type {NodeJS.Timeout|null} */
+  let timer = null
+  function flush() {
+    if (timer) clearTimeout(timer)
+    timer = null
+    if (buffer.length === 0) return
+    const records = buffer
+    buffer = []
+    invocation.emit(records)
+  }
+  invocation.flushers.push(flush)
+  return {
+    /** @param {{tool:string,outcome:string,error?:unknown,duration_ms:number,query?:Record<string,any>}} call */
+    record(call) {
+      const tool = QUERY_TOOLS.includes(call.tool) ? call.tool : null
+      const event = productEvent(
+        'mcp.tool_call',
+        {
+          tool: call.tool,
+          outcome: call.outcome,
+          error_code:
+            call.error == null
+              ? 'other'
+              : (errorCode(call.error) ?? (tool ? 'query_failed' : 'other')),
+          duration_ms: call.duration_ms,
+          query: call.query
+        },
+        now()
+      )
+      if (!event) return
+      buffer.push(event)
+      // @ref LLP 0561#milestones [implements]: a successful MCP query counts toward first_query
+      if (tool && call.outcome === 'success') {
+        const reached = invocation.milestone('first_query')
+        if (reached) buffer.push(reached)
+      }
+      if (buffer.length >= MCP_FLUSH_RECORDS) flush()
+      else if (!timer) {
+        timer = setTimeout(flush, MCP_FLUSH_MS)
+        timer.unref()
+      }
+    },
+    flush
+  }
 }
 
 /** Called once ordinary dispatch has begun; help/version never start a send. */
