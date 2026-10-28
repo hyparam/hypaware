@@ -1,11 +1,8 @@
 // @ts-check
 
 /**
- * `hyp client skills install` places the host-neutral skill tree for every client
- * that has no host-specific copy, and the tree carries nothing Claude- or
- * Codex-only.
- *
- * @ref LLP 0494#skills [tests]: Pi, OpenCode, Cursor and OpenClaw install the one neutral tree, every file of it
+ * @ref LLP 0563#single-source [tests]: every client installs every shared file,
+ * including the client-specific references, from the same source directory
  */
 
 import test from 'node:test'
@@ -17,14 +14,11 @@ import { fileURLToPath } from 'node:url'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
-import { NEUTRAL_SKILLS_DIR, NEUTRAL_SKILL_NAMES } from '../../hypaware-core/skills/index.js'
+import { SHARED_SKILLS_DIR, SHARED_SKILL_NAMES } from '../../hypaware-core/skills/index.js'
 
 const workspace = fileURLToPath(new URL('../../hypaware-core/plugins-workspace/', import.meta.url))
 
-const NEUTRAL_CLIENTS = ['pi', 'droid', 'opencode', 'cursor', 'openclaw', 'hermes']
-
-/** Host-specific mechanics only the claude or codex tree may name. */
-const HOST_ONLY = ['CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', '~/.claude/projects', '~/.codex/sessions', 'hypaware-analyst']
+const CLIENTS = ['claude', 'codex', 'pi', 'droid', 'opencode', 'cursor', 'openclaw', 'hermes']
 
 /**
  * Every file under `dir`, relative to it.
@@ -60,7 +54,7 @@ function makeBuf() {
   }
 }
 
-test('client skills install places every neutral skill file under each client skill_dir', async (t) => {
+test('client skills install places every shared skill file under each client skill_dir', async (t) => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-neutral-skills-'))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
   const env = isolatedClientEnv(process.env, home)
@@ -70,7 +64,7 @@ test('client skills install places every neutral skill file under each client sk
     auto_update: false,
     plugins: [
       { name: '@hypaware/ai-gateway' },
-      ...NEUTRAL_CLIENTS.map((client) => ({ name: `@hypaware/${client}` })),
+      ...CLIENTS.map((client) => ({ name: `@hypaware/${client}` })),
     ],
   }))
 
@@ -79,11 +73,11 @@ test('client skills install places every neutral skill file under each client sk
   const code = await dispatch(['client', 'skills', 'install'], { stdout, stderr, env: { ...env, HYP_CONFIG: configPath } })
   assert.equal(code, 0, stderr.text())
 
-  for (const client of NEUTRAL_CLIENTS) {
+  for (const client of CLIENTS) {
     const base = path.join(home, await skillDir(client))
-    assert.deepEqual((await fs.readdir(base)).sort(), [...NEUTRAL_SKILL_NAMES].sort(), `${client}: installed skill set`)
-    for (const skill of NEUTRAL_SKILL_NAMES) {
-      const source = path.join(NEUTRAL_SKILLS_DIR, skill)
+    assert.deepEqual((await fs.readdir(base)).sort(), [...SHARED_SKILL_NAMES].sort(), `${client}: installed skill set`)
+    for (const skill of SHARED_SKILL_NAMES) {
+      const source = path.join(SHARED_SKILLS_DIR, skill)
       const dest = path.join(base, skill)
       const files = await filesUnder(source)
       assert.deepEqual(await filesUnder(dest), files, `${client}/${skill}: installed file set`)
@@ -103,16 +97,20 @@ test('client skills install places every neutral skill file under each client sk
   }
 })
 
-test('no neutral skill file names a Claude- or Codex-only mechanism', async () => {
-  for (const rel of await filesUnder(NEUTRAL_SKILLS_DIR)) {
-    if (!rel.endsWith('.md')) continue
-    const text = await fs.readFile(path.join(NEUTRAL_SKILLS_DIR, rel), 'utf8')
-    for (const name of HOST_ONLY) assert.ok(!text.includes(name), `${rel} names ${name}`)
+test('client-specific privacy instructions are reachable only through explicit client routing', async () => {
+  const text = await fs.readFile(path.join(SHARED_SKILLS_DIR, 'hypaware-privacy/SKILL.md'), 'utf8')
+  assert.match(text, /In Claude, read and\s+follow \[claude\.md\]\(claude\.md\)/)
+  assert.match(text, /In Codex, read and follow\s+\[codex\.md\]\(codex\.md\)/)
+  assert.match(text, /For every other client, use the generic Step 1 below/)
+  for (const client of ['claude', 'codex']) {
+    const reference = await fs.readFile(path.join(SHARED_SKILLS_DIR, `hypaware-privacy/${client}.md`), 'utf8')
+    assert.match(reference, /Use this reference only when the current client is/)
+    assert.match(reference, /\[Step 2 in the privacy skill\]\(SKILL\.md#/)
   }
 })
 
-test('the neutral reports reference offers the MCP status tool only when the connected MCP lists it', async () => {
-  const text = (await fs.readFile(path.join(NEUTRAL_SKILLS_DIR, 'hypaware-query/reports.md'), 'utf8')).replace(/\s+/g, ' ')
+test('the shared reports reference offers the MCP status tool only when the connected MCP lists it', async () => {
+  const text = (await fs.readFile(path.join(SHARED_SKILLS_DIR, 'hypaware-query/reports.md'), 'utf8')).replace(/\s+/g, ' ')
   assert.match(text, /`hyp report mark`/)
   const sentences = text.split(/(?<=\.)\s/).filter((s) => s.includes('`set_recommendation_status`'))
   assert.ok(sentences.length > 0, 'reports.md must name set_recommendation_status')

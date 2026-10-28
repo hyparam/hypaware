@@ -268,8 +268,6 @@ test('the MCP schema states the ceiling and the MCP validator refuses above it',
 test('the bundled query skills describe the ceiling as a refusal', async () => {
   for (const file of [
     'hypaware-core/skills/hypaware-query/search.md',
-    'hypaware-core/plugins-workspace/claude/skills/hypaware-query/search.md',
-    'hypaware-core/plugins-workspace/codex/skills/hypaware-query/search.md',
   ]) {
     const text = await fs.readFile(path.join(import.meta.dirname, '..', '..', file), 'utf8')
     assert.match(text, /accepts 1 to 1000; a larger value is refused/, file)

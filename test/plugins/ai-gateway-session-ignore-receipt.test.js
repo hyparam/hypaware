@@ -186,8 +186,8 @@ test('the unignore receipt carries no purge hint', async () => {
 // session opt-out is `hyp session ignore` now, whose receipt is held to R14 by
 // section 1 above, so there is no second shell implementation of it to bind.
 const SKILLS = [
-  'claude/skills/hypaware-privacy/SKILL.md',
-  'codex/skills/hypaware-privacy/SKILL.md',
+  'hypaware-privacy/claude.md',
+  'hypaware-privacy/codex.md',
 ]
 
 /**
@@ -210,16 +210,16 @@ const SKILLS = [
  * @type {Record<string, RegExp>}
  */
 const FALLBACK_SCOPE = {
-  'claude/skills/hypaware-privacy/SKILL.md':
+  'hypaware-privacy/claude.md':
     /Only where it is unavailable \(`command not found`\) does the script below apply/,
-  'codex/skills/hypaware-privacy/SKILL.md':
+  'hypaware-privacy/codex.md':
     /Only where it is unavailable, or cannot resolve the session, does the script below apply/,
 }
 
 /** @param {string} rel */
 function skillText(rel) {
   return fs.readFileSync(
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../hypaware-core/plugins-workspace', rel),
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../hypaware-core/skills', rel),
     'utf8'
   )
 }
@@ -334,8 +334,8 @@ for (const rel of SKILLS) {
 // resumes recording until the user notices. Every copy, the host-neutral tree
 // included, must gate the undo on the user and must not order it outright.
 const BYSTANDER_UNDO_COPIES = [
-  'hypaware-core/plugins-workspace/claude/skills/hypaware-privacy/SKILL.md',
-  'hypaware-core/plugins-workspace/codex/skills/hypaware-privacy/SKILL.md',
+  'hypaware-core/skills/hypaware-privacy/claude.md',
+  'hypaware-core/skills/hypaware-privacy/codex.md',
   'hypaware-core/skills/hypaware-privacy/SKILL.md',
 ]
 
@@ -414,8 +414,8 @@ for (const rel of SKILLS) {
  * @type {Record<string, string>}
  */
 const FALLBACK_DEFAULT = {
-  'claude/skills/hypaware-privacy/SKILL.md': `ANTHROPIC_BASE_URL:-${DEFAULT_GATEWAY_ENDPOINT}`,
-  'codex/skills/hypaware-privacy/SKILL.md': `BASE:-${DEFAULT_GATEWAY_ENDPOINT}`,
+  'hypaware-privacy/claude.md': `ANTHROPIC_BASE_URL:-${DEFAULT_GATEWAY_ENDPOINT}`,
+  'hypaware-privacy/codex.md': `BASE:-${DEFAULT_GATEWAY_ENDPOINT}`,
 }
 
 for (const rel of SKILLS) {
@@ -474,7 +474,7 @@ const CLAUDE_AMBIGUITY_OPENER = '**If the verb refuses because more than one cli
  * own right, so the skill's coverage check has to be able to find it.
  */
 test('the claude privacy skill names the recorder id the listener reports', () => {
-  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+  const step1 = privacyStep1('hypaware-privacy/claude.md')
 
   // The check has to be a stop condition, not an observation: the whole bug
   // this skill's Step 1 was rewritten for is an `ok` over a recorder that was
@@ -537,7 +537,7 @@ test('the claude privacy skill names the recorder id the listener reports', () =
  * skipped or refused is a failure.
  */
 test('the claude privacy skill stops on a missing claude-telemetry entry only while that listener is live', () => {
-  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+  const step1 = privacyStep1('hypaware-privacy/claude.md')
 
   const at = step1.indexOf(CLAUDE_STOP_LIST_OPENER)
   assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${CLAUDE_STOP_LIST_OPENER}"`)
@@ -612,7 +612,7 @@ test('the claude privacy skill stops on a missing claude-telemetry entry only wh
  * reaches both recorders where the script reaches one.
  */
 test('the claude privacy skill answers an ambiguous id with the stated-id re-run, not the fallback', () => {
-  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+  const step1 = privacyStep1('hypaware-privacy/claude.md')
 
   const at = step1.indexOf(CLAUDE_AMBIGUITY_OPENER)
   assert.ok(at >= 0, `Step 1 must still route the ambiguous case, opening "${CLAUDE_AMBIGUITY_OPENER}"`)

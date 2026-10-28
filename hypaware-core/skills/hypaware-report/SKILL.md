@@ -47,7 +47,20 @@ saving, or publishing. Quick questions and single recommendations belong to
 
 ## Investigation
 
-The coordinator owns scope, synthesis, and writing; delegate slice reading to
+**Claude:** The coordinator owns scope, synthesis, and writing; delegate slice reading to
+the registered `hypaware-analyst` worker using the host's subagent tool, with
+its plugin namespace if needed. Preserve its model and tool restrictions. If
+the worker is unavailable, explain the missing dependency; a substitute worker
+or single-agent report requires the user's choice.
+
+**Codex:** The coordinator owns scope, synthesis, and writing; delegate slice reading to
+separate workers through the host's delegation tool. Give each the
+`hypaware-analyst` role and scoped assignment from the linked template. Codex
+has no registered agent type by that name: use an available worker type and
+inherit the model unless the user selects another. If delegation is unavailable,
+explain that limitation; a single-agent report requires the user's choice.
+
+**Other clients:** The coordinator owns scope, synthesis, and writing; delegate slice reading to
 scoped workers when this client can run them, giving each the assignment from
 the linked template. A client that cannot run a scoped worker runs each slice
 itself under the same scope and budget; say so in the report's coverage notes.

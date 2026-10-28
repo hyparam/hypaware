@@ -8,7 +8,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { ensureAiGatewayStorageContracts } from '../../ai-gateway/src/storage_contracts.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../ai-gateway/src/session_command.js'
-import { registerNeutralSkills } from '../../../skills/index.js'
+import { registerSkills } from '../../../skills/index.js'
 import { attachDroidHooks } from './attach.js'
 import { createDroidBackfillProvider } from './backfill.js'
 import { DROID_CONFIG_SECTION, droidListenPort, validateDroidConfig } from './config.js'
@@ -51,7 +51,7 @@ export async function activate(ctx) {
   })
 
   registerSessionCommands(ctx)
-  registerNeutralSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
+  registerSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
 
   // @ref LLP 0551#attachment [implements]: install native hook
   //   commands through the intrinsic registry, with no gateway endpoint
