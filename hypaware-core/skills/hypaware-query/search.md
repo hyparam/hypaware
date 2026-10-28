@@ -1,6 +1,6 @@
 # Recorded text search
 
-`hyp query grep "<text>"` searches recorded messages for a case-insensitive substring. For local searches, use `--regex` to interpret the text as a regular expression. Regex search is not supported on the server; use literal text for remote searches.
+`hyp query grep "<text>"` searches recorded messages for a case-insensitive substring. Use `--regex` to interpret the text as a regular expression. On a remote, regex search requires operator access; other credentials get literal search only.
 
 Narrow the search with `--session-id <id>`, `--chain-id <id>`, or `--from`/`--to` dates in YYYY-MM-DD format. `--limit <n>` defaults to 50 and accepts 1 to 1000; a larger value is refused.
 
