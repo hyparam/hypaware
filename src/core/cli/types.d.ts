@@ -72,6 +72,8 @@ export type PickerSource =
   | 'claude'
   | 'codex'
   | 'opencode'
+  | 'antigravity'
+  | 'antigravity-desktop'
   | 'claude-desktop'
   | 'openclaw'
   | 'hermes'
@@ -393,7 +395,7 @@ export interface InitFlags {
   yes: boolean
   noDaemon: boolean
   dryRun: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode')[]
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'antigravity' | 'antigravity-desktop')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number

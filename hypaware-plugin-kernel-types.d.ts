@@ -551,7 +551,7 @@ export interface PluginInitPresetManifest {
   summary?: string
 }
 
-export type PluginSkillClient = 'claude' | 'codex' | 'all'
+export type PluginSkillClient = 'claude' | 'codex' | 'antigravity' | 'antigravity-desktop' | 'all'
 
 // =============================================================================
 // Plugin discovery, install, and lock

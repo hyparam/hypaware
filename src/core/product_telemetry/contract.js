@@ -26,6 +26,8 @@ const ADAPTERS = [
   'claude-desktop',
   'codex',
   'opencode',
+  'antigravity',
+  'antigravity-desktop',
   'openclaw',
   'hermes',
   'other'
