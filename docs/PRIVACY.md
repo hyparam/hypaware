@@ -388,6 +388,14 @@ enrollment changes within 30 seconds. `hyp status` also reports telemetry state.
 | Command outcomes | A command name from a fixed list, success or failure, duration, and selected setup steps; custom commands appear as `other` |
 | Installation and process details | HypAware version, OS, architecture, Node major version, configured integrations, and generated installation/process identifiers |
 | Daemon health | Lifecycle events, memory and CPU summaries, and counts of rows captured, written, and exported |
+| Setup milestones | That this installation captured its first row, and that it ran its first successful query. Each is sent once; changing the telemetry mode or re-enrolling can send it again |
+| Query usage | For a `hyp query` command or an MCP query tool: up to four dataset names from a fixed list (others appear as `other`), whether the query ran locally or on a remote, the row count as a range (`0`, `1-10`, `11-100`, `101-1000`, or more than 1000), and whether it came from a terminal, an MCP client, or an agent's shell |
+| MCP tool calls | A tool name from a fixed list (others appear as `other`), success or failure, an error code from a fixed list, and duration |
+
+Query usage and MCP tool calls are sent only to a server that reports it
+accepts them; an older server receives the other rows without them. An
+agent's shell is recognized by the presence of environment variables that
+known agents set; their values are not read or sent.
 
 Conversations, prompts, responses, argument values, SQL, file paths, credentials,
 and free-text error messages are excluded. Coverage is partial: a killed process
