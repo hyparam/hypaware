@@ -1,6 +1,6 @@
 # SQL dialect reference
 
-The query interface is read-only. This reference targets squirreling 0.16.15; older installations or remote deployments may differ.
+The query interface is read-only. This reference targets squirreling 0.16.15; older installations or remote deployments may differ. `IS [NOT] TRUE`/`IS [NOT] FALSE`, `JSON_EXTRACT_SCALAR`, `GROUP_CONCAT`, `CHR`, and `NOW()` are new in 0.16.15. If a target refuses one as unparsed or unknown, it runs an older version: use `col = true`/`col = false`, `JSON_EXTRACT_STRING`, or `STRING_AGG(col, ',')` there.
 
 - **Discover the schema on the selected target.** Use `hyp query schema <table>` (add `--remote <target>` for remote queries) or `SELECT * FROM <table> LIMIT 1`. `SHOW TABLES` lists registered datasets, not columns; `DESCRIBE`, DDL, and `information_schema` are unsupported. Local `hyp cache status` cannot describe a remote.
 - **Dataset column names.** On `ai_gateway_messages`, use `conversation_source`, `message_created_at`, and JSON fields under `attributes.usage`, not `source`, `timestamp`/`ts`, or a `usage` column. The otel `logs` and `metrics` datasets do have `timestamp`. On `node`, use `node_type`, `natural_key`, and `label`; on `edge`, use `edge_type`, `src_type`, and `dst_type`. Neither graph table has `type`. Read the real column list in query errors instead of guessing another name.
