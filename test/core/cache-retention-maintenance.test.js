@@ -1269,82 +1269,43 @@ test('a foreign sorted replace tags the maintenance.partition span with rebaseli
 })
 
 test('a partition already due for compaction skips the resettle-candidate row scan', async (t) => {
-  // @ref LLP 0207#outranks-resettle [tests]: once the cheap file-count/size
-  // check alone makes compaction due, the resettle scan's answer cannot
-  // change `shouldCompact`, so it must not run at all. `hasResettleCandidate`
-  // is module-private and its `scanRowsFromTable` is an unpatchable ESM named
-  // import, so there is no direct call-count hook to assert against; instead
-  // this mocks `fs.stat` and captures a stack per Parquet reader construction,
-  // then asserts none of those stacks pass through `hasResettleCandidate`.
-  // That frame name survives the async boundary between the scan and the
-  // read, so it attributes each read to its caller instead of only counting
-  // reads tick-wide (a second legitimate read elsewhere in the tick, e.g. a
-  // footer-stats probe, would not falsely implicate the scan).
-  //
-  // A stack-based observation can go blind: the deciding frame sits ~8 frames
-  // below the mock, and V8's default `Error.stackTraceLimit` of 10 leaves only
-  // two frames of headroom. Three more frames anywhere between the mock and
-  // the caller (an icebird refactor, extra node:test mock internals, a wrapper
-  // in `resolver.js`) would drop it, and a negative "no stack mentions
-  // `hasResettleCandidate`" assertion passes vacuously on truncated stacks.
-  // Two guards keep that from happening silently:
-  //   1. raise `Error.stackTraceLimit` while the mock is installed (restored
-  //      below even if the test throws), which removes the hazard outright;
-  //   2. assert positively that some stack names `compactGeneration`, the
-  //      legitimate reader. It calls `scanRowsFromTable` from exactly the same
-  //      depth as `hasResettleCandidate` does, so any truncation deep enough
-  //      to hide the frame the negative assertion hunts for also hides this
-  //      one, and the test fails loudly instead of going quiet. Asserting on
-  //      `scanRowsFromTable` itself would not do: it sits one frame shallower
-  //      and survives truncation that has already blinded the real check.
-  // Guard 2 also catches the `?? ''` fallback below storing an unattributable
-  // empty string.
+  // Compaction reserves its output generation before reading rows. A legacy
+  // resettle probe runs before that reservation. Observe that ordering on
+  // disk instead of relying on engine-specific async stack frames. Reader
+  // caching can hide a second scan, so counting reads alone is insufficient.
   const cacheRoot = await makeTmpDir('maint-scan-skip')
-  const originalStackTraceLimit = Error.stackTraceLimit
   try {
     const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
     const epoch0 = path.join(partDir, 'epoch=0')
-    await appendRowsToTable(epoch0, COLUMNS, [
-      { id: 1, value: 'v1', timestamp: new Date().toISOString() },
+    const epoch1 = path.join(partDir, 'epoch=1')
+    await appendRowsToTable(epoch0, [...COLUMNS, { name: 'attributes', type: 'STRING', nullable: true }], [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString(), attributes: '{}' },
+      { id: 2, value: 'v2', timestamp: new Date().toISOString(), attributes: '{"x":1}' },
     ])
-    // Never compacted: `grewSinceCompaction` is true unconditionally, so the
-    // only thing standing between the old code and a resettle scan is the
-    // `compactionDue` gate under test.
-    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+    // Distinct attribute values prevent a constant-column statistics shortcut
+    // from answering the resettle scan without opening the Parquet file.
+    // No baseline or pendingFallbacks count: removing the dueness gate must
+    // trigger the legacy attributes scan, not just read a cached verdict.
+    await writeCursor(partDir, { epoch: 0, rowCount: 2, compaction: null, layout: 'epoch' })
+    assert.equal(fsSync.existsSync(epoch1), false)
 
-    /** @type {string[]} */
-    const stacks = []
+    const readsAfterReservation = []
     const original = fs.stat
-    Error.stackTraceLimit = 50
     t.mock.method(fs, 'stat', function (p, ...rest) {
-      if (String(p).endsWith('.parquet')) stacks.push(new Error().stack ?? '')
+      if (String(p).endsWith('.parquet')) readsAfterReservation.push(fsSync.existsSync(epoch1))
       return original.call(this, p, ...rest)
     })
-
     const report = await maintainCache({
       cacheRoot,
       compactOnly: true,
-      // compact_file_count: 0 makes `needsCompaction` (and so
-      // `compactionDue`) true on file count alone, with no size heuristic
-      // involved: dueness is settled before the resettle scan would run.
       config: { compact_file_count: 0 },
       storage: /** @type {any} */ ({}),
       getSettleHook: () => async (rows) => rows,
     })
     assert.equal(report.totalCompacted, 1, 'sanity: compaction actually ran')
-
-    assert.ok(stacks.length > 0, 'sanity: the data file was read at all')
-    assert.ok(
-      stacks.some((s) => s.includes('compactGeneration')),
-      'sanity: captured stacks must be deep enough to name the reader, or the assertion below passes vacuously'
-    )
-    assert.deepEqual(
-      stacks.filter((s) => s.includes('hasResettleCandidate')),
-      [],
-      'the resettle scan must not read the data file'
-    )
+    assert.ok(readsAfterReservation.length > 0, 'sanity: a data file was read')
+    assert.ok(readsAfterReservation.every(Boolean), 'no data-file scan may precede compaction reservation')
   } finally {
-    Error.stackTraceLimit = originalStackTraceLimit
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })

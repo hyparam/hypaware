@@ -94,7 +94,8 @@ test('hyp client attach all: a catalog-known client missing from the live regist
     // LLP 0262, so `attach all` owes no migration pointer either.
     assert.equal(stderr.text(), '')
 
-    const lines = stdout.text().split('\n').filter((l) => l.startsWith('note:'))
+    // Discovery order follows the filesystem; membership and duplicates matter.
+    const lines = stdout.text().split('\n').filter((l) => l.startsWith('note:')).sort()
     assert.deepEqual(lines, [
       "note: copilot is a known client but its adapter is not enabled; run 'hyp client attach copilot' to enable it",
       "note: cursor is a known client but its adapter is not enabled; run 'hyp client attach cursor' to enable it",
@@ -106,7 +107,7 @@ test('hyp client attach all: a catalog-known client missing from the live regist
       "note: langgraph is a known client but its adapter is not enabled; run 'hyp client attach langgraph' to enable it",
       "note: nanoclaw is a known client but its adapter is not enabled; run 'hyp client attach nanoclaw' to enable it",
       "note: ollama is a known client but its adapter is not enabled; run 'hyp client attach ollama' to enable it",
-    ])
+    ].sort())
   })
 })
 

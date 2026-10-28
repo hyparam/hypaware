@@ -677,7 +677,15 @@ test('report rendering is absent from the CLI and package exports', async () => 
   const { code } = await run(['report', 'render'])
   assert.notEqual(code, 0)
   const removedExport = 'hypaware/core/reports'
-  await assert.rejects(import(removedExport), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' })
+  const pkg = JSON.parse(await fs.readFile(new URL('../../package.json', import.meta.url), 'utf8'))
+  assert.equal(Object.hasOwn(pkg.exports, './core/reports'), false)
+  // Node distinguishes an unexported path; Bun reports module-not-found.
+  // The manifest check above also catches an export pointing at a missing file.
+  await assert.rejects(import(removedExport), (err) =>
+    err instanceof Error && 'code' in err && typeof err.code === 'string' &&
+    ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_MODULE_NOT_FOUND'].includes(err.code) &&
+    err.message.includes('hypaware')
+  )
 })
 
 /**
