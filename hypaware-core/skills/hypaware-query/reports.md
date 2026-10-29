@@ -130,17 +130,18 @@ small or narrowly scoped reviews can keep evidence in the brief and proposals
 instead of manufacturing extra pages. A standalone recommendation needs only
 its recommendation page. Slugs match `[a-z0-9][a-z0-9-]*`. Use relative page links,
 Markdown tables and fenced code; no raw HTML, images, or renderer assets.
-Each page identifies scope and absolute dates, with a descriptive H1 title and
-a short bold thesis. Write plainly, without em dashes. Token volume, never
+Each page identifies scope and absolute dates, with a descriptive H1 title.
+Non-recommendation pages open with a short bold thesis. For recommendations,
+read and follow [recommendation writing](recommendations.md#recommendation-writing).
+Write plainly, without em dashes. Token volume, never
 dollars or invented savings; discuss patterns, never as an output-per-person
 ranking.
 
 - **report.md:** a brief with `## Overview` and `## Recommendations`. Give the
   main conclusion and the few figures that support it, linking to the evidence
   pages. Use compact weekly/work-share tables when meaningful. Rank entries as
-  `### [1. Action title](recommendation-slug.md)` followed by the motivating
-  finding, latest relevant state, next action, and decisive supporting figures
-  or uncertainty. This linked H3 form lets
+  `### [1. Action title](recommendation-slug.md)` followed by the shared
+  recommendation opening. This linked H3 form lets
   the server render recommendation cards and IDs. Do not mint IDs yourself.
 - **usage.md:** token categories, trends, model and session concentration, with
   coherent denominators and interpretation. Missing attribution stays unknown.
@@ -177,16 +178,14 @@ tradeoffs. The proposal must be usable:
   Proposed thresholds are choices, not measured facts. "Measure more" is not
   enough without the decision that measurement enables.
 
-Name the target, exact deliverable, and completion test for each action. A page
-opens with a short bold thesis and `## At a glance`: four concise bullets with
-bold lead-ins **What we saw**, **What it costs**, **The fix**, and **Expected
-effect**. Use measured numbers where informative, never a numeric quota or
-invented cost/effect. Unknown impact stays unknown. Then use sections What we
-saw, What it costs, The fix, and Expected effect and the case against it,
+Name the target, exact deliverable, and completion test for each action. After
+the shared recommendation opening, use measured numbers where informative,
+never a numeric quota or invented cost/effect. Unknown impact stays unknown.
+Use sections What we saw, What it costs, The fix, and Expected effect and the case against it,
 followed by Evidence, Query, and Check before applying. Keep the finding and
 latest state together, with essential evidence and a usable next action. Put
 artifacts under The fix and scope, dates, and accounting rules under Evidence.
-The glance supports a quick decision; the sections substantiate it.
+The opening supports a quick decision; the sections substantiate it.
 
 Cite 1 to 3 verified turns using page-local evidence headings, locators, and
 short excerpts. Include query labels and exact bounded SQL for supporting

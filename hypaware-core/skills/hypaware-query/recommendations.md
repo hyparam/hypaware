@@ -40,6 +40,24 @@ the query and period that would measure its effect. Offer deeper analysis only
 when it could change the recommendation; completed answers need no fixed menu.
 Do not derive workflow fixes from errors encountered while querying this session.
 
+## Recommendation writing
+
+Use this opening for every recommendation: an individual chat answer, a report
+entry, or a standalone or full-report recommendation page. Open with two separate
+paragraphs labeled **Problem:** and **Fix:**. The problem names the observed
+behavior and its consequence for someone unfamiliar with the work. The fix names
+the concrete change and its target; tests confirm the correction rather than
+replace it. Use **Next action:** instead of **Fix:** only when choosing the remedy
+genuinely requires investigation. Titles, when present, name the action and target.
+
+Keep the opening near 100 words or fewer without padding a shorter explanation.
+Preserve uncertainty that could change the decision. Put supporting measurements,
+locators, implementation details, and completion tests below the opening rather
+than compressing the full recommendation into it. On pages, place the opening
+immediately after the title; use the same opening in the report entry and its
+detail page. Review each opening for the required labels, a concrete consequence,
+and a usable change or investigation.
+
 ## Evidence and durable changes
 
 When the user asks you to analyze recorded sessions and recommend changes:
