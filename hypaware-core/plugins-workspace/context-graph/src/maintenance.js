@@ -438,12 +438,14 @@ export async function refreshGraphRows(storage, dataset, rows, signal, mergeEvid
     if (!tableExists(tableDir)) continue
     const replacements = new Map()
     const foreign = new Set()
+    const folded = new Map()
     for await (const existing of scanRowsFromTable(tableDir)) {
       signal?.throwIfAborted()
       let fresh = byId.get(existing[idCol])
       if (!fresh) continue
+      const id = String(existing[idCol])
       if (fresh.projector !== existing.projector || fresh.source_dataset !== existing.source_dataset) {
-        foreign.add(String(existing[idCol]))
+        foreign.add(id)
         continue
       }
       if (mergeEvidence) {
@@ -452,7 +454,9 @@ export async function refreshGraphRows(storage, dataset, rows, signal, mergeEvid
         for (const key of ['props', 'source_keys']) {
           if (typeof merged[key] === 'string') merged[key] = JSON.parse(merged[key])
         }
-        mergeRow(merged, fresh)
+        // Copies awaiting compaction are all dropped below, so fold each into one row.
+        mergeRow(merged, folded.get(id) ?? fresh)
+        folded.set(id, merged)
         fresh = merged
       }
       // Avoid a generation rewrite when this projection is already current.
@@ -464,7 +468,7 @@ export async function refreshGraphRows(storage, dataset, rows, signal, mergeEvid
         return isDeepStrictEqual(value, fresh[key])
           || (key === 'first_seen' && firstSeenTime(value) === firstSeenTime(fresh[key]))
       })
-      if (!same) replacements.set(String(existing[idCol]), { ...existing, ...fresh })
+      if (!same || replacements.has(id)) replacements.set(id, { ...existing, ...fresh })
     }
     for (const id of foreign) {
       if (replacements.has(id)) throw new Error('graph refresh: shared projector identity requires a full graph rebuild')

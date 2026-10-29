@@ -250,3 +250,29 @@ test('skill evidence survives incremental scans, renders honestly, and refresh c
     assert.doesNotMatch(correctedText, /legacy|invocation requested|file read requested/)
   }, [read, search])
 })
+
+test('skill evidence merge folds duplicate rows awaiting compaction', async () => {
+  const read = { ...source[0], session_id: 'skill-session', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: 'cat /home/test/.codex/skills/review/SKILL.md' } }
+  const all = { dispatch_file_read: true, dispatch_tool: true, dispatch_marker: true }
+  const pairs = [
+    [{ dispatch_tool: true }, { dispatch_marker: true }],
+    [{ dispatch_marker: true }, { dispatch_tool: true }],
+    [{ dispatch_tool: true }, all],
+    [all, { dispatch_tool: true }],
+  ]
+  for (const [first, second] of pairs) {
+    await fixture(async ({ registry, storage, sql }) => {
+      const contract = createAiGatewayGraphContract(kit)
+      const skillRule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+      const fresh = /** @type {Record<string, any>} */ (skillRule?.toRows?.(read)[0])
+      // Two writers can append the same id before compaction folds it.
+      await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [{ ...fresh, props: first }])
+      await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [{ ...fresh, props: second }])
+      await projectGraph({ query: registry, storage, contracts: [contract] })
+      const stored = (await sql(`SELECT * FROM edge WHERE edge_id = '${fresh.edge_id}'`)).rows
+      assert.equal(stored.length, 1)
+      const props = typeof stored[0].props === 'string' ? JSON.parse(stored[0].props) : stored[0].props
+      assert.deepEqual(props, all, `${JSON.stringify(first)} then ${JSON.stringify(second)}`)
+    }, [read])
+  }
+})
