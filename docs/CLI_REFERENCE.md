@@ -37,7 +37,9 @@ page; it doesn't prove the plugin can run.
 This reference identifies each plugin-owned family:
 
 - `session ...`: shared commands provided by `@hypaware/ai-gateway`,
-  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, or `@hypaware/cursor`.
+  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, `@hypaware/cursor`,
+  `@hypaware/copilot`, `@hypaware/nanoclaw`, `@hypaware/langgraph`, or
+  `@hypaware/antigravity` (also Antigravity Desktop).
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
@@ -1263,6 +1265,8 @@ capture:
 | `@hypaware/cursor` | Five minutes | Yes |
 | `@hypaware/openclaw` | Five minutes | Yes |
 | `@hypaware/nanoclaw` | Five minutes | Yes (this is NanoClaw's only capture route) |
+| `@hypaware/antigravity` (also Antigravity Desktop) | Five minutes | Yes |
+| `@hypaware/copilot` | One minute | No (it is Copilot's only capture lane; with `on_join: false` it skips sessions from before the daemon started) |
 
 `hyp client detach <client>` stops every client's scheduled recovery, whatever
 `on_join` says; `hyp client attach <client>` resumes it.

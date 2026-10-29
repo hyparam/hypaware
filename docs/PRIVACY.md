@@ -20,6 +20,10 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory; no billed token usage or cost |
 | `openclaw` | OpenClaw conversations from gateway traffic and local transcripts |
 | `hermes` | Hermes Agent conversations read from its local state database |
+| `antigravity`, `antigravity-desktop` | Antigravity CLI and Desktop conversations read from their local summary databases and transcripts, including model thinking, tool calls and results, and working directory |
+| `copilot` | VS Code Copilot completed spans from its local databases, for sessions with a verified local working directory |
+| `nanoclaw` | NanoClaw Claude transcripts read from an explicitly configured local installation |
+| `langgraph` | LangGraph model, tool, and graph callbacks from your application, with its working directory and Git context |
 | `raw-anthropic`, `raw-openai` | API requests and responses routed through the local gateway |
 | `otel` | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener |
 | `github` | Structural repository activity such as issue, pull request, commit, file, review, and comment metadata; content remains on GitHub |
@@ -167,9 +171,12 @@ Three caveats apply to both surfaces:
 > separate, explicit `hyp privacy purge` step below.
 
 **Class resolution needs a working directory.** The client sources
-(Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, Droid, OpenClaw) supply
-one. Hermes supplies the real one for an interactive session it recorded a
-cwd for, and scopes a messaging-channel session (Telegram, Discord, Slack,
+(Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, Droid, OpenClaw,
+Copilot, LangGraph) supply one. NanoClaw uses the host `groups/<folder>`
+workspace. Antigravity takes it from the conversation's workspace; a
+conversation with no workspace has no scope to match and is recorded
+unconditionally. Hermes supplies the real one for an interactive session it
+recorded a cwd for, and scopes a messaging-channel session (Telegram, Discord, Slack,
 WhatsApp, Signal, email) under a derived `~/.hermes/channels/<source>` path
 instead; an interactive Hermes session with no recorded cwd has no scope to
 match and is recorded unconditionally. The `raw-anthropic` / `raw-openai`
