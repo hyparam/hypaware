@@ -629,6 +629,11 @@ export function literalActions(source) {
  * @returns {string[]}
  */
 export function shellReadPaths(command) {
+  return shellFileEvidence(command).map(item => item.path)
+}
+
+/** @param {unknown} command @returns {{ path: string, operation: string }[]} */
+export function shellFileEvidence(command) {
   if (typeof command !== 'string' || command.length > MAX_ACTION_CHARS || /[\0\n\r$`|;&<>()*?{}\\]/.test(command)) return []
   const words = []
   let end = 0
@@ -659,7 +664,7 @@ export function shellReadPaths(command) {
     }
   }
   if (tokens.length > MAX_ACTIONS || tokens.some(t => !t || t.startsWith('-') || t.length > 4096)) return []
-  return tokens
+  return tokens.map(file => ({ path: file, operation: prog === 'rg' || prog === 'grep' ? 'search' : 'read' }))
 }
 
 /** @param {unknown} file @returns {string | null} */

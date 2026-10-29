@@ -44,9 +44,9 @@ test('contract carries its source/projector metadata', () => {
 // @ref LLP 0073#additive-no-migration: the Program/invoked rules bump the
 // projector version 1 → 2 as provenance only (ids are content-addressed; no
 // re-key, no migration).
-test('PROJECTOR_VERSION is 3 after precise action evidence', () => {
-  assert.equal(PROJECTOR_VERSION, 3)
-  assert.equal(contract.projectorVersion, 3)
+test('PROJECTOR_VERSION is 4 after skill evidence classification', () => {
+  assert.equal(PROJECTOR_VERSION, 4)
+  assert.equal(contract.projectorVersion, 4)
 })
 
 // @ref LLP 0030#decision: the Session node keys on session_id (the
@@ -527,7 +527,7 @@ test('ran edges wire Session -> Skill with exactly their own dispatch flag', () 
 
   const codex = rule('edge', 'ran', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: CODEX_READ_ARGS, message_created_at: TS })
   assert.ok(codex)
-  assert.deepEqual(codex.props, { dispatch_shell_read: true })
+  assert.deepEqual(codex.props, { dispatch_file_read: true })
   assert.deepEqual(codex.source_keys, { session_id: 'sess-1', tool_name: 'exec_command', skill: 'hypaware-query' })
 
   // Same (session, skill) pair from every surface -> the SAME edge id, so the
