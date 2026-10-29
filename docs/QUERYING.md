@@ -231,8 +231,11 @@ Replace the example file with one from your recorded work. A seed can be a node
 ID, natural key, or label. An ambiguous seed needs a type or exact ID. A file can
 have both a repository-relative identity and an absolute-path identity.
 
-Use the graph for questions such as which sessions touched a file or ran a
-skill. A `Session` node's natural key is the `session_id` to use in the SQL
+<!-- @ref LLP 0564#skill-evidence [explains]: a ran edge is skill evidence, not proof the skill executed -->
+Use the graph for questions such as which sessions touched a file or show skill
+evidence for a skill. Skill evidence says how the session reached the skill
+(an invocation requested, its instructions supplied, or its file read or
+searched), not that the skill ran or succeeded. A `Session` node's natural key is the `session_id` to use in the SQL
 examples above. The `node` and `edge` datasets are also queryable with SQL.
 Remote graph traversal uses `--remote`; projecting the local graph does not
 refresh the remote's graph.
