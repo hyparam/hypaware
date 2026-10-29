@@ -681,10 +681,12 @@ test('report rendering is absent from the CLI and package exports', async () => 
   assert.equal(Object.hasOwn(pkg.exports, './core/reports'), false)
   // Node distinguishes an unexported path; Bun reports module-not-found.
   // The manifest check above also catches an export pointing at a missing file.
+  // Both messages name the subpath; Node's names the package only through
+  // the checkout path, so matching 'hypaware' would depend on the clone's name.
   await assert.rejects(import(removedExport), (err) =>
     err instanceof Error && 'code' in err && typeof err.code === 'string' &&
     ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_MODULE_NOT_FOUND'].includes(err.code) &&
-    err.message.includes('hypaware')
+    err.message.includes('core/reports')
   )
 })
 
