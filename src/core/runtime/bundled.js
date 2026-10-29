@@ -36,6 +36,8 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
   '@hypaware/copilot',
   '@hypaware/pi',
   '@hypaware/droid',
+  '@hypaware/antigravity',
+  '@hypaware/antigravity-desktop',
   '@hypaware/local-fs',
   '@hypaware/s3',
   '@hypaware/format-parquet',

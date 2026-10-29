@@ -97,6 +97,8 @@ test('hyp client attach all: a catalog-known client missing from the live regist
     // Discovery order follows the filesystem; membership and duplicates matter.
     const lines = stdout.text().split('\n').filter((l) => l.startsWith('note:')).sort()
     assert.deepEqual(lines, [
+      "note: antigravity is a known client but its adapter is not enabled; run 'hyp client attach antigravity' to enable it",
+      "note: antigravity-desktop is a known client but its adapter is not enabled; run 'hyp client attach antigravity-desktop' to enable it",
       "note: copilot is a known client but its adapter is not enabled; run 'hyp client attach copilot' to enable it",
       "note: cursor is a known client but its adapter is not enabled; run 'hyp client attach cursor' to enable it",
       "note: droid is a known client but its adapter is not enabled; run 'hyp client attach droid' to enable it",
@@ -113,8 +115,9 @@ test('hyp client attach all: a catalog-known client missing from the live regist
 
 test('hyp client attach all: the note does not change the exit code, only real attach failures among the live set do', async () => {
   await withTempHome(async (home) => {
-    // Only claude and claude-desktop are live; codex, copilot, cursor, hermes, langgraph, ollama, openclaw, opencode,
-    // droid, nanoclaw and pi are known-but-not-enabled. Eleven notes, zero live-attach failures, exit
+    // Only claude and claude-desktop are live; antigravity, antigravity-desktop, codex, copilot, cursor, hermes,
+    // langgraph, ollama, openclaw, opencode, droid, nanoclaw and pi are known-but-not-enabled. Thirteen notes, zero
+    // live-attach failures, exit
     // code still 0.
     const { ctx, stdout, stderr } = makeCtx({ home, registered: ['claude', 'claude-desktop'] })
     const code = await runAttach(['all'], ctx)
@@ -124,6 +127,8 @@ test('hyp client attach all: the note does not change the exit code, only real a
 
     const notes = stdout.text().split('\n').filter((l) => l.startsWith('note:')).sort()
     assert.deepEqual(notes, [
+      "note: antigravity is a known client but its adapter is not enabled; run 'hyp client attach antigravity' to enable it",
+      "note: antigravity-desktop is a known client but its adapter is not enabled; run 'hyp client attach antigravity-desktop' to enable it",
       "note: codex is a known client but its adapter is not enabled; run 'hyp client attach codex' to enable it",
       "note: copilot is a known client but its adapter is not enabled; run 'hyp client attach copilot' to enable it",
       "note: cursor is a known client but its adapter is not enabled; run 'hyp client attach cursor' to enable it",

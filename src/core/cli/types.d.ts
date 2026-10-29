@@ -78,6 +78,8 @@ export type PickerSource =
   | 'copilot'
   | 'pi'
   | 'droid'
+  | 'antigravity'
+  | 'antigravity-desktop'
   | 'claude-desktop'
   | 'openclaw'
   | 'ollama'
@@ -337,7 +339,7 @@ export interface InitFlags {
   dryRun: boolean
   github?: boolean
   noBackfill?: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'droid' | 'ollama' | 'langgraph')[]
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'droid' | 'ollama' | 'langgraph' | 'antigravity' | 'antigravity-desktop')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number

@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/antigravity-desktop",
+  "version": "1.0.0",
+  "description": "HypAware Antigravity Desktop collector: reads local SQLite conversation summaries and JSONL transcripts from ~/.gemini/antigravity, projects turns into ai_gateway_messages, and installs the HypAware query and privacy plugin bundle.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22.12",
+  "entrypoint": "./src/index.js",
+  "requires": {
+    "plugins": {
+      "@hypaware/ai-gateway": "^0.1.0"
+    }
+  },
+  "permissions": ["read_home", "write_home", "read_state", "write_state"],
+  "contributes": {
+    "client": {
+      "name": "antigravity-desktop",
+      "skill_dir": ".gemini/config/plugins/hypaware/skills",
+      "agent_dir": ".gemini/config/plugins/hypaware/agents",
+      "attach_probe": {
+        "format": "managed_file",
+        "settings_file": ".gemini/config/plugins/hypaware/plugin.json",
+        "marker_text": "// HYPWARE_ANTIGRAVITY_PLUGIN v1"
+      },
+      "activity_probe": {
+        "dir": ".gemini/antigravity/brain",
+        "file_suffix": ".jsonl"
+      }
+    },
+    "picker": [
+      {
+        "name": "antigravity-desktop",
+        "label": "Antigravity Desktop",
+        "summary": "Records your Antigravity Desktop conversations from local transcripts and installs the HypAware query and privacy plugin.",
+        "detect": {
+          "settings_file": ".gemini/antigravity/conversation_summaries.db"
+        },
+        "compose": {
+          "requires_gateway": true,
+          "plugin": {
+            "name": "@hypaware/antigravity-desktop"
+          }
+        }
+      }
+    ],
+    "sources": [
+      {
+        "name": "antigravity-desktop",
+        "description": "Poll ~/.gemini/antigravity/conversation_summaries.db and brain transcripts, projecting changed conversations into ai_gateway_messages."
+      }
+    ],
+    "commands": [
+      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)" },
+      { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Resume recording this AI session" },
+      { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
+    ],
+    "skills": [
+      { "name": "hypaware-query", "clients": ["antigravity-desktop"] },
+      { "name": "hypaware-reference", "clients": ["antigravity-desktop"] },
+      { "name": "hypaware-privacy", "clients": ["antigravity-desktop"] }
+    ],
+    "agents": [
+      { "name": "hypaware-analyst", "clients": ["antigravity-desktop"] }
+    ],
+    "config_sections": [
+      {
+        "section": "antigravity_desktop",
+        "summary": "Antigravity Desktop collector config: app_data_dir, poll_interval, attach policy { on_join }, and backfill policy { on_join, window_days }."
+      }
+    ]
+  }
+}

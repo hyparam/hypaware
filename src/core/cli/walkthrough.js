@@ -448,6 +448,8 @@ const BACKFILL_PROVIDER_LABELS = /** @type {Record<string, string>} */ ({
   claude: 'Claude',
   codex: 'Codex',
   openclaw: 'OpenClaw',
+  antigravity: 'Antigravity CLI',
+  'antigravity-desktop': 'Antigravity Desktop',
 })
 
 /**
@@ -486,7 +488,17 @@ export function backfillConsentTitle(providers, retentionDays) {
  *
  * @type {string[]}
  */
-const PICKER_DISPLAY_ORDER = ['claude', 'claude-desktop', 'codex', 'opencode', 'raw-anthropic', 'raw-openai', 'otel']
+const PICKER_DISPLAY_ORDER = [
+  'claude',
+  'claude-desktop',
+  'codex',
+  'opencode',
+  'antigravity',
+  'antigravity-desktop',
+  'raw-anthropic',
+  'raw-openai',
+  'otel',
+]
 
 /**
  * Print the closing run summary: the written config path plus one line
