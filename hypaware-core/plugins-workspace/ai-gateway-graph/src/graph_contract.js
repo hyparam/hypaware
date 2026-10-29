@@ -3,7 +3,7 @@
 import path from 'node:path'
 
 import { keys } from './graph-keys.js'
-import { commandStringFrom, programFrom, skillFromCodexRead, skillFromMarker, skillFromSlash, skillFromToolArgs, literalActions, shellReadPaths, patchPaths, skillFromPath, MAX_ACTION_CHARS } from './tool_facets.js'
+import { commandStringFrom, programFrom, skillFromCodexRead, skillFromMarker, skillFromSlash, skillFromToolArgs, literalActions, shellFileEvidence, patchPaths, skillFromPath, MAX_ACTION_CHARS } from './tool_facets.js'
 
 /**
  * @import { ContractRule, GraphKit, GraphKeys } from './types.js'
@@ -23,7 +23,7 @@ export const PROJECTOR = 'ai-gateway.t0'
  * `invoked` rules (LLP 0073 §additive-no-migration): provenance only, existing
  * rows and ids are untouched, there is no re-key and therefore no migration.
  */
-export const PROJECTOR_VERSION = 3
+export const PROJECTOR_VERSION = 4
 
 /** Tools whose args name a concrete file. */
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
@@ -459,7 +459,10 @@ export function createAiGatewayGraphContract(kit) {
     if (row === lastRow) return lastActions
     const wrapped = row.tool_name === 'exec' || row.tool_name === 'functions.exec'
     const inputs = wrapped ? literalActions(row.tool_args) : [row]
-    lastActions = inputs.map(action => ({ ...row, ...action, inferred: wrapped }))
+    lastActions = inputs.map(action => {
+      const input = { ...row, ...action, inferred: wrapped }
+      return { ...input, shellFiles: shellFileEvidence(commandStringFrom(input.tool_name, input.tool_args)) }
+    })
     lastRow = row
     return lastActions
   }
@@ -474,11 +477,11 @@ export function createAiGatewayGraphContract(kit) {
     rule.toRows = (row) => {
       const results = []
       for (const input of actionRule ? actionsFor(row) : [row]) {
-        const action = input.tool_name ? input : { ...input, tool_name: defaultTool }
+        const action = input.tool_name ? input : { ...input, tool_name: defaultTool, shellFiles: shellFileEvidence(commandStringFrom(defaultTool, input.tool_args)) }
         let variants = [action]
         if (rule.type === 'File' || rule.type === 'touched') {
           let files = []
-          if (action.tool_name === 'exec_command' || action.tool_name === 'Bash') files = shellReadPaths(commandStringFrom(action.tool_name, action.tool_args))
+          if (action.tool_name === 'exec_command' || action.tool_name === 'Bash') files = action.shellFiles.map(file => file.path)
           else if (action.tool_name === 'apply_patch') files = patchPaths(action.tool_args)
           else {
             const file = filePathFrom(action.tool_name, action.tool_args)
@@ -492,13 +495,18 @@ export function createAiGatewayGraphContract(kit) {
           })
         } else if (actionRule && (rule.type === 'Skill' || rule.type === 'ran')) {
           if (action.tool_name !== 'exec_command') continue
-          variants = shellReadPaths(commandStringFrom(action.tool_name, action.tool_args))
-            .filter(file => skillFromPath(file))
-            .map(file => ({ ...action, tool_args: { cmd: `cat '${file}'` } }))
+          variants = action.shellFiles
+            .filter(file => skillFromPath(file.path))
+            .map(file => ({ ...action, skillOperation: file.operation, tool_args: { cmd: `cat '${file.path}'` } }))
         }
         for (const variant of variants) {
           const built = original(variant)
           if (!built) continue
+          // @ref LLP 0564#skill-evidence: legacy read flags may actually be searches.
+          if (rule.type === 'ran' && variant.skillOperation) {
+            built.props = variant.skillOperation === 'search'
+              ? { dispatch_shell_search: true } : { dispatch_file_read: true }
+          }
           built.source_keys = { .../** @type {Record<string, unknown>} */ (built.source_keys), ...pruned({ session_id: row.message_id || row.part_id ? row.session_id : undefined, message_id: row.message_id, part_id: row.part_id }) }
           if (action.inferred) {
             built.props = { .../** @type {Record<string, unknown>} */ (built.props), inferred_call: true }

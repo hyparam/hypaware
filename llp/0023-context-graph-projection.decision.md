@@ -164,6 +164,8 @@ ordering; the same inputs must produce the same merged row regardless of scan
 order, or re-projection and compaction would disagree. Projection-time and
 compaction-time merging share the same function for the same reason.
 
+**Extended-by:** [LLP 0564](./0564-skill-evidence-updates.spec.md#incremental-evidence) permits incremental merges for existing skill relationships.
+
 ## Pre-write dedup
 
 `graph project` reads the committed id set (`SELECT node_id FROM node`) and

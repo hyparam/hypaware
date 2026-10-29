@@ -34,6 +34,11 @@ export const graphNeighborsVerb = {
   // @ref LLP 0214#d1 [implements]: a verb explains its own flags instead of a skill narrating them
   help: [
     'Walks outward from a seed node and prints what it reaches.',
+    'Skill ran edges are evidence, not execution counts. dispatch_tool or',
+    'dispatch_slash means invocation requested; dispatch_marker means instructions',
+    'supplied; dispatch_file_read and dispatch_shell_search mean file access',
+    'requested. Legacy dispatch_shell_read is unverified read/search evidence.',
+    'No flag proves success. Use source messages for event counts and outcomes.',
     '',
     'The seed resolves in order: node_id, then natural_key, then label. So a',
     'session id, a file path or basename, a model id, or a tool / skill /',
@@ -204,13 +209,15 @@ function renderNeighbors(result) {
     }
   }
   for (const n of result.neighbors) {
-    const arrow = n.direction === 'out' ? `-${n.edge_type}→` : `←${n.edge_type}-`
+    const relation = n.edge_type === 'ran' ? 'skill evidence' : n.edge_type
+    const arrow = n.direction === 'out' ? `-${relation}→` : `←${relation}-`
     const text = display(n.node)
     let shown = text
     if (labelCounts.get(text) > 1) {
       shown = `${text} (${disambiguator(n.node)})`
       if (shownCounts.get(shown) > 1) shown = `${text} (${n.node.node_id})`
     }
+    if (n.edge_type === 'ran') shown += ` (${skillEvidenceLabel(n.props)})`
     if (n.props?.inferred_call === true) shown += ' (inferred call)'
     out.push(`  ${n.hop}  ${arrow.padEnd(18)} ${n.node.node_type.padEnd(8)} ${shown}`)
   }
@@ -254,4 +261,16 @@ function disambiguator(node) {
  */
 function shortId(id) {
   return id.length > 12 ? id.slice(0, 12) : id
+}
+
+/** @param {Record<string, unknown> | null | undefined} props @returns {string} */
+function skillEvidenceLabel(props) {
+  const labels = []
+  if (props?.dispatch_tool === true || props?.dispatch_slash === true) labels.push('invocation requested')
+  if (props?.dispatch_marker === true) labels.push('instructions supplied')
+  if (props?.dispatch_file_read === true) labels.push('file read requested')
+  if (props?.dispatch_shell_search === true) labels.push('file search requested')
+  if (props?.dispatch_shell_read === true) labels.push('legacy file reference: read/search unverified')
+  if (!labels.length) labels.push('unclassified reference')
+  return labels.join('; ') + '; execution and success not established'
 }

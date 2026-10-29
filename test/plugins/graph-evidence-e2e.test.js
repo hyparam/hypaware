@@ -134,7 +134,7 @@ test('explicit refresh repairs stale activity evidence, repeat refresh is stable
     const result = await sql(`SELECT * FROM edge WHERE edge_id = '${stale.edge_id}'`)
     assert.equal(result.rows.length, 1, 'refresh replaces rather than appending a duplicate')
     row = result.rows[0]
-    assert.equal(row.projector_version, 3)
+    assert.equal(row.projector_version, 4)
     const evidence = await queryEvidence({ query: registry, storage, kind: 'edge', id: String(stale.edge_id), includeLocalOnly: true })
     assert.equal(evidence[0].part_id, 'part-0')
     const neighbors = await queryNeighbors({ query: registry, storage, seed: tool.session_id, edgeTypes: ['touched'], includeLocalOnly: true })
@@ -190,4 +190,89 @@ test('neighbor output limit cannot hide an over-budget neighborhood scan', async
   assert.equal(result.ok, false)
   assert.match(result.ok ? '' : result.error, /read budget/)
   assert.ok(scanned > 100_000 && scanned <= 100_000 + batchSize, `bounded row scan, observed ${scanned}`)
+})
+
+test('skill evidence survives incremental scans, renders honestly, and refresh corrects legacy searches', async () => {
+  const skillFile = '/home/test/.codex/skills/review/SKILL.md'
+  const read = { ...source[0], session_id: 'skill-session', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: `cat ${skillFile}` } }
+  const search = { ...read, session_id: 'search-session', message_id: 'search', part_id: 'search#0', tool_args: { cmd: `rg pattern ${skillFile}` } }
+  await fixture(async ({ registry, storage, sql }) => {
+    const { graphNeighborsVerb } = await import('../../hypaware-core/plugins-workspace/context-graph/src/verb.js')
+    const contract = createAiGatewayGraphContract(kit)
+    const skillRule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+    assert.ok(skillRule?.toRows)
+    const fresh = /** @type {Record<string, any>} */ (skillRule.toRows(search)[0])
+    assert.deepEqual(fresh.props, { dispatch_shell_search: true })
+    const stale = { ...fresh, edge_id: fresh.edge_id, projector_version: 3, props: { dispatch_shell_read: true } }
+    await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [stale])
+    await projectGraph({ query: registry, storage, contracts: [contract] })
+    const id = kit.edgeId(kit.nodeId('Session', read.session_id), 'ran', kit.nodeId('Skill', 'review'))
+    const props = row => typeof row.props === 'string' ? JSON.parse(row.props) : row.props
+    let stored = (await sql(`SELECT * FROM edge WHERE edge_id = '${id}'`)).rows
+    assert.equal(stored.length, 1)
+    assert.deepEqual(props(stored[0]), { dispatch_file_read: true })
+    const later = { ...read, message_id: 'later', part_id: 'later#0', message_created_at: '2026-09-22T12:00:00.000Z', client_name: 'claude', tool_name: 'Skill', tool_args: { skill: 'review' } }
+    const columns = AI_GATEWAY_SCHEMA_COLUMNS.filter(c => Object.hasOwn(later, c.name))
+    await appendRowsToSourceTable(storage.cacheRoot, 'ai_gateway_messages', ['source=later'], [...columns], [later])
+    // A server-sized slice can contain only the later event. It must not erase the read.
+    const partial = { ...contract, rowFilter: { columns: ['message_id'], keep: row => row.message_id === 'later' } }
+    await projectGraph({ query: registry, storage, contracts: [partial] })
+    stored = (await sql(`SELECT * FROM edge WHERE edge_id = '${id}'`)).rows
+    assert.equal(stored.length, 1, 'updates do not append duplicate relationships')
+    assert.deepEqual(props(stored[0]), { dispatch_file_read: true, dispatch_tool: true })
+    assert.equal(new Date(stored[0].first_seen).toISOString(), at)
+    const neighbors = await queryNeighbors({ query: registry, storage, seed: read.session_id, edgeTypes: ['ran'], includeLocalOnly: true })
+    assert.ok(neighbors.ok)
+    const output = graphNeighborsVerb.render(neighbors, { json: false, format: 'json', maxCell: 10000, maxBytes: 100000 }).stdout
+    assert.match(output, /skill evidence/)
+    assert.match(output, /invocation requested; file read requested/)
+    assert.match(output, /execution and success not established/)
+    assert.doesNotMatch(output, /-ran→/)
+    const json = JSON.parse(graphNeighborsVerb.render(neighbors, { json: true, format: 'json', maxCell: 10000, maxBytes: 100000 }).stdout)
+    assert.equal(json.neighbors[0].props.dispatch_tool, true)
+    const parts = await discoverCachePartitions(storage.cacheRoot, { datasets: ['edge'] })
+    const generations = () => parts.map(p => tryReadCursorSync(p.path)?.tableDir)
+    const before = generations()
+    const again = await projectGraph({ query: registry, storage, contracts: [partial] })
+    assert.equal(again.edgesWritten, 0)
+    assert.deepEqual(generations(), before, 'unchanged evidence does not rewrite partitions')
+    const legacyView = await queryNeighbors({ query: registry, storage, seed: search.session_id, edgeTypes: ['ran'], includeLocalOnly: true })
+    assert.ok(legacyView.ok)
+    assert.match(graphNeighborsVerb.render(legacyView, { json: false, format: 'json', maxCell: 10000, maxBytes: 100000 }).stdout, /legacy file reference: read\/search unverified/)
+    await projectGraph({ query: registry, storage, contracts: [contract], refresh: true })
+    const corrected = (await sql(`SELECT * FROM edge WHERE edge_id = '${stale.edge_id}'`)).rows
+    assert.equal(corrected.length, 1)
+    assert.deepEqual(props(corrected[0]), { dispatch_shell_search: true })
+    const correctedView = await queryNeighbors({ query: registry, storage, seed: search.session_id, edgeTypes: ['ran'], includeLocalOnly: true })
+    assert.ok(correctedView.ok)
+    const correctedText = graphNeighborsVerb.render(correctedView, { json: false, format: 'json', maxCell: 10000, maxBytes: 100000 }).stdout
+    assert.match(correctedText, /file search requested/)
+    assert.doesNotMatch(correctedText, /legacy|invocation requested|file read requested/)
+  }, [read, search])
+})
+
+test('skill evidence merge folds duplicate rows awaiting compaction', async () => {
+  const read = { ...source[0], session_id: 'skill-session', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: 'cat /home/test/.codex/skills/review/SKILL.md' } }
+  const all = { dispatch_file_read: true, dispatch_tool: true, dispatch_marker: true }
+  const pairs = [
+    [{ dispatch_tool: true }, { dispatch_marker: true }],
+    [{ dispatch_marker: true }, { dispatch_tool: true }],
+    [{ dispatch_tool: true }, all],
+    [all, { dispatch_tool: true }],
+  ]
+  for (const [first, second] of pairs) {
+    await fixture(async ({ registry, storage, sql }) => {
+      const contract = createAiGatewayGraphContract(kit)
+      const skillRule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+      const fresh = /** @type {Record<string, any>} */ (skillRule?.toRows?.(read)[0])
+      // Two writers can append the same id before compaction folds it.
+      await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [{ ...fresh, props: first }])
+      await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [{ ...fresh, props: second }])
+      await projectGraph({ query: registry, storage, contracts: [contract] })
+      const stored = (await sql(`SELECT * FROM edge WHERE edge_id = '${fresh.edge_id}'`)).rows
+      assert.equal(stored.length, 1)
+      const props = typeof stored[0].props === 'string' ? JSON.parse(stored[0].props) : stored[0].props
+      assert.deepEqual(props, all, `${JSON.stringify(first)} then ${JSON.stringify(second)}`)
+    }, [read])
+  }
 })

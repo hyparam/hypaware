@@ -9,6 +9,8 @@ Prefer the graph for skill and program inventories, identities, and relationship
 
 Read `hyp graph --help` and `hyp query graph neighbors --help` for flags. Nodes use `node_type`, `natural_key`, and `label`; edges use `edge_type`, `src_type`, and `dst_type`.
 
+For Skill edges, `ran` means evidence of a skill relationship, not successful execution. Filter `props.dispatch_tool` or `props.dispatch_slash` for explicit invocation requests. `dispatch_marker` means instructions supplied; `dispatch_file_read` and `dispatch_shell_search` mean file access requested. Legacy `dispatch_shell_read` cannot distinguish reading from searching. Use source messages to verify execution, success, or event counts. Correct historical labels with an explicitly scoped full-source `hyp graph project --refresh`; incremental projection preserves legacy evidence.
+
 Count distinct sessions using `count(distinct src_id)` on session edges: `used` (tool), `used_model` (model), `touched` (file), `ran` (skill), `invoked` (program), `via` (app), `in` (repo), and `at` (commit).
 
 Use the graph to find relevant sessions, then read their messages. A Session node's `natural_key` is the message dataset's `session_id`.
