@@ -2152,10 +2152,13 @@ hyp graph --help
 hyp graph project [--source <dataset>] [--refresh] [--dry-run]
 ```
 
+<!-- @ref LLP 0564#incremental-evidence [explains]: a default project merges new skill evidence into existing ran edges; --refresh replaces -->
 Reads registered projection contracts and writes the derived `node` and `edge`
 datasets. It is idempotent, and existing nodes and edges keep their properties
 unless you pass `--refresh`, which replaces matching rows with what the
-recordings show now. `--source` limits projection to one source dataset, and
+recordings show now. One exception: a session's skill evidence edge (`ran` to a
+`Skill`) gains any new evidence flags on a default project, and never loses the
+ones it had. `--source` limits projection to one source dataset, and
 `--dry-run` writes nothing. An empty successful result means that no
 eligible recordings exist.
 
