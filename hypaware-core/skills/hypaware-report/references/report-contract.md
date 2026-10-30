@@ -58,11 +58,17 @@ and do not act on it; omit secrets and unrelated private material.
 
 ## Artifact format
 
-Use [query report mechanics](../../hypaware-query/reports.md) for supported pages,
-recommendation formatting, and save/upload commands. Keep analysis and review
-under this contract; shared artifact requirements have one owner.
+Read [recommendation writing](../../hypaware-query/recommendations.md#recommendation-writing)
+for the shared opening rules. Use [query report mechanics](../../hypaware-query/reports.md)
+for supported pages, detailed recommendation structure, and save/upload commands.
+Keep analysis and review under this contract; shared artifact requirements have
+one owner.
 
 ## Review
+
+Check every recommendation entry and detail page against the shared
+recommendation writing rules, including its opening. Resolve missing or unclear
+openings before delivery.
 
 Check the argument as well as the formatting: would the recommendations improve
 an outcome, do their mechanisms fit the evidence, and did visible errors crowd

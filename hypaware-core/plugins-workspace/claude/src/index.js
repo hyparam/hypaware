@@ -1,5 +1,7 @@
 // @ts-check
 
+import { registerSkills } from '../../../skills/index.js'
+
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -542,21 +544,7 @@ export async function activate(ctx) {
     run: runClaudeClassifyHook,
   })
 
-  const skillsRoot = path.resolve(skillsRootDir(), 'skills')
-  // @ref LLP 0011#interactive-walkthrough [implements]: contributes client skills the first-run walkthrough installs
-  for (const skillName of [
-    'hypaware-query',
-    'hypaware-reference',
-    'hypaware-privacy',
-    'hypaware-report',
-  ]) {
-    ctx.skills.register({
-      name: skillName,
-      plugin: PLUGIN_NAME,
-      clients: ['claude'],
-      sourceDir: path.join(skillsRoot, skillName),
-    })
-  }
+  registerSkills(ctx, PLUGIN_NAME, 'claude')
 
   const agentsRoot = path.resolve(skillsRootDir(), 'agents')
   ctx.agents.register({

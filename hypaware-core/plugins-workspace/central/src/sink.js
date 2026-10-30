@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import { openReceipts } from './receipts.js'
 
 import { CENTRAL_OPERATION_TIMEOUT_MS, RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail, readStopCode } from './backoff.js'
+import { PRODUCT_VERSION } from '../../../../src/core/product_telemetry/collection.js'
 import { claimPartitionMutation, isPartitionMutationBusy } from '../../../../src/core/util/mutation_guard.js'
 
 /**
@@ -1355,6 +1356,8 @@ async function postNdjson(args) {
         'content-type': 'application/x-ndjson',
         'content-length': String(bytes.byteLength),
         'x-hyp-batch-id': batchId,
+        // @ref LLP 0558#report [implements]: every retry reports the version loaded by this sender, including repair uploads
+        'x-hyp-client-version': PRODUCT_VERSION,
         ...(compressed ? { 'content-encoding': 'gzip', 'x-hyp-uncompressed-length': String(decodedLength) } : {}),
         ...(args.missing ? { 'x-hyp-sync-revision': args.missing.revision, 'x-hyp-sync-org': args.missing.org } : {}),
       },

@@ -257,6 +257,15 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
       const freshNodes = await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
       const freshEdges = await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
 
+      if (!refresh) {
+        const freshIds = new Set(freshEdges.filter(row => row.edge_type === 'ran' && row.dst_type === 'Skill').map(row => row.edge_id))
+        const skillUpdates = edgeRows.filter(row => row.edge_type === 'ran' && row.dst_type === 'Skill' && !freshIds.has(row.edge_id))
+        if (skillUpdates.length) {
+          const { refreshGraphRows } = await import('./maintenance.js')
+          await refreshGraphRows(storage, EDGE_DATASET, skillUpdates, signal, true)
+        }
+      }
+
       // No write starts once aborted; an append already under way settles
       signal?.throwIfAborted()
       if (freshNodes.length > 0) {

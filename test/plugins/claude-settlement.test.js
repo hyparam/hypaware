@@ -622,3 +622,244 @@ function desktop3pProjectsDir(env) {
 function jsonlRow(obj) {
   return JSON.stringify(obj)
 }
+
+test('settlement stamps origin and prompt_source from the transcript line', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-origin', [
+      jsonlRow({
+        sessionId: 'sess-origin', uuid: 'u-prompt', parentUuid: null,
+        type: 'user', origin: { kind: 'human' }, promptSource: 'queued',
+        message: { role: 'user', content: 'what next' },
+        timestamp: '2026-10-20T10:00:00.000Z',
+      }),
+    ])
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const row = fallbackRow({
+      session_id: 'sess-origin', role: 'user', content_text: 'what next',
+      match_key: matchKey('user', [{ type: 'text', text: 'what next' }]),
+    })
+
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+
+    assert.equal(out.message_id, 'u-prompt')
+    const attrs = /** @type {any} */ (out.attributes)
+    assert.deepEqual(attrs?.claude?.origin, { kind: 'human' })
+    assert.equal(attrs?.claude?.prompt_source, 'queued')
+    assert.equal(attrs?.claude?.match_key, undefined, 'spent match_key is still removed')
+    assert.equal(attrs?.gateway?.identity_source, undefined, 'fallback marker is still cleared')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0560 [tests]: an OTEL prompt row owes its transcript line only
+// provenance, never identity. `wants` names it, the stamp is a uuid lookup.
+
+test('wants names exactly the OTEL user-prompt rows that lack origin', async () => {
+  const env = await stageEnv()
+  try {
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const wants = /** @type {(row: Record<string, unknown>) => boolean} */ (enricher.wants)
+    assert.equal(typeof wants, 'function')
+
+    assert.equal(wants(otelPromptRow({ session_id: 's', uuid: 'u-1', content_text: 'hi' })), true, 'typed prompt, no origin yet')
+    assert.equal(wants(otelPromptRow({ session_id: 's', uuid: 'u-1', content_text: 'hi', claude: { origin: { kind: 'human' } } })), false, 'already stamped')
+    assert.equal(wants({ ...otelPromptRow({ session_id: 's', uuid: 'u-1', content_text: 'hi' }), role: 'assistant' }), false, 'assistant rows are out of scope')
+    assert.equal(wants({ ...otelPromptRow({ session_id: 's', uuid: 'u-1', content_text: 'hi' }), provider_uuid: undefined }), false, 'no native uuid, nothing to look up')
+    assert.equal(wants(fallbackRow({ session_id: 's', role: 'user', content_text: 'ok', match_key: 'k' })), false, 'a fallback row takes the match-key path instead')
+    const sweepRow = otelPromptRow({ session_id: 's', uuid: 'u-1', content_text: 'hi' })
+    const sweepAttrs = /** @type {any} */ (sweepRow.attributes)
+    sweepAttrs.gateway.source = 'backfill'
+    assert.equal(wants(sweepRow), false, 'a sweep row was built from the line already')
+    // A spooled row can carry attributes as a JSON string.
+    const spooled = otelPromptRow({ session_id: 's', uuid: 'u-1', content_text: 'hi' })
+    spooled.attributes = JSON.stringify(spooled.attributes)
+    assert.equal(wants(spooled), true)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('settlement stamps an OTEL prompt row from its transcript line by uuid, leaving identity alone', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-prov', [
+      jsonlRow({
+        sessionId: 'sess-prov', uuid: 'u-typed', parentUuid: 'u-prev', isSidechain: false,
+        type: 'user', userType: 'external', entrypoint: 'cli', permissionMode: 'default',
+        origin: { kind: 'human' }, promptSource: 'typed',
+        message: { role: 'user', content: 'what next' },
+        timestamp: '2026-10-26T10:00:00.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-prov', uuid: 'u-notify', parentUuid: 'u-typed', isSidechain: false,
+        type: 'user', userType: 'external', entrypoint: 'cli',
+        origin: { kind: 'task-notification' }, promptSource: 'system',
+        message: { role: 'user', content: '<task-notification>done</task-notification>' },
+        timestamp: '2026-10-26T10:00:05.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-prov', uuid: 'u-bare', parentUuid: 'u-notify', isSidechain: false,
+        type: 'user', userType: 'external', entrypoint: 'cli',
+        message: { role: 'user', content: 'a line with no origin' },
+        timestamp: '2026-10-26T10:00:06.000Z',
+      }),
+    ])
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const typed = otelPromptRow({ session_id: 'sess-prov', uuid: 'u-typed', content_text: 'what next' })
+    const notify = otelPromptRow({ session_id: 'sess-prov', uuid: 'u-notify', content_text: '<task-notification>done</task-notification>' })
+    const bare = otelPromptRow({ session_id: 'sess-prov', uuid: 'u-bare', content_text: 'a line with no origin' })
+    const missing = otelPromptRow({ session_id: 'sess-prov', uuid: 'u-not-landed', content_text: 'line not written yet' })
+
+    const out = /** @type {any[]} */ (await enricher.settle([typed, notify, bare, missing], settleCtx()))
+
+    // The typed turn takes the line's provenance, verbatim.
+    assert.notEqual(out[0], typed, 'a stamped row is a fresh object')
+    assert.deepEqual(out[0].attributes.claude.origin, { kind: 'human' })
+    assert.equal(out[0].attributes.claude.prompt_source, 'typed')
+    assert.equal(out[0].entrypoint, 'cli')
+    assert.equal(out[0].user_type, 'external')
+    assert.equal(out[0].permission_mode, 'default')
+    assert.equal(out[0].parent_uuid, 'u-prev')
+    assert.equal(out[0].raw_frame.uuid, 'u-typed')
+    // Identity, chain and attribution are exactly as projected.
+    assert.equal(out[0].message_id, 'u-typed')
+    assert.equal(out[0].part_id, 'u-typed#0')
+    assert.deepEqual(out[0].previous_message_id, typed.previous_message_id)
+    assert.equal(out[0].agent_id, undefined)
+    assert.equal(out[0].is_sidechain, undefined)
+    // What the event put there survives the merge.
+    assert.equal(out[0].attributes.claude.query_source, 'repl_main_thread')
+    assert.equal(out[0].attributes.gateway.source, 'otel')
+    assert.equal(out[0].attributes.client.version, '2.1.311')
+    // Once stamped, the row is no longer wanted.
+    assert.equal(/** @type {any} */ (enricher).wants(out[0]), false)
+
+    // An injected turn is labeled as what it is, not left to look human.
+    assert.deepEqual(out[1].attributes.claude.origin, { kind: 'task-notification' })
+    assert.equal(out[1].attributes.claude.prompt_source, 'system')
+
+    // A line without origin still fills the empty columns, and adds no origin.
+    assert.equal(out[2].entrypoint, 'cli')
+    assert.equal(out[2].attributes.claude.origin, undefined)
+    assert.equal(out[2].attributes.claude.prompt_source, undefined)
+
+    // A line that has not landed leaves the row untouched, same object.
+    assert.equal(out[3], missing)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('settleBatch hands a wanted OTEL prompt row to the enricher with no fallback row in the batch, and runs no committed scan', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-sel', [
+      jsonlRow({
+        sessionId: 'sess-sel', uuid: 'u-q', parentUuid: null, isSidechain: false,
+        type: 'user', entrypoint: 'cli', origin: { kind: 'human' }, promptSource: 'queued',
+        message: { role: 'user', content: 'queued question' },
+        timestamp: '2026-10-26T10:00:00.000Z',
+      }),
+    ])
+    const state = createGatewayState()
+    const api = createAiGatewayApi(state)
+    api.registerSettlementEnricher(createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile }))
+    const registration = aiGatewayDatasetRegistration(state)
+    let scanned = false
+    const ctx = settleCtx({
+      discoverCachePartitions: async () => { scanned = true; return [] },
+      readRows: async function* () {},
+    })
+
+    const row = otelPromptRow({ session_id: 'sess-sel', uuid: 'u-q', content_text: 'queued question' })
+    const bystander = uuidRow({ message_id: 'u-other', part_index: 0 })
+    const out = /** @type {any[]} */ (await /** @type {any} */ (registration).settleBatch([bystander, row], ctx))
+
+    assert.equal(out.length, 2, 'nothing is dropped')
+    assert.equal(out[0], bystander, 'an unwanted row is untouched')
+    assert.deepEqual(out[1].attributes.claude.origin, { kind: 'human' })
+    assert.equal(out[1].attributes.claude.prompt_source, 'queued')
+    assert.equal(out[1].part_id, 'u-q#0')
+    assert.equal(scanned, false, 'a wanted row is not a fallback: no committed-part_id scan')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a prompt row and a fallback tool row in one batch share one transcript load', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-share', [
+      jsonlRow({
+        sessionId: 'sess-share', uuid: 'u-p', parentUuid: null, isSidechain: false,
+        type: 'user', entrypoint: 'cli', origin: { kind: 'human' }, promptSource: 'typed',
+        message: { role: 'user', content: 'run it' },
+        timestamp: '2026-10-26T10:00:00.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-share', uuid: 'u-call', parentUuid: 'u-p', isSidechain: false,
+        type: 'assistant',
+        message: { id: 'msg_1', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } }] },
+        timestamp: '2026-10-26T10:00:01.000Z',
+      }),
+    ])
+    let loads = 0
+    const { sharedTranscriptLoader } = await import('../../hypaware-core/plugins-workspace/claude/src/transcript-cache.js')
+    const transcriptLoader = {
+      /** @param {any} o */
+      async load(o) { loads += 1; return sharedTranscriptLoader.load(o) },
+    }
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile, transcriptLoader })
+
+    const prompt = otelPromptRow({ session_id: 'sess-share', uuid: 'u-p', content_text: 'run it' })
+    const toolRow = {
+      ...fallbackRow({
+        session_id: 'sess-share', role: 'assistant', content_text: null,
+        match_key: matchKey('assistant', [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } }]),
+      }),
+      conversation_source: 'claude_code', part_type: 'tool_call', tool_call_id: 'toolu_1',
+    }
+    const out = /** @type {any[]} */ (await enricher.settle([prompt, toolRow], settleCtx()))
+
+    assert.equal(loads, 1, 'one transcript read serves both rows')
+    assert.deepEqual(out[0].attributes.claude.origin, { kind: 'human' })
+    assert.equal(out[1].message_id, 'u-call', 'the tool row still upgrades by tool id')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/**
+ * A Claude user-prompt row as the OTEL lane projects it: native uuid from the
+ * event's `message.uuid`, no match key, `gateway.source = otel`, the event's
+ * own `claude.*` facts, and nothing from the transcript.
+ *
+ * @param {{ session_id: string, uuid: string, content_text: string, claude?: Record<string, unknown> }} f
+ * @returns {Record<string, unknown>}
+ */
+function otelPromptRow(f) {
+  return {
+    message_id: f.uuid,
+    provider_uuid: f.uuid,
+    part_id: `${f.uuid}#0`,
+    part_index: 0,
+    part_type: 'text',
+    role: 'user',
+    session_id: f.session_id,
+    conversation_id: null,
+    conversation_source: 'claude_code',
+    client_name: 'claude',
+    cwd: '/work/repo',
+    content_text: f.content_text,
+    previous_message_id: ['u-earlier'],
+    attributes: {
+      claude: { query_source: 'repl_main_thread', terminal_type: 'vscode', ...(f.claude ?? {}) },
+      client: { name: 'claude', version: '2.1.311' },
+      gateway: { source: 'otel' },
+    },
+  }
+}

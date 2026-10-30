@@ -11,7 +11,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
 import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
 /**
- * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewaySettlementEnricher, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { GatewayState } from './types.js'
  */
@@ -335,7 +335,7 @@ export function aiGatewayDatasetRegistration(state) {
 function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
-    const plan = planSettleSelection(rows)
+    const plan = planSettleSelection(rows, state?.enrichers)
     if (!plan) return retainClaudeUsageCarriers(rows, ctx.storage)
     // @ref LLP 0085 [implements]: the settle pass may now REMOVE a row (a
     // late-resolved `.hypignore` ignore), not only upgrade its identity - the
@@ -451,6 +451,16 @@ function claudeResponseKeys(row) {
  *    @ref LLP 0441#select-the-successors [implements]: the renameable ids are
  *    the pre-settlement `message_id`s of the batch's fallback rows, so the
  *    successors LLP 0440's repair can move are knowable before the pass runs.
+ *  - a row its client's enricher asks for (`wants`). The gateway's own three
+ *    shapes all describe a row with something provisional about it; a row can
+ *    also be final in identity and still owe its native log a field only that
+ *    log records. Which rows those are is the client's knowledge, so the
+ *    enricher answers per row, from the row alone, and the answer is never
+ *    stored. Such a row does not set `hasFallback`: nothing about it can twin
+ *    a committed row, so the committed-part_id scan stays off for a batch
+ *    that holds only these.
+ *    @ref LLP 0560#wants [implements]: the plugin names the rows; the gateway
+ *    stays ignorant of what the plugin will do with them.
  *
  * One pass over the batch decides all three and the result is reused as the
  * `select` predicate: `isFallbackRow` parses the `attributes` column, so the
@@ -459,9 +469,10 @@ function claudeResponseKeys(row) {
  * batch can be renamed.
  *
  * @param {Record<string, unknown>[]} rows
+ * @param {Map<string, AiGatewaySettlementEnricher> | undefined} [enrichers] registered enrichers by `client_name`
  * @returns {{ selected: Set<Record<string, unknown>>, hasFallback: boolean } | undefined} `undefined` when there is nothing to settle
  */
-function planSettleSelection(rows) {
+function planSettleSelection(rows, enrichers) {
   /** @type {Set<Record<string, unknown>>} */
   const selected = new Set()
   /** @type {Set<string>} */
@@ -474,7 +485,7 @@ function planSettleSelection(rows) {
       const id = stringValue(row.message_id)
       if (id !== undefined) renameable.add(id)
     }
-    if (fallback || rowHasNullCwd(row)) selected.add(row)
+    if (fallback || rowHasNullCwd(row) || enricherWants(row, enrichers)) selected.add(row)
   }
   if (selected.size === 0) return undefined
   if (renameable.size > 0) {
@@ -483,6 +494,22 @@ function planSettleSelection(rows) {
     }
   }
   return { selected, hasFallback }
+}
+
+/**
+ * Whether the enricher registered for the row's client asks to see it. One
+ * map lookup and, when the client's enricher declares `wants`, one predicate
+ * call; a client with no enricher, or an enricher without `wants`, costs the
+ * lookup alone.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {Map<string, AiGatewaySettlementEnricher> | undefined} enrichers
+ */
+function enricherWants(row, enrichers) {
+  if (!enrichers || enrichers.size === 0) return false
+  const client = stringValue(row?.client_name)
+  const enricher = client ? enrichers.get(client) : undefined
+  return typeof enricher?.wants === 'function' && enricher.wants(row) === true
 }
 
 /**

@@ -5,7 +5,7 @@ import os from 'node:os'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/index.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
-import { registerNeutralSkills } from '../../../skills/index.js'
+import { registerSkills } from '../../../skills/index.js'
 import { createOpenclawAttach } from './attach.js'
 import { createOpenclawBackfillProvider } from './backfill.js'
 import { OPENCLAW_CONFIG_SECTION, validateOpenclawConfig } from './config.js'
@@ -159,7 +159,7 @@ export async function activate(ctx) {
     })
   )
 
-  registerNeutralSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
+  registerSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
 
   const openclawAttach = createOpenclawAttach({
     homeDir: ctx.env.HOME ?? os.homedir(),

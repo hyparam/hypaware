@@ -37,7 +37,9 @@ page; it doesn't prove the plugin can run.
 This reference identifies each plugin-owned family:
 
 - `session ...`: shared commands provided by `@hypaware/ai-gateway`,
-  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, or `@hypaware/cursor`.
+  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, `@hypaware/cursor`,
+  `@hypaware/copilot`, `@hypaware/nanoclaw`, `@hypaware/langgraph`, or
+  `@hypaware/antigravity` (also Antigravity Desktop).
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
@@ -290,17 +292,34 @@ sent). Search or output failures return `1`.
 ### `hyp query schema`
 
 ```text
-hyp query schema <dataset>
+hyp query schema <dataset> [--format <fmt>] [--json] [--output <file>] [--remote [<target>] [--org <label|*>]]
 ```
 
-Prints the registered columns for one local dataset. It doesn't activate a
-remote target, and it doesn't open the dataset's source. A dataset that
-declares no columns (an S3 query source with no `schema`, for example) prints
-`columns: none declared` rather than a count: SQL still resolves the source's
-columns when a query runs, and the output names a query that shows them.
+Prints the registered columns for one dataset. It doesn't open the dataset's
+source. A dataset that declares no columns (an S3 query source with no
+`schema`, for example) prints `columns: none declared` rather than a count:
+SQL still resolves the source's columns when a query runs, and the output
+names a query that shows them.
+
+Without `--remote` it reads this machine's registry. With `--remote` it reads
+the remote's schema for that dataset instead, resolving the target the same
+way `hyp query sql` does: a bare `--remote` selects the default target,
+`--remote TARGET` selects a named target, and `--org` (only with `--remote`)
+selects an organization. A failed remote lookup never falls back to the local
+registry: it prints nothing on stdout and exits with the same codes as a
+`hyp query sql --remote` failure.
+
+Formats are `table` (the default), `json`, `jsonl`, and `markdown`; `--json`
+is shorthand for `--format json`. `--output` writes the rows to a file and
+prints a receipt. Schema output is always complete, so `--max-bytes` and
+`--max-cell` are rejected with a usage error, as is `--refresh`. A dataset the
+remote doesn't serve is a remote failure. Locally, an unknown dataset returns
+`1` under `--format`, `--json`, or `--output`; the default table output prints
+a "no dataset registered" note and returns `0`.
 
 ```sh
 hyp query schema ai_gateway_messages
+hyp query schema ai_gateway_messages --remote team --format json
 ```
 
 ### `hyp query graph neighbors`
@@ -1246,6 +1265,8 @@ capture:
 | `@hypaware/cursor` | Five minutes | Yes |
 | `@hypaware/openclaw` | Five minutes | Yes |
 | `@hypaware/nanoclaw` | Five minutes | Yes (this is NanoClaw's only capture route) |
+| `@hypaware/antigravity` (also Antigravity Desktop) | Five minutes | Yes |
+| `@hypaware/copilot` | One minute | No (it is Copilot's only capture lane; with `on_join: false` it skips sessions from before the daemon started) |
 
 `hyp client detach <client>` stops every client's scheduled recovery, whatever
 `on_join` says; `hyp client attach <client>` resumes it.
@@ -2131,10 +2152,13 @@ hyp graph --help
 hyp graph project [--source <dataset>] [--refresh] [--dry-run]
 ```
 
+<!-- @ref LLP 0564#incremental-evidence [explains]: a default project merges new skill evidence into existing ran edges; --refresh replaces -->
 Reads registered projection contracts and writes the derived `node` and `edge`
 datasets. It is idempotent, and existing nodes and edges keep their properties
 unless you pass `--refresh`, which replaces matching rows with what the
-recordings show now. `--source` limits projection to one source dataset, and
+recordings show now. One exception: a session's skill evidence edge (`ran` to a
+`Skill`) gains any new evidence flags on a default project, and never loses the
+ones it had. `--source` limits projection to one source dataset, and
 `--dry-run` writes nothing. An empty successful result means that no
 eligible recordings exist.
 

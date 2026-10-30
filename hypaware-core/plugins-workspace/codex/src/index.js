@@ -1,8 +1,9 @@
 // @ts-check
 
+import { registerSkills } from '../../../skills/index.js'
+
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
@@ -329,20 +330,7 @@ export async function activate(ctx) {
     run: runCodexClassifyHook,
   })
 
-  const skillsRoot = path.resolve(skillsRootDir(), 'skills')
-  for (const skillName of [
-    'hypaware-query',
-    'hypaware-reference',
-    'hypaware-privacy',
-    'hypaware-report',
-  ]) {
-    ctx.skills.register({
-      name: skillName,
-      plugin: PLUGIN_NAME,
-      clients: ['codex'],
-      sourceDir: path.join(skillsRoot, skillName),
-    })
-  }
+  registerSkills(ctx, PLUGIN_NAME, 'codex')
 }
 
 /**
@@ -556,10 +544,6 @@ function resolveCodexHome(ctx) {
   return path.join(ctx.env.HOME ?? os.homedir(), '.codex')
 }
 
-function skillsRootDir() {
-  const here = fileURLToPath(import.meta.url)
-  return path.resolve(path.dirname(here), '..')
-}
 
 /**
  * @param {string} endpoint

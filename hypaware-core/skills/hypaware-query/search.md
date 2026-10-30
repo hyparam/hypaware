@@ -1,6 +1,6 @@
 # Recorded text search
 
-`hyp query grep "<text>"` searches recorded messages for a case-insensitive substring. Use `--regex` to interpret the text as a regular expression.
+`hyp query grep "<text>"` searches recorded messages for a case-insensitive substring. Use `--regex` to interpret the text as a regular expression. On a remote, regex search requires operator access; other credentials get literal search only.
 
 Narrow the search with `--session-id <id>`, `--chain-id <id>`, or `--from`/`--to` dates in YYYY-MM-DD format. `--limit <n>` defaults to 50 and accepts 1 to 1000; a larger value is refused.
 
@@ -10,4 +10,4 @@ Prefer grep for finding mentions of an error message, issue or PR number, filena
 
 - Grep searches `content_text`, `tool_name`, `session_id`, `conversation_id`, `agent_id`, `model`, `cwd`, `git_branch`, and `git_remote`. It does not search system prompts (`system_text`), tool definitions (`tools`), tool arguments (`tool_args`), `attributes`, or `raw_frame`. Use `hyp query sql` to search those columns.
 - Read stderr for notices about incomplete results. `more matches exist beyond the limit` means the limit cut the answer: narrow it or raise `--limit`. `the search stopped before covering every file` means files were never read, so a larger `--limit` cannot recover them: narrow the search and rerun. Narrow date ranges to reduce local scan work.
-- Local-only rows may be withheld. Use `--include-local-only` only with the user's informed consent.
+- Local-only rows may be withheld. Use `--include-local-only` only with the user's informed consent. Remote grep does not support this flag.

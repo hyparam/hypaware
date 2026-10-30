@@ -190,7 +190,7 @@ test('recordedReportClientLaunchable: a Claude install whose analyst copy failed
     clients: ['claude'],
     descriptors,
     homeDir: home,
-    skills: { list: () => [{ name: 'hypaware-report', clients: ['claude'], plugin: '@hypaware/claude', sourceDir: path.join(plugin, 'skills', 'hypaware-report') }] },
+    skills: { list: () => [{ name: 'hypaware-report', clients: ['claude'], plugin: '@hypaware/claude', sourceDir: fileURLToPath(new URL('../../../../hypaware-core/skills/hypaware-report', import.meta.url)) }] },
     agents: { list: () => [{ name: 'hypaware-analyst', clients: ['claude'], plugin: '@hypaware/claude', sourceFile: path.join(plugin, 'agents', 'hypaware-analyst.md') }] },
     stderr: { write: () => true },
   })

@@ -184,7 +184,13 @@ test('a gateway boot failure records the failed boot rather than a completed sto
       runId: 'gateway-boot-failure-test',
     })
     assert.equal(run.booted, false, 'fixture invariant: the configured listen must fail the boot')
-    assert.match(run.bootError ?? '', /EADDRINUSE/, 'fixture invariant: the boot must fail on the taken port')
+    const port = /** @type {AddressInfo} */ (home.squatter.address()).port
+    // Bun's bind error names the port without spelling the Node errno.
+    assert.ok(
+      /EADDRINUSE/.test(run.bootError ?? '') ||
+      run.bootError === `Failed to start server. Is port ${port} in use?`,
+      `fixture invariant: the boot must fail on the taken port, got ${run.bootError}`
+    )
     // The trap is gone from here on, so everything below reads the gateway's
     // own record rather than the condition that produced it.
     await new Promise(resolve => home.squatter.close(resolve))

@@ -198,6 +198,17 @@ export interface TranscriptEntry {
   is_compact_summary: boolean | undefined
   compact_metadata: unknown
   /**
+   * Claude Code's `origin` object on a user line, e.g. `{ kind: 'human' }`,
+   * `{ kind: 'task-notification' }`. Transcript-only; absent before 2.1.241
+   * and on every line that is not a submitted turn.
+   */
+  origin: Record<string, unknown> | undefined
+  /**
+   * Claude Code's `promptSource` on a user line: typed / queued /
+   * suggestion_accepted / sdk / system. Transcript-only.
+   */
+  prompt_source: string | undefined
+  /**
    * The Anthropic `message.usage` block Claude Code writes onto assistant
    * transcript lines (`input_tokens` / `output_tokens` /
    * `cache_*_input_tokens`). Backfill folds it into `attributes.usage`, the

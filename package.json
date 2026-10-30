@@ -1,6 +1,6 @@
 {
   "name": "hypaware",
-  "version": "1.46.0",
+  "version": "1.47.0",
   "type": "module",
   "description": "The improvement loop for all your agents.",
   "mcpName": "ai.hypaware/hypaware",
@@ -93,7 +93,7 @@
     "hyparquet-compressors": "1.1.2",
     "hysnappy": "1.1.1",
     "icebird": "0.9.2",
-    "squirreling": "0.16.13"
+    "squirreling": "0.16.15"
   },
   "optionalDependencies": {
     "hyparquet-writer": "0.17.0",

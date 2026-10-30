@@ -12,6 +12,7 @@ import { createHeldDatasetStore, readHeldDatasets } from '../../src/core/sinks/h
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 import { readRequestBody } from '../helpers/request_body.js'
 import { temporaryDirectory } from '../helpers/temp_dir.js'
+import { PRODUCT_VERSION } from '../../src/core/product_telemetry/collection.js'
 
 /** @import { HeldDatasetStore } from '../../src/core/sinks/types.js' */
 
@@ -190,7 +191,7 @@ function makeIdentity() {
  * @param {(call: { url: string, method: string, batchId: string | undefined, lines: string[] }) => (number | { status: number, retryAfter?: number } | Promise<number | { status: number, retryAfter?: number }>)} [responder]
  */
 function makeFetch(responder) {
-  /** @type {Array<{ url: string, method: string, batchId: string | undefined, lines: string[], rowCount: number }>} */
+  /** @type {Array<{ url: string, method: string, batchId: string | undefined, version: string | undefined, lines: string[], rowCount: number }>} */
   const calls = []
   // Count of response bodies the sink cancelled (drained) before parking on
   // backpressure: proves it releases the socket rather than leaking it.
@@ -204,6 +205,7 @@ function makeFetch(responder) {
       url: String(url),
       method: String(init?.method ?? 'GET'),
       batchId: headers['x-hyp-batch-id'],
+      version: headers['x-hyp-client-version'],
       lines,
       rowCount: lines.length,
     }
@@ -256,6 +258,7 @@ test('missing-row repair binds the org, preserves its retry batch and never adva
     assert.equal(calls[0].url, 'http://server:8740/v1/ingest-missing/ai_gateway_messages')
     assert.equal(calls[0].headers['x-hyp-batch-id'], calls[1].headers['x-hyp-batch-id'])
     assert.equal(calls[1].headers['x-hyp-sync-org'], 'test-org')
+    assert.ok(calls.every(call => call.headers['x-hyp-client-version'] === PRODUCT_VERSION))
     assert.equal(calls[0].body, calls[1].body)
     assert.equal(watermarks.writes.length, 0)
     org = 'different-org'
@@ -1336,6 +1339,7 @@ test('a 401 re-sends the same body + batch-id after one refresh', async () => {
   assert.equal(result.status, 'exported')
   assert.equal(identityClient.refreshes, 1)
   assert.equal(calls.length, 2)
+  assert.ok(calls.every(call => call.version === PRODUCT_VERSION))
   assert.equal(calls[0].batchId, calls[1].batchId)
   assert.deepEqual(calls[0].lines, calls[1].lines)
 })
@@ -1810,6 +1814,7 @@ test('compression is negotiated, bounded to each chunk, and falls back on 415', 
   const { sink } = buildSink({ count: 12_000, fetchFn })
   assert.equal((await sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
   assert.equal(requests.length, 4)
+  assert.ok(requests.every(request => request.headers['x-hyp-client-version'] === PRODUCT_VERSION))
   assert.equal(requests[0].headers['content-encoding'], undefined)
   assert.equal(requests[1].headers['content-encoding'], 'gzip')
   assert.ok(requests[1].wire < requests[1].decoded / 2)

@@ -18,7 +18,16 @@ tag the client uses for diagnostics, humans read the HTTP status.
 
 All paths are versioned with a leading `/v1/`. Backwards-incompatible
 shape changes go to `/v2/` and both versions stay live until the kernel
-release that drops `/v1/` ships. Clients send no version header.
+release that drops `/v1/` ships.
+
+Config GETs and ingest POSTs carry the optional `X-Hyp-Client-Version`
+header: the HypAware package version loaded by the sending process, not a
+newer version installed on disk. This operational observation is independent
+of product telemetry. Servers accept a bounded version of at most 32
+characters and stamp its observation with server time; missing or malformed
+values never reject an otherwise valid request. Old servers ignore the
+header, and old clients remain compatible without it. See LLP 0558 in the
+client and LLP 0661 in the server for the current-version read contract.
 
 ## Identity
 

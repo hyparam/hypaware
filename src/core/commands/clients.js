@@ -14,7 +14,7 @@ import { CLAUDE_SKILL_RELOAD_HINT, copiedClaudeSkills, materializeClientAssets }
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
-import { writeClientRecording } from '../config/client_recording.js'
+import { createClientRecordingPolicyReader, writeClientRecording } from '../config/client_recording.js'
 import { confirmOllamaRecording } from '../control/client_recording.js'
 import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
@@ -235,7 +235,7 @@ async function runClientLifecycle(action, argv, ctx) {
             continue
           }
         }
-        await detachClientViaCore({
+        const detached = await detachClientViaCore({
           name,
           descriptor,
           dryRun: parsed.dryRun,
@@ -243,6 +243,9 @@ async function runClientLifecycle(action, argv, ctx) {
           recordingSwitch: recording.status,
           ctx,
         })
+        if (!parsed.json && detached?.changed === true && detached.settingsPath !== undefined) {
+          writeSharedSettingsSiblings({ ctx, name, settingsPath: detached.settingsPath, clientNames, clientDescriptors })
+        }
         if (name === 'ollama' && !parsed.json && !parsed.dryRun) await writeOllamaDirectRecovery(ctx)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -2014,6 +2017,30 @@ export async function detachAllClientsFromDisk(ctx) {
   // @ref LLP 0238#ca-survives-detach [implements]: uninstall removes what detach keeps
   const purged = await purgeProxyTrustResidue({ ctx })
   return { detached, failed, purgeLines: purged.lines }
+}
+
+/**
+ * Clients that share one managed settings file (the Antigravity CLI and
+ * Desktop load the same plugin manifest) lose it together when either is
+ * detached. Name each sibling that is still recording, so the user learns its
+ * plugin is gone and how to restore it.
+ *
+ * @param {{
+ *   ctx: CommandRunContext,
+ *   name: string,
+ *   settingsPath: string,
+ *   clientNames: string[],
+ *   clientDescriptors: Map<string, ClientDescriptor>,
+ * }} args
+ */
+function writeSharedSettingsSiblings({ ctx, name, settingsPath, clientNames, clientDescriptors }) {
+  const homeDir = ctx.env.HOME ?? os.homedir()
+  for (const [sibling, descriptor] of clientDescriptors) {
+    if (sibling === name || clientNames.includes(sibling) || !descriptor.attachProbe) continue
+    if (resolveClientSettingsPath(sibling, descriptor.attachProbe.settings_file, ctx.env, homeDir) !== settingsPath) continue
+    if (!createClientRecordingPolicyReader({ env: ctx.env, plugin: descriptor.plugin })().recording) continue
+    ctx.stdout.write(`  This also removed the plugin for ${sibling}, which is still recording. Run 'hyp attach ${sibling}' to restore it.\n`)
+  }
 }
 
 /**

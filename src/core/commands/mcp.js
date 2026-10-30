@@ -9,6 +9,8 @@ import { createMcpServer } from '../mcp/server.js'
 import { serveStdio } from '../mcp/stdio.js'
 import { buildOperationContext } from '../cli/verb_command.js'
 import { pluginScopedConfig } from '../config/plugin_scope.js'
+import { createMcpCallRecorder } from '../product_telemetry/client.js'
+import { queryResult } from '../product_telemetry/collection.js'
 
 /**
  * @import { CommandRunContext, HypAwareV2Config, PluginName } from '../../../hypaware-plugin-kernel-types.js'
@@ -90,6 +92,8 @@ export async function runMcp(argv, ctx) {
     }
     return scoped
   }
+  // Null while product telemetry is off, so the server skips the observer.
+  const recorder = createMcpCallRecorder()
   const server = createMcpServer({
     verbs: ctx.verbs,
     query: ctx.query,
@@ -111,6 +115,16 @@ export async function runMcp(argv, ctx) {
     transport: 'stdio',
     allowOperator: true,
     serverVersion: version,
+    // @ref LLP 0561#mcp [implements]: one mcp.tool_call per tools/call; query fields from the result shape only
+    onToolCall: recorder
+      ? (call) => recorder.record({
+        tool: call.tool,
+        outcome: call.outcome,
+        error: call.error,
+        duration_ms: call.duration_ms,
+        query: call.outcome === 'success' ? queryResult(call.tool, call.value, 'local', 'mcp') : undefined,
+      })
+      : undefined,
   })
 
   const tools = server.listTools()
@@ -135,6 +149,7 @@ export async function runMcp(argv, ctx) {
       message: err instanceof Error ? err.message : String(err),
     }),
   })
+  recorder?.flush()
   log.info('mcp.serve_stop', { [Attr.COMPONENT]: 'mcp', [Attr.OPERATION]: 'mcp.serve' })
   return 0
 }

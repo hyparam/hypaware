@@ -26,9 +26,9 @@ const SHIPPED = trackedFiles(REPO_ROOT, new Set(['.md'])).filter(
 )
 
 test('every shipped SKILL.md frontmatter parses, with a name and a description', () => {
-  // The three trees (claude, codex, neutral) plus gascity: guard against the
+  // The four shared skills plus gascity: guard against the
   // discovery quietly finding nothing.
-  assert.ok(SHIPPED.length >= 13, `expected the shipped skill files, found ${SHIPPED.length}`)
+  assert.ok(SHIPPED.length >= 5, `expected the shipped skill files, found ${SHIPPED.length}`)
   for (const file of SHIPPED) {
     const fm = readSkillFrontmatter(path.join(REPO_ROOT, file))
     assert.equal(fm.name, path.basename(path.dirname(file)), `${file}: name does not match its directory`)

@@ -166,6 +166,87 @@ export const ERROR_CODES = Object.freeze([
   'query_failed',
   'startup_failed'
 ])
+// v2 only (LLP 0561#errors). Kept out of ERROR_CODES because v1 is closed and
+// a v1 receiver refuses any other code.
+export const V2_ERROR_CODES = Object.freeze([...ERROR_CODES, 'budget_exceeded'])
+
+// The wire versions this client can build. A batch is v2 only when the
+// receiver's last capability answer listed 2 (LLP 0666#advert, server repo).
+// @ref LLP 0561#rollout [implements]: one version per batch, v2 only to a receiver that advertised it
+export const SCHEMA_VERSIONS = Object.freeze([1, 2])
+// Each list below must stay a subset of the receiver's (hypaware-server
+// `src/telemetry/contract.js`); anything else is reported as `other`.
+export const MCP_TOOLS = Object.freeze([
+  'query_sql',
+  'grep_search',
+  'graph_neighbors',
+  'session_evidence',
+  'list_recommendations',
+  'get_recommendation',
+  'set_recommendation_status',
+  'open_recommendations',
+  'fix_recommendation',
+  'check_team_history',
+  'other'
+])
+export const QUERY_TOOLS = Object.freeze([
+  'query_sql',
+  'grep_search',
+  'graph_neighbors',
+  'session_evidence'
+])
+export const QUERY_DATASETS = Object.freeze([
+  'ai_gateway_messages',
+  'claude_telemetry_events',
+  'logs',
+  'traces',
+  'metrics',
+  'github_events',
+  'node',
+  'edge',
+  'session_summaries_daily',
+  'audit_events',
+  'product_events',
+  'product_metrics',
+  'other'
+])
+export const MAX_QUERY_DATASETS = 4
+export const QUERY_LOCATIONS = Object.freeze(['local', 'remote'])
+export const QUERY_ROWS = Object.freeze([
+  '0',
+  '1-10',
+  '11-100',
+  '101-1000',
+  '>1000',
+  'unknown'
+])
+export const QUERY_SURFACES = Object.freeze([
+  'cli',
+  'mcp',
+  'agent_shell',
+  'unknown'
+])
+export const QUERY_FIELDS = Object.freeze([
+  'datasets',
+  'location',
+  'rows',
+  'surface'
+])
+// Environment variables a known agent harness sets on the shell commands it
+// runs. Only presence is read; the value is never read or sent.
+// @ref LLP 0561#query [implements]: agent_shell from harness markers, detected and never forwarded
+export const AGENT_SHELL_MARKERS = Object.freeze([
+  'CLAUDECODE',
+  'CLAUDE_CODE_SESSION_ID',
+  'CODEX_THREAD_ID',
+  'CODEX_SANDBOX',
+  'GEMINI_CLI',
+  'CURSOR_AGENT'
+])
+const QUERY_COMMANDS = new Set(COMMANDS.filter((c) => c.startsWith('query ')))
+/** @param {string} command */
+export const isQueryCommand = (command) => QUERY_COMMANDS.has(command)
+
 const COMPONENTS = [
   'cli',
   'daemon',
@@ -269,7 +350,9 @@ function timestamp(value) {
 // @ref LLP 0393#contract [implements]: finite per-kind vocabularies, never arbitrary OTEL attributes
 /** @param {unknown} body @param {number} now @param {boolean} [server] @returns {string | null} */
 export function validateBatch(body, now, server = false) {
-  if (!object(body) || body.schema_version !== 1) return 'unsupported_version'
+  if (!object(body) || !SCHEMA_VERSIONS.includes(body.schema_version))
+    return 'unsupported_version'
+  const v2 = body.schema_version === 2
   if (
     !keys(body, ['schema_version', 'batch_id', 'resource', 'records']) ||
     !uuid(body.batch_id)
@@ -341,7 +424,7 @@ export function validateBatch(body, now, server = false) {
     if (record.kind === 'event') {
       if (
         !keys(record, ['kind', 'timestamp', 'name', 'attributes']) ||
-        !event(record.name, record.attributes)
+        !event(record.name, record.attributes, v2)
       )
         return 'invalid_event'
     } else if (record.kind === 'metric') {
@@ -362,18 +445,38 @@ export function validateBatch(body, now, server = false) {
   return null
 }
 
-/** @param {string} name @param {Record<string, any>} a */
-function event(name, a) {
+/**
+ * The four query fields travel together or not at all.
+ * @param {Record<string, any>} a
+ */
+function queryFields(a) {
+  let present = 0
+  for (const k of QUERY_FIELDS) if (Object.hasOwn(a, k)) present++
+  if (present === 0) return true
+  return (
+    present === QUERY_FIELDS.length &&
+    Array.isArray(a.datasets) &&
+    a.datasets.length <= MAX_QUERY_DATASETS &&
+    new Set(a.datasets).size === a.datasets.length &&
+    a.datasets.every((v) => QUERY_DATASETS.includes(v)) &&
+    QUERY_LOCATIONS.includes(a.location) &&
+    QUERY_ROWS.includes(a.rows) &&
+    QUERY_SURFACES.includes(a.surface)
+  )
+}
+
+/** @param {string} name @param {Record<string, any>} a @param {boolean} v2 */
+function event(name, a, v2) {
+  const codes = v2 ? V2_ERROR_CODES : ERROR_CODES
   switch (name) {
     case 'cli.invocation':
       return (
-        keys(a, [
-          'command',
-          'invocation_kind',
-          'outcome',
-          'exit_class',
-          'duration_ms'
-        ]) &&
+        keys(
+          a,
+          ['command', 'invocation_kind', 'outcome', 'exit_class', 'duration_ms'],
+          v2 && isQueryCommand(a.command) ? QUERY_FIELDS : []
+        ) &&
+        queryFields(a) &&
         COMMANDS.includes(a.command) &&
         ['execution', 'help', 'version', 'unknown'].includes(
           a.invocation_kind
@@ -403,7 +506,7 @@ function event(name, a) {
           'other'
         ].includes(a.step) &&
         OUTCOMES.includes(a.outcome) &&
-        ERROR_CODES.includes(a.error_code) &&
+        codes.includes(a.error_code) &&
         number(a.duration_ms, DAY_MS)
       )
     case 'client.attachment':
@@ -412,7 +515,7 @@ function event(name, a) {
         ADAPTERS.includes(a.adapter) &&
         ['attach', 'detach'].includes(a.operation) &&
         OUTCOMES.includes(a.outcome) &&
-        ERROR_CODES.includes(a.error_code)
+        codes.includes(a.error_code)
       )
     case 'enrollment':
       return (
@@ -425,7 +528,7 @@ function event(name, a) {
         keys(a, ['transition', 'outcome', 'error_code']) &&
         ['start', 'ready', 'stop', 'update'].includes(a.transition) &&
         OUTCOMES.includes(a.outcome) &&
-        ERROR_CODES.includes(a.error_code)
+        codes.includes(a.error_code)
       )
     case 'installation.milestone':
       return (
@@ -439,8 +542,22 @@ function event(name, a) {
         keys(a, ['component', 'operation', 'error_code', 'occurrence_count']) &&
         COMPONENTS.includes(a.component) &&
         OPERATIONS.includes(a.operation) &&
-        ERROR_CODES.includes(a.error_code) &&
+        codes.includes(a.error_code) &&
         integer(a.occurrence_count, 1000, 1)
+      )
+    case 'mcp.tool_call':
+      return (
+        v2 &&
+        keys(
+          a,
+          ['tool', 'outcome', 'error_code', 'duration_ms'],
+          QUERY_TOOLS.includes(a.tool) ? QUERY_FIELDS : []
+        ) &&
+        queryFields(a) &&
+        MCP_TOOLS.includes(a.tool) &&
+        OUTCOMES.includes(a.outcome) &&
+        codes.includes(a.error_code) &&
+        number(a.duration_ms, DAY_MS)
       )
     default:
       return false

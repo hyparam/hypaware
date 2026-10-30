@@ -30,10 +30,7 @@ import url from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '../..')
 
-const HOSTS = {
-  claude: 'hypaware-core/plugins-workspace/claude/skills',
-  codex: 'hypaware-core/plugins-workspace/codex/skills',
-}
+const HOSTS = { shared: 'hypaware-core/skills' }
 
 /** @type {{ constraints: { id: string, pattern: string, harm: string }[] }} */
 const { constraints } = JSON.parse(

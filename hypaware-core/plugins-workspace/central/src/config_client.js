@@ -1,6 +1,7 @@
 // @ts-check
 
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, readBodyCapped, readStopCode, discardBody } from './backoff.js'
+import { PRODUCT_VERSION } from '../../../../src/core/product_telemetry/collection.js'
 
 /**
  * @import { ConfigControlFacade, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
@@ -297,6 +298,8 @@ export function createConfigPullLoop(args) {
         signal,
         headers: {
           authorization: `Bearer ${jwt}`,
+          // @ref LLP 0558#report [implements]: the loaded process version bypasses optional analytics and its backlog
+          'x-hyp-client-version': PRODUCT_VERSION,
           // If-None-Match always reflects the *running* config: the
           // server reads it as the fleet-convergence signal, so a
           // gateway mid-apply keeps presenting its old etag.

@@ -422,10 +422,11 @@ function compareDupRows(a, b) {
  * @param {'node' | 'edge'} dataset
  * @param {GraphRow[]} rows
  * @param {AbortSignal} [signal] once aborted, no further partition rewrite starts
+ * @param {boolean} [mergeEvidence] preserve existing evidence during partial projection
  * @returns {Promise<void>}
  * @ref LLP 0428#refresh [implements]: explicit refresh reuses conditional generation replacement.
  */
-export async function refreshGraphRows(storage, dataset, rows, signal) {
+export async function refreshGraphRows(storage, dataset, rows, signal, mergeEvidence = false) {
   const idCol = ID_COLUMNS[dataset]
   const byId = new Map(rows.map(row => [row[idCol], row]))
   const parts = await discoverCachePartitions(storage.cacheRoot, { datasets: [dataset] })
@@ -437,12 +438,26 @@ export async function refreshGraphRows(storage, dataset, rows, signal) {
     if (!tableExists(tableDir)) continue
     const replacements = new Map()
     const foreign = new Set()
+    const folded = new Map()
     for await (const existing of scanRowsFromTable(tableDir)) {
-      const fresh = byId.get(existing[idCol])
+      signal?.throwIfAborted()
+      let fresh = byId.get(existing[idCol])
       if (!fresh) continue
+      const id = String(existing[idCol])
       if (fresh.projector !== existing.projector || fresh.source_dataset !== existing.source_dataset) {
-        foreign.add(String(existing[idCol]))
+        foreign.add(id)
         continue
+      }
+      if (mergeEvidence) {
+        // @ref LLP 0564#incremental-evidence: partial scans add evidence, never retract it.
+        const merged = { ...existing }
+        for (const key of ['props', 'source_keys']) {
+          if (typeof merged[key] === 'string') merged[key] = JSON.parse(merged[key])
+        }
+        // Copies awaiting compaction are all dropped below, so fold each into one row.
+        mergeRow(merged, folded.get(id) ?? fresh)
+        folded.set(id, merged)
+        fresh = merged
       }
       // Avoid a generation rewrite when this projection is already current.
       const same = Object.keys(fresh).every(key => {
@@ -453,7 +468,7 @@ export async function refreshGraphRows(storage, dataset, rows, signal) {
         return isDeepStrictEqual(value, fresh[key])
           || (key === 'first_seen' && firstSeenTime(value) === firstSeenTime(fresh[key]))
       })
-      if (!same) replacements.set(String(existing[idCol]), { ...existing, ...fresh })
+      if (!same || replacements.has(id)) replacements.set(id, { ...existing, ...fresh })
     }
     for (const id of foreign) {
       if (replacements.has(id)) throw new Error('graph refresh: shared projector identity requires a full graph rebuild')

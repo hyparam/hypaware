@@ -900,6 +900,30 @@ export function withToolUseResult(attributes, entry) {
 }
 
 /**
+ * Merge the transcript line's turn provenance into
+ * `attributes.claude.origin` and `attributes.claude.prompt_source`,
+ * verbatim. These are the only positive markers of a human-typed turn
+ * Claude Code records; the wire request carries neither, so promoting
+ * them is what lets a query separate typed input from injected
+ * user-role content (notifications, peer traffic, skill expansions)
+ * without a text-prefix rule. Merged, never assigned, so a row's
+ * `spawned_by_tool_use_id` or `tool_use_result` survives.
+ *
+ * @param {unknown} attributes  existing message/row attributes (plain object or undefined)
+ * @param {TranscriptEntry} entry
+ * @returns {unknown} the attributes with the provenance merged in;
+ *   the input untouched when the entry carries none
+ */
+export function withTurnOrigin(attributes, entry) {
+  if (entry.origin === undefined && entry.prompt_source === undefined) return attributes
+  const base = isPlainObject(attributes) ? attributes : {}
+  const claude = isPlainObject(base.claude) ? { ...base.claude } : {}
+  if (entry.origin !== undefined) claude.origin = entry.origin
+  if (entry.prompt_source !== undefined) claude.prompt_source = entry.prompt_source
+  return { ...base, claude }
+}
+
+/**
  * The block type a single transcript line holds: used by the
  * splitter's order-alignment sanity check. String content is a text
  * line; array content reports the first block's type (lines are
@@ -1028,6 +1052,13 @@ export function transcriptEntryFromRow(row) {
     hook_event: stringValue(readKey(attachment, 'hookEvent')) ?? stringValue(row.hookEvent),
     is_compact_summary: typeof row.isCompactSummary === 'boolean' ? row.isCompactSummary : undefined,
     compact_metadata: readKey(row, 'compactMetadata') ?? readKey(row, 'compact_metadata'),
+    // Claude Code stamps who a user turn came from on the transcript line only
+    // (never the wire): `origin.kind` is human / task-notification / peer /
+    // coordinator; `promptSource` is typed / queued / suggestion_accepted /
+    // sdk / system. Both are absent on tool results, subagent prompts, skill
+    // expansions, interrupts and compaction. Present from Claude Code 2.1.241.
+    origin: isPlainObject(row.origin) ? row.origin : undefined,
+    prompt_source: stringValue(row.promptSource) ?? stringValue(row.prompt_source),
     // Claude Code writes the API `usage` block onto assistant transcript lines;
     // backfill surfaces it as attributes.usage to match live capture.
     usage: readKey(message, 'usage'),

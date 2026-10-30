@@ -1,5 +1,7 @@
 // @ts-check
 
+import { performance } from 'node:perf_hooks'
+
 import { Attr, getLogger } from '../observability/index.js'
 import { jsonReplacer } from '../query/format.js'
 import { UNDECLARED_SCHEMA_NOTE } from '../query/schema.js'
@@ -70,6 +72,7 @@ const HINTS_BY_AUTH_CLASS = Object.freeze({
  *   allowOperator?: boolean,
  *   allowScopes?: readonly string[],
  *   serverVersion?: string,
+ *   onToolCall?: (call: { tool: string, outcome: 'success' | 'failure', error?: unknown, value?: unknown, duration_ms: number }) => void,
  * }} opts
  * @ref LLP 0034#tool-auth-class [implements]: read/operator boundary lives on the tool; the credential scope gates it
  */
@@ -81,6 +84,7 @@ export function createMcpServer(opts) {
   // assembly already listed.
   const allowScopes = new Set(opts.allowScopes ?? [])
   const serverVersion = opts.serverVersion ?? '0.0.0'
+  const onToolCall = opts.onToolCall
 
   const log = getLogger(SERVER_COMPONENT)
 
@@ -381,7 +385,7 @@ export function createMcpServer(opts) {
         // either way, because an async function's promise adopts the one it
         // returns. The `await` is kept so it still would if a `try` were ever
         // added inside this function, where the difference is real.
-        return await callTool(id, params)
+        return await (onToolCall ? observedCallTool(id, params) : callTool(id, params))
       case 'resources/read':
         return readResource(id, params)
       case 'prompts/list':
@@ -396,10 +400,43 @@ export function createMcpServer(opts) {
   }
 
   /**
+   * `callTool` with one `onToolCall` report per call: the tool name, whether
+   * it succeeded, the thrown value or result, and its duration. A throwing
+   * observer never changes the reply.
+   *
    * @param {string | number | null} id
    * @param {any} params
    */
-  async function callTool(id, params) {
+  async function observedCallTool(id, params) {
+    const observe = /** @type {NonNullable<typeof onToolCall>} */ (onToolCall)
+    const started = performance.now()
+    /** @type {{ error?: unknown, value?: unknown }} */
+    const seen = {}
+    /** @type {any} */
+    let reply
+    try {
+      reply = await callTool(id, params, seen)
+      return reply
+    } finally {
+      try {
+        const failed = !reply || reply.error !== undefined || reply.result?.isError === true
+        observe({
+          tool: typeof params?.name === 'string' ? params.name : '',
+          outcome: failed ? 'failure' : 'success',
+          ...(failed ? { error: seen.error ?? null } : { value: seen.value }),
+          duration_ms: performance.now() - started,
+        })
+      } catch {}
+    }
+  }
+
+  /**
+   * @param {string | number | null} id
+   * @param {any} params
+   * @param {{ error?: unknown, value?: unknown }} [seen] filled with the
+   *   tool's thrown value or result, for {@link observedCallTool}
+   */
+  async function callTool(id, params, seen) {
     const name = params?.name
     const verb = typeof name === 'string' ? verbs.getByTool(name) : undefined
     if (!verb) {
@@ -430,6 +467,7 @@ export function createMcpServer(opts) {
     }
     try {
       const structured = await runTool(verb, validated.params, owner)
+      if (seen) seen.value = structured
       // Round-trip through the query replacer so BigInt/Date in rows can't
       // break the outer response serialization, and structuredContent stays
       // a plain JSON value.
@@ -446,6 +484,7 @@ export function createMcpServer(opts) {
       // Coerced, not passed through: `err.message` is whatever the plugin's
       // throw carried, and a non-string one broke the transport's own
       // `JSON.stringify` the same way, for no reply at all.
+      if (seen) seen.error = err
       const text = describeThrown(err)
       return jsonRpcResult(id, { content: [{ type: 'text', text }], isError: true })
     }

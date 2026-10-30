@@ -124,6 +124,26 @@ async function run(source, query) {
 
 // --- pushdown conversion -----------------------------------------------------
 
+test('boolean truth predicates fall back to the engine through parquet scans', async () => {
+  const source = await parquetSourceFromRows([
+    { name: 'id', type: 'INT64', nullable: false },
+    { name: 'flag', type: 'BOOLEAN', nullable: true },
+  ], [{ id: 1, flag: true }, { id: 2, flag: false }, { id: 3, flag: null }])
+  for (const [predicate, ids] of [
+    ['flag IS TRUE', [1]],
+    ['flag IS NOT TRUE', [2, 3]],
+    ['flag IS FALSE', [2]],
+    ['flag IS NOT FALSE', [1, 3]],
+    ['id > 1 AND flag IS NOT TRUE', [2, 3]],
+    ['id = 1 OR flag IS FALSE', [1, 2]],
+    ['NOT (flag IS TRUE)', [2, 3]],
+  ]) {
+    const query = `SELECT id FROM t WHERE ${predicate} ORDER BY id`
+    assert.equal(whereToParquetFilter(whereOf(query)), undefined, query)
+    assert.deepEqual((await run(source, query)).map(row => Number(row.id)), ids, query)
+  }
+})
+
 // Integer literals stay plain numbers: hyparquet >= 1.28.2 compares them to
 // bigint-decoded INT64 columns through `equals()`, and its bloom hashing
 // rejects a bigint for INT32/FLOAT/DOUBLE, so coercing would cost pruning.
