@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { isPartitionMutationBusy, withPartitionMutationLock } from './partition.js'
 
@@ -29,24 +30,54 @@ const RESERVE_RETRY_DELAY_MS = 25
 /**
  * Read the persisted `nextSeq` watermark. The value is stored as a decimal
  * string so the int64 range survives JSON without bigint/precision hazards.
- * Returns `null` when the file is missing or unparseable: the caller then
- * starts from 1 (a fresh cache), which never collides with a previously
- * issued seq because a real cache always has a `nextSeq >= 1` on disk.
+ * Returns `null` only when the file is absent: the caller then starts from 1
+ * (a fresh cache). A file that is present but unreadable or malformed is not
+ * a fresh cache, and restarting at 1 over it would re-issue seqs below every
+ * sink watermark, so those rows would never export. It recovers instead to
+ * {@link recoveredNextSeq}, and the caller's write replaces the bad file.
  *
  * @param {string} statePath
  * @returns {Promise<bigint | null>}
  */
 async function readNextSeq(statePath) {
+  /** @type {unknown} */
+  let nextSeq
   try {
-    const raw = await fs.readFile(statePath, 'utf8')
-    const parsed = JSON.parse(raw)
-    if (typeof parsed?.nextSeq === 'string' && /^\d+$/.test(parsed.nextSeq)) {
-      return BigInt(parsed.nextSeq)
-    }
-    return null
-  } catch {
-    return null
+    nextSeq = JSON.parse(await fs.readFile(statePath, 'utf8'))?.nextSeq
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return null
+    return recoveredNextSeq(statePath, error)
   }
+  if (typeof nextSeq === 'string' && /^\d+$/.test(nextSeq)) return BigInt(nextSeq)
+  return recoveredNextSeq(statePath, new Error('nextSeq is not a decimal string'))
+}
+
+/**
+ * Restart point for a counter whose state is lost: the wall clock in
+ * microseconds. The counter advances by one per committed row, so it can only
+ * have passed this floor by committing about 1.8e15 rows (or, after an earlier
+ * recovery, more than a million rows a second since then). Every seq already
+ * issued, and so every sink watermark, stays below it without scanning the
+ * cache. The result is far inside int64.
+ *
+ * @ref LLP 0565#why-the-clock [implements]: an O(1) floor above every issued seq, no cache scan
+ * @param {string} statePath
+ * @param {unknown} cause
+ * @returns {bigint}
+ */
+function recoveredNextSeq(statePath, cause) {
+  const nextSeq = BigInt(Date.now()) * 1000n
+  getLogger('cache', { mirrorStderr: true }).warn(
+    'ingest seq state is unreadable; restarting the counter above every issued seq',
+    {
+      [Attr.OPERATION]: 'cache.ingest_seq_read',
+      [Attr.ERROR_KIND]: 'ingest_seq_unreadable',
+      state_path: statePath,
+      read_error: cause instanceof Error ? cause.message : String(cause),
+      recovered_next_seq: nextSeq.toString(),
+    }
+  )
+  return nextSeq
 }
 
 /**
