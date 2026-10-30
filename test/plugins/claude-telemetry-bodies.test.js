@@ -368,7 +368,7 @@ test('a text-bearing response body ending in a tool_use never falls back to its 
   const carriers = /** @type {any[]} */ (projection.messages)
     .filter((message) => message.attributes?.usage)
   assert.equal(carriers.length, 1, 'exactly one row carries the response usage')
-  assert.equal(carriers[0].provider_uuid, 'u-asst')
+  assert.equal(carriers[0].raw_frame.uuid, 'u-asst')
   assert.equal(carriers[0].attributes.usage.output_tokens, 113)
 })
 

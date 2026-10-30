@@ -112,7 +112,7 @@ function rowsFor(events) {
  * @param {string} messageId
  */
 function rowFor(rows, messageId) {
-  const row = rows.find((r) => r.message_id === messageId)
+  const row = rows.find((r) => r.message_id === messageId || /** @type {any} */ (r.raw_frame)?.uuid === messageId)
   assert.ok(row, `expected a row for ${messageId}`)
   return row
 }

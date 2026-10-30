@@ -11,6 +11,8 @@
 response's rows come from two events and the carrier is picked from the
 response body's last block)
 LLP 0553 adds NanoClaw's first-block carrier in its native-only append lane.
+Extended by [LLP 0559](./0559-claude-recording-identity-and-usage.spec.md#usage-carrier)
+for committed Claude carriers across partial transcript reads.
 
 ## Summary
 

@@ -639,12 +639,19 @@ export function indexTranscriptEntries(entries) {
   const byContentKey = new Map()
   /** @type {Map<string, TranscriptEntry[]>} */
   const byMessageId = new Map()
+  /** @type {Map<string, TranscriptEntry[]>} */
+  const byRequestId = new Map()
   /** @type {Map<string, TranscriptEntry>} */
   const byToolUseId = new Map()
   /** @type {Map<string, TranscriptEntry>} */
   const byToolCallId = new Map()
   for (const entry of entries) {
     if (entry.provider_uuid) byUuid.set(entry.provider_uuid, entry)
+    if (entry.request_id) {
+      const list = byRequestId.get(entry.request_id)
+      if (list) list.push(entry)
+      else byRequestId.set(entry.request_id, [entry])
+    }
     if (entry.messageId) {
       const list = byMessageId.get(entry.messageId)
       if (list) list.push(entry)
@@ -667,6 +674,7 @@ export function indexTranscriptEntries(entries) {
     byUuid,
     byContentKey,
     byMessageId,
+    byRequestId,
     byToolUseId,
     byToolCallId,
     ordered: entries,
@@ -1004,6 +1012,8 @@ async function readTranscriptFile(filePath, entries) {
  */
 export function transcriptEntryFromRow(row) {
   if (!isPlainObject(row)) return undefined
+  // @ref LLP 0559#snapshots: repeated history must not replace native identity
+  if (row.type === 'api-request-blob') return undefined
   const sessionId = stringValue(row.sessionId)
   if (!sessionId) return undefined
   const message = isPlainObject(row.message) ? row.message : undefined

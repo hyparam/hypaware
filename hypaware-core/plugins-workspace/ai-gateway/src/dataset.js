@@ -8,6 +8,7 @@ import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
 import { alignRows, canPushWhere, emptySource, scanColumnOrNulls, unionSources, whereColumns } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
+import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewaySettlementEnricher, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
@@ -325,6 +326,8 @@ export function aiGatewayDatasetRegistration(state) {
  *     uuid twin a later replay already wrote. The committed row wins (the
  *     flush path has no row-delete; dropping the in-flight duplicate is
  *     the only achievable collapse).
+ *  4. Keep one usage carrier per Claude response across partial transcript
+ *     reads, even when no identity upgrade was needed.
  *
  * @param {GatewayState | undefined} state
  * @returns {(rows: Record<string, unknown>[], ctx: DatasetSettleContext) => Promise<Record<string, unknown>[]>}
@@ -333,7 +336,7 @@ function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
     const plan = planSettleSelection(rows, state?.enrichers)
-    if (!plan) return rows
+    if (!plan) return retainClaudeUsageCarriers(rows, ctx.storage)
     // @ref LLP 0085 [implements]: the settle pass may now REMOVE a row (a
     // late-resolved `.hypignore` ignore), not only upgrade its identity - the
     // filtered batch is what gets committed, so the dropped row never reaches a
@@ -346,8 +349,109 @@ function createSettleBatch(state) {
     // committed uuid row; a pure cwd-enrich/drop pass creates no new twins, so
     // preserve the original dedupe trigger and leave non-fallback batches
     // byte-for-byte as before.
-    return plan.hasFallback ? dedupeByPartId(settled, ctx) : settled
+    const fresh = plan.hasFallback ? await dedupeByPartId(settled, ctx) : settled
+    return retainClaudeUsageCarriers(fresh, ctx.storage)
   }
+}
+
+/**
+ * A growing transcript can move its last-visible usage block between flushes.
+ * Keep the committed response carrier, or the first carrier in this batch.
+ * Read only candidate sessions and retain only candidate response keys. This
+ * runs once per flush, never once per message, and has no lifetime index.
+ * @ref LLP 0559#usage-carrier: append-only recovery cannot move committed usage
+ * @param {Record<string, unknown>[]} rows
+ * @param {QueryStorageService} storage
+ */
+async function retainClaudeUsageCarriers(rows, storage) {
+  const wanted = new Set()
+  const sessions = new Set()
+  for (const row of rows) {
+    if (!claudeUsage(row)) continue
+    const keys = claudeResponseKeys(row)
+    for (const key of keys) wanted.add(key)
+    if (keys.length > 0) sessions.add(String(row.session_id))
+  }
+  if (wanted.size === 0) return rows
+  const seen = new Set()
+  if (canScanExistingRows(storage)) {
+    const columns = ['session_id', 'provider', 'client_name', 'role', 'request_id', 'raw_frame', 'attributes']
+    // Same scoping rules as `scanExistingPartIds`: a list past the cap, or a
+    // partition that rejects the scoped read, takes the full read. Only an
+    // error from the full read fails the flush.
+    const where = sessions.size <= MAX_SCOPED_SESSION_IDS
+      ? { session_id: [...sessions], role: ['assistant'], provider: ['anthropic'] }
+      : undefined
+    const partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
+    for (const part of partitions) {
+      if (part.rowCount === 0) continue
+      if (where && typeof storage.readRowsWhere === 'function') {
+        try {
+          await collectUsageKeys(storage.readRowsWhere(part.path, columns, where), wanted, seen)
+        } catch {
+          await collectUsageKeys(storage.readRows(part.path, columns), wanted, seen)
+        }
+      } else {
+        await collectUsageKeys(storage.readRows(part.path, columns), wanted, seen)
+      }
+      if (seen.size === wanted.size) break
+    }
+  }
+  let suppressed = 0
+  const out = rows.map(row => {
+    const attrs = claudeUsage(row)
+    if (!attrs) return row
+    const keys = claudeResponseKeys(row)
+    const counted = keys.some(key => seen.has(key))
+    for (const key of keys) seen.add(key)
+    if (!counted) return row
+    suppressed++
+    const { usage: _usage, ...rest } = attrs
+    return { ...row, attributes: rest }
+  })
+  if (suppressed > 0) {
+    getLogger('plugin.ai-gateway').info('ai_gateway.usage_carrier_retained', {
+      [Attr.COMPONENT]: 'ai-gateway', [Attr.OPERATION]: 'settle_usage',
+      status: 'ok', suppressed_count: suppressed,
+    })
+  }
+  return out
+}
+
+/**
+ * @param {AsyncIterable<Record<string, unknown>>} stored
+ * @param {ReadonlySet<string>} wanted
+ * @param {Set<string>} seen
+ */
+async function collectUsageKeys(stored, wanted, seen) {
+  for await (const row of stored) {
+    if (!claudeUsage(row)) continue
+    for (const key of claudeResponseKeys(row)) {
+      if (wanted.has(key)) seen.add(key)
+    }
+    if (seen.size === wanted.size) return
+  }
+}
+
+/** @param {Record<string, unknown>} row @returns {Record<string, unknown> | undefined} */
+function claudeUsage(row) {
+  if (row.provider !== 'anthropic' || row.role !== 'assistant' ||
+      (row.client_name !== 'claude' && row.client_name !== 'claude-desktop')) return undefined
+  const attrs = typeof row.attributes === 'string' ? safeParseJson(row.attributes) : row.attributes
+  return isPlainObject(attrs) && isPlainObject(attrs.usage) ? attrs : undefined
+}
+
+/** @param {Record<string, unknown>} row @returns {string[]} */
+function claudeResponseKeys(row) {
+  const session = stringValue(row.session_id)
+  if (!session) return []
+  const frame = typeof row.raw_frame === 'string' ? safeParseJson(row.raw_frame) : row.raw_frame
+  const apiId = isPlainObject(frame) ? stringValue(frame.message_id) : undefined
+  const requestId = stringValue(row.request_id)
+  const keys = []
+  if (apiId) keys.push(`${session}\0message\0${apiId}`)
+  if (requestId) keys.push(`${session}\0request\0${requestId}`)
+  return keys
 }
 
 /**
