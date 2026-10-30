@@ -76,6 +76,37 @@ test('allocator never regresses across a restart', async () => {
   await fs.rm(dir, { recursive: true, force: true })
 })
 
+test('a corrupt counter file recovers above every issued seq, never back to 1', async () => {
+  const dir = await makeTmpDir()
+  const statePath = path.join(dir, SEQ_FILE)
+  const alloc = createIngestSeqAllocator({ cacheRoot: dir })
+  assert.equal(await alloc.reserve(100), 1n)
+
+  let last = 100n
+  for (const corrupt of ['{not json', '', 'null', '[]', '{"v":1}', '{"v":1,"nextSeq":"-3"}', '{"v":1,"nextSeq":101}']) {
+    await fs.writeFile(statePath, corrupt)
+    const start = await alloc.reserve(5)
+    assert.ok(start > last, `${corrupt}: recovered ${start} is above the last issued seq ${last}`)
+    last = start + 4n
+    // The recovered value is persisted, so the next reserve continues from it.
+    assert.equal(await alloc.reserve(1), last + 1n)
+    last += 1n
+  }
+
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('an unreadable counter path recovers rather than starting fresh, or waits if it cannot write', async () => {
+  const dir = await makeTmpDir()
+  // A directory where the file belongs: readFile fails with EISDIR, not ENOENT,
+  // and the write-rename cannot replace it, so the reserve throws and the chunk
+  // waits in the spool rather than taking a seq from 1.
+  await fs.mkdir(path.join(dir, SEQ_FILE))
+  const alloc = createIngestSeqAllocator({ cacheRoot: dir })
+  await assert.rejects(() => alloc.reserve(1))
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
 test('concurrent reserve() calls never collide (single allocator, parallel flushes)', async () => {
   const dir = await makeTmpDir()
   const alloc = createIngestSeqAllocator({ cacheRoot: dir })
