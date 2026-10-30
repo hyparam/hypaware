@@ -376,18 +376,23 @@ async function retainClaudeUsageCarriers(rows, storage) {
   const seen = new Set()
   if (canScanExistingRows(storage)) {
     const columns = ['session_id', 'provider', 'client_name', 'role', 'request_id', 'raw_frame', 'attributes']
+    // Same scoping rules as `scanExistingPartIds`: a list past the cap, or a
+    // partition that rejects the scoped read, takes the full read. Only an
+    // error from the full read fails the flush.
+    const where = sessions.size <= MAX_SCOPED_SESSION_IDS
+      ? { session_id: [...sessions], role: ['assistant'], provider: ['anthropic'] }
+      : undefined
     const partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
     for (const part of partitions) {
       if (part.rowCount === 0) continue
-      const stored = typeof storage.readRowsWhere === 'function'
-        ? storage.readRowsWhere(part.path, columns, { session_id: [...sessions], role: ['assistant'], provider: ['anthropic'] })
-        : storage.readRows(part.path, columns)
-      for await (const row of stored) {
-        if (!claudeUsage(row)) continue
-        for (const key of claudeResponseKeys(row)) {
-          if (wanted.has(key)) seen.add(key)
+      if (where && typeof storage.readRowsWhere === 'function') {
+        try {
+          await collectUsageKeys(storage.readRowsWhere(part.path, columns, where), wanted, seen)
+        } catch {
+          await collectUsageKeys(storage.readRows(part.path, columns), wanted, seen)
         }
-        if (seen.size === wanted.size) break
+      } else {
+        await collectUsageKeys(storage.readRows(part.path, columns), wanted, seen)
       }
       if (seen.size === wanted.size) break
     }
@@ -411,6 +416,21 @@ async function retainClaudeUsageCarriers(rows, storage) {
     })
   }
   return out
+}
+
+/**
+ * @param {AsyncIterable<Record<string, unknown>>} stored
+ * @param {ReadonlySet<string>} wanted
+ * @param {Set<string>} seen
+ */
+async function collectUsageKeys(stored, wanted, seen) {
+  for await (const row of stored) {
+    if (!claudeUsage(row)) continue
+    for (const key of claudeResponseKeys(row)) {
+      if (wanted.has(key)) seen.add(key)
+    }
+    if (seen.size === wanted.size) return
+  }
 }
 
 /** @param {Record<string, unknown>} row @returns {Record<string, unknown> | undefined} */

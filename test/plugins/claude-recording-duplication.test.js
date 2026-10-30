@@ -194,10 +194,20 @@ test('an unreadable committed usage scan refuses the flush rather than counting 
   const entries = parse([TEXT, CALL])
   const env = stage(entries)
   const first = await env.backfill(entries.slice(0, 1))
-  env.storage.readRowsWhere = async function* () { throw new Error('usage scan unavailable') }
+  env.storage.readRowsWhere = async function* () { throw new Error('scoped scan unavailable') }
+  env.storage.readRows = async function* () { throw new Error('usage scan unavailable') }
   env.storage.discoverCachePartitions = async () => [{ path: '/fixture', rowCount: 1 }]
   await assert.rejects(env.flush(first), /usage scan unavailable/)
   assert.equal(env.committed.length, 0)
+})
+
+test('a partition that rejects the scoped usage scan is read in full, not skipped', async () => {
+  const entries = parse([TEXT, CALL])
+  const env = stage(entries)
+  await env.flush(await env.backfill(entries.slice(0, 1)))
+  env.storage.readRowsWhere = async function* () { throw new Error('no session_id column') }
+  await env.flush(await env.backfill(entries))
+  assert.equal(outputTokens(env.committed), 34)
 })
 
 test('a request ID resolves assistant text when the event uuid is absent from the transcript', async () => {
