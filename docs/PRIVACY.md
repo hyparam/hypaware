@@ -301,8 +301,8 @@ A heuristic also masks unknown random tokens: a standalone run of 32 to 128
 letters, digits, `-` and `_` that mixes uppercase, lowercase and digits and is
 as varied as a randomly generated key. It leaves commit SHAs, UUIDs and other
 hex alone, along with ordinary code identifiers, paths and URLs, provider IDs
-such as `chatcmpl-...` or `toolu_...`, base64 that is padded with `=`, touches
-a `+` or `/`, or sits inside a PEM block, and digests or keys labelled
+such as `chatcmpl-...` or `toolu_...`, standard base64 that is padded with
+`=`, touches a `+` or `/`, or sits inside a PEM block, and digests or keys labelled
 `h1:`, `SHA256:`, `sha-256=` or `ssh-ed25519`. It has limits both ways.
 Random-looking public values can be masked: long identifiers packed with
 acronyms and digits, document or video IDs, base58 addresses, nonces, and

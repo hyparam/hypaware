@@ -56,6 +56,9 @@ const IDENTIFIER_PREFIX = /^(?:chatcmpl|msg|toolu|srvtoolu|req|call|resp|rs|fc|s
 // A digest or public key named by the label before it: go.sum `h1:`, SSH
 // `SHA256:` fingerprints, `sha-256=` digest headers and SSH key lines.
 const DIGEST_LABEL = /(?:\b(?:h1|md5|sha-?(?:1|224|256|384|512))[:=]|\b(?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-nistp\d+)\s+)$/i
+// Whole PEM armor lines, so a `'-----BEGIN '` literal in code is not a block.
+const ARMOR_BEGIN = /-----BEGIN [A-Z0-9 ]{1,40}-----/g
+const ARMOR_END = /-----END [A-Z0-9 ]{1,40}-----/g
 // The expected Shannon entropy of n characters drawn uniformly from 62 is
 // about log2(62) - 61 / (2n ln 2). The bound sits 0.5 bits below it, under
 // the 0.1st percentile of random tokens at every candidate length.
@@ -137,6 +140,12 @@ function looksRandom(text, start, end) {
     !encodedText(text, start, end) && !IDENTIFIER_PREFIX.test(text.slice(start, start + 10))
 }
 
+/** @param {string} text @param {number} start @param {number} end */
+function hasMark(text, start, end) {
+  for (let i = start; i < end; i++) if (CLASS[text.charCodeAt(i)] === MARK) return true
+  return false
+}
+
 /** @param {string} text @param {number} at */
 function continues(text, at) {
   const code = text.charCodeAt(at)
@@ -164,31 +173,35 @@ function maskRandomTokens(text) {
     let from = i
     while (i < length && charClass(text.charCodeAt(i)) !== OTHER) i++
     if (i - from < MIN_TOKEN) continue
+    // The letter after a backslash in escaped text is the escape, not the token.
+    if (text.charCodeAt(from - 1) === 92) from++
     // Part of a path, URL, base64 blob, hostname or dotted name, or padded
-    // base64 (a digest or key), not a token.
+    // standard base64 (a digest or key), not a token.
     let end = i
     while (text.charCodeAt(end) === 61) end++
-    if (end > i && (end - from) % 4 === 0) continue
+    if (end > i && (end - from) % 4 === 0 && !hasMark(text, from, i)) continue
     if (continues(text, from - 1) || continues(text, end) ||
         (text.charCodeAt(from - 1) === 46 && charClass(text.charCodeAt(from - 2)) !== OTHER) ||
         (text.charCodeAt(end) === 46 && charClass(text.charCodeAt(end + 1)) !== OTHER)) continue
-    // The letter after a backslash in escaped text is the escape, not the token.
-    if (text.charCodeAt(from - 1) === 92) from++
     if (!looksRandom(text, from, i)) continue
     if (DIGEST_LABEL.test(text.slice(Math.max(0, from - 24), from))) continue
+    // An unterminated block is not armor; no later block can close either.
     while (armorSearch >= 0 && armorTo <= from) {
-      armorFrom = text.indexOf('-----BEGIN ', armorSearch)
-      if (armorFrom < 0) {
+      ARMOR_BEGIN.lastIndex = armorSearch
+      const begin = ARMOR_BEGIN.exec(text)
+      ARMOR_END.lastIndex = ARMOR_BEGIN.lastIndex
+      const close = begin && ARMOR_END.exec(text)
+      if (!begin || !close) {
         armorSearch = -1
         break
       }
-      const close = text.indexOf('-----END ', armorFrom)
-      armorTo = close < 0 ? length : close
-      armorSearch = armorTo + 1
+      armorFrom = begin.index
+      armorTo = close.index
+      armorSearch = ARMOR_END.lastIndex
     }
     if (armorFrom >= 0 && armorFrom <= from && from < armorTo) continue
     ;(parts ??= []).push(text.slice(copied, from), SECRET_MASK)
-    copied = i
+    copied = end
   }
   return parts ? parts.join('') + text.slice(copied) : text
 }

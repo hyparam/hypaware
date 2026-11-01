@@ -38,8 +38,9 @@ if every test below passes, so each test can only narrow what is masked:
 - The run is not part of a path, URL, base64 blob, hostname or dotted name: no
   `/` or `+` on either side (after trailing `=` padding), and no `.` joining
   it to another token.
-- It is not padded base64: a run whose `=` padding brings it to a multiple of
-  four characters is an encoded digest or key.
+- It is not padded standard base64: a run with no `-` or `_` whose `=`
+  padding brings it to a multiple of four characters is an encoded digest or
+  public key. Padded base64url (a Fernet key, say) is still tested.
 - It mixes uppercase, lowercase and digits. Hex lacks one of these, so commit
   SHAs, digests and UUIDs are never masked.
 - At least 0.42 of adjacent characters change class. camelCase and snake_case
@@ -58,8 +59,10 @@ if every test below passes, so each test can only narrow what is masked:
 - It is not labelled as a digest or public key: no `h1:`, `SHA256:`,
   `sha-256=` or similar, and no `ssh-ed25519` or other SSH key type, directly
   before it.
-- It is not inside a PEM block. Private-key blocks are masked whole before
-  the heuristic runs; certificates and public keys are left alone.
+- It is not inside a PEM block, from a whole `-----BEGIN ...-----` line to
+  its `-----END ...-----` line. Private-key blocks are masked whole before
+  the heuristic runs; certificates and public keys are left alone. An
+  unterminated block, or a bare `-----BEGIN ` in code, shields nothing.
 
 The heuristic is on by default with the other built-ins. There is no switch
 for it, as LLP 0503 #config has none for any built-in.
@@ -69,9 +72,9 @@ for it, as LLP 0503 #config has none for any built-in.
 This trades a small chance of masking a non-secret for catching unknown
 formats. Over a seeded corpus of commit SHAs, SHA-256 digests, UUIDs, ULIDs,
 camelCase, PascalCase and snake_case names, paths, long base64 and base64url
-blobs, padded base64, go.sum hashes, digest headers, SSH fingerprints and
-public keys, PEM certificates, data URLs, npm integrity strings, provider IDs
-and base64 prose, it masks none. It still can:
+blobs, padded standard base64 (also after a JSON `\n` escape), go.sum hashes,
+digest headers, SSH fingerprints and public keys, PEM certificates, data URLs,
+npm integrity strings, provider IDs and base64 prose, it masks none. It still can:
 
 - Mask a random-looking public value: a long identifier dense with acronyms
   and digits, a document or video ID, a base58 address, a nonce, or a line of
@@ -79,10 +82,11 @@ and base64 prose, it masks none. It still can:
   random token.
 - Miss a secret shorter than 32 or longer than 128 characters, a hex-only or
   single-case secret, one inside a path or URL, most secrets in standard
-  base64 (which usually hold a `+` or `/`, or are padded), or about 3% of
-  random 32-character tokens (about 1% at 40, fewer beyond).
-- Miss a JWT joined to a preceding word character, or one whose header JSON
-  starts with a space (`eyAi...`).
+  base64 (which usually hold a `+` or `/`, or are padded), a padded key that
+  happens to have no `-` or `_` (about a quarter of Fernet keys), or about 3%
+  of random 32-character tokens (about 1% at 40, fewer beyond).
+- Miss a JWT joined to a preceding letter, digit, `-` or `_`, or one whose
+  header JSON starts with a space (`eyAi...`).
 
 Explicit formats and custom patterns remain the way to cover a known secret.
 

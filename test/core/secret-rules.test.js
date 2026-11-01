@@ -83,6 +83,14 @@ test('the entropy heuristic masks unknown random tokens of 32 to 128 characters'
   // An escaped newline before the token is not part of it.
   const token = 'Aa0' + string(37, ALNUM)
   assert.equal(redactSecretText(`line\\n${token}`), `line\\n${MASK}`)
+  // Armor text that is not a whole PEM block does not shield what follows.
+  const code = `if (pem.startsWith('-----BEGIN ')) parse(pem)\nconst TOKEN = '${token}'\nconst END = '-----END '`
+  assert.equal(redactSecretText(code), code.replace(token, MASK))
+  const truncated = `-----BEGIN CERTIFICATE-----\nMIIB\nAPI_TOKEN=${token}`
+  assert.equal(redactSecretText(truncated), truncated.replace(token, MASK))
+  // Padded base64url, such as a Fernet key, is a secret, not a digest.
+  const fernet = 'Aa0-' + string(39, ALNUM) + '='
+  assert.equal(redactSecretText(`FERNET_KEY=${fernet}`), `FERNET_KEY=${MASK}`)
   // Outside the length bounds the heuristic does not decide.
   for (const length of [31, 129]) {
     const text = `t ${'Aa0' + string(length - 3, ALNUM)}`
@@ -139,6 +147,7 @@ test('the heuristic false-positive bound: no realistic non-secret token in the c
     dataUrl: () => 'data:image/png;base64,' + bytes(120).toString('base64'),
     npmIntegrity: () => 'sha512-' + bytes(64).toString('base64'),
     paddedBase64: () => bytes([32, 64, 80][Math.floor(rand() * 3)]).toString('base64'),
+    escapedPaddedBase64: () => 'line\\n' + bytes(32).toString('base64'),
     goSum: () => 'golang.org/x/text v0.14.0 h1:' + bytes(32).toString('base64'),
     digestHeader: () => 'Digest: sha-256=' + bytes(32).toString('base64'),
     sshFingerprint: () => 'SHA256:' + bytes(32).toString('base64').replace(/=+$/, ''),
