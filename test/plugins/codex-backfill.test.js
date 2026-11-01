@@ -1752,3 +1752,47 @@ test('TurnItems with no projection are counted by type in scan_complete, and an 
     await env.cleanup()
   }
 })
+
+test('a turn stopped before any model output records its prompt once, and a TurnItem keeps its own completion time', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000041'
+  const env = await stageEnv()
+  try {
+    /** @param {string} turnId @param {string} at @param {Record<string, unknown>} item @param {number} completedAt */
+    const completedAt = (turnId, at, item, completedAt) => {
+      const record = completedItem(thread, turnId, at, item)
+      return { ...record, payload: { ...record.payload, completed_at_ms: completedAt } }
+    }
+    await writeModernRollout(env, `2026/10/23/rollout-2026-10-23T10-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-23T10:00:00.000Z', history_mode: 'paginated' },
+      items: [
+        // Codex writes the person's prompt both as a raw user message and as
+        // its UserMessage mirror, then the turn is aborted before any reply.
+        eventMsg('2026-10-23T10:00:01.000Z', { type: 'task_started', turn_id: 'a1' }),
+        {
+          timestamp: '2026-10-23T10:00:01.000Z',
+          payload: {
+            type: 'message', role: 'user', id: 'msg-u1', content: [{ type: 'input_text', text: 'stop early' }],
+            internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text'] },
+          },
+        },
+        completedItem(thread, 'a1', '2026-10-23T10:00:01.000Z', { type: 'UserMessage', id: 'u-1', content: [{ type: 'text', text: 'stop early' }] }),
+        eventMsg('2026-10-23T10:00:02.000Z', { type: 'turn_aborted', turn_id: 'a1' }),
+        // A TurnItem-only turn whose completion times differ from the record
+        // times; a zero completion time is Codex's default for a missing one.
+        eventMsg('2026-10-23T10:05:00.000Z', { type: 'task_started', turn_id: 'a2' }),
+        completedAt('a2', '2026-10-23T10:05:00.000Z', { type: 'UserMessage', id: 'u-2', content: [{ type: 'text', text: 'later prompt' }] }, Date.parse('2026-10-23T10:04:30.000Z')),
+        completedAt('a2', '2026-10-23T10:05:09.000Z', { type: 'AgentMessage', id: 'a-2', content: [{ type: 'Text', text: 'later answer' }] }, 0),
+        eventMsg('2026-10-23T10:05:10.000Z', { type: 'task_complete', turn_id: 'a2' }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => `${row.role}:${row.content_text}`), ['user:stop early', 'user:later prompt', 'assistant:later answer'])
+    assert.equal(rows[0].message_id, 'msg-u1')
+    assert.equal(String(rows[1].message_created_at), '2026-10-23T10:04:30.000Z')
+    assert.equal(String(rows[2].message_created_at), '2026-10-23T10:05:09.000Z')
+  } finally {
+    await env.cleanup()
+  }
+})

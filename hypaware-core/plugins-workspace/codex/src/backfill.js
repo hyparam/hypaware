@@ -755,6 +755,8 @@ function parseJsonlRollout(text, filePath) {
   let turnId
   /** @type {Set<string>} */
   const rawTurns = new Set()
+  /** @type {Set<string>} */
+  const promptTurns = new Set()
   let sawCompleted = false
 
   for (const line of text.split('\n')) {
@@ -784,8 +786,12 @@ function parseJsonlRollout(text, filePath) {
         deliveryEvidenceSkipped += 1
         continue
       }
-      if (RAW_TURN_EVIDENCE.has(stringValue(payload.type) ?? '') && !(payload.type === 'message' && payload.role !== 'assistant')) {
-        rawTurns.add(turnId ?? '')
+      if (turnId !== undefined) {
+        if (payload.type === 'message' && payload.role !== 'assistant') {
+          if (contentItemKinds(payload)?.some(kind => kind.startsWith('user.'))) promptTurns.add(turnId)
+        } else if (RAW_TURN_EVIDENCE.has(stringValue(payload.type) ?? '')) {
+          rawTurns.add(turnId)
+        }
       }
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
     } else if (type === 'event_msg' && payload) {
@@ -795,9 +801,11 @@ function parseJsonlRollout(text, filePath) {
       }
       if (payload.type === 'item_completed' && isPlainObject(payload.item)) {
         sawCompleted = true
+        // Codex defaults a missing completion time to 0 and writes it back.
+        const completedAt = numberValue(payload.completed_at_ms)
         items.push({
           payload: payload.item,
-          timestampMs: numberValue(payload.completed_at_ms) ?? timestampToMs(row.timestamp),
+          timestampMs: completedAt && completedAt > 0 ? completedAt : timestampToMs(row.timestamp),
           completed: { turnId: stringValue(payload.turn_id) ?? turnId ?? '', threadId: stringValue(payload.thread_id) },
         })
       }
@@ -817,7 +825,7 @@ function parseJsonlRollout(text, filePath) {
   if (!sawRecord) return undefined
   const session = buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
   if (sawCompleted) {
-    const kept = completedTurnItems(session, rawTurns, settledItemCount)
+    const kept = completedTurnItems(session, rawTurns, promptTurns, settledItemCount)
     session.items = kept.items
     settledItemCount = kept.settledItemCount
     if (kept.unsupported.size > 0) session.completedItemsUnsupported = kept.unsupported
@@ -829,11 +837,13 @@ function parseJsonlRollout(text, filePath) {
 
 // Response items only a model response writes. A user-role message is not
 // one: Codex records harness context (AGENTS.md, environment) as user
-// messages, so its presence says nothing about whether the turn's prompt and
-// answer were written as response items.
+// messages, so its presence says nothing about whether the turn's answer was
+// written as response items. The person's own prompt is told apart by its
+// `user.*` content kinds and stands in for the UserMessage mirror alone.
 // @ref LLP 0567#dedupe [implements]: a turn's model response items decide its representation
 const RAW_TURN_EVIDENCE = new Set([
   'message', 'function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'reasoning',
+  'web_search_call', 'image_generation_call', 'compaction', 'context_compaction',
 ])
 
 // The TurnItems a completed-only turn is projected from, each normalized to
@@ -852,7 +862,7 @@ const COMPLETED_TURN_ITEMS = {
 const KNOWN_TURN_ITEMS = new Set([
   'UserMessage', 'FunctionCallOutput', 'HookPrompt', 'AgentMessage', 'Plan', 'Reasoning', 'CommandExecution',
   'DynamicToolCall', 'CollabAgentToolCall', 'SubAgentActivity', 'WebSearch', 'ImageView', 'Extension',
-  'ImageGeneration', 'EnteredReviewMode', 'ExitedReviewMode', 'FileChange', 'McpToolCall',
+  'ImageGeneration', 'EnteredReviewMode', 'ExitedReviewMode', 'ContextCompaction', 'FileChange', 'McpToolCall',
 ])
 
 /**
@@ -870,10 +880,11 @@ const KNOWN_TURN_ITEMS = new Set([
  * @ref LLP 0567#identity [implements]: `item-N` ids dropped, another thread's TurnItems skipped
  * @param {CodexRolloutSession} session
  * @param {Set<string>} rawTurns  turn ids with a model response item
+ * @param {Set<string>} promptTurns  turn ids with the person's prompt as a raw user message
  * @param {number} settledItemCount  settled prefix length before resolution
  * @returns {{ items: CodexRolloutItem[], settledItemCount: number, unsupported: Map<string, number> }}
  */
-function completedTurnItems(session, rawTurns, settledItemCount) {
+function completedTurnItems(session, rawTurns, promptTurns, settledItemCount) {
   /** @type {CodexRolloutItem[]} */
   const items = []
   /** @type {Map<string, number>} */
@@ -887,6 +898,7 @@ function completedTurnItems(session, rawTurns, settledItemCount) {
       if (rawTurns.has(completed.turnId)) continue
       if (completed.threadId && completed.threadId !== session.threadId) continue
       const turnItemType = stringValue(item.payload.type) ?? ''
+      if (turnItemType === 'UserMessage' && promptTurns.has(completed.turnId)) continue
       const normalize = COMPLETED_TURN_ITEMS[turnItemType]
       if (!normalize) {
         const key = KNOWN_TURN_ITEMS.has(turnItemType) ? turnItemType : 'other'
