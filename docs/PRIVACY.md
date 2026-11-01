@@ -289,11 +289,24 @@ Configure [additional regex patterns](CONFIGURATION.md#redact-exported-content)
 for your organization's secret formats.
 
 Built-ins recognize common AI and GitHub keys, AWS access-key IDs, Slack tokens,
-bearer tokens, credential-bearing database URLs, private keys, named credential
-fields, and plaintext password/API-key assignments. They also mask file-tool
+Google API keys (`AIza...`), Stripe live secret keys (`sk_live_...`), JWTs with
+or without a `Bearer` prefix, bearer tokens, credential-bearing database URLs,
+private keys, named credential fields, and plaintext password/API-key
+assignments. They also mask file-tool
 payloads for `.env` variants, private-key files, common credential stores and
 shell configuration/history. Template files such as `.env.example` do not
 trigger full-file masking, though credential patterns still apply.
+
+A heuristic also masks unknown random tokens: a standalone run of 32 to 128
+letters, digits, `-` and `_` that mixes uppercase, lowercase and digits and is
+as varied as a randomly generated key. It leaves commit SHAs, digests, UUIDs
+and other hex alone, along with ordinary code identifiers, paths and URLs,
+base64 blobs, and provider IDs such as `chatcmpl-...` or `toolu_...`. It has
+limits both ways. A long identifier packed with acronyms and digits can look
+random and be masked. It misses secrets shorter than 32 or longer than 128
+characters, hex-only or single-case secrets, secrets embedded in a path or
+URL, and about 3% of random 32-character tokens. It is on by default, like
+the other built-ins, with no switch to turn it off.
 
 File masking uses recorded tool arguments and call/result links. A named file
 read whose path cannot be established within the current export scan has its
