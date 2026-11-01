@@ -1796,3 +1796,55 @@ test('a turn stopped before any model output records its prompt once, and a Turn
     await env.cleanup()
   }
 })
+
+test('only a turn\'s own prompt or model output decides it: harness context, a prompt between turns and a missing turn id suppress nothing', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000051'
+  const env = await stageEnv()
+  try {
+    /** @param {string} at @param {string} text @param {string[]} kinds */
+    const userMessage = (at, text, kinds) => ({
+      timestamp: at,
+      payload: {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text }],
+        internal_chat_message_metadata_passthrough: { content_item_kinds: kinds },
+      },
+    })
+    /** @param {string} text */
+    const agent = text => ({ type: 'AgentMessage', content: [{ type: 'Text', text }] })
+    /** @param {string} text */
+    const user = text => ({ type: 'UserMessage', content: [{ type: 'text', text }] })
+    await writeModernRollout(env, `2026/10/23/rollout-2026-10-23T11-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-23T11:00:00.000Z', history_mode: 'paginated' },
+      items: [
+        // Turn b1 is TurnItems only, with harness context written raw.
+        eventMsg('2026-10-23T11:00:01.000Z', { type: 'task_started', turn_id: 'b1' }),
+        userMessage('2026-10-23T11:00:01.000Z', 'AGENTS.md says hello', ['contextual.agents_md']),
+        completedItem(thread, 'b1', '2026-10-23T11:00:02.000Z', user('first prompt')),
+        completedItem(thread, 'b1', '2026-10-23T11:00:03.000Z', agent('first answer')),
+        eventMsg('2026-10-23T11:00:04.000Z', { type: 'task_complete', turn_id: 'b1' }),
+        // A raw prompt written before the next turn starts belongs to no turn.
+        userMessage('2026-10-23T11:01:00.000Z', 'gap prompt', ['user.text']),
+        // Turn b2 searched the web: its raw evidence wins over its mirrors.
+        eventMsg('2026-10-23T11:01:01.000Z', { type: 'task_started', turn_id: 'b2' }),
+        { timestamp: '2026-10-23T11:01:02.000Z', payload: { type: 'web_search_call', id: 'ws-1', status: 'completed' } },
+        completedItem(thread, 'b2', '2026-10-23T11:01:02.000Z', user('gap prompt')),
+        completedItem(thread, 'b2', '2026-10-23T11:01:03.000Z', agent('mirrored answer')),
+        eventMsg('2026-10-23T11:01:04.000Z', { type: 'task_complete', turn_id: 'b2' }),
+        // A TurnItem with no turn id at all, after the last turn ended.
+        eventMsg('2026-10-23T11:02:00.000Z', { type: 'item_completed', thread_id: thread, item: agent('unowned answer') }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => `${row.role}:${row.content_text}`), [
+      'user:AGENTS.md says hello',
+      'user:first prompt',
+      'assistant:first answer',
+      'user:gap prompt',
+      'assistant:unowned answer',
+    ])
+  } finally {
+    await env.cleanup()
+  }
+})

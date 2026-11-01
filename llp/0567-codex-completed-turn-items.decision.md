@@ -38,13 +38,15 @@ the existing projection keeps their call and output relationship.
 
 A turn may be written both ways: a fresh paginated turn has raw items and
 TurnItem mirrors of the same messages. Projecting both would record each
-message twice. The choice is made per turn, by turn id (`task_started`, or the
-TurnItem's own `turn_id`):
+message twice. The choice is made per turn, by turn id. A TurnItem names its
+own `turn_id`, falling back to the open turn. A raw item belongs to the turn
+the last `task_started` opened, and to none once `task_complete` or
+`turn_aborted` closes it, so an item written between turns decides nothing:
 
-- A turn with any model response item (an assistant message, a function or
-  custom tool call or its output, reasoning, a web search or image generation
-  call, or a compaction item) is projected from its raw items alone. Its
-  TurnItems are dropped.
+- A turn with any model response item (an assistant message, a function,
+  custom or local shell tool call or its output, a tool search, reasoning, a
+  web search or image generation call, or a compaction item) is projected
+  from its raw items alone. Its TurnItems are dropped.
 - A turn whose prompt is a raw user message keeps that message and drops its
   `UserMessage` mirror. The person's prompt is told apart by its
   `user.*` content item kinds; its other TurnItems are still projected.
@@ -82,7 +84,8 @@ A TurnItem of a type with no projection is counted, not dropped silently.
 `scan_complete` carries `completed_items_unsupported` (a count) and
 `completed_item_unsupported_types` (the sorted type names, comma joined).
 Types outside the known TurnItem list are counted as `other`, so the field is
-bounded by that list whatever a file holds. Neither field carries content. A
+bounded by that list whatever a file holds. Neither field carries content,
+and a session skipped by an opt-out or `.hypignore` adds nothing to either. A
 zero-row scan with no unsupported items reports nothing new.
 
 ## Limits {#limits}
@@ -100,8 +103,9 @@ zero-row scan with no unsupported items reports nothing new.
 
 ## Cost {#cost}
 
-A file with no `item_completed` record is parsed as before. A file with them
-gets one more pass over its parsed items and a set of turn ids, both bounded
-by the file and released with it. No state is kept across sweeps, and the
-fingerprint lifecycle (LLP 0429 #sweep) is unchanged, so sweep work stays
-proportional to discovered paths and changed files.
+A file with no `item_completed` record yields the same items as before; the
+parser also notes turn ids in two sets and reads the content kinds of each
+user-role message. A file with them gets one more pass over its parsed items.
+All of it is bounded by the file and released with it. No state is kept across
+sweeps, and the fingerprint lifecycle (LLP 0429 #sweep) is unchanged, so sweep
+work stays proportional to discovered paths and changed files.

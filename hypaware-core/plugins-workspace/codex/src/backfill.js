@@ -425,9 +425,6 @@ async function* runCodexBackfill(args) {
     let fileDeferred = 0
     for (const session of sessions) {
       deliveryEvidenceSkipped += session.deliveryEvidenceSkipped ?? 0
-      for (const [type, count] of session.completedItemsUnsupported ?? []) {
-        completedUnsupported.set(type, (completedUnsupported.get(type) ?? 0) + count)
-      }
       // @ref LLP 0403#backfill [implements]: key on the container, not thread ID.
       if (args.ignoredSessions?.has(session.sessionId)) {
         sessionsIgnored += 1
@@ -458,6 +455,11 @@ async function* runCodexBackfill(args) {
           ...(sessionPolicy.warn ? { warn: sessionPolicy.warn } : {}),
         })
         continue
+      }
+      // Counted only for sessions the scan keeps, so an ignored session
+      // leaves no trace of what it held.
+      for (const [type, count] of session.completedItemsUnsupported ?? []) {
+        completedUnsupported.set(type, (completedUnsupported.get(type) ?? 0) + count)
       }
 
       // Native lifecycle events delimit an unfinished model response. Do
@@ -818,7 +820,12 @@ function parseJsonlRollout(text, filePath) {
         items.push({ payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes })
         settledItemCount = items.length
       }
-      if (payload.type === 'task_complete' || payload.type === 'turn_aborted') settledItemCount = items.length
+      if (payload.type === 'task_complete' || payload.type === 'turn_aborted') {
+        settledItemCount = items.length
+        // A raw item between turns, such as a migrated turn's prompt, belongs
+        // to no turn, so it cannot suppress the turn that just ended.
+        turnId = undefined
+      }
     }
   }
 
@@ -843,7 +850,8 @@ function parseJsonlRollout(text, filePath) {
 // @ref LLP 0567#dedupe [implements]: a turn's model response items decide its representation
 const RAW_TURN_EVIDENCE = new Set([
   'message', 'function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'reasoning',
-  'web_search_call', 'image_generation_call', 'compaction', 'context_compaction',
+  'web_search_call', 'image_generation_call', 'local_shell_call', 'tool_search_call', 'tool_search_output',
+  'compaction', 'compaction_summary', 'context_compaction',
 ])
 
 // The TurnItems a completed-only turn is projected from, each normalized to
