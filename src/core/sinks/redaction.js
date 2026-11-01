@@ -2,10 +2,10 @@
 
 import { Worker } from 'node:worker_threads'
 import { isPlainObject } from '../util/json_util.js'
+import { CREDENTIAL_KEYS, SECRET_MASK as MASK, isSensitiveFile as sensitiveFile, redactSecretText } from '../secret_rules.js'
 
 /** @import { ExportRedactionConfig, ValidationError } from '../../../hypaware-plugin-kernel-types.js' */
 
-const MASK = '[REDACTED]'
 const MAX_PATTERNS = 32
 const MAX_PATTERN_LENGTH = 2048
 const MAX_NODES = 100000
@@ -13,42 +13,11 @@ const MAX_BYTES = 16 * 1024 * 1024
 const MAX_TOOL_PATHS = 4096
 const PATH_KEYS = new Set(['path', 'file_path', 'filePath', 'filename', 'file'])
 const READ_TOOLS = /^(?:read|read_file|readfile)$/i
-const CREDENTIAL_KEYS = /^(?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key|authorization)$/i
 const STRUCTURAL = new Set([
   'org', 'cwd', 'date', 'timestamp', 'time', 'ts', 'role', 'part_type', 'part_index',
   'message_index', 'client_name', 'conversation_source', 'entrypoint', 'model',
   'provider', 'tool_name', 'provider_type', 'provider_subtype',
 ])
-
-// Small, maintained patterns with recognizable credential syntax. Avoid a
-// thousands-of-regex pass over every string in a growing transcript.
-const BUILTIN_PATTERNS = [
-  /\bsk-(?:ant-[A-Za-z0-9_-]{16,}|proj-[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]{32,})\b/g,
-  /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
-  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
-  /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi,
-  /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s/@]+:[^\s/@]+@[^\s"'<>]+/gi,
-]
-const ASSIGNMENT = /\b((?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key)\s*[=:]\s*["']?)[^\s"'<>;,}{]{4,}/gi
-
-/** @param {string} text */
-function privateKeys(text) {
-  if (!text.includes('-----BEGIN ')) return text
-  const begin = /-----BEGIN ((?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----/g
-  const parts = []
-  let offset = 0
-  let match
-  while ((match = begin.exec(text))) {
-    parts.push(text.slice(offset, match.index), MASK)
-    const end = `-----END ${match[1]}-----`
-    const at = text.indexOf(end, begin.lastIndex)
-    if (at < 0) return parts.join('')
-    offset = at + end.length
-    begin.lastIndex = offset
-  }
-  return parts.length ? parts.join('') + text.slice(offset) : text
-}
 
 /** @param {unknown} value @param {ValidationError[]} errors @returns {ExportRedactionConfig | undefined} */
 export function parseRedactionConfig(value, errors) {
@@ -92,15 +61,6 @@ export function parseRedactionConfig(value, errors) {
 /** @param {string} key */
 export function isExportIdentityColumn(key) {
   return STRUCTURAL.has(key) || key === 'id' || /(?:^|_)(?:id|uuid|hash|sha)$/.test(key)
-}
-
-/** @param {string} file */
-function sensitiveFile(file) {
-  const normalized = file.replace(/\\/g, '/').toLowerCase()
-  const name = normalized.split('/').at(-1) ?? ''
-  if (/^\.env(?:\.|$)/.test(name) && !/\.(?:example|sample|template)$/.test(name)) return true
-  return /^(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\.npmrc|\.netrc|\.git-credentials|\.zshrc|\.bashrc|\.bash_profile|\.profile|\.zsh_history|\.bash_history|secrets\.ya?ml|master\.key|service[-_]account\.json)$/.test(name) ||
-    /\.(?:pem|key)$/.test(name) || /(?:^|\/)(?:\.aws\/(?:credentials|config)|\.docker\/config\.json|\.kube\/config)$/.test(normalized)
 }
 
 /** @param {unknown} value @returns {Record<string, unknown> | undefined} */
@@ -167,11 +127,7 @@ export function createRowRedactor(config = {}, customOnly = false) {
         }
         if (hide && mode !== 'path') return MASK
         let result = value
-        if (!customOnly) {
-          result = privateKeys(result)
-          for (const pattern of BUILTIN_PATTERNS) result = result.replace(pattern, MASK)
-          result = result.replace(ASSIGNMENT, (_, prefix) => prefix + MASK)
-        }
+        if (!customOnly) result = redactSecretText(result)
         for (const pattern of custom) result = result.replace(pattern, MASK)
         return result
       }
