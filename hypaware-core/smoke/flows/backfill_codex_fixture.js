@@ -226,6 +226,21 @@ export async function run({ harness, expect }) {
       ]
       await fs.writeFile(path.join(sessionsDir, `rollout-${originator}.jsonl`), records.map((r) => JSON.stringify(r)).join('\n') + '\n')
     }
+    // @ref LLP 0567#turn-items [tests]: a May thread resumed today in
+    // paginated history records the new turn as completed TurnItems only.
+    const resumedId = `${sessionId}-resumed`
+    const resumedAt = (/** @type {number} */ offset) => new Date(Date.now() - 60_000 + offset).toISOString()
+    /** @param {number} offset @param {Record<string, unknown>} item */
+    const completed = (offset, item) => ({ type: 'event_msg', timestamp: resumedAt(offset), payload: { type: 'item_completed', thread_id: resumedId, turn_id: 'turn-resumed', item, completed_at_ms: Date.parse(resumedAt(offset)) } })
+    const resumed = [
+      { type: 'session_meta', timestamp: '2026-05-20T10:00:00.000Z', payload: { id: resumedId, timestamp: '2026-05-20T10:00:00.000Z', originator: 'Codex Desktop', history_mode: 'paginated' } },
+      { type: 'event_msg', timestamp: resumedAt(0), payload: { type: 'task_started', turn_id: 'turn-resumed' } },
+      completed(1, { type: 'UserMessage', id: 'resumed-user', content: [{ type: 'text', text: 'resumed prompt' }] }),
+      completed(2, { type: 'AgentMessage', id: 'resumed-agent', content: [{ type: 'Text', text: 'resumed answer' }] }),
+      { type: 'event_msg', timestamp: resumedAt(3), payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } } } },
+      { type: 'event_msg', timestamp: resumedAt(3), payload: { type: 'task_complete', turn_id: 'turn-resumed' } },
+    ]
+    await fs.writeFile(path.join(sessionsDir, `rollout-2026-05-20T10-00-00-${resumedId}-${sessionId}.jsonl`), resumed.map((r) => JSON.stringify(r)).join('\n') + '\n')
     /** @type {Array<Promise<any>>} */
     const pending = []
     const sweep = createBackfillSweepDriver({
@@ -241,7 +256,7 @@ export async function run({ harness, expect }) {
     const now = new Date()
     await sweep.tick({ now })
     const firstSweep = await Promise.all(pending)
-    expect.that('sweep: both client surfaces imported', firstSweep[0], (v) => v?.ok && v.rowsWritten === 4)
+    expect.that('sweep: both client surfaces and the resumed thread imported', firstSweep[0], (v) => v?.ok && v.rowsWritten === 6)
     expect.that('sweep: previous provider restored', await fs.readFile(configPath, 'utf8'), (v) => v.startsWith('model_provider = "custom"\n') && v.includes('[model_providers.hypaware]') && !v.includes('127.0.0.1'))
     const nativeRows = await queryRows({
       dispatch, kernel, registry, env, expect, label: 'scheduled capture',
@@ -250,6 +265,13 @@ export async function run({ harness, expect }) {
     expect.that('sweep: CLI and Desktop attribution and base instructions', nativeRows, (v) =>
       v.length === 2 && new Set(v.map((r) => r.entrypoint)).size === 2 &&
       v.every((r) => r.system_text === 'native instructions' && r.tools == null))
+    const resumedRows = await queryRows({
+      dispatch, kernel, registry, env, expect, label: 'resumed paginated thread',
+      sql: `select role, content_text, message_id, entrypoint from ai_gateway_messages where conversation_id = '${resumedId}' and part_type <> 'session_metadata' order by message_index, part_index`,
+    })
+    expect.that('sweep: resumed TurnItem turn captured once, with native ids', resumedRows, (v) =>
+      v.length === 2 && v[0].role === 'user' && v[0].content_text === 'resumed prompt' && v[0].message_id === 'resumed-user' &&
+      v[1].role === 'assistant' && v[1].content_text === 'resumed answer' && v[1].entrypoint === 'Codex Desktop')
     pending.length = 0
     await sweep.tick({ now: new Date(now.getTime() + 60_000) })
     const secondSweep = await Promise.all(pending)
@@ -310,9 +332,9 @@ export async function run({ harness, expect }) {
     expect.that('logs: title capture is observable without title text', logs, v => v.some(l =>
       l.body === 'codex.backfill.session_projected' && l.attributes?.title_captured === true))
     expect.that('logs: scheduled unchanged-file skip', logs, (v) => v.some((l) =>
-      l.body === 'codex.backfill.scan_complete' && l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 3))
+      l.body === 'codex.backfill.scan_complete' && l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 4))
     expect.that('logs: scheduled capture completed', logs, (v) => v.some((l) =>
-      l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'codex' && l.attributes?.rows_written === 4))
+      l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'codex' && l.attributes?.rows_written === 6))
     const finishLogs = logs.filter(
       (/** @type {any} */ l) => l.body === 'backfill.finish' && l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
     )

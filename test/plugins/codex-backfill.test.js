@@ -1530,3 +1530,321 @@ test('content_item_kinds is promoted onto each user row and merges with the exch
     await env.cleanup()
   }
 })
+
+// Paginated Codex history (and a migrated legacy one) records a turn's
+// messages as completed TurnItems: `event_msg` `item_completed` with a
+// `UserMessage` or `AgentMessage` whose content blocks are not Responses
+// blocks. A resumed thread can append only those, so a parser that reads
+// `response_item` alone drops the new turns while the scan reports ok.
+// @ref LLP 0567#turn-items [tests]: completed TurnItems are captured, not skipped
+const PAGINATED_THREAD = '01a0835d-0000-7000-8000-000000000001'
+const PAGINATED_ROLLOUT = '01a0ab78-0000-7000-8000-000000000002'
+
+/**
+ * A September thread resumed in October, with only completed TurnItems for
+ * the new turn. `prefix` adds an old ordinary response item before it.
+ *
+ * @param {{ prefix?: boolean }} [options]
+ */
+function resumedPaginatedThread(options = {}) {
+  /** @param {string} at @param {Record<string, unknown>} payload */
+  const event = (at, payload) => ({ type: 'event_msg', timestamp: at, payload })
+  /** @param {string} at @param {Record<string, unknown>} item */
+  const completed = (at, item) => event(at, {
+    type: 'item_completed',
+    thread_id: PAGINATED_THREAD,
+    turn_id: 'turn-oct',
+    item,
+    completed_at_ms: Date.parse(at),
+  })
+  return {
+    meta: { id: PAGINATED_THREAD, timestamp: '2026-09-16T10:00:00.000Z', originator: 'Codex Desktop', history_mode: 'paginated' },
+    items: [
+      ...(options.prefix
+        ? [{ timestamp: '2026-09-16T10:00:05.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'old user' }] } }]
+        : []),
+      event('2026-10-30T19:00:00.000Z', { type: 'task_started', turn_id: 'turn-oct' }),
+      completed('2026-10-30T19:00:01.000Z', { type: 'UserMessage', id: 'user-1', content: [{ type: 'text', text: 'new user', text_elements: [] }] }),
+      completed('2026-10-30T19:00:09.000Z', { type: 'AgentMessage', id: 'assistant-1', content: [{ type: 'Text', text: 'new assistant' }], phase: 'final_answer' }),
+      event('2026-10-30T19:00:10.000Z', { type: 'token_count', info: { last_token_usage: { input_tokens: 40, output_tokens: 7 } } }),
+      event('2026-10-30T19:00:10.000Z', { type: 'task_complete', turn_id: 'turn-oct' }),
+    ],
+  }
+}
+
+test('completed TurnItems in a resumed paginated thread are captured by import and by the sweep', async () => {
+  for (const prefix of [false, true]) {
+    for (const sweep of [false, true]) {
+      const env = await stageEnv()
+      try {
+        await writeModernRollout(
+          env,
+          `2026/09/16/rollout-2026-09-16T10-00-00-${PAGINATED_THREAD}_${PAGINATED_ROLLOUT}.jsonl`,
+          resumedPaginatedThread({ prefix })
+        )
+        const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+        const { ctx } = runContext({ since: '2026-10-01T00:00:00.000Z' })
+        if (sweep) ctx.sweep = true
+        const { items } = await collect(provider.run(ctx))
+        const label = `prefix=${prefix} sweep=${sweep}`
+        assert.equal(items.length, 1, label)
+        const exchange = value(items[0])
+        assert.equal(exchange.session_id, PAGINATED_THREAD, label)
+        assert.equal(exchange.conversation_id, PAGINATED_THREAD, label)
+        const rows = await materialize(items[0])
+        const users = rowsByRole(rows, 'user')
+        const assistants = rowsByRole(rows, 'assistant')
+        assert.deepEqual(users.map((r) => r.content_text), ['new user'], label)
+        assert.deepEqual(assistants.map((r) => r.content_text), ['new assistant'], label)
+        assert.equal(users[0].message_id, 'user-1', label)
+        assert.equal(assistants[0].message_id, 'assistant-1', label)
+        assert.equal(String(users[0].message_created_at), '2026-10-30T19:00:01.000Z', label)
+        assert.equal(String(assistants[0].message_created_at), '2026-10-30T19:00:09.000Z', label)
+        assert.equal(/** @type {any} */ (assistants[0].attributes)?.usage?.output_tokens, 7, label)
+      } finally {
+        await env.cleanup()
+      }
+    }
+  }
+})
+
+/**
+ * @param {string} threadId
+ * @param {string} turnId
+ * @param {string} at
+ * @param {Record<string, unknown>} item
+ */
+function completedItem(threadId, turnId, at, item) {
+  return { type: 'event_msg', timestamp: at, payload: { type: 'item_completed', thread_id: threadId, turn_id: turnId, item, completed_at_ms: Date.parse(at) } }
+}
+
+/** @param {string} at @param {Record<string, unknown>} payload */
+function eventMsg(at, payload) {
+  return { type: 'event_msg', timestamp: at, payload }
+}
+
+test('a turn written as response items is projected from them alone, whatever TurnItems mirror it', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000011'
+  const env = await stageEnv()
+  try {
+    // Turn 1: a fresh paginated turn, response items plus their mirrors.
+    // Turn 2: a migrated legacy turn. The raw prompt sits before the implicit
+    // turn it starts, and the mirrors carry per-thread `item-N` ids.
+    // Turn 3: a resumed turn with TurnItems only.
+    await writeModernRollout(env, `2026/10/20/rollout-2026-10-20T10-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-20T10:00:00.000Z', history_mode: 'paginated' },
+      items: [
+        eventMsg('2026-10-20T10:00:01.000Z', { type: 'task_started', turn_id: 't1' }),
+        { timestamp: '2026-10-20T10:00:01.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'first prompt' }] } },
+        completedItem(thread, 't1', '2026-10-20T10:00:01.000Z', { type: 'UserMessage', id: 'u-1', content: [{ type: 'text', text: 'first prompt' }] }),
+        { timestamp: '2026-10-20T10:00:02.000Z', payload: { type: 'function_call', name: 'shell', arguments: '{"cmd":"ls"}', call_id: 'call-1' } },
+        { timestamp: '2026-10-20T10:00:03.000Z', payload: { type: 'function_call_output', call_id: 'call-1', output: 'a.txt' } },
+        { timestamp: '2026-10-20T10:00:04.000Z', payload: { type: 'message', role: 'assistant', id: 'msg-1', content: [{ type: 'output_text', text: 'first answer' }] } },
+        completedItem(thread, 't1', '2026-10-20T10:00:04.000Z', { type: 'AgentMessage', id: 'a-1', content: [{ type: 'Text', text: 'first answer' }] }),
+        eventMsg('2026-10-20T10:00:05.000Z', { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 3 } } }),
+        eventMsg('2026-10-20T10:00:05.000Z', { type: 'task_complete', turn_id: 't1' }),
+        { timestamp: '2026-10-20T10:01:00.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'second prompt' }] } },
+        eventMsg('2026-10-20T10:01:00.000Z', { type: 'task_started', turn_id: 'rollout-9' }),
+        completedItem(thread, 'rollout-9', '2026-10-20T10:01:00.000Z', { type: 'UserMessage', id: 'item-1', content: [{ type: 'text', text: 'second prompt' }] }),
+        { timestamp: '2026-10-20T10:01:02.000Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'second answer' }] } },
+        completedItem(thread, 'rollout-9', '2026-10-20T10:01:02.000Z', { type: 'AgentMessage', id: 'item-2', content: [{ type: 'Text', text: 'second answer' }] }),
+        eventMsg('2026-10-20T10:01:03.000Z', { type: 'task_complete', turn_id: 'rollout-9' }),
+        eventMsg('2026-10-30T09:00:00.000Z', { type: 'task_started', turn_id: 't3' }),
+        completedItem(thread, 't3', '2026-10-30T09:00:00.000Z', { type: 'UserMessage', id: 'u-3', content: [{ type: 'text', text: 'third prompt' }] }),
+        completedItem(thread, 't3', '2026-10-30T09:00:02.000Z', { type: 'Reasoning', id: 'r-3', summary_text: ['thinking it over'], raw_content: ['hidden'] }),
+        completedItem(thread, 't3', '2026-10-30T09:00:03.000Z', { type: 'AgentMessage', id: 'a-3', content: [{ type: 'Text', text: 'third answer' }] }),
+        eventMsg('2026-10-30T09:00:04.000Z', { type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 5 } } }),
+        eventMsg('2026-10-30T09:00:04.000Z', { type: 'task_complete', turn_id: 't3' }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    for (const sweep of [false, true]) {
+      const { ctx } = runContext()
+      if (sweep) ctx.sweep = true
+      const { items } = await collect(provider.run(ctx))
+      if (sweep) {
+        // The manual import above did not fingerprint the file, so the sweep reads it.
+        assert.equal(items.length, 1)
+      }
+      const rows = await materialize(items[0])
+      const texts = rows.map(row => `${row.role}:${row.content_text}`)
+      assert.deepEqual(texts, [
+        'user:first prompt',
+        `assistant:${rows[1].content_text}`,
+        'tool:a.txt',
+        'assistant:first answer',
+        'user:second prompt',
+        'assistant:second answer',
+        'user:third prompt',
+        'assistant:thinking it over',
+        'assistant:third answer',
+      ])
+      assert.equal(rows[1].provider_type, 'function_call')
+      assert.ok(!rows.some(row => String(row.content_text).includes('hidden')), 'raw reasoning content is not recorded')
+      const usage = rows.filter(row => /** @type {any} */ (row.attributes)?.usage)
+      assert.deepEqual(usage.map(row => row.content_text), ['first answer', 'third answer'])
+      assert.equal(rows.find(row => row.content_text === 'third answer')?.message_id, 'a-3')
+      assert.equal(rows.find(row => row.content_text === 'third answer')?.provider_type, 'AgentMessage')
+      assert.equal(new Set(rows.map(row => row.part_id)).size, rows.length)
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('migrated item-N ids do not become row identity, and another thread\'s TurnItems are not this thread\'s rows', async () => {
+  const threads = ['01a0835d-0000-7000-8000-000000000021', '01a0835d-0000-7000-8000-000000000022']
+  const env = await stageEnv()
+  try {
+    for (const [index, thread] of threads.entries()) {
+      await writeModernRollout(env, `2026/10/21/rollout-2026-10-21T10-00-0${index}-${thread}.jsonl`, {
+        meta: { id: thread, timestamp: '2026-10-21T10:00:00.000Z' },
+        items: [
+          eventMsg('2026-10-21T10:00:01.000Z', { type: 'task_started', turn_id: 'rollout-1' }),
+          completedItem(thread, 'rollout-1', '2026-10-21T10:00:01.000Z', { type: 'UserMessage', id: 'item-1', content: [{ type: 'text', text: `prompt ${index}` }] }),
+          completedItem(threads[1 - index], 'rollout-1', '2026-10-21T10:00:01.500Z', { type: 'UserMessage', id: 'item-9', content: [{ type: 'text', text: 'not this thread' }] }),
+          eventMsg('2026-10-21T10:00:02.000Z', { type: 'task_complete', turn_id: 'rollout-1' }),
+        ],
+      })
+    }
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx } = runContext()
+    const { items } = await collect(provider.run(ctx))
+    assert.equal(items.length, 2)
+    const rows = (await Promise.all(items.map(materialize))).flat()
+    assert.deepEqual(rows.map(row => row.content_text).sort(), ['prompt 0', 'prompt 1'])
+    assert.ok(rows.every(row => row.message_id !== 'item-1'))
+    assert.equal(new Set(rows.map(row => row.part_id)).size, 2)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('TurnItems with no projection are counted by type in scan_complete, and an unfinished TurnItem turn is deferred by the sweep', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000031'
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, `2026/10/22/rollout-2026-10-22T10-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-22T10:00:00.000Z' },
+      items: [
+        eventMsg('2026-10-22T10:00:01.000Z', { type: 'task_started', turn_id: 't1' }),
+        completedItem(thread, 't1', '2026-10-22T10:00:01.000Z', { type: 'UserMessage', id: 'u-1', content: [{ type: 'text', text: 'run it' }] }),
+        completedItem(thread, 't1', '2026-10-22T10:00:02.000Z', { type: 'CommandExecution', id: 'c-1', command: 'secret-looking command' }),
+        completedItem(thread, 't1', '2026-10-22T10:00:03.000Z', { type: 'FutureThing', id: 'f-1', body: 'secret-looking body' }),
+        completedItem(thread, 't1', '2026-10-22T10:00:04.000Z', { type: 'AgentMessage', id: 'a-1', content: [{ type: 'Text', text: 'done' }] }),
+        eventMsg('2026-10-22T10:00:05.000Z', { type: 'task_complete', turn_id: 't1' }),
+        eventMsg('2026-10-22T10:01:00.000Z', { type: 'task_started', turn_id: 't2' }),
+        completedItem(thread, 't2', '2026-10-22T10:01:00.000Z', { type: 'UserMessage', id: 'u-2', content: [{ type: 'text', text: 'still going' }] }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const { items } = await collect(provider.run(ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => row.content_text), ['run it', 'done'])
+    const scan = entries.findLast(entry => entry.message === 'codex.backfill.scan_complete')?.fields
+    assert.equal(scan?.sessions_deferred, 1)
+    assert.equal(scan?.completed_items_unsupported, 2)
+    assert.equal(scan?.completed_item_unsupported_types, 'CommandExecution,other')
+    assert.ok(!JSON.stringify(entries).includes('secret-looking'), 'the diagnostic carries no content')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a turn stopped before any model output records its prompt once, and a TurnItem keeps its own completion time', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000041'
+  const env = await stageEnv()
+  try {
+    /** @param {string} turnId @param {string} at @param {Record<string, unknown>} item @param {number} completedAt */
+    const completedAt = (turnId, at, item, completedAt) => {
+      const record = completedItem(thread, turnId, at, item)
+      return { ...record, payload: { ...record.payload, completed_at_ms: completedAt } }
+    }
+    await writeModernRollout(env, `2026/10/23/rollout-2026-10-23T10-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-23T10:00:00.000Z', history_mode: 'paginated' },
+      items: [
+        // Codex writes the person's prompt both as a raw user message and as
+        // its UserMessage mirror, then the turn is aborted before any reply.
+        eventMsg('2026-10-23T10:00:01.000Z', { type: 'task_started', turn_id: 'a1' }),
+        {
+          timestamp: '2026-10-23T10:00:01.000Z',
+          payload: {
+            type: 'message', role: 'user', id: 'msg-u1', content: [{ type: 'input_text', text: 'stop early' }],
+            internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text'] },
+          },
+        },
+        completedItem(thread, 'a1', '2026-10-23T10:00:01.000Z', { type: 'UserMessage', id: 'u-1', content: [{ type: 'text', text: 'stop early' }] }),
+        eventMsg('2026-10-23T10:00:02.000Z', { type: 'turn_aborted', turn_id: 'a1' }),
+        // A TurnItem-only turn whose completion times differ from the record
+        // times; a zero completion time is Codex's default for a missing one.
+        eventMsg('2026-10-23T10:05:00.000Z', { type: 'task_started', turn_id: 'a2' }),
+        completedAt('a2', '2026-10-23T10:05:00.000Z', { type: 'UserMessage', id: 'u-2', content: [{ type: 'text', text: 'later prompt' }] }, Date.parse('2026-10-23T10:04:30.000Z')),
+        completedAt('a2', '2026-10-23T10:05:09.000Z', { type: 'AgentMessage', id: 'a-2', content: [{ type: 'Text', text: 'later answer' }] }, 0),
+        eventMsg('2026-10-23T10:05:10.000Z', { type: 'task_complete', turn_id: 'a2' }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => `${row.role}:${row.content_text}`), ['user:stop early', 'user:later prompt', 'assistant:later answer'])
+    assert.equal(rows[0].message_id, 'msg-u1')
+    assert.equal(String(rows[1].message_created_at), '2026-10-23T10:04:30.000Z')
+    assert.equal(String(rows[2].message_created_at), '2026-10-23T10:05:09.000Z')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('only a turn\'s own prompt or model output decides it: harness context, a prompt between turns and a missing turn id suppress nothing', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000051'
+  const env = await stageEnv()
+  try {
+    /** @param {string} at @param {string} text @param {string[]} kinds */
+    const userMessage = (at, text, kinds) => ({
+      timestamp: at,
+      payload: {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text }],
+        internal_chat_message_metadata_passthrough: { content_item_kinds: kinds },
+      },
+    })
+    /** @param {string} text */
+    const agent = text => ({ type: 'AgentMessage', content: [{ type: 'Text', text }] })
+    /** @param {string} text */
+    const user = text => ({ type: 'UserMessage', content: [{ type: 'text', text }] })
+    await writeModernRollout(env, `2026/10/23/rollout-2026-10-23T11-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-23T11:00:00.000Z', history_mode: 'paginated' },
+      items: [
+        // Turn b1 is TurnItems only, with harness context written raw.
+        eventMsg('2026-10-23T11:00:01.000Z', { type: 'task_started', turn_id: 'b1' }),
+        userMessage('2026-10-23T11:00:01.000Z', 'AGENTS.md says hello', ['contextual.agents_md']),
+        completedItem(thread, 'b1', '2026-10-23T11:00:02.000Z', user('first prompt')),
+        completedItem(thread, 'b1', '2026-10-23T11:00:03.000Z', agent('first answer')),
+        eventMsg('2026-10-23T11:00:04.000Z', { type: 'task_complete', turn_id: 'b1' }),
+        // A raw prompt written before the next turn starts belongs to no turn.
+        userMessage('2026-10-23T11:01:00.000Z', 'gap prompt', ['user.text']),
+        // Turn b2 searched the web: its raw evidence wins over its mirrors.
+        eventMsg('2026-10-23T11:01:01.000Z', { type: 'task_started', turn_id: 'b2' }),
+        { timestamp: '2026-10-23T11:01:02.000Z', payload: { type: 'web_search_call', id: 'ws-1', status: 'completed' } },
+        completedItem(thread, 'b2', '2026-10-23T11:01:02.000Z', user('gap prompt')),
+        completedItem(thread, 'b2', '2026-10-23T11:01:03.000Z', agent('mirrored answer')),
+        eventMsg('2026-10-23T11:01:04.000Z', { type: 'task_complete', turn_id: 'b2' }),
+        // A TurnItem with no turn id at all, after the last turn ended.
+        eventMsg('2026-10-23T11:02:00.000Z', { type: 'item_completed', thread_id: thread, item: agent('unowned answer') }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => `${row.role}:${row.content_text}`), [
+      'user:AGENTS.md says hello',
+      'user:first prompt',
+      'assistant:first answer',
+      'user:gap prompt',
+      'assistant:unowned answer',
+    ])
+  } finally {
+    await env.cleanup()
+  }
+})

@@ -348,6 +348,10 @@ async function* runCodexBackfill(args) {
   // suffixes). Count this one too, so an operator can tell a session that
   // recorded nothing from one whose delivery evidence was filtered out.
   let deliveryEvidenceSkipped = 0
+  // Completed TurnItems no projection exists for, by type, in turns projected
+  // from TurnItems. Counts and fixed type names only, never content.
+  /** @type {Map<string, number>} */
+  const completedUnsupported = new Map()
   const files = await listRolloutFiles(sessionsDir)
   const present = new Set(files)
   for (const filePath of args.fingerprints.keys()) {
@@ -452,6 +456,11 @@ async function* runCodexBackfill(args) {
         })
         continue
       }
+      // Counted only for sessions the scan keeps, so an ignored session
+      // leaves no trace of what it held.
+      for (const [type, count] of session.completedItemsUnsupported ?? []) {
+        completedUnsupported.set(type, (completedUnsupported.get(type) ?? 0) + count)
+      }
 
       // Native lifecycle events delimit an unfinished model response. Do
       // not persist its assistant row before a later token_count can stamp
@@ -521,6 +530,9 @@ async function* runCodexBackfill(args) {
     sessions_projected: sessionsProjected,
     sessions_ignored: sessionsIgnored,
     delivery_evidence_skipped: deliveryEvidenceSkipped,
+    // @ref LLP 0567#diagnostic [implements]: bounded, content-free count of TurnItems with no projection
+    completed_items_unsupported: [...completedUnsupported.values()].reduce((sum, count) => sum + count, 0),
+    completed_item_unsupported_types: [...completedUnsupported.keys()].sort().join(','),
     messages_projected: messagesProjected,
     status: 'ok',
   })
@@ -720,9 +732,11 @@ function isDeliveredAssistantEvidence(metadata, payload) {
  * Modern rollout: line-delimited `{ timestamp, type, payload }` records:
  * one `session_meta`, zero+ `turn_context`, and the conversation's
  * `response_item`s. A `token_count` `event_msg` carries the turn's token
- * usage and is captured as a synthetic turn-boundary marker (no message);
- * all other `event_msg` / `compacted` and unknown line types are skipped. A
- * blank or truncated line never aborts the parse.
+ * usage and is captured as a synthetic turn-boundary marker (no message). An
+ * `item_completed` `event_msg` carries a completed TurnItem, which is kept for
+ * a turn that recorded no model response items of its own (see
+ * `completedTurnItems`). All other `event_msg` / `compacted` and unknown line
+ * types are skipped. A blank or truncated line never aborts the parse.
  *
  * @param {string} text
  * @param {string} filePath
@@ -739,6 +753,13 @@ function parseJsonlRollout(text, filePath) {
   let tracksLifecycle = false
   let settledItemCount = 0
   let deliveryEvidenceSkipped = 0
+  /** @type {string | undefined} */
+  let turnId
+  /** @type {Set<string>} */
+  const rawTurns = new Set()
+  /** @type {Set<string>} */
+  const promptTurns = new Set()
+  let sawCompleted = false
 
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
@@ -767,9 +788,29 @@ function parseJsonlRollout(text, filePath) {
         deliveryEvidenceSkipped += 1
         continue
       }
+      if (turnId !== undefined) {
+        if (payload.type === 'message' && payload.role !== 'assistant') {
+          if (contentItemKinds(payload)?.some(kind => kind.startsWith('user.'))) promptTurns.add(turnId)
+        } else if (RAW_TURN_EVIDENCE.has(stringValue(payload.type) ?? '')) {
+          rawTurns.add(turnId)
+        }
+      }
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
     } else if (type === 'event_msg' && payload) {
-      if (payload.type === 'task_started') tracksLifecycle = true
+      if (payload.type === 'task_started') {
+        tracksLifecycle = true
+        turnId = stringValue(payload.turn_id)
+      }
+      if (payload.type === 'item_completed' && isPlainObject(payload.item)) {
+        sawCompleted = true
+        // Codex defaults a missing completion time to 0 and writes it back.
+        const completedAt = numberValue(payload.completed_at_ms)
+        items.push({
+          payload: payload.item,
+          timestampMs: completedAt && completedAt > 0 ? completedAt : timestampToMs(row.timestamp),
+          completed: { turnId: stringValue(payload.turn_id) ?? turnId ?? '', threadId: stringValue(payload.thread_id) },
+        })
+      }
       // The one event_msg we keep: token_count. It is NOT a message: it is a
       // turn-boundary marker carrying that turn's normalized usage. Its slot in
       // the items stream is preserved (so the projector can attribute it to the
@@ -779,15 +820,112 @@ function parseJsonlRollout(text, filePath) {
         items.push({ payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes })
         settledItemCount = items.length
       }
-      if (payload.type === 'task_complete' || payload.type === 'turn_aborted') settledItemCount = items.length
+      if (payload.type === 'task_complete' || payload.type === 'turn_aborted') {
+        settledItemCount = items.length
+        // A raw item between turns, such as a migrated turn's prompt, belongs
+        // to no turn, so it cannot suppress the turn that just ended.
+        turnId = undefined
+      }
     }
   }
 
   if (!sawRecord) return undefined
   const session = buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
+  if (sawCompleted) {
+    const kept = completedTurnItems(session, rawTurns, promptTurns, settledItemCount)
+    session.items = kept.items
+    settledItemCount = kept.settledItemCount
+    if (kept.unsupported.size > 0) session.completedItemsUnsupported = kept.unsupported
+  }
   if (tracksLifecycle) session.settledItemCount = settledItemCount
   if (deliveryEvidenceSkipped) session.deliveryEvidenceSkipped = deliveryEvidenceSkipped
   return session
+}
+
+// Response items only a model response writes. A user-role message is not
+// one: Codex records harness context (AGENTS.md, environment) as user
+// messages, so its presence says nothing about whether the turn's answer was
+// written as response items. The person's own prompt is told apart by its
+// `user.*` content kinds and stands in for the UserMessage mirror alone.
+// @ref LLP 0567#dedupe [implements]: a turn's model response items decide its representation
+const RAW_TURN_EVIDENCE = new Set([
+  'message', 'function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'reasoning',
+  'web_search_call', 'image_generation_call', 'local_shell_call', 'tool_search_call', 'tool_search_output',
+  'compaction', 'compaction_summary', 'context_compaction',
+])
+
+// The TurnItems a completed-only turn is projected from, each normalized to
+// the response item it mirrors so one projector handles both. Tool TurnItems
+// are not here: Codex persists a tool call's response items in every history
+// mode, so a turn that ran a tool already has raw evidence.
+/** @type {Record<string, (item: Record<string, unknown>) => Record<string, unknown>>} */
+const COMPLETED_TURN_ITEMS = {
+  UserMessage: item => ({ type: 'message', role: 'user', content: item.content }),
+  AgentMessage: item => ({ type: 'message', role: 'assistant', content: item.content }),
+  Reasoning: item => ({ type: 'reasoning', summary: item.summary_text }),
+}
+
+// Every TurnItem variant Codex defines. A type outside this list is counted
+// as `other`, so the diagnostic stays bounded whatever a newer client writes.
+const KNOWN_TURN_ITEMS = new Set([
+  'UserMessage', 'FunctionCallOutput', 'HookPrompt', 'AgentMessage', 'Plan', 'Reasoning', 'CommandExecution',
+  'DynamicToolCall', 'CollabAgentToolCall', 'SubAgentActivity', 'WebSearch', 'ImageView', 'Extension',
+  'ImageGeneration', 'EnteredReviewMode', 'ExitedReviewMode', 'ContextCompaction', 'FileChange', 'McpToolCall',
+])
+
+/**
+ * Resolve the completed TurnItems against the response items. Codex writes a
+ * turn's model output as response items in every history mode, and paginated
+ * history (or a migrated legacy file) also records completed TurnItems. A
+ * turn with any model response item is therefore projected from those alone,
+ * and its TurnItems are dropped; a turn with none is projected from its
+ * TurnItems. The decision is per turn id, never by comparing text.
+ *
+ * Migrated mirrors carry `item-N` ids numbered per thread, which would collide
+ * across threads as row identity, so those ids are dropped for the gateway's
+ * fallback identity. Other native ids are kept verbatim.
+ *
+ * @ref LLP 0567#identity [implements]: `item-N` ids dropped, another thread's TurnItems skipped
+ * @param {CodexRolloutSession} session
+ * @param {Set<string>} rawTurns  turn ids with a model response item
+ * @param {Set<string>} promptTurns  turn ids with the person's prompt as a raw user message
+ * @param {number} settledItemCount  settled prefix length before resolution
+ * @returns {{ items: CodexRolloutItem[], settledItemCount: number, unsupported: Map<string, number> }}
+ */
+function completedTurnItems(session, rawTurns, promptTurns, settledItemCount) {
+  /** @type {CodexRolloutItem[]} */
+  const items = []
+  /** @type {Map<string, number>} */
+  const unsupported = new Map()
+  let settled = 0
+  for (let index = 0; index < session.items.length; index++) {
+    if (index === settledItemCount) settled = items.length
+    const item = session.items[index]
+    const completed = item.completed
+    if (completed) {
+      if (rawTurns.has(completed.turnId)) continue
+      if (completed.threadId && completed.threadId !== session.threadId) continue
+      const turnItemType = stringValue(item.payload.type) ?? ''
+      if (turnItemType === 'UserMessage' && promptTurns.has(completed.turnId)) continue
+      const normalize = COMPLETED_TURN_ITEMS[turnItemType]
+      if (!normalize) {
+        const key = KNOWN_TURN_ITEMS.has(turnItemType) ? turnItemType : 'other'
+        unsupported.set(key, (unsupported.get(key) ?? 0) + 1)
+        continue
+      }
+      const payload = normalize(item.payload)
+      const id = stringValue(item.payload.id)
+      if (id && !/^item-\d+$/.test(id)) payload.id = id
+      /** @type {CodexRolloutItem} */
+      const normalized = { payload, turnItemType }
+      if (item.timestampMs !== undefined) normalized.timestampMs = item.timestampMs
+      items.push(normalized)
+    } else {
+      items.push(item)
+    }
+  }
+  if (settledItemCount >= session.items.length) settled = items.length
+  return { items, settledItemCount: settled, unsupported }
 }
 
 /**
@@ -1018,7 +1156,8 @@ function projectedMessageFromItem(item) {
   if (nativeId) message.message_id = nativeId
   if (item.timestampMs !== undefined) message.message_created_at = new Date(item.timestampMs).toISOString()
   // Carry the native item type as a provenance breadcrumb on the row.
-  if (itemType) message.provider_type = itemType
+  const providerType = item.turnItemType ?? itemType
+  if (providerType) message.provider_type = providerType
   return message
 }
 
