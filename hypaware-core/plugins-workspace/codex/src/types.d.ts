@@ -55,6 +55,12 @@ export interface CodexRolloutSession {
   settledItemCount?: number
   /** Guardian Code Mode delivery-evidence records dropped before projection. Absent when none were. */
   deliveryEvidenceSkipped?: number
+  /**
+   * Completed TurnItems with no projection, by TurnItem type (`other` for a
+   * type Codex did not define), in turns projected from TurnItems. Absent when
+   * none were.
+   */
+  completedItemsUnsupported?: Map<string, number>
 }
 
 /** One recovered rollout response item plus its envelope timestamp. */
@@ -71,6 +77,13 @@ export interface CodexRolloutItem {
    * message rather than projecting a message of its own.
    */
   usageAttributes?: JsonObject
+  /**
+   * Set while parsing on an `item_completed` TurnItem, before it is resolved
+   * against the turn's response items: the turn and thread it completed in.
+   */
+  completed?: { turnId: string, threadId?: string }
+  /** The TurnItem type a normalized completed item came from, e.g. `AgentMessage`. */
+  turnItemType?: string
 }
 
 /**
