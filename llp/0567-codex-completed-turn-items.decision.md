@@ -51,7 +51,8 @@ the last `task_started` opened, and to none once `task_complete` or
   `UserMessage` mirror. The person's prompt is told apart by its
   `user.*` content item kinds; its other TurnItems are still projected.
 - A turn with neither is projected from its TurnItems.
-- A TurnItem with no turn id is never suppressed.
+- A TurnItem with no turn id, written outside any open turn, is never
+  suppressed.
 
 Other user-role raw messages do not count, because Codex writes harness
 context as user-role raw items even in a turn whose conversation is only in
