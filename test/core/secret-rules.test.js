@@ -91,6 +91,8 @@ test('the entropy heuristic masks unknown random tokens of 32 to 128 characters'
   // Padded base64url, such as a Fernet key, is a secret, not a digest.
   const fernet = 'Aa0-' + string(39, ALNUM) + '='
   assert.equal(redactSecretText(`FERNET_KEY=${fernet}`), `FERNET_KEY=${MASK}`)
+  // An `=` after a token that is not padding stays.
+  assert.equal(redactSecretText(`${token}=1 ${token}==value`), `${MASK}=1 ${MASK}==value`)
   // Outside the length bounds the heuristic does not decide.
   for (const length of [31, 129]) {
     const text = `t ${'Aa0' + string(length - 3, ALNUM)}`
@@ -148,6 +150,7 @@ test('the heuristic false-positive bound: no realistic non-secret token in the c
     npmIntegrity: () => 'sha512-' + bytes(64).toString('base64'),
     paddedBase64: () => bytes([32, 64, 80][Math.floor(rand() * 3)]).toString('base64'),
     escapedPaddedBase64: () => 'line\\n' + bytes(32).toString('base64'),
+    windowsPathPaddedBase64: () => 'C:\\d\\' + bytes(32).toString('base64'),
     goSum: () => 'golang.org/x/text v0.14.0 h1:' + bytes(32).toString('base64'),
     digestHeader: () => 'Digest: sha-256=' + bytes(32).toString('base64'),
     sshFingerprint: () => 'SHA256:' + bytes(32).toString('base64').replace(/=+$/, ''),

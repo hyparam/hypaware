@@ -153,8 +153,8 @@ function continues(text, at) {
 }
 
 /**
- * One left-to-right scan; a run is examined only once it ends, and only runs
- * of 32 to 128 characters are read again, so cost is linear in the text.
+ * One left-to-right scan; a run is examined only once it ends, and each run is
+ * read again at most a constant number of times, so cost is linear in the text.
  * @param {string} text
  */
 function maskRandomTokens(text) {
@@ -170,22 +170,26 @@ function maskRandomTokens(text) {
   let armorTo = -1
   while (i < length) {
     while (i < length && charClass(text.charCodeAt(i)) === OTHER) i++
-    let from = i
+    const run = i
     while (i < length && charClass(text.charCodeAt(i)) !== OTHER) i++
-    if (i - from < MIN_TOKEN) continue
+    if (i - run < MIN_TOKEN) continue
+    let from = run
     // The letter after a backslash in escaped text is the escape, not the token.
     if (text.charCodeAt(from - 1) === 92) from++
     // Part of a path, URL, base64 blob, hostname or dotted name, or padded
-    // standard base64 (a digest or key), not a token.
+    // standard base64 (a digest or key), not a token. A backslash may be an
+    // escape or part of a path, so either alignment counts as padded.
     let end = i
     while (text.charCodeAt(end) === 61) end++
-    if (end > i && (end - from) % 4 === 0 && !hasMark(text, from, i)) continue
+    const padded = end > i && end - i <= 2 && (end - from) % 4 === 0
+    if (end > i && ((end - run) % 4 === 0 || (end - from) % 4 === 0) && !hasMark(text, from, i)) continue
     if (continues(text, from - 1) || continues(text, end) ||
         (text.charCodeAt(from - 1) === 46 && charClass(text.charCodeAt(from - 2)) !== OTHER) ||
         (text.charCodeAt(end) === 46 && charClass(text.charCodeAt(end + 1)) !== OTHER)) continue
     if (!looksRandom(text, from, i)) continue
     if (DIGEST_LABEL.test(text.slice(Math.max(0, from - 24), from))) continue
-    // An unterminated block is not armor; no later block can close either.
+    // A BEGIN line pairs with the next END line. A block that no END closes
+    // is not armor, and then no later block can close either.
     while (armorSearch >= 0 && armorTo <= from) {
       ARMOR_BEGIN.lastIndex = armorSearch
       const begin = ARMOR_BEGIN.exec(text)
@@ -201,7 +205,7 @@ function maskRandomTokens(text) {
     }
     if (armorFrom >= 0 && armorFrom <= from && from < armorTo) continue
     ;(parts ??= []).push(text.slice(copied, from), SECRET_MASK)
-    copied = end
+    copied = padded ? end : i
   }
   return parts ? parts.join('') + text.slice(copied) : text
 }

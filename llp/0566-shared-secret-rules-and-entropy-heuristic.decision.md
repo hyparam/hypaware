@@ -61,8 +61,11 @@ if every test below passes, so each test can only narrow what is masked:
   before it.
 - It is not inside a PEM block, from a whole `-----BEGIN ...-----` line to
   its `-----END ...-----` line. Private-key blocks are masked whole before
-  the heuristic runs; certificates and public keys are left alone. An
-  unterminated block, or a bare `-----BEGIN ` in code, shields nothing.
+  the heuristic runs; certificates and public keys are left alone. A bare
+  `-----BEGIN ` in code, or a block that no END line closes, shields nothing.
+  A BEGIN line pairs with the next END line whatever lies between, so text
+  between an unclosed block and a later one, or between whole armor lines
+  written as code literals, is shielded too.
 
 The heuristic is on by default with the other built-ins. There is no switch
 for it, as LLP 0503 #config has none for any built-in.
@@ -72,7 +75,8 @@ for it, as LLP 0503 #config has none for any built-in.
 This trades a small chance of masking a non-secret for catching unknown
 formats. Over a seeded corpus of commit SHAs, SHA-256 digests, UUIDs, ULIDs,
 camelCase, PascalCase and snake_case names, paths, long base64 and base64url
-blobs, padded standard base64 (also after a JSON `\n` escape), go.sum hashes,
+blobs, padded standard base64 (also after a JSON `\n` escape or a Windows path
+backslash), go.sum hashes,
 digest headers, SSH fingerprints and public keys, PEM certificates, data URLs,
 npm integrity strings, provider IDs and base64 prose, it masks none. It still can:
 
@@ -94,8 +98,8 @@ Explicit formats and custom patterns remain the way to cover a known secret.
 
 Each rule is compiled at load. The added formats are linear in the string:
 each match attempt starts at most once per run and reads it once. The
-heuristic is one left-to-right scan; only runs of 32 to 128 characters are
-read again, a bounded constant number of times, and PEM blocks are located
+heuristic is one left-to-right scan; a run is read again only if it is 32 to
+128 characters or padded with `=`, a bounded constant number of times, and PEM blocks are located
 once, moving forward, so cost stays linear in the string. It allocates only
 when it masks something, plus a short slice per candidate that passes the
 statistical tests.
