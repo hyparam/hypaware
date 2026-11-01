@@ -299,14 +299,18 @@ trigger full-file masking, though credential patterns still apply.
 
 A heuristic also masks unknown random tokens: a standalone run of 32 to 128
 letters, digits, `-` and `_` that mixes uppercase, lowercase and digits and is
-as varied as a randomly generated key. It leaves commit SHAs, digests, UUIDs
-and other hex alone, along with ordinary code identifiers, paths and URLs,
-base64 blobs, and provider IDs such as `chatcmpl-...` or `toolu_...`. It has
-limits both ways. A long identifier packed with acronyms and digits can look
-random and be masked. It misses secrets shorter than 32 or longer than 128
-characters, hex-only or single-case secrets, secrets embedded in a path or
-URL, and about 3% of random 32-character tokens. It is on by default, like
-the other built-ins, with no switch to turn it off.
+as varied as a randomly generated key. It leaves commit SHAs, UUIDs and other
+hex alone, along with ordinary code identifiers, paths and URLs, provider IDs
+such as `chatcmpl-...` or `toolu_...`, base64 that is padded with `=`, touches
+a `+` or `/`, or sits inside a PEM block, and digests or keys labelled
+`h1:`, `SHA256:`, `sha-256=` or `ssh-ed25519`. It has limits both ways.
+Random-looking public values can be masked: long identifiers packed with
+acronyms and digits, document or video IDs, base58 addresses, nonces, and
+lines of wrapped base64 outside a PEM block. It misses secrets shorter than 32
+or longer than 128 characters, hex-only or single-case secrets, secrets
+embedded in a path or URL, most secrets in standard base64 (they usually
+contain `+` or `/`), and about 3% of random 32-character tokens. It is on by
+default, like the other built-ins, with no switch to turn it off.
 
 File masking uses recorded tool arguments and call/result links. A named file
 read whose path cannot be established within the current export scan has its

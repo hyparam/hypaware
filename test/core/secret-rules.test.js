@@ -99,6 +99,14 @@ test('the heuristic catches nearly every random 62-character-alphabet token', ()
   }
 })
 
+test('adversarial input stays linear: a long run of -eyJ with no dots', () => {
+  // A word-boundary JWT pattern took about 30 s on 512 KB of this.
+  const text = '-eyJ' + 'aaaaaaaa-eyJ'.repeat(87382)
+  const started = performance.now()
+  redactSecretText(text)
+  assert.ok(performance.now() - started < 2000, 'took more than 2 s on 1 MB')
+})
+
 test('the heuristic false-positive bound: no realistic non-secret token in the corpus is masked', () => {
   const { rand, pick, string, bytes } = generator(1)
   const capitalized = () => { const word = pick(WORDS); return word[0].toUpperCase() + word.slice(1) }
@@ -130,6 +138,12 @@ test('the heuristic false-positive bound: no realistic non-secret token in the c
     base64urlBlob: () => bytes(200).toString('base64url'),
     dataUrl: () => 'data:image/png;base64,' + bytes(120).toString('base64'),
     npmIntegrity: () => 'sha512-' + bytes(64).toString('base64'),
+    paddedBase64: () => bytes([32, 64, 80][Math.floor(rand() * 3)]).toString('base64'),
+    goSum: () => 'golang.org/x/text v0.14.0 h1:' + bytes(32).toString('base64'),
+    digestHeader: () => 'Digest: sha-256=' + bytes(32).toString('base64'),
+    sshFingerprint: () => 'SHA256:' + bytes(32).toString('base64').replace(/=+$/, ''),
+    sshPublicKey: () => 'ssh-ed25519 ' + Buffer.concat([Buffer.from('0000000b7373682d6564323535313900000020', 'hex'), bytes(32)]).toString('base64') + ' dev@host',
+    pemCertificate: () => '-----BEGIN CERTIFICATE-----\n' + (bytes(600).toString('base64').match(/.{1,64}/g) ?? []).join('\n') + '\n-----END CERTIFICATE-----',
     completionId: () => 'chatcmpl-' + string(29, ALNUM),
     toolUseId: () => 'toolu_' + string(24, ALNUM),
     encodedProse: () => Buffer.from(sentence()).toString('base64'),

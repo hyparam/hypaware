@@ -20,8 +20,10 @@ const PATTERNS = [
   /\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/g,
   /\bsk_live_[A-Za-z0-9]{24,}\b/g,
   // A JWT is three base64url segments whose header encodes `{"`. The
-  // signature segment is empty for an unsigned token.
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g,
+  // signature segment is empty for an unsigned token. The lookbehind starts a
+  // match only where a run starts; `\b` would retry at every `-eyJ` in a long
+  // run and backtrack to its end each time, which is quadratic.
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g,
 ]
 const ASSIGNMENT = /\b((?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key)\s*[=:]\s*["']?)[^\s"'<>;,}{]{4,}/gi
 
@@ -51,6 +53,9 @@ const MAX_TOKEN = 128
 // Provider message, call and integrity identifiers look random but are
 // recorded routinely and are not credentials.
 const IDENTIFIER_PREFIX = /^(?:chatcmpl|msg|toolu|srvtoolu|req|call|resp|rs|fc|sha1|sha256|sha384|sha512)[-_]/
+// A digest or public key named by the label before it: go.sum `h1:`, SSH
+// `SHA256:` fingerprints, `sha-256=` digest headers and SSH key lines.
+const DIGEST_LABEL = /(?:\b(?:h1|md5|sha-?(?:1|224|256|384|512))[:=]|\b(?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-nistp\d+)\s+)$/i
 // The expected Shannon entropy of n characters drawn uniformly from 62 is
 // about log2(62) - 61 / (2n ln 2). The bound sits 0.5 bits below it, under
 // the 0.1st percentile of random tokens at every candidate length.
@@ -149,20 +154,39 @@ function maskRandomTokens(text) {
   let copied = 0
   const length = text.length
   let i = 0
+  // Base64 inside a PEM block (a certificate or public key; private keys are
+  // already masked whole) is armor. Blocks are found once, moving forward.
+  let armorSearch = text.includes('-----BEGIN ') ? 0 : -1
+  let armorFrom = -1
+  let armorTo = -1
   while (i < length) {
     while (i < length && charClass(text.charCodeAt(i)) === OTHER) i++
     let from = i
     while (i < length && charClass(text.charCodeAt(i)) !== OTHER) i++
     if (i - from < MIN_TOKEN) continue
-    // Part of a path, URL, base64 blob, hostname or dotted name, not a token.
+    // Part of a path, URL, base64 blob, hostname or dotted name, or padded
+    // base64 (a digest or key), not a token.
     let end = i
     while (text.charCodeAt(end) === 61) end++
+    if (end > i && (end - from) % 4 === 0) continue
     if (continues(text, from - 1) || continues(text, end) ||
         (text.charCodeAt(from - 1) === 46 && charClass(text.charCodeAt(from - 2)) !== OTHER) ||
         (text.charCodeAt(end) === 46 && charClass(text.charCodeAt(end + 1)) !== OTHER)) continue
     // The letter after a backslash in escaped text is the escape, not the token.
     if (text.charCodeAt(from - 1) === 92) from++
     if (!looksRandom(text, from, i)) continue
+    if (DIGEST_LABEL.test(text.slice(Math.max(0, from - 24), from))) continue
+    while (armorSearch >= 0 && armorTo <= from) {
+      armorFrom = text.indexOf('-----BEGIN ', armorSearch)
+      if (armorFrom < 0) {
+        armorSearch = -1
+        break
+      }
+      const close = text.indexOf('-----END ', armorFrom)
+      armorTo = close < 0 ? length : close
+      armorSearch = armorTo + 1
+    }
+    if (armorFrom >= 0 && armorFrom <= from && from < armorTo) continue
     ;(parts ??= []).push(text.slice(copied, from), SECRET_MASK)
     copied = i
   }
@@ -170,8 +194,8 @@ function maskRandomTokens(text) {
 }
 
 /**
- * Mask every recognized secret in one string. Each rule is a single linear
- * pass compiled at load, so cost is proportional to the string's length.
+ * Mask every recognized secret in one string. Every rule is compiled at load;
+ * the heuristic and the formats added with it are linear in the string.
  * @param {string} text
  * @ref LLP 0566#entropy-heuristic [implements]: conservative random-token masking alongside the explicit formats
  */

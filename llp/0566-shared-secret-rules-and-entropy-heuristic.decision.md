@@ -26,7 +26,8 @@ The built-ins also mask:
 - Stripe live secret keys: `sk_live_` and at least 24 alphanumerics.
 - JWTs: three base64url segments, the first starting `eyJ` (the encoding of
   `{"`), with or without a `Bearer` prefix. An empty signature segment still
-  counts.
+  counts. A match starts only where a run of base64url characters starts; a
+  word-boundary start retries inside a long run and is quadratic in it.
 
 ## Entropy heuristic {#entropy-heuristic}
 
@@ -37,6 +38,8 @@ if every test below passes, so each test can only narrow what is masked:
 - The run is not part of a path, URL, base64 blob, hostname or dotted name: no
   `/` or `+` on either side (after trailing `=` padding), and no `.` joining
   it to another token.
+- It is not padded base64: a run whose `=` padding brings it to a multiple of
+  four characters is an encoded digest or key.
 - It mixes uppercase, lowercase and digits. Hex lacks one of these, so commit
   SHAs, digests and UUIDs are never masked.
 - At least 0.42 of adjacent characters change class. camelCase and snake_case
@@ -52,6 +55,11 @@ if every test below passes, so each test can only narrow what is masked:
 - It does not start with a provider identifier prefix such as `chatcmpl-`,
   `msg_`, `toolu_`, `call_` or `sha512-`. Those IDs look random but are
   recorded routinely.
+- It is not labelled as a digest or public key: no `h1:`, `SHA256:`,
+  `sha-256=` or similar, and no `ssh-ed25519` or other SSH key type, directly
+  before it.
+- It is not inside a PEM block. Private-key blocks are masked whole before
+  the heuristic runs; certificates and public keys are left alone.
 
 The heuristic is on by default with the other built-ins. There is no switch
 for it, as LLP 0503 #config has none for any built-in.
@@ -60,21 +68,30 @@ for it, as LLP 0503 #config has none for any built-in.
 
 This trades a small chance of masking a non-secret for catching unknown
 formats. Over a seeded corpus of commit SHAs, SHA-256 digests, UUIDs, ULIDs,
-camelCase, PascalCase and snake_case names, paths, base64 and base64url blobs,
-data URLs, npm integrity strings, provider IDs and base64 prose, it masks
-none. It still can:
+camelCase, PascalCase and snake_case names, paths, long base64 and base64url
+blobs, padded base64, go.sum hashes, digest headers, SSH fingerprints and
+public keys, PEM certificates, data URLs, npm integrity strings, provider IDs
+and base64 prose, it masks none. It still can:
 
-- Mask a long identifier dense with acronyms and digits, which has the same
-  statistics as a random token.
+- Mask a random-looking public value: a long identifier dense with acronyms
+  and digits, a document or video ID, a base58 address, a nonce, or a line of
+  wrapped base64 outside a PEM block. These have the same statistics as a
+  random token.
 - Miss a secret shorter than 32 or longer than 128 characters, a hex-only or
-  single-case secret, one inside a path or URL, or about 3% of random
-  32-character tokens (about 1% at 40, fewer beyond).
+  single-case secret, one inside a path or URL, most secrets in standard
+  base64 (which usually hold a `+` or `/`, or are padded), or about 3% of
+  random 32-character tokens (about 1% at 40, fewer beyond).
+- Miss a JWT joined to a preceding word character, or one whose header JSON
+  starts with a space (`eyAi...`).
 
 Explicit formats and custom patterns remain the way to cover a known secret.
 
 ## Cost {#cost}
 
-Each rule is compiled at load and makes one pass over a string. The
+Each rule is compiled at load. The added formats are linear in the string:
+each match attempt starts at most once per run and reads it once. The
 heuristic is one left-to-right scan; only runs of 32 to 128 characters are
-read again, a bounded constant number of times, so cost stays linear in the
-string. It allocates only when it masks something.
+read again, a bounded constant number of times, and PEM blocks are located
+once, moving forward, so cost stays linear in the string. It allocates only
+when it masks something, plus a short slice per candidate that passes the
+statistical tests.
