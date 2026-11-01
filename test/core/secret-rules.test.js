@@ -93,6 +93,11 @@ test('the entropy heuristic masks unknown random tokens of 32 to 128 characters'
   assert.equal(redactSecretText(`FERNET_KEY=${fernet}`), `FERNET_KEY=${MASK}`)
   // An `=` after a token that is not padding stays.
   assert.equal(redactSecretText(`${token}=1 ${token}==value`), `${MASK}=1 ${MASK}==value`)
+  // Lengths where the `=` would align the run: a token with a mark, and one after an escape.
+  const marked = 'Aa0_' + string(43, ALNUM)
+  assert.equal(redactSecretText(`${marked}=1`), `${MASK}=1`)
+  const short = 'Aa0' + string(31, ALNUM)
+  assert.equal(redactSecretText(`a\\n${short}=1`), `a\\n${MASK}=1`)
   // Outside the length bounds the heuristic does not decide.
   for (const length of [31, 129]) {
     const text = `t ${'Aa0' + string(length - 3, ALNUM)}`

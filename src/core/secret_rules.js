@@ -181,8 +181,10 @@ function maskRandomTokens(text) {
     // escape or part of a path, so either alignment counts as padded.
     let end = i
     while (text.charCodeAt(end) === 61) end++
-    const padded = end > i && end - i <= 2 && (end - from) % 4 === 0
-    if (end > i && ((end - run) % 4 === 0 || (end - from) % 4 === 0) && !hasMark(text, from, i)) continue
+    // One or two `=` count as padding only where the run of them ends the token.
+    const padding = end > i && end - i <= 2 && charClass(text.charCodeAt(end)) === OTHER
+    const padded = padding && (end - from) % 4 === 0
+    if (padding && ((end - run) % 4 === 0 || padded) && !hasMark(text, from, i)) continue
     if (continues(text, from - 1) || continues(text, end) ||
         (text.charCodeAt(from - 1) === 46 && charClass(text.charCodeAt(from - 2)) !== OTHER) ||
         (text.charCodeAt(end) === 46 && charClass(text.charCodeAt(end + 1)) !== OTHER)) continue

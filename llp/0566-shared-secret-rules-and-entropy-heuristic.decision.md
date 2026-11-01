@@ -40,7 +40,10 @@ if every test below passes, so each test can only narrow what is masked:
   it to another token.
 - It is not padded standard base64: a run with no `-` or `_` whose `=`
   padding brings it to a multiple of four characters is an encoded digest or
-  public key. Padded base64url (a Fernet key, say) is still tested.
+  public key. Padding is one or two `=` with no token character after them.
+  After a backslash the run counts as aligned with or without its first
+  letter, since the backslash may be an escape or part of a path. Padded
+  base64url (a Fernet key, say) is still tested.
 - It mixes uppercase, lowercase and digits. Hex lacks one of these, so commit
   SHAs, digests and UUIDs are never masked.
 - At least 0.42 of adjacent characters change class. camelCase and snake_case
@@ -76,9 +79,9 @@ This trades a small chance of masking a non-secret for catching unknown
 formats. Over a seeded corpus of commit SHAs, SHA-256 digests, UUIDs, ULIDs,
 camelCase, PascalCase and snake_case names, paths, long base64 and base64url
 blobs, padded standard base64 (also after a JSON `\n` escape or a Windows path
-backslash), go.sum hashes,
-digest headers, SSH fingerprints and public keys, PEM certificates, data URLs,
-npm integrity strings, provider IDs and base64 prose, it masks none. It still can:
+backslash), go.sum hashes, digest headers, SSH fingerprints and public keys,
+PEM certificates, data URLs, npm integrity strings, provider IDs and base64
+prose, it masks none. It still can:
 
 - Mask a random-looking public value: a long identifier dense with acronyms
   and digits, a document or video ID, a base58 address, a nonce, or a line of
@@ -99,7 +102,8 @@ Explicit formats and custom patterns remain the way to cover a known secret.
 Each rule is compiled at load. The added formats are linear in the string:
 each match attempt starts at most once per run and reads it once. The
 heuristic is one left-to-right scan; a run is read again only if it is 32 to
-128 characters or padded with `=`, a bounded constant number of times, and PEM blocks are located
-once, moving forward, so cost stays linear in the string. It allocates only
+128 characters or padded with `=`, a bounded constant number of times, and
+PEM blocks are located once, moving forward, so cost stays linear in the
+string. It allocates only
 when it masks something, plus a short slice per candidate that passes the
 statistical tests.
