@@ -27,14 +27,19 @@ There are three ways to connect to it:
 
 ### Claude
 
-These steps work in claude.ai, Claude Desktop, and the Claude mobile apps:
+Add the connector in claude.ai or Claude Desktop. Once it is connected, it
+also works in the Claude mobile apps.
 
 1. Open **Customize**, then **Connectors**, then **+ Add**, then **Add
    custom connector**.
-2. Name it `HypAware` and set the URL to `https://api.hypaware.ai/v1/mcp`.
-   Leave the token and header fields empty.
-3. Click **Connect**, sign in to HypAware, and click **Allow**.
-4. In a chat, turn the connector on under **+**, then **Connectors**.
+2. Name it `HypAware`, set the URL to `https://api.hypaware.ai/v1/mcp`, and
+   click **Continue**.
+3. Keep the detected settings and click **Continue**. Under
+   **Authentication**, pick **Sign in now** or **Sign in when needed**.
+   Leave **OAuth client** at its default and **Request headers** empty,
+   then click **Add**.
+4. Click **Connect**, sign in to HypAware, and click **Allow**.
+5. In a chat, turn the connector on under **+**, then **Connectors**.
 
 On a Team or Enterprise plan, an Owner first adds the connector for the
 organization under **Organization settings**, then **Connectors**, then
@@ -339,6 +344,8 @@ If the connection fails:
   `hyp mcp serve`. It should print a line naming the tools it serves and
   then wait; press Ctrl-C to stop it. With `--remote`, sign in first with
   `hyp remote login`.
+- **Sign-in:** after 30 days, or after the connection is revoked, click
+  **Connect** in Claude and sign in again.
 - **Remote:** a `401` means the token has expired or was revoked; mint a new
   one. Check that the header reads `Bearer ` followed by the token.
 
