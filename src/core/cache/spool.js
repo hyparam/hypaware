@@ -64,7 +64,7 @@ const APPEND_OPEN_RETRY_LIMIT = 8
  * @returns {CacheSpool}
  */
 export function createCacheSpool(args) {
-  /** @type {Map<string, { writeLock: Promise<unknown>, flushLock: Promise<unknown>, ownMarkers: Set<string> }>} */
+  /** @type {Map<string, { writeLock: Promise<unknown>, flushLock: Promise<unknown>, ownMarkers: Set<string>, ownerOnly: boolean }>} */
   const states = new Map()
   /** @type {Set<string>} */
   const knownTables = new Set()
@@ -80,7 +80,10 @@ export function createCacheSpool(args) {
       // the table. Its appends and rotations share the write lock above, so
       // none of them can span one of its rotations; a marker from any other
       // instance can, even one in this process.
-      state = { writeLock: Promise.resolve(), flushLock: Promise.resolve(), ownMarkers: new Set() }
+      // `ownerOnly` records that this instance has already set the active
+      // file's mode once, so the repair costs one fchmod per table per
+      // instance and nothing per append.
+      state = { writeLock: Promise.resolve(), flushLock: Promise.resolve(), ownMarkers: new Set(), ownerOnly: false }
       states.set(tablePath, state)
     }
     return state
@@ -255,9 +258,18 @@ export function createCacheSpool(args) {
       const bytesWritten = Buffer.byteLength(line, 'utf8')
       const result = await withWriteLock(tablePath, async () => {
         const dir = spoolDir(tablePath)
-        await fs.mkdir(dir, { recursive: true })
-        const { ownMarkers } = stateFor(tablePath)
-        const { handle, marker } = await openActiveFile(dir, ownMarkers)
+        await fs.mkdir(dir, { recursive: true, mode: 0o700 })
+        const state = stateFor(tablePath)
+        const { handle, marker } = await openActiveFile(dir, state.ownMarkers)
+        // A new active file is created 0600. One left by an earlier version
+        // keeps the mode it was created with until it rotates, so it is
+        // tightened through this descriptor the first time this instance
+        // opens it. A file it cannot change (another owner) is left as is.
+        // @ref LLP 0569#new-files [implements]: the existing active spool file is repaired once per table, not per append
+        if (!state.ownerOnly) {
+          state.ownerOnly = true
+          await handle.chmod(0o600).catch(() => undefined)
+        }
         // An append either lands in the spool or it does not, and the
         // outcome says which. Callers read a rejection as "nothing landed"
         // and re-derive what to write from the spool - `dedupeStoredPartIds`
@@ -298,7 +310,7 @@ export function createCacheSpool(args) {
           // stays the one that propagates.
           await handle.close().catch(() => undefined)
           await fs.rm(marker, { force: true }).catch(() => undefined)
-          ownMarkers.delete(marker)
+          state.ownMarkers.delete(marker)
         }
         return { bytesWritten, pendingBytes: pendingBytesSync(tablePath) }
       })
@@ -666,7 +678,7 @@ async function openActiveFile(dir, own) {
     // Opened `a+` rather than `a`: writes still append, and the read
     // side is what lets a failed append verify the tail is its own
     // bytes before truncating them (see `discardTail`).
-    const handle = await fs.open(active, 'a+')
+    const handle = await fs.open(active, 'a+', 0o600)
     let marker = ''
     let current = false
     try {
@@ -971,7 +983,7 @@ async function readLastFlushAt(tablePath) {
 async function writeFlushFailure(tablePath, err) {
   const message = err instanceof Error ? err.message : String(err)
   try {
-    await fs.mkdir(spoolDir(tablePath), { recursive: true })
+    await fs.mkdir(spoolDir(tablePath), { recursive: true, mode: 0o700 })
     await atomicWriteJson(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), {
       failedAt: new Date().toISOString(),
       errorMessage: message.slice(0, FLUSH_FAILURE_MESSAGE_MAX),

@@ -1586,7 +1586,7 @@ async function reserveGenerationDir(partitionDir, layout) {
     const newDirName = layout.nextDirName(attempt)
     const newDir = path.join(partitionDir, newDirName)
     try {
-      await fsPromises.mkdir(newDir)
+      await fsPromises.mkdir(newDir, { mode: 0o700 })
       return { newDirName, newDir }
     } catch (err) {
       if (errCode(err) !== 'EEXIST') throw err
