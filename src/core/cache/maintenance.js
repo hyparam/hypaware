@@ -2294,7 +2294,9 @@ async function resettleFallbackRows(fallbackRows, settle, emittedPartIds) {
     return fallbackRows
   }
   // A row the sweep rebuilt can carry content read back from the transcript,
-  // so it passes the record-time rules before it is rewritten.
+  // so it passes the record-time rules before it is rewritten. The redactor
+  // is fresh, with no call verdicts: the row's content was masked when it was
+  // appended, and a rebuilt Read result still names its file.
   // @ref LLP 0568#seam [implements]: the compaction re-settle is a write path too
   if (upgraded !== fallbackRows) {
     const recorded = createRecordRedactor()(upgraded, new Set(fallbackRows))

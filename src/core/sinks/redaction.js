@@ -150,7 +150,10 @@ export function createRowRedactor(config = {}, customOnly = false, record) {
       // process, and a mask there cannot be undone, so the read is kept.
       else if (typeof path !== 'string' && !record &&
         READ_TOOLS.test(typeof row.tool_name === 'string' ? row.tool_name.split('.').at(-1) ?? '' : '')) mask = true
-      toolPaths.delete(key)
+      // A recorded result can be written again (a failed append is replayed),
+      // so at record time the verdict outlives its first use; the FIFO cap
+      // still bounds the map.
+      if (!record) toolPaths.delete(key)
     }
 
     // `mode` narrows what a hidden file's content may keep: a top-level

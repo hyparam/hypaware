@@ -58,7 +58,9 @@ record mode departs from export mode in three places:
   process or an earlier run, so the read is kept. A read whose call named a
   sensitive file is still masked, including when the call was recorded in an
   earlier batch: the redactor lives as long as the storage service and keeps
-  its bounded call verdicts across writes.
+  its bounded call verdicts across writes. A verdict is kept after a result
+  uses it, so a result written again (a failed append replayed) is masked the
+  same way.
 - **Over-budget rows are written.** Export refuses a row past the traversal
   budget. Refusing at record time would lose the row, so each column is walked
   again on its own budget and only a column still past it degrades: a string

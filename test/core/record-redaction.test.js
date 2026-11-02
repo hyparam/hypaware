@@ -157,6 +157,20 @@ test('a sensitive-file read is masked when its call and its result arrive in sep
   assert.equal(spooled[0].tool_args, '{"file_path":"/work/.env"}', 'the path itself is kept')
 })
 
+test('a sensitive-file read written again after its first write is still masked', async t => {
+  const cacheRoot = await tempCache(t)
+  const storage = createQueryStorageService({ cacheRoot })
+  const table = storage.cacheTablePath('messages', ['source=claude'])
+  const base = { client_name: 'claude', session_id: 'record-session' }
+  await storage.appendRows(table, COLUMNS, [{ ...base, part_id: 'call', part_type: 'tool_call', tool_name: 'Read', tool_call_id: 'c1', tool_args: '{"file_path":"/work/.env"}' }])
+  // The gateway replays a result whose append failed; the call is not sent again.
+  const result = { ...base, part_id: 'result', part_type: 'tool_result', tool_name: 'Read', tool_result_for: 'c1', content_text: 'DB_HOST=internal-only' }
+  await storage.appendRows(table, COLUMNS, [result])
+  await storage.appendRows(table, COLUMNS, [result])
+  const spooled = await Array.fromAsync(storage.readSpooledRows('messages'))
+  assert.deepEqual(spooled.filter(row => row.part_id === 'result').map(row => row.content_text), [MASK, MASK])
+})
+
 // @ref LLP 0568#irreversible [tests]: an over-budget row is written, and only the column past the budget degrades
 test('a row past the traversal budget is still written, keeping the columns that fit the budget', async t => {
   const cacheRoot = await tempCache(t)
