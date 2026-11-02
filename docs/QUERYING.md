@@ -164,6 +164,100 @@ do not assume every message part has usage or represents another request.
 > **Tip:** Keep scans economical: choose dates or a session before selecting large text
 > fields. Use `LIMIT` for exploration and select only the columns you need.
 
+## Find the turns a person typed
+
+A `role = 'user'` text row is not always something a person typed. Skill
+expansions, system reminders, tool output echoes, task notifications, messages
+from other agents, interrupts, and compaction summaries are recorded as user
+text too. Since HypAware 1.48.0, Claude Code and Codex rows record who
+submitted the turn:
+
+- Claude Code: `JSON_EXTRACT_STRING(attributes, '$.claude.origin.kind') = 'human'`.
+  `attributes.claude.prompt_source` adds how the turn was submitted: `typed`,
+  `queued`, `suggestion_accepted`, `sdk`, or `system`. A headless `claude -p`
+  turn has `prompt_source = 'sdk'` and no `origin`.
+- Codex: `JSON_EXTRACT_STRING(attributes, '$.codex.content_item_kinds')`
+  contains `"user.text"`.
+
+This counts typed turns per client per day:
+
+<!-- agent: Use HypAware to count the turns a person typed per client per day for the week of 2026-11-02. Over MCP, run the same SQL with query_sql. -->
+```sh
+hyp query sql "select date, client_name, count(*) as typed_turns
+  from ai_gateway_messages
+  where date >= '2026-11-02' and date < '2026-11-09'
+    and role = 'user' and part_type = 'text'
+    and (JSON_EXTRACT_STRING(attributes, '$.claude.origin.kind') = 'human'
+      or JSON_EXTRACT_STRING(attributes, '$.codex.content_item_kinds') like '%\"user.text\"%')
+  group by date, client_name
+  order by date desc, client_name" --format markdown
+```
+
+Not every other row is unlabeled. Claude Code gives task notifications, peer
+messages, and coordinator turns their own `origin.kind` (`task-notification`,
+`peer`, `coordinator`), and leaves tool results, subagent prompts, skill
+expansions, interrupts, and compaction summaries with no `origin` at all.
+Codex labels injected blocks with other kinds, such as
+`agents_md.instructions` and `environments.environment_context`. Filter on
+`= 'human'` and `"user.text"`; a row with some label is not a typed turn.
+
+The labels need HypAware 1.48.0 or later on the machine that recorded the row,
+Claude Code 2.1.241 or later, and Codex 0.151.0 or later. Rows recorded before
+that never get a label, and maintenance does not add one later, so a
+label-only count is low for every earlier day and every machine that has not
+upgraded. Check coverage first:
+
+<!-- agent: Use HypAware to compare user text rows with labeled typed turns per client per day since 2026-10-01. Over MCP, run the same SQL with query_sql. -->
+```sh
+hyp query sql "select date, client_name, count(*) as user_rows,
+    sum(case when JSON_EXTRACT_STRING(attributes, '$.claude.origin.kind') = 'human'
+      or JSON_EXTRACT_STRING(attributes, '$.codex.content_item_kinds') like '%\"user.text\"%'
+      then 1 else 0 end) as typed_turns
+  from ai_gateway_messages
+  where date >= '2026-10-01' and role = 'user' and part_type = 'text'
+  group by date, client_name
+  order by date desc, client_name" --format markdown
+```
+
+A day with user rows but no typed turns most likely predates the label. On a
+remote target, add `gateway_id` to the grouping to find the machines that have
+not upgraded.
+
+For those days, estimate Claude Code typed turns from the text. This keeps
+main-thread rows and drops the common injected prefixes:
+
+<!-- agent: Use HypAware to estimate typed Claude Code turns per day for October 2026 from the message text. Over MCP, run the same SQL with query_sql. -->
+```sh
+hyp query sql "select date, count(*) as estimated_typed_turns
+  from ai_gateway_messages
+  where date >= '2026-10-01' and date < '2026-11-01'
+    and client_name = 'claude' and role = 'user' and part_type = 'text'
+    and coalesce(is_sidechain, false) = false
+    and (agent_id is null or agent_id = '')
+    and (user_type is null or user_type in ('external', 'user'))
+    and (entrypoint is null or entrypoint <> 'sdk-cli')
+    and content_text not like '<%'
+    and content_text not like '[%'
+    and content_text not like 'Base directory for this skill%'
+    and content_text not like 'Tool loaded.%'
+    and content_text not like 'Skill /%'
+    and content_text not like 'Re-invocation of %'
+    and content_text not like 'Another Claude session sent%'
+    and content_text not like 'The user sent a new message while%'
+    and content_text not like 'This session is being continued%'
+    and content_text not like 'From my HypAware history%'
+    and content_text not like 'Message Type:%'
+  group by date
+  order by date desc" --format markdown
+```
+
+Report these counts as estimates. The filter still counts smoke prompts and
+pasted documents, and it drops a typed message that starts with a bracket.
+Codex has no reliable text rule before the label: count its main-thread
+`role = 'user'` text rows and say that they include injected blocks.
+
+Over MCP, every SQL query in this section runs with `query_sql`.
+
 ## Save complete results
 
 Terminal output truncates long cells and limits the displayed byte count.
