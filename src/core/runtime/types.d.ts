@@ -45,6 +45,21 @@ import type {
  */
 export type BootProfile = 'config' | 'gateway' | 'all-bundled' | 'all-available' | { activate: PluginName[] }
 
+/**
+ * What `secureOwnerRoot` did with one storage root (LLP 0569). Only
+ * `'secured'` changed anything on disk.
+ */
+export type OwnerRootOutcome =
+  | 'secured'
+  | 'unchanged'
+  | 'missing'
+  | 'foreign_owner'
+  | 'not_dedicated'
+  | 'not_directory'
+  | 'replaced'
+  | 'error'
+  | 'unsupported'
+
 export interface BootKernelOptions {
   /** Override HYP_HOME (defaults from env). */
   hypHome?: string

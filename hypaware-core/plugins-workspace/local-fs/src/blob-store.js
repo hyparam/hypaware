@@ -109,13 +109,13 @@ export function createLocalFsBlobStore({ baseDir }) {
     async putObject(input) {
       const dest = resolveSafePath(input.key)
       const dir = path.dirname(dest)
-      await fs.mkdir(dir, { recursive: true })
+      await fs.mkdir(dir, { recursive: true, mode: 0o700 })
       const bytes = await materializeBody(input.body)
       if (input.ifNoneMatch === '*') {
         // Conditional create: use O_EXCL so a concurrent writer cannot
         // race past us. node:fs/promises maps O_EXCL via `flag: 'wx'`.
         try {
-          const handle = await fs.open(dest, 'wx')
+          const handle = await fs.open(dest, 'wx', 0o600)
           try {
             await handle.writeFile(bytes)
           } finally {
@@ -133,7 +133,7 @@ export function createLocalFsBlobStore({ baseDir }) {
           throw err
         }
       } else {
-        await fs.writeFile(dest, bytes)
+        await fs.writeFile(dest, bytes, { mode: 0o600 })
       }
       return { key: input.key }
     },

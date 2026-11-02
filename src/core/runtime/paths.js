@@ -68,8 +68,8 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   // @ref LLP 0525#preview-boot [implements]: a preview boot resolves the durable plugin dirs without creating them
   await Promise.all([
     ...(preview ? [] : [
-      fs.mkdir(stateDir, { recursive: true }),
-      fs.mkdir(cacheDir, { recursive: true }),
+      fs.mkdir(stateDir, { recursive: true, mode: 0o700 }),
+      fs.mkdir(cacheDir, { recursive: true, mode: 0o700 }),
     ]),
     fs.mkdir(tempBase, { recursive: true }),
   ])
@@ -92,7 +92,7 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   // atomic: exactly one caller creates the leaf, every other gets EEXIST.
   let tempDir = intendedTempDir
   try {
-    await fs.mkdir(intendedTempDir)
+    await fs.mkdir(intendedTempDir, { mode: 0o700 })
   } catch (err) {
     if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
     tempDir = await fs.mkdtemp(`${intendedTempDir}-`)

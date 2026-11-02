@@ -244,3 +244,30 @@ test('local-fs drop-only tick: no blob is written, but the watermark advances pa
 
   await sink.close()
 })
+
+test('local-fs export directories and blobs are owner-only whatever the umask (LLP 0569)', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async (t) => {
+  const base = await tmpDir()
+  const stateDir = await tmpDir()
+  t.after(() => fs.rm(base, { recursive: true, force: true }))
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
+  const exportsDir = path.join(base, 'exports')
+
+  const previous = process.umask(0o000)
+  try {
+    const sink = await buildSink({ rows: [{ _seq: 1, id: 'a' }], exportsDir, stateDir })
+    const r = await sink.exportBatch({ batchId: 'b1', partitions: [partition()] })
+    assert.equal(r.status, 'exported')
+  } finally {
+    process.umask(previous)
+  }
+
+  /** @param {string} p */
+  const modeOf = async (p) => (await fs.stat(p)).mode & 0o777
+  const dir = path.join(exportsDir, 'out')
+  assert.equal(await modeOf(exportsDir), 0o700, 'exports base dir')
+  assert.equal(await modeOf(dir), 0o700, 'sink dir')
+  assert.equal(await modeOf(path.join(dir, DATASET)), 0o700, 'dataset dir')
+  assert.equal(await modeOf(path.join(dir, DATASET, 'all')), 0o700, 'partition dir')
+  const [blob] = await listBlobs(dir)
+  assert.equal(await modeOf(path.join(dir, DATASET, 'all', blob)), 0o600, 'exported blob')
+})

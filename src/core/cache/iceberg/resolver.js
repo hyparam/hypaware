@@ -157,16 +157,17 @@ function localWriter(ByteWriter, filePath, options) {
 
   const openTmp = () => {
     if (fd !== null) return
-    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    // @ref LLP 0569#new-files [implements]: a committed data file is owner-only from its first byte, whatever the umask
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 })
     if (tmp === null) {
       tmp = stagedNameFor(filePath)
-      fd = fs.openSync(tmp, 'w')
+      fd = fs.openSync(tmp, 'w', 0o600)
       return
     }
     // Reopening a parked writer: append, never truncate. Every parquet
     // offset already recorded in the footer is file-absolute, so the
     // bytes have to continue exactly where the park left them.
-    fd = fs.openSync(tmp, 'a')
+    fd = fs.openSync(tmp, 'a', 0o600)
   }
 
   /** @param {string} label */

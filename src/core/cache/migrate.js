@@ -184,7 +184,7 @@ async function retirePartition(partitionPath) {
   const parent = path.dirname(partitionPath)
   const name = path.basename(partitionPath)
   const retiredDir = path.join(parent, '.retired')
-  await fsPromises.mkdir(retiredDir, { recursive: true })
+  await fsPromises.mkdir(retiredDir, { recursive: true, mode: 0o700 })
   const dest = path.join(retiredDir, name)
   await fsPromises.rename(partitionPath, dest)
   clearEscapeReport(partitionPath)

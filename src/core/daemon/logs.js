@@ -20,9 +20,9 @@ import { daemonLogDir, daemonLogPath } from '../runtime/paths.js'
  */
 export function openDaemonLog({ stateRoot, runId, mode }) {
   const dir = daemonLogDir(stateRoot)
-  fs.mkdirSync(dir, { recursive: true })
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   const logPath = daemonLogPath(stateRoot)
-  const stream = fs.createWriteStream(logPath, { flags: 'a' })
+  const stream = fs.createWriteStream(logPath, { flags: 'a', mode: 0o600 })
 
   /**
    * @param {'info'|'warn'|'error'} level

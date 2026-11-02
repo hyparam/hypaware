@@ -139,7 +139,7 @@ export function createIngestSeqAllocator({ cacheRoot }) {
     if (!Number.isInteger(count) || count < 1) {
       throw new Error('IngestSeqAllocator.reserve: count must be a positive integer')
     }
-    await fs.mkdir(cacheRoot, { recursive: true })
+    await fs.mkdir(cacheRoot, { recursive: true, mode: 0o700 })
     // The partition mutation guard is a general cross-process lock with
     // dead-owner recovery; keyed on the counter file it serializes every
     // process's read-modify-write of `nextSeq`. It fails fast on contention,

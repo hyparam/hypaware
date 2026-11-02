@@ -404,3 +404,23 @@ test('in-memory BlobStore satisfies the BlobStore contract end-to-end', async ()
     /precondition failed/i,
   )
 })
+
+test('local-fs blob store writes owner-only objects whatever the umask (LLP 0569)', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async () => {
+  const base = await makeTempBase()
+  const previous = process.umask(0o000)
+  try {
+    const store = createLocalFsBlobStore({ baseDir: base })
+    const payload = new TextEncoder().encode('synthetic')
+    await store.putObject({ key: 'datasets/foo/plain.bin', body: payload })
+    await store.putObject({ key: 'datasets/foo/once.bin', body: payload, ifNoneMatch: '*' })
+    /** @param {string} p */
+    const modeOf = async (p) => (await fs.stat(p)).mode & 0o777
+    assert.equal(await modeOf(path.join(base, 'datasets')), 0o700)
+    assert.equal(await modeOf(path.join(base, 'datasets', 'foo')), 0o700)
+    assert.equal(await modeOf(path.join(base, 'datasets', 'foo', 'plain.bin')), 0o600)
+    assert.equal(await modeOf(path.join(base, 'datasets', 'foo', 'once.bin')), 0o600)
+  } finally {
+    process.umask(previous)
+    await fs.rm(base, { recursive: true, force: true })
+  }
+})

@@ -18,6 +18,7 @@ import { resolveDependencies } from '../dep_graph.js'
 import { activatePlugins } from './loader.js'
 import { createKernelRuntime } from './activation.js'
 import { cacheRootOf, stateRootOf } from './paths.js'
+import { secureStorageRoots } from './owner_only.js'
 import { buildSourceWithholdResolver, ensureClientSyncMigration } from './source_withhold.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import {
@@ -82,6 +83,12 @@ export async function bootKernel(opts = {}) {
       status: 'ok',
     },
     async (span) => {
+      // A preview boot leaves the state root as it found it (LLP 0525).
+      // @ref LLP 0569#roots [implements]: every process boots here, so the roots are tightened once per process before anything writes
+      if (!opts.preview) {
+        const roots = await secureStorageRoots({ hypHome, stateRoot, cacheRoot })
+        for (const [kind, outcome] of Object.entries(roots)) span.setAttribute(`owner_only_${kind}`, outcome)
+      }
       const discovered = await discoverBundledPlugins({ workspaceDir: opts.workspaceDir })
       span.setAttribute('bundled_available', discovered.loaded.length)
       if (discovered.failed.length > 0) {
