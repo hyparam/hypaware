@@ -41,6 +41,7 @@ Common fields:
 | Tool name / arguments | `tool_name` / `tool_args` |
 | Capture source | `conversation_source`, not `source` |
 | Token usage | JSON inside `attributes`, under `usage`; no `usage` column |
+| Human-typed turn | `attributes.claude.origin.kind = 'human'` (Claude) or `attributes.codex.content_item_kinds` containing `user.text` (Codex), not `role = 'user'` alone; rows from before 1.48.0 carry no label, see [sql.md](sql.md) |
 
 Example, replacing the dates and session with the requested scope:
 
@@ -74,6 +75,17 @@ the limitation rather than claiming an exact total.
 identifies an installation. Verify which installations belong to the requested
 person or agent; names, repositories, and working directories are clues, not
 proof.
+
+**Start with what the person typed.** Unless the question is specifically
+about something else (tool usage, token cost, assistant behavior, one error),
+begin any analysis of recorded activity with the human-typed turns. They state
+the intent every other row serves, and they are a small share of the table:
+most `role = 'user'` rows are injected text, and assistant and tool rows
+outnumber human turns many times over, so sampling rows without this filter
+describes the harness rather than the person. Select human turns first with the
+predicate in [sql.md](sql.md) (the label since 1.48.0, the text fallback
+before it), read them to establish what was asked, then widen to the assistant
+and tool rows that answered.
 
 ## Results and coverage
 
