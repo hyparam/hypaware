@@ -24,7 +24,7 @@ The built-in rules of LLP 0566 run on every row before it is persisted, in
 - the compaction re-settle (LLP 0027), on the rows the hook upgraded.
 
 Rows a step already redacted are passed through by identity, so each row is
-scanned once per write. A spooled row is scanned again only when a settle hook
+scanned once per write (an over-budget row is walked again, below). A spooled row is scanned again only when a settle hook
 replaced it with a new row; a hook that returns the batch it was given costs
 nothing more. Rows are redacted with the export row redactor of LLP
 0503 in a record mode, so top-level identities, provenance columns and
@@ -64,7 +64,9 @@ record mode departs from export mode in three places:
   again on its own budget and only a column still past it degrades: a string
   gets the text rules once, a hidden file's content and a credential key's
   value are masked (hidden `tool_args` keep only their path keys), and a
-  nested value the walk could not finish is dropped. Usage, attributes and
+  nested value the walk could not finish is dropped. Inside such a column only
+  the text rules apply: a file path or credential key name nested in it is not
+  recognized. Usage, attributes and
   markers in the other columns are kept. A cache write logs
   `cache.record_redaction_over_budget` with the dataset and count; the
   compaction re-settle sets `record_redaction_over_budget` on its span.

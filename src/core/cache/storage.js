@@ -167,7 +167,8 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         // The spooled rows were redacted on append. A row the hook builds
         // fresh can carry content it read back from its source (the Claude
         // enricher rewrites frames from the transcript), so only those pass
-        // through the rules again.
+        // through the rules again. A hook returns a new array when it changes
+        // a row; one that returns its own batch is taken as unchanged.
         const settled = await settle(rows, { storage: service })
         if (settled !== rows) rows = recordRows(dataset, settled, new Set(rows)).rows
       }

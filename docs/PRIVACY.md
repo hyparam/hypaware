@@ -288,8 +288,8 @@ cache itself and in every local query, not only in exports. This is on by
 default and has no switch to turn it off. It covers every capture source that
 writes the cache, live capture and transcript backfill alike, including Claude
 Code telemetry events and OpenTelemetry logs, traces and metrics. It runs again
-on content a capture adds while settling a row, and when compaction rewrites
-one.
+on content a capture adds while settling a row, including when compaction
+settles a row again.
 
 > **Caution:** A credential masked when it is recorded cannot be recovered from
 > HypAware. If the heuristic below masks something that was not a secret, only
@@ -304,8 +304,9 @@ Some differences from export redaction:
   recorded in an earlier batch. A read whose call HypAware never saw is kept
   locally; exports still mask it.
 - A row too large for the traversal budget below is still recorded instead
-  of failing. Each column is checked on its own; a column still too large has
-  its text scanned once and its nested values dropped.
+  of failing. Each column is checked on its own. A column still too large gets
+  only the text patterns: file paths and credential key names inside it are
+  not recognized, and a nested value that is not text is dropped.
 - Rows recorded before this change keep their content, and so do rows still
   waiting to be written when you upgrade. To remove them, use
   `hyp privacy purge`.

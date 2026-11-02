@@ -100,7 +100,7 @@ function redactFlatColumn(key, value, hide) {
     /** @type {Record<string, unknown>} */
     const kept = {}
     for (const name in args) {
-      if (Object.hasOwn(args, name)) kept[name] = PATH_KEYS.has(name) && typeof args[name] === 'string' ? args[name] : MASK
+      if (Object.hasOwn(args, name)) kept[name] = PATH_KEYS.has(name) && typeof args[name] === 'string' ? redactSecretText(args[name]) : MASK
     }
     return typeof value === 'string' ? JSON.stringify(kept) : kept
   }
