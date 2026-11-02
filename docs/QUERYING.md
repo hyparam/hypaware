@@ -172,10 +172,14 @@ from other agents, interrupts, and compaction summaries are recorded as user
 text too. Since HypAware 1.48.0, Claude Code and Codex rows record who
 submitted the turn:
 
-- Claude Code: `JSON_EXTRACT_STRING(attributes, '$.claude.origin.kind') = 'human'`.
+- Claude Code and Claude Desktop:
+  `JSON_EXTRACT_STRING(attributes, '$.claude.origin.kind') = 'human'`.
   `attributes.claude.prompt_source` adds how the turn was submitted: `typed`,
-  `queued`, `suggestion_accepted`, `sdk`, or `system`. A headless `claude -p`
-  turn has `prompt_source = 'sdk'` and no `origin`.
+  `queued`, `suggestion_accepted`, `sdk`, or `system`. A `'human'` turn can be
+  any of the first three; add
+  `JSON_EXTRACT_STRING(attributes, '$.claude.prompt_source') = 'typed'` to keep
+  only turns typed at the prompt. A headless `claude -p` turn has
+  `prompt_source = 'sdk'` and no `origin`.
 - Codex: `JSON_EXTRACT_STRING(attributes, '$.codex.content_item_kinds')`
   contains `"user.text"`.
 
@@ -253,8 +257,10 @@ hyp query sql "select date, count(*) as estimated_typed_turns
 
 Report these counts as estimates. The filter still counts smoke prompts and
 pasted documents, and it drops a typed message that starts with a bracket.
-Codex has no reliable text rule before the label: count its main-thread
-`role = 'user'` text rows and say that they include injected blocks.
+Codex has no reliable text rule before the label. Count its main-thread user
+text rows (`client_name = 'codex' and role = 'user' and part_type = 'text' and
+coalesce(is_sidechain, false) = false`) and say that they include injected
+blocks.
 
 Over MCP, every SQL query in this section runs with `query_sql`.
 
