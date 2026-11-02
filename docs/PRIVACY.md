@@ -303,9 +303,11 @@ Some differences from export redaction:
 - A file read is masked when its call names a sensitive file, including a call
   recorded in an earlier batch. A read whose call HypAware never saw is kept
   locally; exports still mask it.
-- A row too large for the traversal budget below is still recorded, with its
-  text values scanned and its nested values dropped, instead of failing.
-- Rows recorded before this change keep their content. To remove them, use
+- A row too large for the traversal budget below is still recorded instead
+  of failing. Each column is checked on its own; a column still too large has
+  its text scanned once and its nested values dropped.
+- Rows recorded before this change keep their content, and so do rows still
+  waiting to be written when you upgrade. To remove them, use
   `hyp privacy purge`.
 - The raw-body spool and the LangGraph outbox are written by other programs,
   so their files are not masked. HypAware masks what it records from them.

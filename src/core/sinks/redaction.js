@@ -73,29 +73,40 @@ function objectValue(value) {
   return undefined
 }
 
+/** @param {unknown} error */
+function isBudgetError(error) {
+  return error instanceof Error && error.message.startsWith('export redaction row exceeds')
+}
+
 /** @param {Record<string, unknown> | undefined} object */
 function sensitivePathIn(object) {
   return object !== undefined && PATH_KEY_LIST.some(key => typeof object[key] === 'string' && sensitiveFile(/** @type {string} */ (object[key])))
 }
 
 /**
- * The record-time fallback for a row past the traversal budget. It is still
- * written, read as flat text: each top-level content string gets the text
- * rules once, a hidden file's content and a credential key's value are
- * masked, and a nested value the walk could not finish is dropped.
- * @param {Record<string, unknown>} row
+ * The record-time fallback for one column past its traversal budget. It is
+ * still written, read as flat text: a string gets the text rules once, a
+ * hidden file's content and a credential key's value are masked (hidden
+ * tool_args keep only their path keys), and a nested value the walk could
+ * not finish is dropped.
+ * @param {string} key
+ * @param {unknown} value
  * @param {boolean} hide
  */
-function redactFlat(row, hide) {
-  /** @type {Record<string, unknown>} */
-  const copy = { ...row }
-  for (const key in row) {
-    if (!Object.hasOwn(row, key) || isExportIdentityColumn(key)) continue
-    const value = row[key]
-    if (typeof value === 'string') copy[key] = (hide && key !== 'tool_args') || CREDENTIAL_KEYS.test(key) ? MASK : redactSecretText(value)
-    else if (value && typeof value === 'object' && !ArrayBuffer.isView(value)) copy[key] = null
+function redactFlatColumn(key, value, hide) {
+  if (hide && key === 'tool_args') {
+    const args = objectValue(value)
+    if (!args) return typeof value === 'string' ? MASK : null
+    /** @type {Record<string, unknown>} */
+    const kept = {}
+    for (const name in args) {
+      if (Object.hasOwn(args, name)) kept[name] = PATH_KEYS.has(name) && typeof args[name] === 'string' ? args[name] : MASK
+    }
+    return typeof value === 'string' ? JSON.stringify(kept) : kept
   }
-  return copy
+  if (typeof value === 'string') return hide ? MASK : redactSecretText(value)
+  if (value && typeof value === 'object' && !ArrayBuffer.isView(value)) return null
+  return value
 }
 
 /**
@@ -106,8 +117,9 @@ function redactFlat(row, hide) {
  * @param {ExportRedactionConfig} [config]
  * @param {boolean} [customOnly] Internal worker mode: built-ins already ran before IPC.
  * @param {{ overBudget(): void }} [record] Record-time mode (LLP 0568): a read
- *   with no known path is kept, and a row past the budget is redacted as flat
- *   text instead of refused. Both are irreversible at record time; export
+ *   with no known path is kept, and a row past the budget is written instead
+ *   of refused, each column walked on its own budget and a column past it
+ *   redacted as flat text. Both are irreversible at record time; export
  *   still applies the conservative rules.
  */
 export function createRowRedactor(config = {}, customOnly = false, record) {
@@ -198,10 +210,35 @@ export function createRowRedactor(config = {}, customOnly = false, record) {
     try {
       return /** @type {T} */ (visit(row, mask, 0))
     } catch (error) {
-      if (!(error instanceof Error && error.message.startsWith('export redaction row exceeds'))) throw error
+      if (!isBudgetError(error)) throw error
       record.overBudget()
-      return /** @type {T} */ (redactFlat(row, mask))
     }
+    // Past the budget, each column is walked again on its own budget, so only
+    // a column too large to walk degrades to flat text and the rest of the
+    // row (usage, attributes, markers) is kept as the full walk would keep it.
+    const hide = mask || sensitivePathIn(row) || sensitivePathIn(objectValue(row.input ?? row.arguments ?? row.args))
+    /** @type {[string, unknown][] | undefined} */
+    let changes
+    for (const key in row) {
+      if (!Object.hasOwn(row, key) || isExportIdentityColumn(key)) continue
+      const value = row[key]
+      const hideKey = hide || CREDENTIAL_KEYS.test(key)
+      nodes = 0
+      bytes = 0
+      let changed
+      try {
+        changed = visit(value, hideKey, 1, key === 'tool_args' ? 'args' : undefined)
+      } catch (error) {
+        if (!isBudgetError(error)) throw error
+        changed = redactFlatColumn(key, value, hideKey)
+      }
+      if (changed !== value) (changes ??= []).push([key, changed])
+    }
+    if (!changes) return row
+    /** @type {Record<string, unknown>} */
+    const copy = { ...row }
+    for (const [key, changed] of changes) copy[key] = changed
+    return /** @type {T} */ (copy)
   }
 }
 

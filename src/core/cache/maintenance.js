@@ -2296,7 +2296,11 @@ async function resettleFallbackRows(fallbackRows, settle, emittedPartIds) {
   // A row the sweep rebuilt can carry content read back from the transcript,
   // so it passes the record-time rules before it is rewritten.
   // @ref LLP 0568#seam [implements]: the compaction re-settle is a write path too
-  if (upgraded !== fallbackRows) upgraded = createRecordRedactor()(upgraded, new Set(fallbackRows)).rows
+  if (upgraded !== fallbackRows) {
+    const recorded = createRecordRedactor()(upgraded, new Set(fallbackRows))
+    if (recorded.overBudget > 0) getActiveSpan()?.setAttribute('record_redaction_over_budget', recorded.overBudget)
+    upgraded = recorded.rows
+  }
 
   /** @type {Record<string, unknown>[]} */
   const survivors = []

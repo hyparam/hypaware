@@ -168,8 +168,8 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         // fresh can carry content it read back from its source (the Claude
         // enricher rewrites frames from the transcript), so only those pass
         // through the rules again.
-        const spooled = new Set(rows)
-        rows = recordRows(dataset, await settle(rows, { storage: service }), spooled).rows
+        const settled = await settle(rows, { storage: service })
+        if (settled !== rows) rows = recordRows(dataset, settled, new Set(rows)).rows
       }
       const beforeSecondCheck = rows.length
       rows = survivingRows(rows)
@@ -746,7 +746,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       if (!snapshots.length) return 0
       await drainSpoolForReconcile(dataset)
       return reconcileCacheSnapshots({ cacheRoot, dataset, columns,
-        snapshots: snapshots.map(snapshot => ({ ...snapshot, rows: recordRows(dataset, snapshot.rows).rows })),
+        snapshots: snapshots.map(snapshot => {
+          const recorded = recordRows(dataset, snapshot.rows).rows
+          return recorded === snapshot.rows ? snapshot : { ...snapshot, rows: recorded }
+        }),
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 

@@ -24,7 +24,9 @@ The built-in rules of LLP 0566 run on every row before it is persisted, in
 - the compaction re-settle (LLP 0027), on the rows the hook upgraded.
 
 Rows a step already redacted are passed through by identity, so each row is
-scanned once per write. Rows are redacted with the export row redactor of LLP
+scanned once per write. A spooled row is scanned again only when a settle hook
+replaced it with a new row; a hook that returns the batch it was given costs
+nothing more. Rows are redacted with the export row redactor of LLP
 0503 in a record mode, so top-level identities, provenance columns and
 numeric usage are kept verbatim and dedupe keys stay stable. The redaction is
 synchronous: rows reach the spool in the order they were appended, and a tool
@@ -38,7 +40,9 @@ on the way out.
 
 It is on by default and there is no opt-out. LLP 0503 #config has only
 `redaction.custom_patterns` and settled that there is no disable switch; no
-key is added here. Rows recorded before the change are not rewritten. `hyp
+key is added here. Rows recorded before the change are not rewritten, and
+rows already waiting in the spool when the daemon is upgraded are committed as
+they were spooled: redacting at flush as well would scan every row twice. `hyp
 privacy purge` remains the way to remove them.
 
 ## Masking cannot be undone {#irreversible}
@@ -56,10 +60,14 @@ record mode departs from export mode in three places:
   earlier batch: the redactor lives as long as the storage service and keeps
   its bounded call verdicts across writes.
 - **Over-budget rows are written.** Export refuses a row past the traversal
-  budget. Refusing at record time would lose the row, so each top-level string
+  budget. Refusing at record time would lose the row, so each column is walked
+  again on its own budget and only a column still past it degrades: a string
   gets the text rules once, a hidden file's content and a credential key's
-  value are masked, and a nested value the walk could not finish is dropped.
-  `cache.record_redaction_over_budget` is logged with the dataset and count.
+  value are masked (hidden `tool_args` keep only their path keys), and a
+  nested value the walk could not finish is dropped. Usage, attributes and
+  markers in the other columns are kept. A cache write logs
+  `cache.record_redaction_over_budget` with the dataset and count; the
+  compaction re-settle sets `record_redaction_over_budget` on its span.
 - **Custom patterns stay export-only.** They are organization rules for what
   leaves the host, and LLP 0503 #custom-regex runs them in a worker with a
   deadline. They are not applied to the local cache.

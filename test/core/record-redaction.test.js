@@ -9,6 +9,7 @@ import path from 'node:path'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { SECRET_MASK as MASK } from '../../src/core/secret_rules.js'
 import { createRecordRedactor } from '../../src/core/sinks/redaction.js'
+import { withLogRecords } from '../helpers/log_records.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
 
@@ -44,7 +45,7 @@ const labelOf = (/** @type {Record<string, unknown>} */ row) => String(row.part_
 
 /** @type {ColumnSpec[]} */
 const COLUMNS = ['client_name', 'session_id', 'part_id', 'message_hash', 'part_type', 'tool_name', 'tool_call_id',
-  'tool_result_for', 'tool_args', 'content_text', 'raw_frame'].map(name => ({ name, type: 'STRING', nullable: true }))
+  'tool_result_for', 'tool_args', 'content_text', 'raw_frame', 'attributes'].map(name => ({ name, type: 'STRING', nullable: true }))
 
 /** @param {string} label @param {string} secret @param {number} index */
 function rowWith(label, secret, index) {
@@ -156,16 +157,38 @@ test('a sensitive-file read is masked when its call and its result arrive in sep
   assert.equal(spooled[0].tool_args, '{"file_path":"/work/.env"}', 'the path itself is kept')
 })
 
-test('a row past the traversal budget is still written, with its text redacted', async t => {
+// @ref LLP 0568#irreversible [tests]: an over-budget row is written, and only the column past the budget degrades
+test('a row past the traversal budget is still written, keeping the columns that fit the budget', async t => {
   const cacheRoot = await tempCache(t)
-  const storage = createQueryStorageService({ cacheRoot })
-  const table = storage.cacheTablePath('messages', ['source=claude'])
   const big = `${SECRETS.stripe} ${repeat('x', 9 * 1024 * 1024)}`
-  await storage.appendRows(table, COLUMNS, [{ client_name: 'claude', session_id: 's', part_id: 'big', content_text: big }])
-  const [row] = await Array.fromAsync(storage.readSpooledRows('messages'))
+  const attributes = { gateway: { identity_source: 'gateway_fallback' }, usage: { input_tokens: 5 }, note: SECRETS.openai }
+  const { result: [row], records } = await withLogRecords(async () => {
+    const storage = createQueryStorageService({ cacheRoot })
+    const table = storage.cacheTablePath('messages', ['source=claude'])
+    await storage.appendRows(table, COLUMNS, [{ client_name: 'claude', session_id: 's', part_id: 'big', content_text: big, attributes }])
+    return Array.fromAsync(storage.readSpooledRows('messages'))
+  })
   assert.equal(row.part_id, 'big')
   assert.equal(String(row.content_text).length, big.length - SECRETS.stripe.length + MASK.length)
   assert.ok(String(row.content_text).startsWith(`${MASK} xxx`))
+  // The column that fit its budget got the full walk: marker and usage kept, its secret masked.
+  const kept = typeof row.attributes === 'string' ? JSON.parse(row.attributes) : row.attributes
+  assert.deepEqual(kept, { gateway: { identity_source: 'gateway_fallback' }, usage: { input_tokens: 5 }, note: MASK })
+  assert.ok(records.some(record => record.body === 'cache.record_redaction_over_budget'))
+})
+
+test('a sensitive-file write past the traversal budget keeps only its path', async t => {
+  const cacheRoot = await tempCache(t)
+  const storage = createQueryStorageService({ cacheRoot })
+  const table = storage.cacheTablePath('messages', ['source=claude'])
+  const content = `API_TOKEN=plain ${repeat('x', 9 * 1024 * 1024)}`
+  await storage.appendRows(table, COLUMNS, [{
+    client_name: 'claude', session_id: 's', part_id: 'write', part_type: 'tool_call', tool_name: 'Write', tool_call_id: 'w1',
+    tool_args: JSON.stringify({ file_path: '/work/.env', content }), content_text: 'writing the env file',
+  }])
+  const [row] = await Array.fromAsync(storage.readSpooledRows('messages'))
+  assert.deepEqual(JSON.parse(String(row.tool_args)), { file_path: '/work/.env', content: MASK })
+  assert.equal(row.content_text, MASK)
 })
 
 test('the record redactor returns the same batch and rows when nothing is masked', () => {
