@@ -16,7 +16,10 @@ const PATTERNS = [
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
   /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
   /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi,
-  /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s/@]+:[^\s/@]+@[^\s"'<>]+/gi,
+  // The user part, which may be empty, holds no `:`, so it has one possible
+  // end. Letting it take `:` made the engine try every colon in a run as the
+  // user/password split and rescan the rest each time, which is quadratic.
+  /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s/@:]*:[^\s/@]+@[^\s"'<>]+/gi,
   /\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/g,
   /\bsk_live_[A-Za-z0-9]{24,}\b/g,
   // A JWT is three base64url segments whose header encodes `{"`. The

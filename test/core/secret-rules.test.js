@@ -122,6 +122,21 @@ test('adversarial input stays linear: a long run of -eyJ with no dots', () => {
   assert.ok(performance.now() - started < 2000, 'took more than 2 s on 1 MB')
 })
 
+test('adversarial input stays linear: a database URL scheme before a long colon run', () => {
+  // The user part used to take `:`, which made these 1.6 s and 3.3 s at 64 KB.
+  for (const text of ['postgres://' + 'a:'.repeat(32768), 'redis://u:' + ':'.repeat(65536)]) {
+    const started = performance.now()
+    assert.equal(redactSecretText(text), text)
+    assert.ok(performance.now() - started < 200, 'took more than 200 ms on 64 KB')
+  }
+  // A password may still hold `:`, and the whole URL is masked as before.
+  assert.equal(redactSecretText('[ mysql://u:p:q@h:3306/x ]'), `[ ${MASK} ]`)
+  assert.equal(redactSecretText('[ redis://a:b:c:d@h ]'), `[ ${MASK} ]`)
+  // An empty user, the usual Redis form, is masked even when the password holds `:`.
+  assert.equal(redactSecretText('[ redis://:pa:ss@cache:6379/0 ]'), `[ ${MASK} ]`)
+  assert.equal(redactSecretText('[ redis://:pw@h ]'), `[ ${MASK} ]`)
+})
+
 test('the heuristic false-positive bound: no realistic non-secret token in the corpus is masked', () => {
   const { rand, pick, string, bytes } = generator(1)
   const capitalized = () => { const word = pick(WORDS); return word[0].toUpperCase() + word.slice(1) }
