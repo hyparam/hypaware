@@ -18,6 +18,18 @@
     }
   },
   "contributes": {
+    "picker": [
+      {
+        "name": "goose",
+        "label": "Goose",
+        "summary": "Records your Goose conversations and imports recent history. Makes no changes to Goose.",
+        "detect": { "settings_file": ".local/share/goose/sessions/sessions.db" },
+        "compose": {
+          "plugin": { "name": "@hypaware/goose" },
+          "requires_gateway": true
+        }
+      }
+    ],
     "config_sections": [
       {
         "section": "goose",

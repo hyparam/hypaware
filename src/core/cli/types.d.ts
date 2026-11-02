@@ -85,6 +85,7 @@ export type PickerSource =
   | 'ollama'
   | 'langgraph'
   | 'hermes'
+  | 'goose'
   | 'raw-anthropic'
   | 'raw-openai'
   | 'otel'
