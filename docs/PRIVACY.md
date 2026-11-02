@@ -283,8 +283,8 @@ next batch write back rows you just deleted.
 ## Local file permissions
 
 HypAware creates its local storage readable only by your user: directories
-0700 and recorded content (the cache spool, cached data, the daemon log)
-0600, whatever your umask. On an existing install, each start tightens
+0700 and recorded content (the cache spool, cached data, local exports, the
+daemon log) 0600, whatever your umask. On an existing install, each start tightens
 `HYP_HOME`, its `hypaware` directory, and a cache root kept elsewhere to 0700,
 which keeps other users out of the older files below them without rewriting
 any of them.
@@ -292,7 +292,7 @@ any of them.
 It only tightens a directory it can tell is its own. A custom `HYP_HOME` or
 cache location that holds other files, or that another user owns, is left as
 it is, and HypAware logs a `storage.root_not_secured` warning and keeps
-running. Parent directories are never changed. On Windows HypAware does not
+running; files written there before this release keep their old modes. Parent directories are never changed. On Windows HypAware does not
 set permissions; your data is protected by your user profile's own access
 rules.
 

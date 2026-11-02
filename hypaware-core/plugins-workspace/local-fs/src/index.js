@@ -48,7 +48,7 @@ export async function activate(ctx) {
   // The blob store tolerates a missing base dir, so a preview boot can leave
   // the user's exports root uncreated; a real boot still makes it here.
   // @ref LLP 0525#preview-boot [implements]: a preview activation creates nothing on disk
-  if (!ctx.preview) await fs.mkdir(baseDir, { recursive: true })
+  if (!ctx.preview) await fs.mkdir(baseDir, { recursive: true, mode: 0o700 })
   const blobStore = createLocalFsBlobStore({ baseDir })
   ctx.provideCapability('hypaware.blob-store', PLUGIN_VERSION, blobStore)
 
@@ -69,7 +69,7 @@ export async function activate(ctx) {
       if (!encoder) {
         throw new Error(`${PLUGIN_NAME}: blob sink requires an encoder via SinkCreateContext.encoder`)
       }
-      await fs.mkdir(dir, { recursive: true })
+      await fs.mkdir(dir, { recursive: true, mode: 0o700 })
 
       const sink = buildSink({
         baseDir: dir,
@@ -245,7 +245,10 @@ function lookupColumns(query, datasetName) {
  */
 async function writeBlob(baseDir, partition, filename, blobBytes) {
   const partitionDir = path.join(baseDir, partition.dataset, partitionSegment(partition))
-  await fs.mkdir(partitionDir, { recursive: true })
+  // An export holds recorded content, so it is owner-only whatever the umask
+  // and whether or not the location around it was tightened at boot.
+  // @ref LLP 0569#new-files [implements]: exports get the same 0700 / 0600 as the cache
+  await fs.mkdir(partitionDir, { recursive: true, mode: 0o700 })
   const destPath = path.join(partitionDir, filename)
   /** @type {Uint8Array} */
   let bytes
@@ -257,7 +260,7 @@ async function writeBlob(baseDir, partition, filename, blobBytes) {
     for await (const chunk of blobBytes) chunks.push(chunk)
     bytes = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)))
   }
-  await fs.writeFile(destPath, bytes)
+  await fs.writeFile(destPath, bytes, { mode: 0o600 })
   return destPath
 }
 

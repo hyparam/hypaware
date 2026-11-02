@@ -43,14 +43,21 @@ The final component is resolved with `realpath`, so a root that is a symlink
 is tightened at its target and ancestors may be links (a home directory on
 another volume is common). The resolved directory is then opened with
 `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`, and every later step uses that
-descriptor: `fstat` for owner and mode, `fchmod` for the change. A link
-swapped in after the resolve fails the open instead of redirecting the
-chmod, and there is no check on one inode followed by a chmod on another.
+descriptor: `fstat` for owner and mode, `fchmod` for the change. A final
+component swapped for a link after the resolve fails the open instead of
+redirecting the chmod, and there is no check on one inode followed by a
+chmod on another. `O_NOFOLLOW` covers only the final component: an ancestor
+swapped for a link in that window is followed. The owner check still limits
+the change to a directory this user owns, and the change only removes
+access, so the worst case is tightening another of the user's own
+directories.
 
 - Owned by another uid: left alone (`foreign_owner`).
 - Group and other bits already clear: nothing to do (`unchanged`), without
   reading the directory.
-- A root dedicated by its entries is listed by path, so after the listing
+- A root dedicated by its entries is listed by path, stopping at the first
+  entry that is not HypAware's, so a large shared directory costs one entry
+  per boot rather than its size. After the listing
   the path is `lstat`ed and its inode and device compared with the
   descriptor's. A mismatch means the listing was of a different directory,
   and nothing is changed (`replaced`).
@@ -61,8 +68,12 @@ New storage gets explicit modes, so it is owner-only whatever the umask:
 directories 0700 and recorded content 0600. That covers the cache spool
 (its directory and `active.jsonl`), committed Iceberg data and metadata files
 and their directories, the ingest counter's directory, compaction generation
-directories, retired partitions, plugin state, cache and temp directories, and
-the daemon log. A recursive `mkdir` applies the mode to every directory it
+directories, retired partitions, plugin state, cache and temp directories, the
+daemon log, and local-fs exports (the exports root, a sink's directory, and
+each blob). Exports get their own modes rather than relying on the root
+around them, because a custom `HYP_HOME` that is not dedicated is left as
+found (see [below](#not-dedicated)) and `<HYP_HOME>/exports` is the default export
+location. A recursive `mkdir` applies the mode to every directory it
 creates, intermediate ones included.
 
 An `active.jsonl` left by an earlier version keeps its old mode until it
@@ -72,8 +83,9 @@ service. A file it cannot change is left as is and the append goes ahead.
 
 Bookkeeping JSON beside the content (flush stamps, cursors, the ingest
 counter) keeps the umask mode: it holds no recorded content and sits inside
-an owner-only directory. Existing committed files are not rewritten; they are
-behind the tightened root. The Claude raw-body spool keeps its own create and
+an owner-only directory. Existing committed files and earlier exports are not
+rewritten; they are behind the tightened root, or, in a location that is not
+dedicated, keep their old modes. The Claude raw-body spool keeps its own create and
 repair (LLP 0253), unchanged.
 
 ## A location that is not HypAware's {#not-dedicated}
@@ -94,7 +106,8 @@ the data is protected only by the user profile's own permissions.
 ## Cost {#cost}
 
 Per process: for each root, one `realpath`, `open`, `fstat` and `close`, plus
-a `readdir` and `lstat` for a root dedicated by its entries and one `fchmod`
+a listing (stopping at the first foreign entry) and an `lstat` for a root
+dedicated by its entries and one `fchmod`
 when it needs tightening. Per table per storage service: one `fchmod` on the
 first append. Per append: nothing; the mode is passed to the `open` call the
 append already made. Nothing is retained beyond one set of resolved root paths

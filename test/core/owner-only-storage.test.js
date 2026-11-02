@@ -241,19 +241,22 @@ test('a root replaced between its listing and the chmod is left alone', posixOnl
   const root = path.join(base, 'hyp-data')
   await fs.mkdir(path.join(root, 'hypaware'), { recursive: true, mode: 0o755 })
   await fs.chmod(root, 0o755)
-  const realReaddir = fs.readdir
-  fs.readdir = async (/** @type {any[]} */ ...args) => {
-    // @ts-expect-error - forwarded verbatim
-    const names = await realReaddir(...args)
+  // The listing is read in full, then the root is swapped before the
+  // listing is handed back, as a concurrent rename would.
+  const realOpendir = fs.opendir
+  // @ts-expect-error - a stand-in yielding the real entries
+  fs.opendir = async (/** @type {string} */ dir) => {
+    const entries = []
+    for await (const entry of await realOpendir(dir)) entries.push(entry)
     await fs.rename(root, path.join(base, 'moved'))
     await fs.mkdir(root, { mode: 0o755 })
     await fs.chmod(root, 0o755)
-    return names
+    return entries
   }
   try {
     assert.equal(await secureOwnerRoot(root, { knownEntries: name => name === 'hypaware' }), 'replaced')
   } finally {
-    fs.readdir = realReaddir
+    fs.opendir = realOpendir
   }
   assert.equal(await modeOf(root), 0o755)
   assert.equal(await modeOf(path.join(base, 'moved')), 0o755)

@@ -30,8 +30,10 @@ const CACHE_ROOT_ENTRIES = new Set(['datasets', 'plugins', 'session-purges', '.p
  *
  * The final component is resolved first and the resolved directory opened
  * with `O_NOFOLLOW | O_DIRECTORY`, so a symlinked root is tightened at its
- * target and a link swapped in after the resolve fails the open instead of
- * redirecting the chmod. Owner and type come from `fstat` on that descriptor
+ * target and a final component swapped for a link after the resolve fails
+ * the open instead of redirecting the chmod. An ancestor swapped in that
+ * window is followed; the owner check below still limits the change to a
+ * directory this user owns, and it only removes access. Owner and type come from `fstat` on that descriptor
  * and the mode is set with `fchmod` on it, so nothing is checked on one inode
  * and changed on another. Ancestors are not touched and may be links.
  *
@@ -72,8 +74,7 @@ export async function secureOwnerRoot(dir, opts = {}) {
     if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return 'foreign_owner'
     if ((st.mode & 0o077) === 0) return 'unchanged'
     if (opts.knownEntries) {
-      const names = await fs.readdir(real)
-      if (!names.every(opts.knownEntries)) return 'not_dedicated'
+      if (!await onlyKnownEntries(real, opts.knownEntries)) return 'not_dedicated'
       // The list was read by path; the descriptor is what gets the chmod.
       // A different directory at that path now means the list was not this
       // directory's, so nothing is changed.
@@ -87,6 +88,22 @@ export async function secureOwnerRoot(dir, opts = {}) {
   } finally {
     await handle.close().catch(() => undefined)
   }
+}
+
+/**
+ * Whether every entry in `dir` passes `known`. Stops at the first one that
+ * does not, so a large shared directory, which is listed on every boot
+ * because it is never tightened, costs one entry rather than its size.
+ *
+ * @param {string} dir
+ * @param {(name: string) => boolean} known
+ */
+async function onlyKnownEntries(dir, known) {
+  // Leaving the loop, early or not, closes the directory handle.
+  for await (const entry of await fs.opendir(dir)) {
+    if (!known(entry.name)) return false
+  }
+  return true
 }
 
 /** @param {unknown} err @returns {OwnerRootOutcome} */
