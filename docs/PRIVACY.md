@@ -280,11 +280,44 @@ the targeted ones: a spooled body has not been read yet, so nothing about it
 says which directory or session it belongs to, and leaving it would let the
 next batch write back rows you just deleted.
 
+## Redaction when content is recorded
+
+The built-in rules below also run before a row is written to the local cache,
+so recognized credentials and sensitive file-tool contents are masked in the
+cache itself and in every local query, not only in exports. This is on by
+default and has no switch to turn it off. It covers every capture source that
+writes the cache, live capture and transcript backfill alike, including Claude
+Code telemetry events and OpenTelemetry logs, traces and metrics. It runs again
+on content a capture adds while settling a row, including when compaction
+settles a row again.
+
+> **Caution:** A credential masked when it is recorded cannot be recovered from
+> HypAware. If the heuristic below masks something that was not a secret, only
+> the client's own transcript still holds it. This is why the heuristic's
+> thresholds stay conservative.
+
+Some differences from export redaction:
+
+- [Custom patterns](CONFIGURATION.md#redact-exported-content) apply to exports
+  only. The local cache masks the built-ins alone.
+- A file read is masked when its call names a sensitive file, including a call
+  recorded in an earlier batch. A read whose call HypAware never saw is kept
+  locally; exports still mask it.
+- A row too large for the traversal budget below is still recorded instead
+  of failing. Each column is checked on its own. A column still too large gets
+  only the text patterns: file paths and credential key names inside it are
+  not recognized, and a nested value that is not text is dropped.
+- Rows recorded before this change keep their content, and so do rows still
+  waiting to be written when you upgrade. To remove them, use
+  `hyp privacy purge`.
+- The raw-body spool and the LangGraph outbox are written by other programs,
+  so their files are not masked. HypAware masks what it records from them.
+
 ## Automatic export redaction
 
 Cloud forwarding and file exports mask recognizable credentials and known
-sensitive file-tool contents. Local cache data and local queries keep the
-original content. Existing directory and session withholding applies first.
+sensitive file-tool contents, whether or not the content was masked when it
+was recorded. Existing directory and session withholding applies first.
 Configure [additional regex patterns](CONFIGURATION.md#redact-exported-content)
 for your organization's secret formats.
 
@@ -335,8 +368,8 @@ Adding a rule affects subsequent exports; it does not recall earlier copies.
 Before sharing recordings, review captured directories with the
 `hypaware-privacy` skill in Claude Code or Codex. It checks this host's local
 cache, samples recordings, and proposes directory markings and deletions for
-your confirmation. A review cannot guarantee it will find every secret. Export
-redaction covers recognized patterns; recorded local content stays intact.
+your confirmation. A review cannot guarantee it will find every secret.
+Redaction covers recognized patterns; other local content stays as recorded.
 You can run the review at any time, even without Cloud enrollment.
 
 <!-- agent: Run the hypaware-privacy skill: review what this host has recorded, sample it, and propose which folders to mark local-only or ignore before anything syncs. Do not delete anything without asking me. -->

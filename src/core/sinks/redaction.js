@@ -12,6 +12,7 @@ const MAX_NODES = 100000
 const MAX_BYTES = 16 * 1024 * 1024
 const MAX_TOOL_PATHS = 4096
 const PATH_KEYS = new Set(['path', 'file_path', 'filePath', 'filename', 'file'])
+const PATH_KEY_LIST = [...PATH_KEYS]
 const READ_TOOLS = /^(?:read|read_file|readfile)$/i
 const STRUCTURAL = new Set([
   'org', 'cwd', 'date', 'timestamp', 'time', 'ts', 'role', 'part_type', 'part_index',
@@ -72,13 +73,56 @@ function objectValue(value) {
   return undefined
 }
 
+/** @param {unknown} error */
+function isBudgetError(error) {
+  return error instanceof Error && error.message.startsWith('export redaction row exceeds')
+}
+
+/** @param {Record<string, unknown> | undefined} object */
+function sensitivePathIn(object) {
+  return object !== undefined && PATH_KEY_LIST.some(key => typeof object[key] === 'string' && sensitiveFile(/** @type {string} */ (object[key])))
+}
+
 /**
- * Copy on change. The state is bounded to one export iterator and records only
- * whether a file tool targets a sensitive path, never its contents or path.
+ * The record-time fallback for one column past its traversal budget. It is
+ * still written, read as flat text: a string gets the text rules once, a
+ * hidden file's content and a credential key's value are masked (hidden
+ * tool_args keep only their path keys), and a nested value the walk could
+ * not finish is dropped.
+ * @param {string} key
+ * @param {unknown} value
+ * @param {boolean} hide
+ */
+function redactFlatColumn(key, value, hide) {
+  if (hide && key === 'tool_args') {
+    const args = objectValue(value)
+    if (!args) return typeof value === 'string' ? MASK : null
+    /** @type {Record<string, unknown>} */
+    const kept = {}
+    for (const name in args) {
+      if (Object.hasOwn(args, name)) kept[name] = PATH_KEYS.has(name) && typeof args[name] === 'string' ? redactSecretText(args[name]) : MASK
+    }
+    return typeof value === 'string' ? JSON.stringify(kept) : kept
+  }
+  if (typeof value === 'string') return hide ? MASK : redactSecretText(value)
+  if (value && typeof value === 'object' && !ArrayBuffer.isView(value)) return null
+  return value
+}
+
+/**
+ * Copy on change. The state is at most MAX_TOOL_PATHS call verdicts per
+ * redactor (one export iterator, or one storage service at record time) and
+ * records only whether a file tool targets a sensitive path, never its
+ * contents or path.
  * @param {ExportRedactionConfig} [config]
  * @param {boolean} [customOnly] Internal worker mode: built-ins already ran before IPC.
+ * @param {{ overBudget(): void }} [record] Record-time mode (LLP 0568): a read
+ *   with no known path is kept, and a row past the budget is written instead
+ *   of refused, each column walked on its own budget and a column past it
+ *   redacted as flat text. Both are irreversible at record time; export
+ *   still applies the conservative rules.
  */
-export function createRowRedactor(config = {}, customOnly = false) {
+export function createRowRedactor(config = {}, customOnly = false, record) {
   const custom = (config.custom_patterns ?? []).map(({ pattern, flags = '' }) => new RegExp(pattern, flags.includes('g') ? flags : flags + 'g'))
   const toolPaths = new Map()
 
@@ -87,11 +131,11 @@ export function createRowRedactor(config = {}, customOnly = false) {
     let nodes = 0
     let bytes = 0
     const args = objectValue(row.tool_args)
-    const path = args && [...PATH_KEYS].map(key => args[key]).find(value => typeof value === 'string')
-    const tool = typeof row.tool_name === 'string' ? row.tool_name.split('.').at(-1) ?? '' : ''
+    const path = args && PATH_KEY_LIST.map(key => args[key]).find(value => typeof value === 'string')
     const call = row.tool_call_id ?? row.tool_result_for
     const session = row.session_id ?? row.conversation_id
-    const key = typeof session === 'string' && session && typeof call === 'string' && call
+    const key = (row.part_type === 'tool_call' || row.part_type === 'tool_result') &&
+      typeof session === 'string' && session && typeof call === 'string' && call
       ? JSON.stringify([session, call]) : undefined
     let mask = !customOnly && typeof path === 'string' && sensitiveFile(path)
     if (!customOnly && row.part_type === 'tool_call' && key && typeof path === 'string') {
@@ -102,8 +146,14 @@ export function createRowRedactor(config = {}, customOnly = false) {
       if (typeof path !== 'string' && toolPaths.has(key)) mask = toolPaths.get(key)
       // A read without a known path cannot be proven safe, including when its
       // call was exported on an earlier tick. Mask the output conservatively.
-      else if (typeof path !== 'string' && READ_TOOLS.test(tool)) mask = true
-      toolPaths.delete(key)
+      // At record time the call may simply have been recorded by another
+      // process, and a mask there cannot be undone, so the read is kept.
+      else if (typeof path !== 'string' && !record &&
+        READ_TOOLS.test(typeof row.tool_name === 'string' ? row.tool_name.split('.').at(-1) ?? '' : '')) mask = true
+      // A recorded result can be written again (a failed append is replayed),
+      // so at record time the verdict outlives its first use; the FIFO cap
+      // still bounds the map.
+      if (!record) toolPaths.delete(key)
     }
 
     // `mode` narrows what a hidden file's content may keep: a top-level
@@ -137,7 +187,7 @@ export function createRowRedactor(config = {}, customOnly = false) {
       if (Array.isArray(value) && nodes + value.length > MAX_NODES) throw new Error('export redaction row exceeds traversal budget')
       const local = objectValue(value)
       const input = local && objectValue(local.input ?? local.arguments ?? local.args)
-      if (!customOnly && [local, input].some(object => object && [...PATH_KEYS].some(key => typeof object[key] === 'string' && sensitiveFile(/** @type {string} */ (object[key]))))) hide = true
+      if (!customOnly && (sensitivePathIn(local) || sensitivePathIn(input))) hide = true
       // Changes are applied after the walk, so a row refused by the budget
       // never pays for a copy of a wide container.
       /** @type {[string | number, unknown][] | undefined} */
@@ -159,7 +209,70 @@ export function createRowRedactor(config = {}, customOnly = false) {
       for (const [key, changed] of changes) copy[key] = changed
       return copy
     }
-    return /** @type {T} */ (visit(row, mask, 0))
+    if (!record) return /** @type {T} */ (visit(row, mask, 0))
+    try {
+      return /** @type {T} */ (visit(row, mask, 0))
+    } catch (error) {
+      if (!isBudgetError(error)) throw error
+      record.overBudget()
+    }
+    // Past the budget, each column is walked again on its own budget, so only
+    // a column too large to walk degrades to flat text and the rest of the
+    // row (usage, attributes, markers) is kept as the full walk would keep it.
+    const hide = mask || sensitivePathIn(row) || sensitivePathIn(objectValue(row.input ?? row.arguments ?? row.args))
+    /** @type {[string, unknown][] | undefined} */
+    let changes
+    for (const key in row) {
+      if (!Object.hasOwn(row, key) || isExportIdentityColumn(key)) continue
+      const value = row[key]
+      const hideKey = hide || CREDENTIAL_KEYS.test(key)
+      nodes = 0
+      bytes = 0
+      let changed
+      try {
+        changed = visit(value, hideKey, 1, key === 'tool_args' ? 'args' : undefined)
+      } catch (error) {
+        if (!isBudgetError(error)) throw error
+        changed = redactFlatColumn(key, value, hideKey)
+      }
+      if (changed !== value) (changes ??= []).push([key, changed])
+    }
+    if (!changes) return row
+    /** @type {Record<string, unknown>} */
+    const copy = { ...row }
+    for (const [key, changed] of changes) copy[key] = changed
+    return /** @type {T} */ (copy)
+  }
+}
+
+/**
+ * The built-in rules applied to rows about to be persisted. Synchronous, so
+ * rows reach the spool in the order they were appended, and copy on change:
+ * a batch with nothing to mask comes back as the same array of the same rows.
+ * Custom patterns stay export-only.
+ * @ref LLP 0568#seam [implements]: one built-in pass per row before the spool or a commit
+ */
+export function createRecordRedactor() {
+  let overBudget = 0
+  const redactRow = createRowRedactor({}, false, { overBudget() { overBudget++ } })
+  /**
+   * @param {Record<string, unknown>[]} rows
+   * @param {Set<Record<string, unknown>>} [done] rows already redacted, passed through
+   * @returns {{ rows: Record<string, unknown>[], redacted: number, overBudget: number }}
+   */
+  return function redactRows(rows, done) {
+    overBudget = 0
+    /** @type {Record<string, unknown>[] | undefined} */
+    let out
+    let redacted = 0
+    for (let i = 0; i < rows.length; i++) {
+      if (done?.has(rows[i])) continue
+      const row = redactRow(rows[i])
+      if (row === rows[i]) continue
+      ;(out ??= rows.slice())[i] = row
+      redacted++
+    }
+    return { rows: out ?? rows, redacted, overBudget }
   }
 }
 

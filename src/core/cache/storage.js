@@ -26,7 +26,7 @@ import { claimReconcileScope as claimReconcileScopeImpl, reconcileCacheRows, rec
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
-import { createExportRedactor, isExportIdentityColumn } from '../sinks/redaction.js'
+import { createExportRedactor, createRecordRedactor, isExportIdentityColumn } from '../sinks/redaction.js'
 
 import { createHash } from 'node:crypto'
 import path from 'node:path'
@@ -119,6 +119,22 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     sessionPurges.refresh()
     return sessionPurges.size ? rows.filter((row) => !sessionPurges.has(row)) : rows
   }
+  const redactRecordRows = createRecordRedactor()
+  /**
+   * Every write below persists only what this returns: the built-in secret
+   * rules applied once, before the spool or a commit sees the row.
+   * @ref LLP 0568#seam [implements]: record-time redaction on every cache write path
+   * @param {string} dataset
+   * @param {Record<string, unknown>[]} rows
+   * @param {Set<Record<string, unknown>>} [done]
+   */
+  function recordRows(dataset, rows, done) {
+    const result = redactRecordRows(rows, done)
+    if (result.overBudget > 0) {
+      logger.warn('cache.record_redaction_over_budget', { [Attr.DATASET]: dataset, row_count: result.overBudget })
+    }
+    return result
+  }
   const meter = getMeter('cache')
   const partitionDropCounter = meter.createCounter('hyp_partition_validation_drops', {
     description: 'Rows dropped due to missing required Iceberg partition fields',
@@ -148,7 +164,13 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // short-circuits cheaply when a batch has nothing to settle.
       const settle = getSettleHook?.(dataset)
       if (settle) {
-        rows = await settle(rows, { storage: service })
+        // The spooled rows were redacted on append. A row the hook builds
+        // fresh can carry content it read back from its source (the Claude
+        // enricher rewrites frames from the transcript), so only those pass
+        // through the rules again. A hook returns a new array when it changes
+        // a row; one that returns its own batch is taken as unchanged.
+        const settled = await settle(rows, { storage: service })
+        if (settled !== rows) rows = recordRows(dataset, settled, new Set(rows)).rows
       }
       const beforeSecondCheck = rows.length
       rows = survivingRows(rows)
@@ -363,7 +385,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const { bytesWritten, pendingBytes } = await spool.append(tablePath, columns, survivingRows(rows))
+          const recorded = recordRows(dataset, survivingRows(rows))
+          span.setAttribute('redacted_row_count', recorded.redacted)
+          const { bytesWritten, pendingBytes } = await spool.append(tablePath, columns, recorded.rows)
           span.setAttribute('bytes_written', bytesWritten)
           span.setAttribute('pending_bytes', pendingBytes)
           span.setAttribute('spooled', true)
@@ -703,7 +727,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, survivingRows(rows), { filterRows: survivingRows })
+          const recorded = recordRows(dataset, survivingRows(rows))
+          span.setAttribute('redacted_row_count', recorded.redacted)
+          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, recorded.rows, { filterRows: survivingRows })
           span.setAttribute('bytes_written', result.bytesWritten)
           span.setAttribute('appended', result.appended)
         },
@@ -713,14 +739,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
 
     async reconcileRows(dataset, columns, rows, scope) {
       await drainSpoolForReconcile(dataset)
-      return reconcileCacheRows({ cacheRoot, dataset, columns, rows, scope,
+      return reconcileCacheRows({ cacheRoot, dataset, columns, rows: recordRows(dataset, rows).rows, scope,
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 
     async reconcileRowsBatch(dataset, columns, snapshots) {
       if (!snapshots.length) return 0
       await drainSpoolForReconcile(dataset)
-      return reconcileCacheSnapshots({ cacheRoot, dataset, columns, snapshots,
+      return reconcileCacheSnapshots({ cacheRoot, dataset, columns,
+        snapshots: snapshots.map(snapshot => {
+          const recorded = recordRows(dataset, snapshot.rows).rows
+          return recorded === snapshot.rows ? snapshot : { ...snapshot, rows: recorded }
+        }),
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 

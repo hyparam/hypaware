@@ -5,6 +5,7 @@
 **Systems:** Sinks, Privacy
 **Date:** 2026-11-01
 **Related:** LLP 0503
+**Extended-by:** LLP 0568 (#shared-rules: the record path imports the same rules and applies them before local persistence)
 
 Extends [LLP 0503](0503-export-content-redaction.decision.md) (#export-seam:
 the built-in set it names grows by three formats and one heuristic).

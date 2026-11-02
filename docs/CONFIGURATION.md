@@ -49,9 +49,10 @@ changing it in one shell does not move existing recordings or a running service.
 ## Redact exported content
 
 Exports automatically mask recognized credentials and sensitive file-tool
-contents before cloud forwarding or file export. The local cache retains the
-original recording. See [privacy and redaction](PRIVACY.md#automatic-export-redaction)
-for coverage and limits.
+contents before cloud forwarding or file export. The same built-in rules run
+when content is recorded, so the local cache holds the masked text too. See
+[privacy and redaction](PRIVACY.md#redaction-when-content-is-recorded) for
+coverage and limits.
 
 Add your own patterns at the top level of `hypaware-config.json`:
 
@@ -71,7 +72,8 @@ regex syntax without `/` delimiters. Matching replaces every occurrence with
 `[REDACTED]`; optional flags are `g`, `i`, `m`, `s`, and `u`. JSON requires
 backslashes to be doubled, for example `"\\d{8}"`. Each layer accepts up to
 32 patterns, each up to 2048 characters. Invalid expressions fail validation.
-Local patterns add to organization patterns and built-in masking.
+Local patterns add to organization patterns and built-in masking. Custom
+patterns apply to exports only; the local cache keeps what they match.
 
 Run `hyp config validate`, then `hyp daemon restart` to apply changes.
 Pattern matching has a one-second worker deadline per row. A timeout or row

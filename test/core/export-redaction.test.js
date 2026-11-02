@@ -195,7 +195,7 @@ test('a blob export whose encoder fails before reading rows still stops the reda
   assert.equal(workers.size, 0)
 })
 
-test('booted config reaches every export reader, preserves local data and watermarks, and cannot be bypassed by projection', async t => {
+test('booted config reaches every export reader, keeps custom matches local, preserves watermarks, and cannot be bypassed by projection', async t => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-redaction-'))
   t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [], redaction: { custom_patterns: [{ pattern: 'company-[a-z]+' }] } }))
@@ -210,8 +210,9 @@ test('booted config reaches every export reader, preserves local data and waterm
   ]
   await storage.appendRows(table, columns, rows)
   await storage.flushTable(table, { reason: 'manual' })
+  // Built-in rules ran at record time (LLP 0568); custom patterns are export-only.
   const local = await Array.fromAsync(storage.readRows(table))
-  assert.equal(local[0].content_text, rows[0].content_text)
+  assert.deepEqual(local.map(row => row.content_text), [`${MASK} company-alpha`, MASK, MASK])
   const exported = await Array.fromAsync(storage.readRowsSince(table, { columns: ['id', 'content_text'] }))
   assert.deepEqual(exported.map(entry => entry.row), [{ id: '1', content_text: `${MASK} ${MASK}` }, { id: '2', content_text: MASK }, { id: '3', content_text: MASK }])
   assert.ok(exported.every(entry => entry.after.seq))
@@ -242,7 +243,7 @@ test('booted config reaches every export reader, preserves local data and waterm
   assert.ok(posted.length)
   assert.equal(posted.join('').includes(key), false)
   assert.equal(posted.join('').includes('company-alpha'), false)
-  assert.equal((await Array.fromAsync(storage.readRows(table)))[0].content_text, rows[0].content_text)
+  assert.equal((await Array.fromAsync(storage.readRows(table)))[0].content_text, `${MASK} company-alpha`)
 })
 
 test('oversized rows fail closed rather than skipping scanning', () => {

@@ -29,6 +29,7 @@ import { partitionSpecForDeclaration, partitionSpecMigrationDue, sortColumnsForD
 import { openStreamingAppend } from './iceberg/stream_append.js'
 import { sidecarPathFor } from '../search/searchable_columns.js'
 import { errCode, isPlainObject } from '../util/json_util.js'
+import { createRecordRedactor } from '../sinks/redaction.js'
 
 /**
  * @import {
@@ -2291,6 +2292,16 @@ async function resettleFallbackRows(fallbackRows, settle, emittedPartIds) {
     // Degrade safely: leave the fallback rows as committed. The next
     // sweep (transcript now present, or the bug fixed) can retry.
     return fallbackRows
+  }
+  // A row the sweep rebuilt can carry content read back from the transcript,
+  // so it passes the record-time rules before it is rewritten. The redactor
+  // is fresh, with no call verdicts: the row's content was masked when it was
+  // appended, and a rebuilt Read result still names its file.
+  // @ref LLP 0568#seam [implements]: the compaction re-settle is a write path too
+  if (upgraded !== fallbackRows) {
+    const recorded = createRecordRedactor()(upgraded, new Set(fallbackRows))
+    if (recorded.overBudget > 0) getActiveSpan()?.setAttribute('record_redaction_over_budget', recorded.overBudget)
+    upgraded = recorded.rows
   }
 
   /** @type {Record<string, unknown>[]} */

@@ -212,6 +212,41 @@ test('re-settle sweep sends fallback rows to the hook in byte-bounded batches', 
   }
 })
 
+// @ref LLP 0568#seam [tests]: the compaction re-settle is a write path too
+test('content a re-settle hook writes is redacted before the rewritten generation commits', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+
+    // Built at runtime so no literal here looks like a live credential.
+    const secret = 'gh' + 'p_' + 'aB3'.repeat(12)
+    await maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      getSettleHook: () => async (batch) => batch.map(row => ({ ...upgradedRow(row, 'u-assist'), content_text: `token ${secret}` })),
+    })
+
+    const partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
+    /** @type {unknown[]} */
+    const texts = []
+    for (const part of partitions) {
+      for await (const row of storage.readRows(part.path, ['part_id', 'content_text'])) texts.push(row.content_text)
+    }
+    assert.deepEqual(texts, ['token [REDACTED]'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('an early fallback batch collapses onto a native twin later in scan order', async () => {
   const env = await stageEnv()
   try {
