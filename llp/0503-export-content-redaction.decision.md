@@ -6,7 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-10-15
 **Related:** LLP 0010, LLP 0031, LLP 0070, LLP 0305
-**Extended-by:** LLP 0566 (#export-seam: the built-ins move to a shared rules module and add Google API keys, Stripe live secret keys, JWTs and a random-token heuristic)
+**Extended-by:** LLP 0566 (#export-seam: the built-ins move to a shared rules module and add Google API keys, Stripe live secret keys, JWTs and a random-token heuristic); LLP 0568 (#export-seam: the built-ins also run when content is recorded, so the local cache and local queries no longer keep what they match)
 
 ## Export seam {#export-seam}
 
