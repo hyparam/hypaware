@@ -2,42 +2,81 @@
 
 <!-- @ref LLP 0494#docs-mcp: hand-written setup page; every config block is checked by test/core/docs-mcp-configs.test.js -->
 HypAware speaks the Model Context Protocol (MCP), so an AI client can query
-your recorded AI work and your organization's recommendations as tools. There are two
-ways to connect:
-
-- **Local:** the client starts `hyp mcp serve` on your host. It needs
-  `hyp` installed and uses your own sign-in. No token is involved.
-- **Remote:** the client connects over HTTPS to your team's server at
-  `/v1/mcp` and sends an agent token. Use it for cloud agents, CI jobs, and
-  any client that has no `hyp` on its host.
-
-> **Tip:** On your own host, use the local setup, even to reach your
-> team's history: `hyp mcp serve --remote` uses the session you already
-> have. You do not need an agent token.
-
-## Local setup: `hyp mcp serve`
-
-Configure your client to run `hyp` with the arguments `mcp` and `serve`. The
-client starts it and talks to it over stdio. `hyp mcp serve` speaks the
-protocol on stdout; it is not an interactive command.
-
-- `hyp mcp serve` answers from this host's recordings.
-- `hyp mcp serve --remote` answers from your team's server instead, as you.
-  Sign in once first with `hyp remote login`.
-
-The client must be able to find `hyp`. Desktop apps often do not read your
-shell's `PATH`, so if the client reports that it cannot start the server,
-replace `hyp` with the full path that `command -v hyp` prints.
-
-## Remote setup: `/v1/mcp` with an agent token
-
-The endpoint for HypAware Cloud is:
+your recorded AI work and your organization's recommendations as tools. The
+server for HypAware Cloud is:
 
 ```text
 https://api.hypaware.ai/v1/mcp
 ```
 
-The client sends the token in the `Authorization` header as `Bearer <token>`.
+There are three ways to connect to it:
+
+- **Sign in from a chat client:** add the server to Claude as a connector
+  and sign in with your HypAware account. No token, no headers, and no
+  `hyp` install. Most people start here.
+- **Agent token:** the client sends a token you mint. Use it for cloud
+  agents, CI jobs, and clients that cannot sign in themselves.
+- **Local:** the client starts `hyp mcp serve` on a host that already runs
+  `hyp`.
+
+> **Tip:** On a host that already runs `hyp`, you do not need an agent
+> token to reach your team's history: `hyp mcp serve --remote` uses the
+> session you already have. See [Local setup](#local-setup-hyp-mcp-serve).
+
+## Sign in from a chat client
+
+### Claude
+
+Add the connector in claude.ai or Claude Desktop. Once it is connected, it
+also works in the Claude mobile apps.
+
+1. Open **Customize**, then **Connectors**, then **+ Add**, then **Add
+   custom connector**.
+2. Name it `HypAware`, set the URL to `https://api.hypaware.ai/v1/mcp`, and
+   click **Continue**.
+3. Keep the detected settings and click **Continue**. Under
+   **Authentication**, pick **Sign in now** or **Sign in when needed**.
+   Leave **OAuth client** at its default and **Request headers** empty,
+   then click **Add**.
+4. Click **Connect**, sign in to HypAware, and click **Allow**.
+5. In a chat, turn the connector on under **+**, then **Connectors**.
+
+On a Team or Enterprise plan, an Owner first adds the connector for the
+organization under **Organization settings**, then **Connectors**, then
+**Add**, then **Custom**, then **Web**. Each member then clicks **Connect**
+and signs in. The Claude Free plan allows one custom connector.
+
+The menu paths follow Claude's own guide,
+[Getting started with custom connectors using remote MCP](https://support.claude.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp).
+
+### What the connection can do
+
+The connection acts as you, in your organization. If you belong to more
+than one, you pick it on the Allow page. The Allow page says what the
+connection can do, with your organization's name in place of Example Co:
+
+> Claude will be able to read Example Co's recorded AI sessions, including
+> other members' sessions, and its reports, and to mark recommendations as
+> applied or dismissed. It can't publish or delete reports, change
+> settings, or manage the organization.
+
+### How long it lasts and how to disconnect
+
+The connection lasts 30 days, unless your server sets another lifetime.
+The Allow page shows the number. After that, Claude asks you to sign in
+again.
+
+Removing the HypAware connector in Claude's settings stops Claude using
+it. To end the connection on the server sooner, revoke it with
+`hyp remote tokens` (see [List and revoke tokens](#list-and-revoke-tokens)),
+or ask an admin of your organization to disconnect it.
+
+## Remote setup: `/v1/mcp` with an agent token
+
+Use an agent token for cloud agents, CI jobs, and clients that cannot sign
+in through a connector. The endpoint is the same,
+`https://api.hypaware.ai/v1/mcp`. The client sends the token in the
+`Authorization` header as `Bearer <token>`.
 
 ### Mint an agent token
 
@@ -98,8 +137,9 @@ Claude, sign in first, or remove HypAware from Claude's connectors.
 
 ## Client setup
 
-Each client below has a local block and, where the client supports a bearer
-header, a remote block. Remote blocks read the token from the
+Each client below has a local block (see
+[Local setup](#local-setup-hyp-mcp-serve)) and, where the client supports a
+bearer header, a remote block. Remote blocks read the token from the
 `HYPAWARE_AGENT_TOKEN` environment variable unless the client stores secrets
 itself.
 
@@ -224,7 +264,8 @@ stores it for you:
 
 Add to `claude_desktop_config.json` (Settings, Developer, Edit Config), then
 restart Claude Desktop. Its config file runs local servers only. To reach your
-team's server, add `"--remote"` to `args`.
+team's server, add `"--remote"` to `args`, or skip the file and
+[sign in from a chat client](#sign-in-from-a-chat-client).
 
 <!-- mcp-config: claude-desktop stdio -->
 ```json
@@ -303,5 +344,22 @@ If the connection fails:
   `hyp mcp serve`. It should print a line naming the tools it serves and
   then wait; press Ctrl-C to stop it. With `--remote`, sign in first with
   `hyp remote login`.
+- **Sign-in:** after 30 days, or after the connection is revoked, click
+  **Connect** in Claude and sign in again.
 - **Remote:** a `401` means the token has expired or was revoked; mint a new
   one. Check that the header reads `Bearer ` followed by the token.
+
+## Local setup: `hyp mcp serve`
+
+Use this on a host that already runs `hyp`. Configure your client to run
+`hyp` with the arguments `mcp` and `serve`. The client starts it and talks to
+it over stdio. `hyp mcp serve` speaks the protocol on stdout; it is not an
+interactive command.
+
+- `hyp mcp serve` answers from this host's recordings.
+- `hyp mcp serve --remote` answers from your team's server instead, as you.
+  Sign in once first with `hyp remote login`.
+
+The client must be able to find `hyp`. Desktop apps often do not read your
+shell's `PATH`, so if the client reports that it cannot start the server,
+replace `hyp` with the full path that `command -v hyp` prints.
