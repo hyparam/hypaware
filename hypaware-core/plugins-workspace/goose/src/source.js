@@ -294,10 +294,14 @@ export async function runGoosePollTick(runner, ctx) {
         span.setAttribute('sessions_changed', result.sessionsChanged)
         span.setAttribute('sessions_pending', runner.sessionsPending)
         span.setAttribute('rows', result.rows)
+        // `status` is the fixed attribute set (LLP 0021), which would rewrite
+        // `baseline` and `unchanged` to `failed`; the tick outcome rides
+        // `poll_status`, as it does on the span.
         ctx.log.info('goose.poll', {
           component: 'goose',
           operation: 'goose.poll',
-          status: result.status,
+          status: 'ok',
+          poll_status: result.status,
           sessions_changed: result.sessionsChanged,
           sessions_pending: runner.sessionsPending,
           rows: result.rows,
@@ -317,7 +321,7 @@ export async function runGoosePollTick(runner, ctx) {
     ctx.log.error('goose.poll', {
       component: 'goose',
       operation: 'goose.poll',
-      status: 'error',
+      status: 'failed',
       sessions_pending: runner.sessionsPending,
       error_kind: kind,
     })
