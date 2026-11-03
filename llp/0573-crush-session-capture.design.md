@@ -304,7 +304,10 @@ So the reader creates SQLite's own empty WAL index files in `.crush/` when
 they are absent, and Crush removes them on its next clean close. The change
 gate (#reconciliation) leaves `-shm` out and records the signature after the
 reader closes, so the reader's own files never read as a commit. T10 (LLP
-0574) repeats the check on macOS.
+0574) repeats the check on macOS: which files the first read of a database
+with no `-wal` creates and their sizes, that idle reads leave `crush.db` and
+`-wal` size, mtime and inode unchanged, and that the next idle tick opens
+nothing. If macOS differs, this design is amended before Close.
 
 The reader checks that `goose_db_version` exists and that every column it
 reads exists. A missing table or column is `schema_unsupported`, naming it.
@@ -386,13 +389,17 @@ metadata and reads by `rowid`:
    database is not opened. That rests on a hypothesis (#open-questions):
    every WAL commit grows or rewrites the WAL, and a checkpoint rewrites the
    main file, so the signature moves. The Linux self-check saw a commit move
-   the WAL; the checkpoint-and-reset case is tested in T3 and T4 on Linux and
-   in T10 on macOS. A false positive only costs one open. An opened
+   the WAL; the checkpoint-and-reset case is tested in T4 on Linux and in
+   T10 on macOS. A false positive only costs one open. An opened
    database is stat-checked twice, before the open and after the reader
-   closes. When the two agree, or differ only by the reader's own empty `-wal` (#sqlite), the
-   after-close signature is recorded. Otherwise a writer committed during the
-   read, and the before-open signature is kept so the next tick opens it
-   again.
+   closes. The after-close signature is recorded only when the two agree, or
+   differ only by the reader's own empty `-wal` (#sqlite), and every
+   candidate in the database was admitted. Otherwise the before-open
+   signature is kept, so the next tick sees the database as changed and
+   opens it again: either a writer committed during the read, or the tick's
+   budget (#source) left a candidate unadmitted, an open session included.
+   The leftover sessions' rows stay above the cursor, which advances only
+   past committed or unchanged sessions.
 2. **Changed database.** Two reads:
    - `messages WHERE rowid > max_rowid` (excluding title sessions), giving the
      sessions with new rows. This must be a rowid range search.
@@ -423,7 +430,10 @@ metadata and reads by `rowid`:
    sweep finds the session's digest equal to its entry (nothing streamed
    since the last hash, as after a crash or cancel mid-stream). So a message
    that never finishes is hashed until the next sweep at most. Open sessions
-   are never pending (#source) and never schedule a catch-up tick.
+   are never pending (#source) and never schedule a catch-up tick. An open
+   session the budget left unadmitted still keeps its database's before-open
+   signature (step 1), so the next poll tick reads it even when no further
+   write lands, as after the write that set its `finished_at`.
 6. **The scheduled sweep** hashes every session in scope and catches any
    other in-place edit, up to one sweep interval late.
 
@@ -454,15 +464,28 @@ tick, then ticks every `poll_interval`. Each tick:
 - refreshes discovery (#discovery);
 - stats every database in the set, in a round-robin order that starts after
   the last database the previous tick opened;
-- opens at most 16 changed databases. A changed database left unopened keeps
-  its old signature, so the next tick sees it as changed again;
-- admits candidate sessions across the opened databases, at most 64, and
-  stops admitting at 4096 projected rows (LLP 0527);
+- opens changed databases one at a time in that order, at most 16, and
+  stops opening once the session or row budget is spent. A changed database
+  left unopened keeps its old signature, so the next tick sees it as changed
+  again;
+- admits each opened database's candidate sessions before opening the next,
+  at most 64 sessions in all, and stops admitting at 4096 projected rows
+  (LLP 0527 `#tick-budget`). An opened database with a candidate left
+  unadmitted keeps its before-open signature (#reconciliation step 1);
 - commits one batch through `reconcileRowsBatch`, flushes the watermark once
   after the commit, and schedules a catch-up tick one second later while
-  anything is pending. Pending means a changed database the 16-open budget
-  left unopened, or a candidate session the 64-session or 4096-row budget
-  left unadmitted. Open sessions (#reconciliation step 5) are not pending.
+  anything is pending. Pending means a changed database the tick left
+  unopened, or a candidate session other than an open one that the
+  64-session or 4096-row budget left unadmitted. Open sessions
+  (#reconciliation step 5) are not pending; one left unadmitted is read on
+  the next poll tick.
+
+**No database starves the others.** The next tick's order starts after the
+last database this tick opened, so a database that always has leftovers is
+opened again only after every other changed database has had its turn. LLP
+0527 always admits a tick's first session, so each tick makes progress, and
+every changed database is opened within as many ticks as there are changed
+databases, at most 1,024.
 
 A session whose scope guard another writer holds is deferred and holds its
 database's cursor and signature, as in goose.
@@ -540,6 +563,10 @@ Each tick logs `crush.poll` with `component=crush`, `operation`, `status`,
   and one index seek per candidate. At most 16 databases are opened per tick.
   A session with no entry is a candidate only above the database's `floor`,
   so old history and pruned or evicted entries are never hashed by the poll.
+  A database whose candidates the budget left unadmitted keeps its
+  before-open signature and is reopened on each tick until they are
+  admitted, one open per tick, and the round-robin start bounds how long any
+  other changed database waits behind it (#source).
 - **Each changed session** costs a streamed digest and, when it moved, a
   projection, both O(that session's length). Open sessions are re-hashed on
   each changed-database tick until their latest message finishes, a later
@@ -612,7 +639,7 @@ whose exclusions persist and whose backfill honors them, and states that the
 - The stat gate is partly observed: the Linux self-check (#sqlite) saw idle
   reads leave `crush.db` and `-wal` unchanged and a commit move the `-wal`.
   Still open: that every commit moves the `crush.db` or `crush.db-wal`
-  signature, including a WAL reset after checkpoint. T3 and T4 test that on
+  signature, including a WAL reset after checkpoint. T4 tests that on
   Linux, and T10 (Mac Part B) on macOS. If it does not hold, the gate falls back to a
   per-tick `data_version` read on a short-lived connection, which costs one
   open per database per tick and is bounded by the database cap.
