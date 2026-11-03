@@ -37,19 +37,20 @@ const RESERVE_RETRY_DELAY_MS = 25
  * {@link recoveredNextSeq}, and the caller's write replaces the bad file.
  *
  * @param {string} statePath
+ * @param {bigint} issuedThrough highest seq this allocator has issued, 0n if none
  * @returns {Promise<bigint | null>}
  */
-async function readNextSeq(statePath) {
+async function readNextSeq(statePath, issuedThrough) {
   /** @type {unknown} */
   let nextSeq
   try {
     nextSeq = JSON.parse(await fs.readFile(statePath, 'utf8'))?.nextSeq
   } catch (error) {
     if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return null
-    return recoveredNextSeq(statePath, error)
+    return recoveredNextSeq(statePath, error, issuedThrough)
   }
   if (typeof nextSeq === 'string' && /^\d+$/.test(nextSeq)) return BigInt(nextSeq)
-  return recoveredNextSeq(statePath, new Error('nextSeq is not a decimal string'))
+  return recoveredNextSeq(statePath, new Error('nextSeq is not a decimal string'), issuedThrough)
 }
 
 /**
@@ -60,13 +61,20 @@ async function readNextSeq(statePath) {
  * issued, and so every sink watermark, stays below it without scanning the
  * cache. The result is far inside int64.
  *
+ * The rate argument fails when two recoveries land in the same millisecond, or
+ * the clock steps back between them: the clock alone would then restart at or
+ * below seqs the first recovery already issued (issue #2858). So the result is
+ * also kept above `issuedThrough`, the highest seq this allocator has issued.
+ *
  * @ref LLP 0565#why-the-clock [implements]: an O(1) floor above every issued seq, no cache scan
  * @param {string} statePath
  * @param {unknown} cause
+ * @param {bigint} issuedThrough
  * @returns {bigint}
  */
-function recoveredNextSeq(statePath, cause) {
-  const nextSeq = BigInt(Date.now()) * 1000n
+function recoveredNextSeq(statePath, cause, issuedThrough) {
+  const clockSeq = BigInt(Date.now()) * 1000n
+  const nextSeq = clockSeq > issuedThrough ? clockSeq : issuedThrough + 1n
   getLogger('cache', { mirrorStderr: true }).warn(
     'ingest seq state is unreadable; restarting the counter above every issued seq',
     {
@@ -114,7 +122,9 @@ async function writeNextSeq(statePath, nextSeq) {
  * cache. The earlier design reserved a block of 1024 per process and handed
  * them out from memory, which put a daemon's rows below the seqs a `hyp
  * query` flush had already committed (and the sink had already forwarded);
- * those rows sat under the watermark for good (issue #2578).
+ * those rows sat under the watermark for good (issue #2578). The one thing
+ * kept in memory is `issuedThrough`, the highest seq already issued, which
+ * only raises the floor a recovery restarts from; it reserves nothing.
  *
  * **Cache-global, not per-partition.** Two distinct spool table paths (e.g.
  * live capture vs. `backfill`) can feed the SAME destination partition. A
@@ -133,6 +143,7 @@ async function writeNextSeq(statePath, nextSeq) {
 export function createIngestSeqAllocator({ cacheRoot }) {
   if (!cacheRoot) throw new Error('createIngestSeqAllocator: cacheRoot is required')
   const statePath = path.join(cacheRoot, SEQ_FILE)
+  let issuedThrough = 0n
 
   /** @param {number} count */
   async function reserve(count) {
@@ -148,9 +159,11 @@ export function createIngestSeqAllocator({ cacheRoot }) {
     for (let attempt = 0; ; attempt++) {
       try {
         return await withPartitionMutationLock(statePath, async () => {
-          const start = (await readNextSeq(statePath)) ?? 1n
+          const start = (await readNextSeq(statePath, issuedThrough)) ?? 1n
+          const next = start + BigInt(count)
           // Durable BEFORE any seq in [start, start + count) is stamped onto a row.
-          await writeNextSeq(statePath, start + BigInt(count))
+          await writeNextSeq(statePath, next)
+          if (next - 1n > issuedThrough) issuedThrough = next - 1n
           return start
         })
       } catch (error) {
