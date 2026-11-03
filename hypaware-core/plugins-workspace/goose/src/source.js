@@ -198,7 +198,9 @@ export function gooseSourceStatus(runner, stopped = false) {
     },
   }
   if (runner.lastError) {
-    status.lastError = runner.lastError
+    // Plain `hyp status` prints `lastError` over `message`, so both carry the
+    // text TROUBLESHOOTING lists; the kind stays in `details`.
+    status.lastError = message
     if (status.details && runner.lastErrorKind) status.details.error_kind = runner.lastErrorKind
   }
   return status

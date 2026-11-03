@@ -89,6 +89,18 @@ hyp session ignore 20261103_4
 Goose reads saved exclusions on its next poll, so an ignore takes effect
 within a minute.
 
+The command saves the exclusion through the HypAware gateway, so it works only
+while the gateway is proxying at least one other client. On an install that
+records only Goose, it reports that status is unknown and saves nothing.
+Ignore the session's working directory instead, which also stops recording
+every other Goose session there:
+
+```sh
+hyp privacy ignore /path/to/session/working/dir
+```
+
+See [marking directories](../PRIVACY.md#marking-directories).
+
 **Goose writes its own copy of your prompts.** Goose saves the full body of
 every model request, including your prompts, to `llm_request.*.jsonl` files in
 its logs directory. HypAware does not read those files, and HypAware's privacy

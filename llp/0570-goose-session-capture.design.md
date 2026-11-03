@@ -357,8 +357,14 @@ import is idempotent. It waits a bounded time on a held scope guard, then fails 
   before the ignore are left as they are, as for every recorder under
   LLP 0403. A load error fails closed: the tick and the run project nothing,
   advance no cursor, and status shows the error. The control path is the ai-gateway `session
-  ignore` command with an explicit Goose session id; with no gateway active,
-  LLP 0549's database-only controls write the same store. LLP 0403
+  ignore` command with an explicit Goose session id. LLP 0549's database-only
+  controls do not cover Goose: they apply only when every registered client is
+  database-only and no gateway capability is active, and Goose registers no
+  client while a Goose-only install still activates an idle gateway that binds
+  no port. On such an install the command exits status-unknown and saves
+  nothing, and directory markings are the working control. Writing the store
+  directly when no recorder is listening is a change to the shared session
+  command, left to a follow-up. LLP 0403
   `#backfill` leaves Hermes outside session opt-out. Goose opts in, because
   the store, the check and the controls already exist and skipping them would
   let an ignored session keep recording.

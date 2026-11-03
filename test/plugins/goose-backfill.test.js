@@ -12,6 +12,7 @@ import { readGooseWatermark } from '../../hypaware-core/plugins-workspace/goose/
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { sessionIgnoresDir } from '../../src/core/runtime/paths.js'
 import { runBackfillProvider } from '../../src/core/commands/backfill.js'
+import { withLogRecords } from '../helpers/log_records.js'
 import { createBackfillMaterializerRegistry, createBackfillRegistry } from '../../src/core/registry/backfills.js'
 import { AI_GATEWAY_MESSAGE_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { aiGatewayBackfillMaterializer } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
@@ -435,10 +436,26 @@ test('goose backfill: an unreadable sessions.db fails by kind and keeps the path
   await fs.chmod(h.sessionsDb, 0o000)
   try {
     await assert.rejects(h.direct({ sweep: true }),
-      /** @param {any} err */ err => err.code === 'permission_denied')
+      /** @param {any} err */ err => err.code === 'permission_denied' && !err.message.includes(h.sessionsDb))
     const failed = h.logs.find(record => record.message === 'goose.backfill.open_failed')
     assert.equal(failed?.fields?.error_kind, 'permission_denied')
     assert.ok(!JSON.stringify(h.logs).includes(h.sessionsDb), 'the path stays out of the log')
+  } finally {
+    await fs.chmod(h.sessionsDb, 0o600)
+  }
+})
+
+test('goose backfill: an unreadable sessions.db keeps the path out of the kernel provider_error log', async () => {
+  const h = await stage()
+  h.db.close()
+  await fs.chmod(h.sessionsDb, 0o000)
+  try {
+    const { result, records } = await withLogRecords(() => h.run({ sweep: true }))
+    assert.equal(result.ok, false)
+    const failed = records.find(record => record.body === 'backfill.provider_error')
+    assert.ok(failed, 'the kernel logs the provider failure')
+    assert.ok(!JSON.stringify(records).includes(h.sessionsDb), 'the path stays out of every log record')
+    assert.ok(!JSON.stringify(result).includes(h.sessionsDb), 'the path stays out of the run result')
   } finally {
     await fs.chmod(h.sessionsDb, 0o600)
   }

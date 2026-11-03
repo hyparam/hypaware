@@ -434,7 +434,7 @@ test('an unreadable sessions.db degrades with permission_denied and names the pa
     assert.equal(status.state, 'degraded')
     assert.equal(status.details?.error_kind, 'permission_denied')
     assert.equal(status.message, `cannot read the database at ${sessionsDb}`)
-    assert.equal(status.lastError, `cannot read the goose sessions.db at ${sessionsDb}`)
+    assert.equal(status.lastError, status.message, 'plain status prints the same text')
     assert.equal(pollLogs(logs, 'failed')[0]?.fields?.error_kind, 'permission_denied')
     assert.ok(!JSON.stringify(logs).includes(sessionsDb), 'the path stays out of the log')
     const poll = spans.find(s => s.name === 'goose.poll')
@@ -467,6 +467,7 @@ test('a store locked past the bounded retry degrades with sqlite_busy and recove
   assert.equal(status.state, 'degraded')
   assert.equal(status.details?.error_kind, 'sqlite_busy')
   assert.equal(status.message, 'database busy, retrying next poll')
+  assert.equal(status.lastError, status.message, 'plain status prints the same text')
 
   db.exec('COMMIT')
   await runGoosePollTick(runner, ctx)

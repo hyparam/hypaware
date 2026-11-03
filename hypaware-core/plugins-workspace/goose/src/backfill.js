@@ -130,15 +130,24 @@ async function* runGooseBackfill(ctx, opts, resolver) {
       log.info('goose.backfill.no_store', { component: COMPONENT, operation: 'backfill.scan', status: 'skipped' })
       return
     }
+    const kind = err instanceof GooseSessionsDbError ? err.code : 'open_failed'
     // @ref LLP 0570#privacy [implements]: logged by kind only; the open
     // error's message names the database path.
     log.warn('goose.backfill.open_failed', {
       component: COMPONENT,
       operation: 'backfill.scan',
       status: 'error',
-      error_kind: err instanceof GooseSessionsDbError ? err.code : 'unknown',
+      error_kind: kind,
     })
-    throw err
+    if (kind === 'sqlite_unavailable') throw err
+    // The kernel logs a provider's error message, so the rethrow names no
+    // path; `hyp status` shows the path.
+    throw new GooseSessionsDbError(
+      kind === 'permission_denied'
+        ? 'cannot read the goose sessions.db (hyp status shows the path)'
+        : 'failed to open the goose sessions.db (hyp status shows the path)',
+      { code: kind }
+    )
   }
 
   /** @type {GooseWatermarkState | null} */
