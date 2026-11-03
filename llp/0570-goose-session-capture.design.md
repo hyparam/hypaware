@@ -165,8 +165,8 @@ init`) and its configure phase (LLP 0131), `hyp status`, `hyp backfill` and
 the scheduled backfill sweep. Re-running the `hyp setup` picker with Goose
 selected is idempotent and keeps an explicit `goose.enabled = false`, as for
 hermes. `hyp setup --source goose` refuses an existing configuration, and
-`--force` replaces it rather than adding to it, as for every source but
-Ollama (LLP 0474).
+`--force` replaces it rather than adding to it; only Ollama's source path
+carries an existing install forward (LLP 0474).
 
 Detection is a path existence check, so it reads no rows and never runs
 Goose. Limit: a custom `GOOSE_PATH_ROOT` is not seen by the picker, because

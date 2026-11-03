@@ -30,10 +30,10 @@ hyp setup --source goose
 hyp status
 ```
 
-To add Goose to an existing installation, run `hyp setup` in a terminal and
-select Goose; your current choices start selected. `hyp setup --source goose`
-refuses to change an existing configuration, and `--force` replaces it rather
-than adding to it.
+To add Goose to an existing installation, run `hyp setup` in a terminal,
+choose **Reconfigure**, and select Goose; your current choices stay selected.
+`hyp setup --source goose` refuses to change an existing configuration, and
+`--force` replaces it rather than adding to it.
 
 This integration installs no skills into Goose.
 
