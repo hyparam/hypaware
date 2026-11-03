@@ -9,10 +9,11 @@
  *   `{ readOnly: true }`, never a write or checkpoint, a bounded SQLITE_BUSY
  *   retry, and a required-column check that names what is missing.
  *
- * @import { GooseSessionRow, GooseMessageRow, GooseSessionSnapshot, GooseBusyRetryOptions, GooseSessionsDbOptions } from './types.js'
+ * @import { GooseSessionRow, GooseMessageRow, GooseSessionSnapshot, GooseBusyRetryOptions, GooseSessionsDbOptions, GooseChanges } from './types.js'
  * @import { DatabaseSync } from 'node:sqlite'
  */
 
+import { createHash } from 'node:crypto'
 import { accessSync, constants, existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
@@ -116,6 +117,23 @@ const SESSION_SELECT = `SELECT ${SESSION_COLUMNS.join(', ')} FROM sessions`
 const MESSAGE_SELECT = `SELECT ${MESSAGE_COLUMNS.join(', ')} FROM messages WHERE session_id = ? ORDER BY id ASC`
 
 /**
+ * Sessions with a message above the id cursor, with their first new id.
+ * The derived table walks only `messages.id > ?` by its rowid: without
+ * `NOT INDEXED` SQLite prefers a full scan of a `session_id` index, which
+ * grows with history instead of with what changed.
+ * @ref LLP 0570#cost [implements]: both range reads are SEARCHes bounded by the cursors.
+ */
+export const NEW_MESSAGES_SQL = 'SELECT n.session_id AS session_id, n.first_id AS first_id, s.updated_at AS updated_at'
+  + ' FROM (SELECT m.session_id AS session_id, MIN(m.id) AS first_id FROM messages m NOT INDEXED WHERE m.id > ? GROUP BY m.session_id) n'
+  + " JOIN sessions s ON s.id = n.session_id WHERE s.session_type != 'hidden'"
+/** Sessions whose `updated_at` is at or above the time cursor (inclusive), oldest first. */
+export const UPDATED_SQL = "SELECT id, updated_at FROM sessions WHERE updated_at >= ? AND session_type != 'hidden' ORDER BY updated_at ASC"
+/** One session's largest message id, an index seek. */
+export const MAX_ID_SQL = 'SELECT MAX(id) AS max_id FROM messages WHERE session_id = ?'
+const MAX_ALL_ID_SQL = 'SELECT MAX(id) AS max_id FROM messages'
+const MAX_UPDATED_SQL = 'SELECT MAX(updated_at) AS max_updated_at FROM sessions'
+
+/**
  * Read-only handle onto one Goose `sessions.db`. Construct via
  * {@link openGooseSessionsDb}; every read goes through the bounded busy
  * retry and the required-column check.
@@ -169,9 +187,99 @@ export class GooseSessionsDb {
   }
 
   /**
+   * `PRAGMA data_version`. The value is local to this connection: it changes
+   * when another connection commits, and means nothing across a reopen.
+   *
+   * @returns {Promise<number>}
+   */
+  async dataVersion() {
+    return withBusyRetry(() => Number(this.db.prepare('PRAGMA data_version').get()?.data_version), this.retryOpts)
+  }
+
+  /**
+   * The candidate sessions above both cursors and the current maxima, read
+   * in one transaction so the maxima cover exactly what the candidates saw.
+   * A null `cursorId` reads every message and a null `cursorUpdatedAt` every
+   * session; the source never passes them on a first start.
+   *
+   * @param {number | null} cursorId
+   * @param {string | null} cursorUpdatedAt
+   * @returns {Promise<GooseChanges>}
+   */
+  async detectChanges(cursorId, cursorUpdatedAt) {
+    return withBusyRetry(() => {
+      this.checkSchema()
+      this.db.exec('BEGIN')
+      try {
+        const newMessages = this.db.prepare(NEW_MESSAGES_SQL).all(cursorId ?? 0).map(row => ({
+          session_id: String(row.session_id),
+          first_id: Number(row.first_id),
+          updated_at: textOrNull(row.updated_at),
+        }))
+        const updated = this.db.prepare(UPDATED_SQL).all(cursorUpdatedAt ?? '').map(row => ({
+          id: String(row.id),
+          updated_at: textOrNull(row.updated_at),
+        }))
+        const maxima = this.readMaxima()
+        this.db.exec('COMMIT')
+        return { newMessages, updated, ...maxima }
+      } catch (error) {
+        rollbackQuietly(this.db)
+        throw error
+      }
+    }, this.retryOpts)
+  }
+
+  /**
+   * The largest message id and `updated_at` in the store, the first-start
+   * baseline (LLP 0570#reconciliation).
+   *
+   * @returns {Promise<{ maxId: number | null, maxUpdatedAt: string | null }>}
+   */
+  async maxima() {
+    return withBusyRetry(() => {
+      this.checkSchema()
+      return this.readMaxima()
+    }, this.retryOpts)
+  }
+
+  /** @returns {{ maxId: number | null, maxUpdatedAt: string | null }} */
+  readMaxima() {
+    const maxId = this.db.prepare(MAX_ALL_ID_SQL).get()?.max_id
+    const maxUpdatedAt = this.db.prepare(MAX_UPDATED_SQL).get()?.max_updated_at
+    return { maxId: maxId == null ? null : Number(maxId), maxUpdatedAt: textOrNull(maxUpdatedAt) }
+  }
+
+  /**
+   * One session's largest message id, 0 when it has none.
+   *
+   * @param {string} sessionId
+   * @returns {Promise<number>}
+   */
+  async maxMessageId(sessionId) {
+    return withBusyRetry(() => Number(this.db.prepare(MAX_ID_SQL).get(sessionId)?.max_id ?? 0), this.retryOpts)
+  }
+
+  /**
+   * Sessions with `updated_at` exactly `updatedAt`, with their largest
+   * message id: the first-start baseline seeds these, since the inclusive
+   * time cursor reads them again on the next tick.
+   *
+   * @param {string} updatedAt
+   * @returns {Promise<{ id: string, updated_at: string, max_id: number }[]>}
+   */
+  async sessionsAt(updatedAt) {
+    return withBusyRetry(() => this.db.prepare(
+      "SELECT s.id AS id, (SELECT MAX(m.id) FROM messages m WHERE m.session_id = s.id) AS max_id FROM sessions s WHERE s.updated_at = ? AND s.session_type != 'hidden'"
+    ).all(updatedAt).map(row => ({ id: String(row.id), updated_at: updatedAt, max_id: Number(row.max_id ?? 0) })), this.retryOpts)
+  }
+
+  /**
    * One session's row and messages, read in a single read transaction so
-   * both describe the same committed state. Null when the session is gone or
-   * `hidden`.
+   * both describe the same committed state, with the watermark entry they
+   * settle. The digest covers every selected column of the session and its
+   * messages, so an in-place edit or a truncation changes it. Null when the
+   * session is gone or `hidden`.
    * @ref LLP 0449#read-commit-guard [implements]: metadata and messages come from one snapshot.
    *
    * @param {string} sessionId
@@ -187,7 +295,15 @@ export class GooseSessionsDb {
         const messages = session ? /** @type {GooseMessageRow[]} */ (/** @type {unknown} */ (
           this.db.prepare(MESSAGE_SELECT).all(sessionId))) : []
         this.db.exec('COMMIT')
-        return session ? { session, messages } : null
+        if (!session) return null
+        const hash = createHash('sha256').update(JSON.stringify(session))
+        for (const message of messages) hash.update(JSON.stringify(message))
+        const mark = {
+          updated_at: session.updated_at,
+          max_id: messages.length ? Number(messages[messages.length - 1].id) : 0,
+          digest: hash.digest('hex'),
+        }
+        return { session, messages, mark }
       } catch (error) {
         rollbackQuietly(this.db)
         throw error
@@ -199,6 +315,14 @@ export class GooseSessionsDb {
   close() {
     this.db.close()
   }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function textOrNull(value) {
+  return value == null ? null : String(value)
 }
 
 /**

@@ -13,6 +13,8 @@
  * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 import { GOOSE_CONFIG_SECTION, validateGooseConfig } from './config.js'
 import { startGooseSource } from './source.js'
 
@@ -40,11 +42,15 @@ export async function activate(ctx) {
     validate: validateGooseConfig,
   })
 
+  // @ref LLP 0570#privacy [implements]: the durable session exclusions load at
+  // activation, as NanoClaw and Copilot do; the poll refreshes them by signature.
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
+
   ctx.sources.register({
     name: SOURCE_NAME,
     plugin: PLUGIN_NAME,
     summary: 'Goose sessions.db poll source (ongoing capture)',
     configSection: GOOSE_CONFIG_SECTION,
-    start: startGooseSource,
+    start: (sctx) => startGooseSource(sctx, { ignoredSessions }),
   })
 }

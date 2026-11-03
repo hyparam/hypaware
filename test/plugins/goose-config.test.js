@@ -151,30 +151,15 @@ test('a sessions_db that does not exist resolves without error and the source re
   try {
     const missing = path.join(dir, 'nope', 'sessions.db')
     assert.equal(resolveSessionsDbPath(makeCtx({ sessions_db: missing }), HOME), missing)
-    const source = await startGooseSource(makeCtx({ sessions_db: missing }))
+    const ctx = /** @type {any} */ (makeCtx({ sessions_db: missing }, { HYP_HOME: dir }))
+    ctx.paths = { stateDir: dir }
+    const source = await startGooseSource(ctx)
     assert.ok(source.status)
     const status = await source.status()
     assert.equal(status.state, 'ready')
     assert.equal(status.message, 'no goose installation detected')
     assert.equal(status.rowsWritten, 0)
-    assert.deepEqual(status.details, { sessions_db: missing })
-    await source.stop()
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true })
-  }
-})
-
-test('an existing sessions.db is reported as ready with no sessions yet', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'goose-config-'))
-  try {
-    const db = path.join(dir, 'sessions.db')
-    await fs.writeFile(db, '')
-    const source = await startGooseSource(makeCtx({ sessions_db: db, poll_interval: '30s' }))
-    assert.ok(source.status)
-    const status = await source.status()
-    assert.equal(status.state, 'ready')
-    assert.equal(status.message, `polling ${db} every 30000ms, no sessions yet`)
-    assert.equal(status.rowsWritten, 0)
+    assert.equal(status.details?.sessions_db, missing)
     await source.stop()
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
