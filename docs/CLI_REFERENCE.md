@@ -788,7 +788,7 @@ exception: it advertises the control route but still holds its set in memory,
 so a restart clears Cursor's exclusions. A fork has a new session ID and needs
 its own ignore. Supported routes include the gateway, Claude telemetry,
 OpenCode, Pi, Droid, and Cursor. Droid requires an explicitly verified native
-session ID. OpenClaw and Hermes do not support session opt-out;
+session ID. Goose also needs its session ID, such as `20261103_4`. OpenClaw and Hermes do not support session opt-out;
 use [directory controls](PRIVACY.md#marking-directories) for them.
 
 ### `hyp session status`
@@ -1266,6 +1266,7 @@ capture:
 | `@hypaware/openclaw` | Five minutes | Yes |
 | `@hypaware/nanoclaw` | Five minutes | Yes (this is NanoClaw's only capture route) |
 | `@hypaware/antigravity` (also Antigravity Desktop) | Five minutes | Yes |
+| `@hypaware/goose` | 15 minutes | Yes |
 | `@hypaware/copilot` | One minute | No (it is Copilot's only capture lane; with `on_join: false` it skips sessions from before the daemon started) |
 
 `hyp client detach <client>` stops every client's scheduled recovery, whatever

@@ -31,6 +31,11 @@ native transcript-change hooks; restart Droid afterward. Recovery imports local
 session files every five minutes. Hosted sessions without local transcripts
 are not captured.
 
+[Goose](integrations/goose.md) uses the setup id `goose`. It reads Goose's
+local session database read-only and changes nothing in Goose, so there is
+nothing to restart. Check it with `hyp status`; `hyp client status` does not
+list it.
+
 ```sh
 hyp setup
 hyp client status
