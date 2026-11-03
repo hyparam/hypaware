@@ -1,6 +1,6 @@
 // @ts-check
 
-import test from 'node:test'
+import test, { mock } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -93,6 +93,45 @@ test('a corrupt counter file recovers above every issued seq, never back to 1', 
     last += 1n
   }
 
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('recoveries in the same millisecond resume above the seqs the first one issued (#2858)', async () => {
+  const dir = await makeTmpDir()
+  const statePath = path.join(dir, SEQ_FILE)
+  const alloc = createIngestSeqAllocator({ cacheRoot: dir })
+  // A frozen clock makes the fast-runner case deterministic: every recovery
+  // below reads the same millisecond, so the clock alone gives the same start.
+  const clock = mock.method(Date, 'now', () => 1793661756811)
+  try {
+    await fs.writeFile(statePath, '{not json')
+    const first = await alloc.reserve(5)
+    assert.equal(first, 1793661756811000n)
+    await fs.writeFile(statePath, '{not json')
+    const second = await alloc.reserve(5)
+    assert.equal(second, first + 5n, 'resumes right after the last seq issued, not at the clock value again')
+  } finally {
+    clock.mock.restore()
+  }
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('a recovery after the wall clock steps back stays above every issued seq (#2858)', async () => {
+  const dir = await makeTmpDir()
+  const statePath = path.join(dir, SEQ_FILE)
+  const alloc = createIngestSeqAllocator({ cacheRoot: dir })
+  let now = 1793661756811
+  const clock = mock.method(Date, 'now', () => now)
+  try {
+    await fs.writeFile(statePath, '{not json')
+    const first = await alloc.reserve(3)
+    now -= 60_000
+    await fs.writeFile(statePath, '{not json')
+    const second = await alloc.reserve(1)
+    assert.equal(second, first + 3n)
+  } finally {
+    clock.mock.restore()
+  }
   await fs.rm(dir, { recursive: true, force: true })
 })
 
