@@ -1,9 +1,11 @@
 /**
- * Shared shapes for the `@hypaware/goose` adapter. The watermark shapes
- * arrive with their task (LLP 0571 T4).
+ * Shared shapes for the `@hypaware/goose` adapter: the reader rows, the poll
+ * watermark, and the poll runner state.
  */
 
-import type { JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
+import type { ColumnSpec, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
+import type { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
+import type { GooseSessionsDb } from './sessions_db.js'
 
 /** `GooseSessionsDbError.code`, also the `error_kind` the source reports (LLP 0570#status). */
 export type GooseSessionsDbErrorCode =
@@ -48,6 +50,77 @@ export interface GooseSessionSnapshot {
   session: GooseSessionRow
   /** Messages in `id` order, from the same transaction as `session`. */
   messages: GooseMessageRow[]
+  /** The watermark entry this snapshot settles, digested in the same transaction. */
+  mark: GooseSessionWatermark
+}
+
+/** One session's entry in the poll watermark (LLP 0570#reconciliation). */
+export interface GooseSessionWatermark {
+  updated_at: string | null
+  /** Largest message `id` in the session, 0 when it has none. */
+  max_id: number
+  /** SHA-256 over the session row and its messages; absent forces a reconcile. */
+  digest?: string
+}
+
+/** The poll watermark sidecar (`watermark.json` in the plugin state dir). */
+export interface GooseWatermarkState {
+  /** `PRAGMA data_version` after the last successful tick on this connection. */
+  data_version: number | null
+  /** Messages with `id` above this are new. */
+  cursor_id: number | null
+  /** Sessions with `updated_at` at or above this are candidates. */
+  cursor_updated_at: string | null
+  sessions: Record<string, GooseSessionWatermark>
+}
+
+/** The candidate sets one detection read returns, from one read transaction. */
+export interface GooseChanges {
+  /** Sessions with a message above the id cursor, and their first new id. */
+  newMessages: { session_id: string, first_id: number, updated_at: string | null }[]
+  /** Sessions with `updated_at` at or above the time cursor, oldest first. */
+  updated: { id: string, updated_at: string | null }[]
+  maxId: number | null
+  maxUpdatedAt: string | null
+}
+
+/** One session staged for a batched commit. */
+export interface GooseBatchEntry {
+  session_id: string
+  /** Null when the session is gone or hidden: its entry is deleted. */
+  mark: GooseSessionWatermark | null
+  snapshot?: {
+    rows: Record<string, unknown>[]
+    scope: { where: Record<string, string>, key: string }
+    columns: ColumnSpec[]
+  }
+}
+
+/** Mutable state of one running goose poll source. */
+export interface GoosePollRunner {
+  sessionsDbPath: string
+  pollIntervalMs: number
+  homeDir: string
+  stateDir: string
+  resolver: UsagePolicyResolver
+  devRunId?: string
+  db: GooseSessionsDb | null
+  watermark: GooseWatermarkState | null
+  /** `PRAGMA data_version` seen by the last successful tick on the open connection. */
+  dataVersion: number | null
+  rowsWritten: number
+  sessionsTracked: number
+  sessionsPending: number
+  lastPollAt?: string
+  lastError?: string
+  lastErrorKind?: string
+  idleLogged: boolean
+  /** Whether the database has never held a session, for the status wording. */
+  noSessions: boolean
+  /** `SessionIgnoreSet` shared with the control plane; unset in tests that do not exercise it. */
+  ignoredSessions?: Set<string>
+  /** Directory-signature of the exclusion markers at the last refresh. */
+  exclusionsSignature?: string
 }
 
 export interface GooseBusyRetryOptions {
