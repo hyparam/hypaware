@@ -1,7 +1,7 @@
 # LLP 0571: Goose session capture, implementation plan
 
 **Type:** plan
-**Status:** Draft
+**Status:** Active
 **Systems:** Sources, Plugins
 **Author:** HypForge
 **Date:** 2026-11-02
@@ -15,6 +15,8 @@
 > splits that design into tasks that each land on their own, with a test that
 > proves the task and nothing more. It follows the hermes plan (LLP 0123),
 > whose file and test layout the tasks copy.
+>
+> Active 2026-11-03: T1-T10 are done; the results are in #validation-results.
 
 ## How this refines the design {#refinement}
 
@@ -105,3 +107,30 @@ then Mac.
 - id: T8  branch: codex/goose-session-capture/T8  deps: [T7]      complexity: 2  -- docs/integrations/goose.md (what is recorded, setup, history import, limits, the `llm_request.*.jsonl` disclosure, pre-1.10, Desktop-only and the older macOS `Block/goose` location out of scope, and that a `GOOSE_PATH_ROOT` set in a shell is not seen by a daemon under launchd or systemd, so those users set `goose.sessions_db`) modeled on docs/integrations/hermes.md; a row in the docs/INTEGRATIONS.md "Coding agents" table; README client list; docs/CLIENTS.md entry; docs/PRIVACY.md client table plus Goose in the session-exclusion lists (not in the "do not support this session control" sentence); docs/TROUBLESHOOTING.md missing-database, busy and schema entries and the sweep-cadence latency for in-place edits. No edits under hypaware-core/skills/. Test: every command in the new text run in the T9 sandbox; `npm test` (doc drift guards) green.
 - id: T9  branch: codex/goose-session-capture/T9  deps: [T8]      complexity: 2  -- Validation, no code: `npm pack`, then `scripts/sandbox/hyp-sandbox` installs the tarball, runs `hyp setup` with Goose picked, a real Goose v1.57.0 turn against the labeled loopback fixture, SQL readback, daemon restart, disable and re-enable, and `hyp status`. Row 5's upgrade case is n/a for this release because the plugin is new and has no earlier version to upgrade from; the receipt says so; the receipt records the candidate sha256 and labels the run as loopback. Test: the receipt in the mission folder and the coverage rows it settles on Linux.
 - id: T10 branch: codex/goose-session-capture/T10 deps: [T9]      complexity: 2  -- Mac Part B through the operator relay (MAC-JOB-goose.md Part B): a pinned, reviewed script runs the same packaged candidate on compat@macmini-new under a disposable HYP_HOME and HOME. Results are marked operator-run. Test: evidence copied back with a verifying SHA256SUMS, and the Mac column of every coverage row filled from it.
+
+### Validation results {#validation-results}
+
+Recorded 2026-11-03. T1-T8 landed in #2859; T9 and T10 ran the packaged
+candidate on Linux and macOS.
+
+| Task | Platform | Result | Evidence |
+| --- | --- | --- | --- |
+| T1-T8 | CI | Landed in #2859 (merge e6a943a7, landing head 7862ff31) | The merge queue run on e6a943a7 (CI 41575880979) |
+| T9 | Linux x86_64, `hyp-sandbox`, Goose 1.57.0, loopback fixture provider | Passed. Setup's picker pre-check and the picker re-run on an existing install were not driven live and stay on fixture tests. | Sandbox run of the 1.48.0 tarball from d6321fa6. Addendum at the landing head 7862ff31: goose tests 76 pass, 0 fail, and the installed `goose_capture` smoke from tarball sha256 `37cb800e` (fixture database) |
+| T10 | macOS 27.2 arm64, the dedicated Mac test account, Goose 1.57.0, loopback fixture provider, operator-run | Passed: 30 checks pass, 0 fail, 0 skip, exit 0 | Part B run `goose-partB-20261103T182221Z-26260` of the same tarball (`37cb800e`), pinned script `970ec00f`; all 42 SHA256SUMS entries verified after copy-back |
+
+What the runs do not prove:
+
+- Both platforms used a labeled loopback provider, so they prove Goose's
+  storage and HypAware's capture, not authenticated inference.
+- On a Goose-only install `hyp session ignore` exits 3 because no gateway
+  port is bound (#2860). `hyp privacy ignore <dir>` works and was checked on
+  both platforms.
+- Neither run read usage, provider/model or repo identity back from captured
+  rows; both read rows by role and entrypoint. Those fields rest on the
+  fixture tests, including the installed goose_capture smoke from 37cb800e
+  (usage and provider/model). History rewrites, the unreadable and locked
+  database states, the picker steps and upgrade are fixture-only on both
+  platforms (upgrade has no earlier Goose-capable release to start from).
+
+Nothing LLP 0570 or this plan decided changes.

@@ -1,7 +1,7 @@
 # LLP 0570: Goose session capture - technical design
 
 **Type:** Design
-**Status:** Draft
+**Status:** Active
 **Systems:** Sources, Plugins
 **Author:** HypForge
 **Date:** 2026-11-02
@@ -9,6 +9,9 @@
 
 > Buildable design for a `@hypaware/goose` client adapter. Status stays Draft
 > until the Build tasks in LLP 0571 land.
+> Active 2026-11-03: every Build task in LLP 0571 has landed; the Linux and
+> Mac results are recorded in
+> [LLP 0571#validation-results](./0571-goose-session-capture.plan.md#validation-results).
 > `@ref LLP 0118 [constrained-by]`: same shape of capture as hermes, a pull
 > from the product's own local store with no proxying.
 > `@ref LLP 0119 [constrained-by]`: Goose is never modified or proxied;
