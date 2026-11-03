@@ -72,6 +72,23 @@ Ollama detach leaves the capture host unchanged. With its collector stopped,
 launch the CLI at the preserved direct root or construct a new SDK object with
 that root using [direct recovery](integrations/ollama.md#stop-and-resume-ollama-recording).
 
+## Goose records nothing
+
+Goose capture reads Goose's session database, so `hyp status` is where its
+health shows. `hyp client status` does not list Goose.
+
+| `hyp status` says | What to do |
+| --- | --- |
+| `no goose installation detected` | HypAware found no database at `~/.local/share/goose/sessions/sessions.db`. If you set `GOOSE_PATH_ROOT` or keep the database elsewhere, set `sessions_db` as shown on the [Goose page](integrations/goose.md#use-a-different-database-location), then run `hyp daemon restart`. Sessions from Goose before 1.10.0 are not supported. |
+| `cannot read the database at <path>` | The daemon's user cannot read the file. Run HypAware as the same user as Goose. |
+| `database busy, retrying next poll` | Goose was writing when HypAware read. It retries on the next poll; if this persists, check for a stuck Goose process. |
+| `goose sessions.db has no <table>.<column> column` | Your Goose version uses a database schema this HypAware release does not support. Nothing is recorded until you upgrade HypAware to a release that supports it. |
+| `polling <path> every 60000ms, no sessions yet` | Capture is ready. Finish a Goose turn and wait up to a minute. |
+
+New messages arrive within a minute. A change Goose makes to a session it
+already wrote, such as rewriting earlier messages, arrives with the scheduled
+import, up to 15 minutes later. Run `hyp backfill goose` to pick it up at once.
+
 ## Ollama capture is unconfirmed
 
 <!-- @ref LLP 0474#diagnostics [implements]: default status and local diagnostics distinguish readiness, observed traffic, persistence evidence and actionable finite failures -->
