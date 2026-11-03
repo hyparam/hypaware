@@ -216,7 +216,8 @@ For another supported recorder, pass an explicitly verified session ID as
 shown in the [session reference](CLI_REFERENCE.md#control-the-current-session).
 
 The command sends the exclusion to local recorder control routes for the gateway,
-Claude telemetry, OpenCode, Pi, Droid, and Cursor when they are running. The Claude
+Claude telemetry, OpenCode, Pi, Droid, and Cursor when they are running. Goose
+has no control route; it reads the saved exclusion on its next poll. The Claude
 listener deletes ignored sessions' spooled bodies unread. Use
 `hyp session unignore` to resume and `hyp session status` to check the result.
 

@@ -788,8 +788,10 @@ exception: it advertises the control route but still holds its set in memory,
 so a restart clears Cursor's exclusions. A fork has a new session ID and needs
 its own ignore. Supported routes include the gateway, Claude telemetry,
 OpenCode, Pi, Droid, and Cursor. Droid requires an explicitly verified native
-session ID. Goose also needs its session ID, such as `20261103_4`. OpenClaw and Hermes do not support session opt-out;
-use [directory controls](PRIVACY.md#marking-directories) for them.
+session ID. Goose has no live route: pass its session ID, such as
+`20261103_4` from `goose session list`, and Goose reads the saved ignore on its
+next poll. OpenClaw and Hermes do not support session opt-out; use
+[directory controls](PRIVACY.md#marking-directories) for them.
 
 ### `hyp session status`
 

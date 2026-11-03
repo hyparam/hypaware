@@ -75,14 +75,18 @@ that root using [direct recovery](integrations/ollama.md#stop-and-resume-ollama-
 ## Goose records nothing
 
 Goose capture reads Goose's session database, so `hyp status` is where its
-health shows. `hyp client status` does not list Goose.
+health shows. `hyp client status` does not list Goose. `hyp status` prints a
+Goose line only when something is wrong. The ready messages, the last two rows
+below, show in `hyp status --json` as the `goose` entry's `health.message`.
 
-| `hyp status` says | What to do |
+| Goose status says | What to do |
 | --- | --- |
-| `no goose installation detected` | HypAware found no database at `~/.local/share/goose/sessions/sessions.db`. If you set `GOOSE_PATH_ROOT` or keep the database elsewhere, set `sessions_db` as shown on the [Goose page](integrations/goose.md#use-a-different-database-location), then run `hyp daemon restart`. Sessions from Goose before 1.10.0 are not supported. |
 | `cannot read the database at <path>` | The daemon's user cannot read the file. Run HypAware as the same user as Goose. |
+| `failed to open goose sessions.db at <path>` | The file exists but SQLite could not open it, for example because it is damaged. Check that Goose itself can still open its sessions. |
 | `database busy, retrying next poll` | Goose was writing when HypAware read. It retries on the next poll; if this persists, check for a stuck Goose process. |
 | `goose sessions.db has no <table>.<column> column` | Your Goose version uses a database schema this HypAware release does not support. Nothing is recorded until you upgrade HypAware to a release that supports it. |
+| `goose source requires Node >= 22.12` | Goose capture reads the database with Node's built-in SQLite. Upgrade the Node.js that runs HypAware, then run `hyp daemon restart`. |
+| `no goose installation detected at <path>` | HypAware found no database at that path. If you set `GOOSE_PATH_ROOT` or keep the database elsewhere, set `sessions_db` as shown on the [Goose page](integrations/goose.md#use-a-different-database-location), then run `hyp daemon restart`. Sessions from Goose before 1.10.0 are not supported. |
 | `polling <path> every 60000ms, no sessions yet` | Capture is ready. Finish a Goose turn and wait up to a minute. |
 
 New messages arrive within a minute. A change Goose makes to a session it

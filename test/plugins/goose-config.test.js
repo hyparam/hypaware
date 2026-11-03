@@ -163,7 +163,7 @@ test('a sessions_db that does not exist resolves without error and the source re
     assert.ok(source.status)
     const status = await source.status()
     assert.equal(status.state, 'ready')
-    assert.equal(status.message, 'no goose installation detected')
+    assert.equal(status.message, `no goose installation detected at ${missing}`)
     assert.equal(status.rowsWritten, 0)
     assert.equal(status.details?.sessions_db, missing)
     await source.stop()

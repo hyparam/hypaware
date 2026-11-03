@@ -13,6 +13,7 @@ import {
   GOOSE_SESSIONS_PER_TICK,
 } from '../../hypaware-core/plugins-workspace/goose/src/source.js'
 import { readGooseWatermark } from '../../hypaware-core/plugins-workspace/goose/src/watermark.js'
+import { TracerProvider } from '../../src/core/observability/runtime.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { sessionIgnoresDir } from '../../src/core/runtime/paths.js'
 import {
@@ -83,7 +84,7 @@ test('a missing sessions.db idles as ready: nothing opened, idle logged once, no
   assert.deepEqual(logs.filter(entry => entry.level === 'error'), [])
   const status = gooseSourceStatus(runner)
   assert.equal(status.state, 'ready')
-  assert.equal(status.message, 'no goose installation detected')
+  assert.equal(status.message, `no goose installation detected at ${sessionsDb}`)
   assert.equal(status.rowsWritten, 0)
 })
 
@@ -413,13 +414,33 @@ test('an unreadable sessions.db degrades with permission_denied and names the pa
   try {
     const { ctx, logs } = makeCtx({ dir, sessionsDb })
     const runner = createGoosePollRunner(ctx)
-    await runGoosePollTick(runner, ctx)
+    /** @type {any[]} */
+    const spans = []
+    const provider = new TracerProvider({
+      resource: { attributes: {} },
+      exporters: [{
+        exportBatch: (/** @type {any[]} */ batch) => {
+          for (const s of batch) spans.push({ name: s.name, status: { ...s.status }, attributes: { ...s.attributes }, events: s.events })
+        },
+      }],
+    })
+    provider.register()
+    try {
+      await runGoosePollTick(runner, ctx)
+    } finally {
+      await provider.shutdown()
+    }
     const status = gooseSourceStatus(runner)
     assert.equal(status.state, 'degraded')
     assert.equal(status.details?.error_kind, 'permission_denied')
     assert.equal(status.message, `cannot read the database at ${sessionsDb}`)
+    assert.equal(status.lastError, `cannot read the goose sessions.db at ${sessionsDb}`)
     assert.equal(pollLogs(logs, 'failed')[0]?.fields?.error_kind, 'permission_denied')
     assert.ok(!JSON.stringify(logs).includes(sessionsDb), 'the path stays out of the log')
+    const poll = spans.find(s => s.name === 'goose.poll')
+    assert.equal(poll?.attributes.error_kind, 'permission_denied')
+    assert.equal(poll?.attributes.status, 'failed')
+    assert.ok(!JSON.stringify(spans).includes(sessionsDb), 'the path stays out of the span')
   } finally {
     await fs.chmod(sessionsDb, 0o600)
   }

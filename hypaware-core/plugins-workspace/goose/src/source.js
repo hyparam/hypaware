@@ -180,7 +180,7 @@ export function gooseSourceStatus(runner, stopped = false) {
   } else if (!runner.db) {
     // @ref LLP 0570#status [implements]: a missing `sessions.db` is `ready`
     // with zero rows, not an error: most hosts never install Goose.
-    message = 'no goose installation detected'
+    message = `no goose installation detected at ${runner.sessionsDbPath}`
   } else {
     message = runner.noSessions ? `${every}, no sessions yet` : every
   }
@@ -272,6 +272,8 @@ export function createGoosePollRunner(ctx, opts = {}) {
  */
 export async function runGoosePollTick(runner, ctx) {
   runner.devRunId = randomUUID()
+  /** @type {unknown} */
+  let failure
   try {
     await withSpan(
       'goose.poll',
@@ -282,37 +284,48 @@ export async function runGoosePollTick(runner, ctx) {
         status: 'ok',
       },
       async (span) => {
-        if (!runner.db) {
-          const opened = await tryOpen(runner, ctx)
-          span.setAttribute('mode', opened ? 'active' : 'idle')
-          if (!opened) return
-        } else {
-          span.setAttribute('mode', 'active')
+        try {
+          if (!runner.db) {
+            const opened = await tryOpen(runner, ctx)
+            span.setAttribute('mode', opened ? 'active' : 'idle')
+            if (!opened) return
+          } else {
+            span.setAttribute('mode', 'active')
+          }
+          const result = await pollOnce(runner, ctx)
+          span.setAttribute('poll_status', result.status)
+          span.setAttribute('sessions_changed', result.sessionsChanged)
+          span.setAttribute('sessions_pending', runner.sessionsPending)
+          span.setAttribute('rows', result.rows)
+          // `status` is the fixed attribute set (LLP 0021), which would rewrite
+          // `baseline` and `unchanged` to `failed`; the tick outcome rides
+          // `poll_status`, as it does on the span.
+          ctx.log.info('goose.poll', {
+            component: 'goose',
+            operation: 'goose.poll',
+            status: 'ok',
+            poll_status: result.status,
+            sessions_changed: result.sessionsChanged,
+            sessions_pending: runner.sessionsPending,
+            rows: result.rows,
+          })
+        } catch (err) {
+          // @ref LLP 0570#privacy [implements]: `withSpan` records the thrown
+          // message, which can name the database path; the span gets the kind
+          // and a path-free error, and status keeps the original message.
+          failure = err
+          const kind = errorKind(err)
+          span.setAttribute('error_kind', kind)
+          throw new Error(`goose poll failed: ${kind}`)
         }
-        const result = await pollOnce(runner, ctx)
-        span.setAttribute('poll_status', result.status)
-        span.setAttribute('sessions_changed', result.sessionsChanged)
-        span.setAttribute('sessions_pending', runner.sessionsPending)
-        span.setAttribute('rows', result.rows)
-        // `status` is the fixed attribute set (LLP 0021), which would rewrite
-        // `baseline` and `unchanged` to `failed`; the tick outcome rides
-        // `poll_status`, as it does on the span.
-        ctx.log.info('goose.poll', {
-          component: 'goose',
-          operation: 'goose.poll',
-          status: 'ok',
-          poll_status: result.status,
-          sessions_changed: result.sessionsChanged,
-          sessions_pending: runner.sessionsPending,
-          rows: result.rows,
-        })
       },
       { component: 'goose' }
     )
     runner.lastPollAt = new Date().toISOString()
     runner.lastError = undefined
     runner.lastErrorKind = undefined
-  } catch (err) {
+  } catch (thrown) {
+    const err = failure ?? thrown
     const kind = errorKind(err)
     runner.lastError = err instanceof Error ? err.message : String(err)
     runner.lastErrorKind = kind

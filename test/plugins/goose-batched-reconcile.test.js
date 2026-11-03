@@ -5,6 +5,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import test from 'node:test'
 
+/** @import { DatabaseSync } from 'node:sqlite' */
+
 import { createGoosePollRunner, runGoosePollTick } from '../../hypaware-core/plugins-workspace/goose/src/source.js'
 import { MAX_ID_SQL, NEW_MESSAGES_SQL, UPDATED_SQL } from '../../hypaware-core/plugins-workspace/goose/src/sessions_db.js'
 import { MAX_WATERMARK_SESSIONS, readGooseWatermark } from '../../hypaware-core/plugins-workspace/goose/src/watermark.js'
@@ -90,7 +92,7 @@ function anyRowHas(rows, text) {
 }
 
 /**
- * @param {import('node:sqlite').DatabaseSync} db
+ * @param {DatabaseSync} db
  * @param {string} sessionId
  */
 function touch(db, sessionId) {

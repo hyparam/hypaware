@@ -429,6 +429,21 @@ test('goose backfill: a missing sessions.db is a no-op', async () => {
   assert.equal(result.scanned, 0)
 })
 
+test('goose backfill: an unreadable sessions.db fails by kind and keeps the path out of the log', async () => {
+  const h = await stage()
+  h.db.close()
+  await fs.chmod(h.sessionsDb, 0o000)
+  try {
+    await assert.rejects(h.direct({ sweep: true }),
+      /** @param {any} err */ err => err.code === 'permission_denied')
+    const failed = h.logs.find(record => record.message === 'goose.backfill.open_failed')
+    assert.equal(failed?.fields?.error_kind, 'permission_denied')
+    assert.ok(!JSON.stringify(h.logs).includes(h.sessionsDb), 'the path stays out of the log')
+  } finally {
+    await fs.chmod(h.sessionsDb, 0o600)
+  }
+})
+
 test('goose backfill: a dry run takes no scope guard and writes no watermark', async () => {
   const h = await stage()
   insertExchange(h.db, { id: 's1', workingDir: h.workingDir })

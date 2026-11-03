@@ -3,9 +3,10 @@
 **Status:** Supported. **Setup id:** `goose`. **Backfill:** Yes.
 
 HypAware reads [Goose](https://github.com/aaif-goose/goose)'s local session
-database, `~/.local/share/goose/sessions/sessions.db`, read-only. It imports
-existing sessions and then polls the database every 60 seconds for new
-messages. It does not route Goose's model traffic or change Goose's settings.
+database, `~/.local/share/goose/sessions/sessions.db`, read-only. It polls
+the database every 60 seconds for new messages, and a scheduled import every
+15 minutes brings in existing sessions. It does not route Goose's model
+traffic or change Goose's settings.
 The same database serves the Goose CLI and Desktop on Linux and macOS.
 
 ## What is recorded
@@ -32,9 +33,11 @@ This integration installs no skills into Goose.
 
 ### Use a different database location
 
-HypAware does not see a `GOOSE_PATH_ROOT` set in your shell, because the
-daemon runs under launchd or systemd with its own environment. If you set
-`GOOSE_PATH_ROOT`, or keep the database somewhere else, add this entry to the
+The daemon does not see a `GOOSE_PATH_ROOT` set in your shell, because it
+runs under launchd or systemd with its own environment. A `hyp backfill goose`
+run from that shell does see it, so the two can read different databases. If
+you set `GOOSE_PATH_ROOT`, or keep the database somewhere else, add this entry
+to the
 existing `plugins` list in your HypAware configuration, preserving the other
 entries:
 
@@ -58,6 +61,9 @@ hyp status
 
 ## Import existing history
 
+Setup does not import your existing sessions itself. The scheduled import
+picks them up within 15 minutes, or run it now:
+
 ```sh
 hyp backfill goose --dry-run
 hyp backfill goose
@@ -73,11 +79,15 @@ With `backfill.on_join` set to `false`, neither runs.
 
 Directory markings and `.hypignore` apply to each session's working directory.
 To stop recording one session, pass its Goose session id, such as
-`20261103_4`:
+`20261103_4`. Goose prints the id when a session starts, and
+`goose session list` shows it for each session:
 
 ```sh
 hyp session ignore 20261103_4
 ```
+
+Goose reads saved exclusions on its next poll, so an ignore takes effect
+within a minute.
 
 **Goose writes its own copy of your prompts.** Goose saves the full body of
 every model request, including your prompts, to `llm_request.*.jsonl` files in

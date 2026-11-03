@@ -24,7 +24,6 @@ import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.
 import { refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import {
   AI_GATEWAY_MESSAGES_DATASET,
-  errMessage,
   filterByWindow,
   projectedExchangeItem,
   resolveWindow,
@@ -131,12 +130,13 @@ async function* runGooseBackfill(ctx, opts, resolver) {
       log.info('goose.backfill.no_store', { component: COMPONENT, operation: 'backfill.scan', status: 'skipped' })
       return
     }
+    // @ref LLP 0570#privacy [implements]: logged by kind only; the open
+    // error's message names the database path.
     log.warn('goose.backfill.open_failed', {
       component: COMPONENT,
       operation: 'backfill.scan',
       status: 'error',
       error_kind: err instanceof GooseSessionsDbError ? err.code : 'unknown',
-      error: errMessage(err),
     })
     throw err
   }

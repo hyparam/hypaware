@@ -377,7 +377,7 @@ The source reports its own health (LLP 0394): `state`, `message`,
 
 | State | Source health | `hyp status` message |
 | --- | --- | --- |
-| Database missing | `ready`, rowsWritten 0 | no goose installation detected |
+| Database missing | `ready`, rowsWritten 0 | no goose installation detected at `<path>` |
 | Ready, no traffic | `ready`, rowsWritten 0 | polling `<path>` every `<N>`ms, no sessions yet |
 | Recording | `ready`, rowsWritten > 0 | polling `<path>` every `<N>`ms |
 | Unreadable | `degraded`, `error_kind` `permission_denied` | cannot read the database at `<path>` |
