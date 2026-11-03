@@ -64,6 +64,17 @@ export function isExportIdentityColumn(key) {
   return STRUCTURAL.has(key) || key === 'id' || /(?:^|_)(?:id|uuid|hash|sha)$/.test(key)
 }
 
+// A sensitive-file mask hides the file's payload (its text, arguments and raw
+// frame), not the whole row. Timestamps, branch, versions and attributes get
+// only the text rules: masking a timestamp whole wrote '[REDACTED]' into a
+// TIMESTAMP column, which the cache refuses, so the row's spool never drained.
+const FILE_MASK_COLUMNS = new Set(['content_text', 'tool_args', 'raw_frame'])
+
+/** @param {string} key @returns {boolean} */
+function keptUnderFileMask(key) {
+  return !FILE_MASK_COLUMNS.has(key)
+}
+
 /** @param {unknown} value @returns {Record<string, unknown> | undefined} */
 function objectValue(value) {
   if (isPlainObject(value)) return value
@@ -126,8 +137,13 @@ export function createRowRedactor(config = {}, customOnly = false, record) {
   const custom = (config.custom_patterns ?? []).map(({ pattern, flags = '' }) => new RegExp(pattern, flags.includes('g') ? flags : flags + 'g'))
   const toolPaths = new Map()
 
-  /** @template {Record<string, unknown>} T @param {T} row @returns {T} */
-  return function redactRow(row) {
+  /**
+   * @template {Record<string, unknown>} T
+   * @param {T} row
+   * @param {ReadonlySet<string>} [preserve] top-level columns kept verbatim, past every rule
+   * @returns {T}
+   */
+  return function redactRow(row, preserve) {
     let nodes = 0
     let bytes = 0
     const args = objectValue(row.tool_args)
@@ -194,11 +210,13 @@ export function createRowRedactor(config = {}, customOnly = false, record) {
       let changes
       /** @param {string | number} key @param {unknown} child */
       const step = (key, child) => {
-        const childMode = mode === 'preserve' || (depth === 0 && typeof key === 'string' && isExportIdentityColumn(key)) ? 'preserve'
+        const childMode = mode === 'preserve' ||
+          (depth === 0 && typeof key === 'string' && (isExportIdentityColumn(key) || preserve?.has(key))) ? 'preserve'
           : depth === 0 && key === 'tool_args' ? 'args'
             : mode === 'args' && typeof key === 'string' && PATH_KEYS.has(key) ? 'path'
               : undefined
-        const changed = visit(child, hide || (!customOnly && typeof key === 'string' && CREDENTIAL_KEYS.test(key)), depth + 1, childMode)
+        const fileHide = hide && !(depth === 0 && typeof key === 'string' && keptUnderFileMask(key))
+        const changed = visit(child, fileHide || (!customOnly && typeof key === 'string' && CREDENTIAL_KEYS.test(key)), depth + 1, childMode)
         if (changed !== child) (changes ??= []).push([key, changed])
       }
       if (Array.isArray(value)) for (let i = 0; i < value.length; i++) step(i, value[i])
@@ -223,9 +241,9 @@ export function createRowRedactor(config = {}, customOnly = false, record) {
     /** @type {[string, unknown][] | undefined} */
     let changes
     for (const key in row) {
-      if (!Object.hasOwn(row, key) || isExportIdentityColumn(key)) continue
+      if (!Object.hasOwn(row, key) || isExportIdentityColumn(key) || preserve?.has(key)) continue
       const value = row[key]
-      const hideKey = hide || CREDENTIAL_KEYS.test(key)
+      const hideKey = (hide && !keptUnderFileMask(key)) || CREDENTIAL_KEYS.test(key)
       nodes = 0
       bytes = 0
       let changed
@@ -258,16 +276,17 @@ export function createRecordRedactor() {
   /**
    * @param {Record<string, unknown>[]} rows
    * @param {Set<Record<string, unknown>>} [done] rows already redacted, passed through
+   * @param {ReadonlySet<string>} [preserve] top-level columns no rule may touch
    * @returns {{ rows: Record<string, unknown>[], redacted: number, overBudget: number }}
    */
-  return function redactRows(rows, done) {
+  return function redactRows(rows, done, preserve) {
     overBudget = 0
     /** @type {Record<string, unknown>[] | undefined} */
     let out
     let redacted = 0
     for (let i = 0; i < rows.length; i++) {
       if (done?.has(rows[i])) continue
-      const row = redactRow(rows[i])
+      const row = redactRow(rows[i], preserve)
       if (row === rows[i]) continue
       ;(out ??= rows.slice())[i] = row
       redacted++
