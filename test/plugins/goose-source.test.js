@@ -227,7 +227,7 @@ async function baselined(opts = {}) {
 
 /** @param {Array<{ message: string, fields?: Record<string, unknown> }>} logs @param {string} status */
 function pollLogs(logs, status) {
-  return logs.filter(entry => entry.message === 'goose.poll' && entry.fields?.status === status)
+  return logs.filter(entry => entry.message === 'goose.poll' && (entry.fields?.poll_status ?? entry.fields?.status) === status)
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +446,7 @@ test('a session that cannot commit keeps the cursors and logs by kind', async ()
   const failed = logs.filter(entry => entry.message === 'goose.session_reconcile_failed')
   assert.equal(failed.length, 1)
   assert.equal(failed[0].fields?.session_id, 's1')
-  assert.equal(pollLogs(logs, 'error')[0]?.fields?.error_kind, 'unknown')
+  assert.equal(pollLogs(logs, 'failed')[0]?.fields?.error_kind, 'unknown')
   for (const entry of logs) {
     assert.ok(!JSON.stringify(entry.fields ?? {}).includes(sessionsDb), `${entry.message} keeps the database path out`)
   }
@@ -506,7 +506,7 @@ test('an exclusions store that cannot load fails the tick closed', async () => {
   assert.equal(committed.length, 0)
   assert.equal(JSON.stringify(runner.watermark), before, 'nothing advances')
   assert.equal(runner.lastErrorKind, 'session_ignore_load_failed')
-  assert.equal(pollLogs(logs, 'error')[0]?.fields?.error_kind, 'session_ignore_load_failed')
+  assert.equal(pollLogs(logs, 'failed')[0]?.fields?.error_kind, 'session_ignore_load_failed')
 
   await fs.rm(path.join(sessionIgnoresDir(dir), 'not-a-marker'))
   await runGoosePollTick(runner, ctx)
@@ -584,7 +584,7 @@ test('an unreadable sessions.db degrades with permission_denied and names the pa
     assert.equal(status.state, 'degraded')
     assert.equal(status.details?.error_kind, 'permission_denied')
     assert.equal(status.message, `cannot read the database at ${sessionsDb}`)
-    assert.equal(pollLogs(logs, 'error')[0]?.fields?.error_kind, 'permission_denied')
+    assert.equal(pollLogs(logs, 'failed')[0]?.fields?.error_kind, 'permission_denied')
     assert.ok(!JSON.stringify(logs).includes(sessionsDb), 'the path stays out of the log')
   } finally {
     await fs.chmod(sessionsDb, 0o600)
@@ -633,7 +633,7 @@ test('a store missing a required column degrades with schema_unsupported naming 
   assert.equal(status.state, 'degraded')
   assert.equal(status.details?.error_kind, 'schema_unsupported')
   assert.match(status.message ?? '', /sessions\.parent_session_id/)
-  assert.equal(pollLogs(logs, 'error')[0]?.fields?.error_kind, 'schema_unsupported')
+  assert.equal(pollLogs(logs, 'failed')[0]?.fields?.error_kind, 'schema_unsupported')
 })
 
 test('no log line carries message text, a title, the working_dir or the database path', async () => {
