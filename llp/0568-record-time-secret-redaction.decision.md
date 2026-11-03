@@ -5,6 +5,7 @@
 **Systems:** Cache, Sinks, Privacy
 **Date:** 2026-11-02
 **Related:** LLP 0503, LLP 0566, LLP 0027
+**Extended-by:** LLP 0572 (#default: a kernel option turns the record pass off for the server cache, whose rows clients already redacted; a sensitive-file verdict masks only `content_text`, `tool_args` and `raw_frame`, so timestamps and other columns get the text rules)
 
 Extends [LLP 0503](0503-export-content-redaction.decision.md) (#export-seam:
 stored cache contents and local queries no longer keep what the built-ins

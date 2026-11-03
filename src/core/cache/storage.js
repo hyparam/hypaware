@@ -130,6 +130,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
    * @param {Set<Record<string, unknown>>} [done]
    */
   function recordRows(dataset, rows, done) {
+    // @ref LLP 0572#server-skip [implements]: off only for the server cache, by kernel option, not config
     // The server's cache stores rows clients already redacted; it skips this pass.
     if (!recordRedaction) return { rows, redacted: 0, overBudget: 0 }
     const result = redactRecordRows(rows, done)
