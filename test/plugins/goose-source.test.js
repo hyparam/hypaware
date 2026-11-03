@@ -28,8 +28,10 @@ import { aiGatewayBackfillMaterializer } from '../../hypaware-core/plugins-works
  * @ref LLP 0570#privacy [tests]: a usage-policy ignore reconciles to an empty
  *   snapshot, a session exclusion is never projected, and an exclusions store
  *   that cannot load fails the tick closed.
- * @ref LLP 0570#status [tests]: a missing `sessions.db` idles as `ready`,
- *   logged once, and the database path stays out of every log record.
+ * @ref LLP 0570#status [tests]: one case per state (missing, ready with no
+ *   traffic, recording, `permission_denied`, `sqlite_busy`,
+ *   `schema_unsupported`, disabled), and no log record carries message text,
+ *   a title, a `working_dir` or the database path.
  *
  * The fixture is a reduced copy of the Goose v1.57.0 schema v17, synthetic
  * rows only, written through its own connection between ticks so
@@ -551,4 +553,104 @@ test('startGooseSource runs one tick before returning and reports polling status
     await source.stop()
   }
   assert.equal((await source.status?.())?.state, 'stopped')
+})
+
+// ---------------------------------------------------------------------------
+// Status per state, and what a log line may carry
+// ---------------------------------------------------------------------------
+
+test('a recording source reports ready, polling, and the rows it wrote', async () => {
+  const { runner, ctx, sessionsDb, db } = await baselined()
+  insertMessage(db, { sessionId: 's1', role: 'user', text: 'second prompt' })
+  await runGoosePollTick(runner, ctx)
+  db.close()
+  const status = gooseSourceStatus(runner)
+  assert.equal(status.state, 'ready')
+  assert.equal(status.message, `polling ${sessionsDb} every ${runner.pollIntervalMs}ms`)
+  assert.ok((status.rowsWritten ?? 0) > 0)
+  assert.equal(status.details?.error_kind, undefined)
+})
+
+test('an unreadable sessions.db degrades with permission_denied and names the path in status only', async () => {
+  const dir = await tmpDir()
+  const sessionsDb = path.join(dir, 'sessions.db')
+  createFixtureDb(sessionsDb).close()
+  await fs.chmod(sessionsDb, 0o000)
+  try {
+    const { ctx, logs } = makeCtx({ dir, sessionsDb })
+    const runner = createGoosePollRunner(ctx)
+    await runGoosePollTick(runner, ctx)
+    const status = gooseSourceStatus(runner)
+    assert.equal(status.state, 'degraded')
+    assert.equal(status.details?.error_kind, 'permission_denied')
+    assert.equal(status.message, `cannot read the database at ${sessionsDb}`)
+    assert.equal(pollLogs(logs, 'error')[0]?.fields?.error_kind, 'permission_denied')
+    assert.ok(!JSON.stringify(logs).includes(sessionsDb), 'the path stays out of the log')
+  } finally {
+    await fs.chmod(sessionsDb, 0o600)
+  }
+})
+
+test('a store locked past the bounded retry degrades with sqlite_busy and recovers next poll', async () => {
+  // A rollback-journal writer holding EXCLUSIVE blocks every reader, which a
+  // WAL store never does; the retry is shortened so the test stays quick.
+  const dir = await tmpDir()
+  const sessionsDb = path.join(dir, 'sessions.db')
+  const db = createFixtureDb(sessionsDb)
+  db.exec('PRAGMA journal_mode = DELETE')
+  insertSession(db, { id: 's1', workingDir: path.join(dir, 'work') })
+  insertMessage(db, { sessionId: 's1', role: 'user', text: 'fixture prompt' })
+  const { ctx, committed } = makeCtx({ dir, sessionsDb })
+  const runner = createGoosePollRunner(ctx)
+  await runGoosePollTick(runner, ctx)
+  const reader = /** @type {NonNullable<typeof runner.db>} */ (runner.db)
+  reader.retryOpts = { attempts: 2, delayMs: 1 }
+  insertMessage(db, { sessionId: 's1', role: 'user', text: 'second prompt' })
+  db.exec('BEGIN EXCLUSIVE')
+  await runGoosePollTick(runner, ctx)
+  const status = gooseSourceStatus(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'sqlite_busy')
+  assert.equal(status.message, 'database busy, retrying next poll')
+
+  db.exec('COMMIT')
+  await runGoosePollTick(runner, ctx)
+  assert.equal(gooseSourceStatus(runner).state, 'ready')
+  assert.ok(committed.length > 0, 'the held change lands once the lock clears')
+  db.close()
+})
+
+test('a store missing a required column degrades with schema_unsupported naming it', async () => {
+  const dir = await tmpDir()
+  const sessionsDb = path.join(dir, 'sessions.db')
+  const db = createFixtureDb(sessionsDb)
+  db.exec('ALTER TABLE sessions DROP COLUMN parent_session_id')
+  db.close()
+  const { ctx, logs } = makeCtx({ dir, sessionsDb })
+  const runner = createGoosePollRunner(ctx)
+  await runGoosePollTick(runner, ctx)
+  const status = gooseSourceStatus(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'schema_unsupported')
+  assert.match(status.message ?? '', /sessions\.parent_session_id/)
+  assert.equal(pollLogs(logs, 'error')[0]?.fields?.error_kind, 'schema_unsupported')
+})
+
+test('no log line carries message text, a title, the working_dir or the database path', async () => {
+  const { runner, ctx, logs, sessionsDb, workingDir, db } = await baselined()
+  renameSession(db, 's1', 'Renamed fixture title')
+  insertMessage(db, { sessionId: 's1', role: 'user', text: 'second prompt' })
+  await runGoosePollTick(runner, ctx)
+  await runGoosePollTick(runner, ctx)
+  db.close()
+  assert.ok(pollLogs(logs, 'ok').length > 0, 'a recording tick ran')
+  for (const entry of pollLogs(logs, 'ok')) {
+    for (const key of ['component', 'operation', 'status', 'sessions_changed', 'sessions_pending', 'rows']) {
+      assert.ok(entry.fields && key in entry.fields, `goose.poll carries ${key}`)
+    }
+  }
+  const serialized = JSON.stringify(logs)
+  for (const marker of ['fixture prompt', 'fixture reply', 'second prompt', 'Fixture session', 'Renamed fixture title', workingDir, sessionsDb]) {
+    assert.ok(!serialized.includes(marker), `no log line carries ${marker}`)
+  }
 })
