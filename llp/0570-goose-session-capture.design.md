@@ -162,8 +162,11 @@ bundled adapters.
 
 It reuses these commands and adds none: the `hyp setup` picker (alias `hyp
 init`) and its configure phase (LLP 0131), `hyp status`, `hyp backfill` and
-the scheduled backfill sweep. Re-running `hyp setup --source goose` is
-idempotent and keeps an explicit `goose.enabled = false`, as for hermes.
+the scheduled backfill sweep. Re-running the `hyp setup` picker with Goose
+selected is idempotent and keeps an explicit `goose.enabled = false`, as for
+hermes. `hyp setup --source goose` refuses an existing configuration, and
+`--force` replaces it rather than adding to it, as for every source but
+Ollama (LLP 0474).
 
 Detection is a path existence check, so it reads no rows and never runs
 Goose. Limit: a custom `GOOSE_PATH_ROOT` is not seen by the picker, because
@@ -436,7 +439,7 @@ Each tick logs `goose.poll` with `component=goose`, `operation`,
 | 1 Product | pinned version in docs and the upstream-watch entry | Mac Part A, Linux probe |
 | 2 Upstream watch | `targets.json` entry at Close | upstream-watch `npm test` |
 | 3 Detection | manifest `detect`, `INIT_SOURCE_CHOICES`, `PickerSource` | `test/core/init-source-choices.test.js` present and absent cases, walkthrough smoke |
-| 4 Onboarding | picker and the `hyp setup` configure phase | `walkthrough_picker_to_first_query` with Goose, repeat `hyp setup --source goose` keeps `enabled = false` |
+| 4 Onboarding | picker and the `hyp setup` configure phase | `walkthrough_picker_to_first_query` with Goose, a repeat picker run with Goose keeps `enabled = false` |
 | 5 Lifecycle | `enabled`, read-only reader | config test, smoke disable step |
 | 6 Collection | projector, reconciliation | projector and reconcile tests on fixture dbs, `goose_capture` smoke |
 | 7 History | backfill, window, busy retry | backfill and sessions-db tests |

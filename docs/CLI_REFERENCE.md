@@ -790,7 +790,9 @@ its own ignore. Supported routes include the gateway, Claude telemetry,
 OpenCode, Pi, Droid, and Cursor. Droid requires an explicitly verified native
 session ID. Goose has no live route: pass its session ID, such as
 `20261103_4` from `goose session list`, and Goose reads the saved ignore on its
-next poll. OpenClaw and Hermes do not support session opt-out; use
+next poll. The command saves it only while HypAware also records another
+client through its gateway, so on a Goose-only install use
+`hyp privacy ignore <dir>` on the session's working directory instead. OpenClaw and Hermes do not support session opt-out; use
 [directory controls](PRIVACY.md#marking-directories) for them.
 
 ### `hyp session status`

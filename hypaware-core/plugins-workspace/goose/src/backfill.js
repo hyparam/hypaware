@@ -141,11 +141,12 @@ async function* runGooseBackfill(ctx, opts, resolver) {
     })
     if (kind === 'sqlite_unavailable') throw err
     // The kernel logs a provider's error message, so the rethrow names no
-    // path; `hyp status` shows the path.
+    // path. It says "configured" rather than pointing at `hyp status`: a
+    // shell's GOOSE_PATH_ROOT can make this run read a different database.
     throw new GooseSessionsDbError(
       kind === 'permission_denied'
-        ? 'cannot read the goose sessions.db (hyp status shows the path)'
-        : 'failed to open the goose sessions.db (hyp status shows the path)',
+        ? 'cannot read the configured goose sessions.db'
+        : 'failed to open the configured goose sessions.db',
       { code: kind }
     )
   }

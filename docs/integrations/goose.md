@@ -22,12 +22,18 @@ that started them. Sessions Goose keeps hidden, such as `goose run
 
 ## Set it up
 
-`hyp setup` offers Goose when it finds the session database. To add it later:
+`hyp setup` offers Goose when it finds the session database. On a new
+installation you can pick it without the prompts:
 
 ```sh
 hyp setup --source goose
 hyp status
 ```
+
+To add Goose to an existing installation, run `hyp setup` in a terminal and
+select Goose; your current choices start selected. `hyp setup --source goose`
+refuses to change an existing configuration, and `--force` replaces it rather
+than adding to it.
 
 This integration installs no skills into Goose.
 
@@ -90,8 +96,9 @@ Goose reads saved exclusions on its next poll, so an ignore takes effect
 within a minute.
 
 The command saves the exclusion through the HypAware gateway, so it works only
-while the gateway is proxying at least one other client. On an install that
-records only Goose, it reports that status is unknown and saves nothing.
+while HypAware also records another client through its gateway. On an install
+that records only Goose, it prints one `hyp session` error line, exits `3`, and
+saves nothing.
 Ignore the session's working directory instead, which also stops recording
 every other Goose session there:
 
