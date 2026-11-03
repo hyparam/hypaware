@@ -3,7 +3,7 @@
 /**
  * Config for the `@hypaware/goose` plugin's own `[goose]` block: the
  * validator, plus the resolvers the source and the backfill provider share.
- * All three keys are optional; a missing section means defaults:
+ * Every key is optional; a missing section means defaults:
  *
  *   - `enabled`       boolean, static kill switch for the ongoing poll
  *                      source. `hyp backfill goose` stays available either
@@ -11,6 +11,8 @@
  *                      exists regardless of this flag.
  *   - `sessions_db`   string, overrides the resolved `sessions.db` path.
  *   - `poll_interval` number (ms) or a duration string (`"60s"`, `"5m"`).
+ *   - `backfill`      the kernel-generic `{ on_join?, window_days? }` policy
+ *                      block (LLP 0037), validated by the shared helper.
  *
  * The validator is pure and dependency-free: it returns a
  * `ValidationResult` so it plugs straight into
@@ -26,6 +28,8 @@
 import os from 'node:os'
 import path from 'node:path'
 
+import { validateBackfillSection } from '../../codex/src/config.js'
+
 /** Manifest `config_sections[].section` name this validator backs. */
 export const GOOSE_CONFIG_SECTION = 'goose'
 
@@ -35,7 +39,7 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000
 /** Duration string shape `poll_interval` accepts: an integer plus an `ms`/`s`/`m`/`h` suffix. */
 export const DURATION_RE = /^(\d+)(ms|s|m|h)$/
 
-const KNOWN_KEYS = new Set(['enabled', 'sessions_db', 'poll_interval'])
+const KNOWN_KEYS = new Set(['enabled', 'sessions_db', 'poll_interval', 'backfill'])
 
 /**
  * Validate the `@hypaware/goose` plugin config slice.
@@ -51,7 +55,7 @@ export function validateGooseConfig(value) {
   const raw = /** @type {Record<string, unknown>} */ (value)
 
   /** @type {ValidationError[]} */
-  const errors = []
+  const errors = [...validateBackfillSection(raw.backfill, '/backfill')]
 
   if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') {
     errors.push({ pointer: '/enabled', message: 'enabled must be a boolean' })

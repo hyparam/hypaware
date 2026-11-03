@@ -70,6 +70,7 @@ test('validateGooseConfig accepts an absent, empty or full config', () => {
   for (const value of [5000, '500ms', '10s', '5m', '1h']) {
     assert.deepEqual(validateGooseConfig({ poll_interval: value }), { ok: true }, String(value))
   }
+  assert.deepEqual(validateGooseConfig({ backfill: { on_join: false, window_days: 30 } }), { ok: true })
 })
 
 test('validateGooseConfig refuses a bad value or an unknown key', () => {
@@ -87,6 +88,11 @@ test('validateGooseConfig refuses a bad value or an unknown key', () => {
     [{ poll_interval: '30x' }, '/poll_interval'],
     [{ poll_interval: true }, '/poll_interval'],
     [{ state_db: '/tmp/x.db' }, '/state_db'],
+    [{ backfill: 'x' }, '/backfill'],
+    [{ backfill: { window_days: -1 } }, '/backfill/window_days'],
+    [{ backfill: { on_join: 'yes' } }, '/backfill/on_join'],
+    // No sweep_cron key: the sweep runs on a fixed 15-minute cron.
+    [{ backfill: { sweep_cron: '*/5 * * * *' } }, '/backfill/sweep_cron'],
   ]
   for (const [value, pointer] of cases) {
     const result = validateGooseConfig(value)

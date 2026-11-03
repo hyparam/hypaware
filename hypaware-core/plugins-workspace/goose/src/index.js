@@ -1,8 +1,8 @@
 // @ts-check
 
 /**
- * Activation for `@hypaware/goose`: wires the `[goose]` config section and
- * the `goose` source into the kernel. No dataset of its own: rows
+ * Activation for `@hypaware/goose`: wires the `[goose]` config section, the
+ * `goose` source, and the `goose` backfill provider into the kernel. No dataset of its own: rows
  * materialize into `ai_gateway_messages` through the shared
  * `ai_gateway.projected_exchange` materializer contributed by
  * `@hypaware/ai-gateway`, the manifest's `requires.plugins` dependency.
@@ -11,11 +11,14 @@
  *   shape; it writes nothing into Goose's config and installs no skills.
  *
  * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { GooseRunnerHolder } from './types.js'
  */
 
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
-import { GOOSE_CONFIG_SECTION, validateGooseConfig } from './config.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
+import { createGooseBackfillProvider } from './backfill.js'
+import { GOOSE_CONFIG_SECTION, resolveHomeDir, resolveSessionsDbPath, validateGooseConfig } from './config.js'
 import { startGooseSource } from './source.js'
 
 const PLUGIN_NAME = '@hypaware/goose'
@@ -44,13 +47,25 @@ export async function activate(ctx) {
 
   // @ref LLP 0570#privacy [implements]: the durable session exclusions load at
   // activation, as NanoClaw and Copilot do; the poll refreshes them by signature.
-  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
+  const observabilityStateDir = readObservabilityEnv(ctx.env).stateDir
+  const ignoredSessions = new SessionIgnoreSet(observabilityStateDir, ctx.log)
+  /** @type {GooseRunnerHolder} */
+  const holder = {}
+
+  ctx.backfills.register(createGooseBackfillProvider({
+    sessionsDbPath: resolveSessionsDbPath(ctx, resolveHomeDir(ctx)),
+    stateDir: ctx.paths.stateDir,
+    config: ctx.config,
+    ignoredSessions,
+    localOnlyListPath: localOnlyListPath(observabilityStateDir),
+    holder,
+  }))
 
   ctx.sources.register({
     name: SOURCE_NAME,
     plugin: PLUGIN_NAME,
     summary: 'Goose sessions.db poll source (ongoing capture)',
     configSection: GOOSE_CONFIG_SECTION,
-    start: (sctx) => startGooseSource(sctx, { ignoredSessions }),
+    start: (sctx) => startGooseSource(sctx, { ignoredSessions, holder }),
   })
 }

@@ -190,8 +190,11 @@ All three keys and their validation are those of `[hermes]` (LLP 0122
 | `poll_interval` | `hermes.poll_interval`, default 60 s | positive ms or a duration string |
 
 Unknown keys are rejected as hermes rejects them. The busy-retry policy, the
-tick budget and the hidden-session skip are code constants, not keys. Nothing
-in the design needs a fourth key.
+tick budget, the hidden-session skip and the sweep cadence are code
+constants, not keys. The one further key is the kernel-generic `backfill`
+policy block (`on_join`, `window_days`, LLP 0037), which `#backfill` needs
+for its window and which the shared validator checks. Hermes's own key set
+rejects it; goose accepts it as antigravity and copilot do.
 
 Path resolution order: `sessions_db` if set, then `$GOOSE_PATH_ROOT/data/
 sessions/sessions.db` if that variable is set in the daemon's environment

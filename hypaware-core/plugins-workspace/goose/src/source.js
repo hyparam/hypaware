@@ -11,7 +11,7 @@
  *   against two cursors, then a whole-session snapshot reconcile per change.
  *
  * @import { BackfillItem, PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { GooseBatchEntry, GooseChanges, GoosePollRunner, GooseWatermarkState } from './types.js'
+ * @import { GooseBatchEntry, GooseChanges, GoosePollRunner, GooseRunnerHolder, GooseWatermarkState } from './types.js'
  */
 
 import { randomUUID } from 'node:crypto'
@@ -60,7 +60,7 @@ class GooseSessionIgnoreError extends Error {}
  * `startGooseSource(ctx, opts)` is the `SourceContribution.start` callback.
  *
  * @param {PluginActivationContext} ctx
- * @param {{ ignoredSessions?: Set<string> }} [opts]
+ * @param {{ ignoredSessions?: Set<string>, holder?: GooseRunnerHolder }} [opts]
  * @returns {Promise<StartedSource>}
  */
 export async function startGooseSource(ctx, opts = {}) {
@@ -70,6 +70,8 @@ export async function startGooseSource(ctx, opts = {}) {
   if (!resolveGooseEnabled(ctx.config)) return createDisabledSource(ctx)
 
   const runner = createGoosePollRunner(ctx, opts)
+  // The backfill sweep shares this runner's in-memory watermark (LLP 0570#backfill).
+  if (opts.holder) opts.holder.runner = runner
   let activeCtx = ctx
   let stopped = false
   /** @type {NodeJS.Timeout | null} */
@@ -235,7 +237,7 @@ function createDisabledSource(ctx) {
  * {@link runGoosePollTick} without timers.
  *
  * @param {PluginActivationContext} ctx
- * @param {{ ignoredSessions?: Set<string> }} [opts]
+ * @param {{ ignoredSessions?: Set<string>, holder?: GooseRunnerHolder }} [opts]
  * @returns {GoosePollRunner}
  */
 export function createGoosePollRunner(ctx, opts = {}) {
@@ -397,7 +399,7 @@ async function pollOnce(runner, ctx) {
         && await db.maxMessageId(candidate.id) === entry.max_id) continue
       // @ref LLP 0570#privacy [implements]: an excluded session is not
       // projected and its entry does not advance; the cursors move past it.
-      if (isExcluded(runner, candidate.id)) continue
+      if (isExcluded(runner.ignoredSessions, candidate.id)) continue
       if (admitted >= GOOSE_SESSIONS_PER_TICK || (admitted > 0 && batchRows >= GOOSE_ROWS_PER_TICK)) {
         sessionsPending += 1
         hold(candidate)
@@ -611,12 +613,11 @@ function refreshExclusions(runner) {
  * The session's own marker decides membership both ways, so an ignore or
  * unignore written since the last refresh is seen at once.
  *
- * @param {GoosePollRunner} runner
+ * @param {Set<string> | undefined} set
  * @param {string} sessionId
  * @returns {boolean}
  */
-function isExcluded(runner, sessionId) {
-  const set = runner.ignoredSessions
+export function isExcluded(set, sessionId) {
   if (!set) return false
   const directory = /** @type {{ directory?: string }} */ (set).directory
   return directory ? present(path.join(directory, markerName(sessionId))) : set.has(sessionId)
