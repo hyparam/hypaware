@@ -137,8 +137,13 @@ export function createRowRedactor(config = {}, customOnly = false, record) {
   const custom = (config.custom_patterns ?? []).map(({ pattern, flags = '' }) => new RegExp(pattern, flags.includes('g') ? flags : flags + 'g'))
   const toolPaths = new Map()
 
-  /** @template {Record<string, unknown>} T @param {T} row @returns {T} */
-  return function redactRow(row) {
+  /**
+   * @template {Record<string, unknown>} T
+   * @param {T} row
+   * @param {ReadonlySet<string>} [preserve] top-level columns kept verbatim, past every rule
+   * @returns {T}
+   */
+  return function redactRow(row, preserve) {
     let nodes = 0
     let bytes = 0
     const args = objectValue(row.tool_args)
@@ -205,7 +210,8 @@ export function createRowRedactor(config = {}, customOnly = false, record) {
       let changes
       /** @param {string | number} key @param {unknown} child */
       const step = (key, child) => {
-        const childMode = mode === 'preserve' || (depth === 0 && typeof key === 'string' && isExportIdentityColumn(key)) ? 'preserve'
+        const childMode = mode === 'preserve' ||
+          (depth === 0 && typeof key === 'string' && (isExportIdentityColumn(key) || preserve?.has(key))) ? 'preserve'
           : depth === 0 && key === 'tool_args' ? 'args'
             : mode === 'args' && typeof key === 'string' && PATH_KEYS.has(key) ? 'path'
               : undefined
@@ -235,7 +241,7 @@ export function createRowRedactor(config = {}, customOnly = false, record) {
     /** @type {[string, unknown][] | undefined} */
     let changes
     for (const key in row) {
-      if (!Object.hasOwn(row, key) || isExportIdentityColumn(key)) continue
+      if (!Object.hasOwn(row, key) || isExportIdentityColumn(key) || preserve?.has(key)) continue
       const value = row[key]
       const hideKey = (hide && !keptUnderFileMask(key)) || CREDENTIAL_KEYS.test(key)
       nodes = 0
@@ -270,16 +276,17 @@ export function createRecordRedactor() {
   /**
    * @param {Record<string, unknown>[]} rows
    * @param {Set<Record<string, unknown>>} [done] rows already redacted, passed through
+   * @param {ReadonlySet<string>} [preserve] top-level columns no rule may touch
    * @returns {{ rows: Record<string, unknown>[], redacted: number, overBudget: number }}
    */
-  return function redactRows(rows, done) {
+  return function redactRows(rows, done, preserve) {
     overBudget = 0
     /** @type {Record<string, unknown>[] | undefined} */
     let out
     let redacted = 0
     for (let i = 0; i < rows.length; i++) {
       if (done?.has(rows[i])) continue
-      const row = redactRow(rows[i])
+      const row = redactRow(rows[i], preserve)
       if (row === rows[i]) continue
       ;(out ??= rows.slice())[i] = row
       redacted++

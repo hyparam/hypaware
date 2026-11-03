@@ -27,12 +27,13 @@ import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } 
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
 import { createExportRedactor, createRecordRedactor, isExportIdentityColumn } from '../sinks/redaction.js'
+import { SECRET_MASK } from '../secret_rules.js'
 
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 /**
- * @import { ExportRedactionConfig, ScannableDataSource, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, ExportRedactionConfig, ScannableDataSource, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'
@@ -66,6 +67,149 @@ function continuationToSeq(since) {
     throw new Error(`readRows: invalid SinkContinuation ${JSON.stringify(since)}`)
   }
   return BigInt(since.seq)
+}
+
+/** @type {WeakMap<readonly ColumnSpec[], ReadonlySet<string>>} */
+const timeColumnsByShape = new WeakMap()
+
+/**
+ * A dataset's TIMESTAMP columns. No redaction rule touches them: a date is
+ * never a secret, and the cache refuses a mask in one.
+ *
+ * @param {readonly ColumnSpec[]} columns
+ * @returns {ReadonlySet<string>}
+ */
+function timeColumns(columns) {
+  let names = timeColumnsByShape.get(columns)
+  if (!names) {
+    names = new Set(columns.filter(column => column.type === 'TIMESTAMP').map(column => column.name))
+    timeColumnsByShape.set(columns, names)
+  }
+  return names
+}
+
+/**
+ * The conversation a row belongs to, or undefined when it names no session.
+ *
+ * @param {Record<string, unknown>} row
+ * @returns {string | undefined}
+ */
+function conversationKey(row) {
+  if (typeof row.session_id !== 'string' || row.session_id === '') return undefined
+  return `${row.session_id}\0${typeof row.conversation_id === 'string' ? row.conversation_id : ''}`
+}
+
+/**
+ * Where a row sits in its conversation: its message index when it has one,
+ * else its place in the chunk.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {number} at
+ * @returns {number}
+ */
+function conversationPlace(row, at) {
+  return typeof row.message_index === 'number' ? row.message_index : at
+}
+
+/**
+ * Repair the rows v1.48.0 spooled with the mask in a typed column, which the
+ * cache refuses, so their spool file could never commit. A masked date is
+ * rebuilt from the same column of another row in its conversation: one of the
+ * same message first, else the nearest message. A row whose date cannot be
+ * rebuilt is dropped, and a date is never nulled. Any other typed column is
+ * nulled when it may be null and drops the row when it may not. Donors are
+ * looked for only in the chunk being flushed, and only unmasked values donate.
+ * A chunk with no masked value is returned as is.
+ *
+ * @param {readonly ColumnSpec[]} columns
+ * @param {Record<string, unknown>[]} rows
+ * @returns {{ rows: Record<string, unknown>[], reconstructed: number, nulled: number, dropped: number }}
+ */
+export function repairMaskedTypedValues(columns, rows) {
+  const typed = columns.filter(column => column.type !== 'STRING' && column.type !== 'JSON')
+  if (!rows.some(row => typed.some(column => row[column.name] === SECRET_MASK))) {
+    return { rows, reconstructed: 0, nulled: 0, dropped: 0 }
+  }
+  /** @type {Map<string, Map<string, { places: number[], values: unknown[], byMessage: Map<unknown, unknown> }>>} */
+  const donorsByColumn = new Map()
+  /** @param {string} name */
+  const donorsFor = (name) => {
+    let byConversation = donorsByColumn.get(name)
+    if (byConversation) return byConversation
+    /** @type {Map<string, { place: number, value: unknown, message: unknown }[]>} */
+    const found = new Map()
+    rows.forEach((row, at) => {
+      const value = row[name]
+      const key = conversationKey(row)
+      if (key === undefined || value === undefined || value === null || value === SECRET_MASK) return
+      let list = found.get(key)
+      if (!list) found.set(key, list = [])
+      list.push({ place: conversationPlace(row, at), value, message: row.message_id })
+    })
+    byConversation = new Map()
+    for (const [key, list] of found) {
+      list.sort((a, b) => a.place - b.place)
+      /** @type {Map<unknown, unknown>} */
+      const byMessage = new Map()
+      for (const donor of list) if (donor.message !== undefined && !byMessage.has(donor.message)) byMessage.set(donor.message, donor.value)
+      byConversation.set(key, { places: list.map(donor => donor.place), values: list.map(donor => donor.value), byMessage })
+    }
+    donorsByColumn.set(name, byConversation)
+    return byConversation
+  }
+  /** @param {string} name @param {Record<string, unknown>} row @param {number} at @returns {unknown} */
+  const rebuild = (name, row, at) => {
+    const key = conversationKey(row)
+    const donors = key === undefined ? undefined : donorsFor(name).get(key)
+    if (!donors) return undefined
+    if (row.message_id !== undefined && donors.byMessage.has(row.message_id)) return donors.byMessage.get(row.message_id)
+    const place = conversationPlace(row, at)
+    let low = 0
+    let high = donors.places.length
+    while (low < high) {
+      const mid = (low + high) >> 1
+      if (donors.places[mid] < place) low = mid + 1
+      else high = mid
+    }
+    if (low === 0) return donors.values[0]
+    if (low === donors.places.length) return donors.values[low - 1]
+    return place - donors.places[low - 1] <= donors.places[low] - place ? donors.values[low - 1] : donors.values[low]
+  }
+  /** @type {Record<string, unknown>[]} */
+  const kept = []
+  let reconstructed = 0
+  let nulled = 0
+  let dropped = 0
+  rows.forEach((row, at) => {
+    /** @type {Record<string, unknown> | undefined} */
+    let copy
+    let rowReconstructed = 0
+    let rowNulled = 0
+    for (const column of typed) {
+      if (row[column.name] !== SECRET_MASK) continue
+      /** @type {unknown} */
+      let value = null
+      if (column.type === 'TIMESTAMP') {
+        value = rebuild(column.name, row, at)
+        if (value === undefined) {
+          dropped++
+          return
+        }
+        rowReconstructed++
+      } else if (column.nullable) {
+        rowNulled++
+      } else {
+        dropped++
+        return
+      }
+      copy ??= { ...row }
+      copy[column.name] = value
+    }
+    reconstructed += rowReconstructed
+    nulled += rowNulled
+    kept.push(copy ?? row)
+  })
+  return { rows: kept, reconstructed, nulled, dropped }
 }
 
 /**
@@ -126,14 +270,16 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
    * rules applied once, before the spool or a commit sees the row.
    * @ref LLP 0568#seam [implements]: record-time redaction on every cache write path
    * @param {string} dataset
+   * @param {readonly ColumnSpec[]} columns
    * @param {Record<string, unknown>[]} rows
    * @param {Set<Record<string, unknown>>} [done]
    */
-  function recordRows(dataset, rows, done) {
+  function recordRows(dataset, columns, rows, done) {
     // @ref LLP 0572#server-skip [implements]: off only for the server cache, by kernel option, not config
     // The server's cache stores rows clients already redacted; it skips this pass.
     if (!recordRedaction) return { rows, redacted: 0, overBudget: 0 }
-    const result = redactRecordRows(rows, done)
+    // @ref LLP 0572#spool-repair [implements]: a date column is never redacted, by type, whatever a text rule matches
+    const result = redactRecordRows(rows, done, timeColumns(columns))
     if (result.overBudget > 0) {
       logger.warn('cache.record_redaction_over_budget', { [Attr.DATASET]: dataset, row_count: result.overBudget })
     }
@@ -162,6 +308,19 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       rows = survivingRows(rows)
       let purgedCount = beforePurge - rows.length
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
+      // Runs before the settle hook, so a hook that reads a row's dates sees
+      // the rebuilt ones.
+      // @ref LLP 0572#spool-repair [implements]: v1.48.0 rows with a masked date drain, rebuilt from their conversation or dropped
+      const repaired = repairMaskedTypedValues(columns, rows)
+      if (repaired.rows !== rows) {
+        rows = repaired.rows
+        logger.warn('cache.record_redaction_unstorable', {
+          [Attr.DATASET]: dataset,
+          reconstructed_count: repaired.reconstructed,
+          dropped_count: repaired.dropped,
+          ...(repaired.nulled > 0 ? { nulled_count: repaired.nulled } : {}),
+        })
+      }
       // @ref LLP 0027#decision: flush-time settlement: the owning dataset
       // may upgrade provisional (fallback) row identity and dedupe before
       // the batch is committed. Generic and optional; the hook itself
@@ -174,7 +333,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         // through the rules again. A hook returns a new array when it changes
         // a row; one that returns its own batch is taken as unchanged.
         const settled = await settle(rows, { storage: service })
-        if (settled !== rows) rows = recordRows(dataset, settled, new Set(rows)).rows
+        if (settled !== rows) rows = recordRows(dataset, columns, settled, new Set(rows)).rows
       }
       const beforeSecondCheck = rows.length
       rows = survivingRows(rows)
@@ -182,7 +341,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const declaration = getDeclaration?.(dataset)
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
-      let droppedCount = purgedCount
+      let droppedCount = purgedCount + repaired.dropped
       /** @type {Map<string, number>} */
       const missingFieldCounts = new Map()
       for (const row of rows) {
@@ -289,7 +448,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // (a session purge with unflushed spool rows), not a validation
       // problem, so they must not trip this warn or inflate the reported
       // missing-field drop count; only the non-purge remainder does.
-      const validationDroppedCount = droppedCount - purgedCount
+      const validationDroppedCount = droppedCount - purgedCount - repaired.dropped
       if (validationDroppedCount > 0) {
         logger.warn('cache.partition_validation_drops', {
           [Attr.DATASET]: dataset,
@@ -389,7 +548,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const recorded = recordRows(dataset, survivingRows(rows))
+          const recorded = recordRows(dataset, columns, survivingRows(rows))
           span.setAttribute('redacted_row_count', recorded.redacted)
           const { bytesWritten, pendingBytes } = await spool.append(tablePath, columns, recorded.rows)
           span.setAttribute('bytes_written', bytesWritten)
@@ -731,7 +890,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const recorded = recordRows(dataset, survivingRows(rows))
+          const recorded = recordRows(dataset, columns, survivingRows(rows))
           span.setAttribute('redacted_row_count', recorded.redacted)
           const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, recorded.rows, { filterRows: survivingRows })
           span.setAttribute('bytes_written', result.bytesWritten)
@@ -743,7 +902,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
 
     async reconcileRows(dataset, columns, rows, scope) {
       await drainSpoolForReconcile(dataset)
-      return reconcileCacheRows({ cacheRoot, dataset, columns, rows: recordRows(dataset, rows).rows, scope,
+      return reconcileCacheRows({ cacheRoot, dataset, columns, rows: recordRows(dataset, columns, rows).rows, scope,
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 
@@ -752,7 +911,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       await drainSpoolForReconcile(dataset)
       return reconcileCacheSnapshots({ cacheRoot, dataset, columns,
         snapshots: snapshots.map(snapshot => {
-          const recorded = recordRows(dataset, snapshot.rows).rows
+          const recorded = recordRows(dataset, columns, snapshot.rows).rows
           return recorded === snapshot.rows ? snapshot : { ...snapshot, rows: recorded }
         }),
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })

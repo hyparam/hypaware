@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { createQueryStorageService, repairMaskedTypedValues } from '../../src/core/cache/storage.js'
 import { SECRET_MASK as MASK } from '../../src/core/secret_rules.js'
 import { createRecordRedactor } from '../../src/core/sinks/redaction.js'
 import { withLogRecords } from '../helpers/log_records.js'
@@ -245,4 +245,87 @@ test('a storage service built without record redaction persists rows as given', 
   await storage.appendRowsToPartition('messages', ['source=direct'], COLUMNS, [rowWith('plain', SECRETS.github, 0)])
   const rows = await committedRows(storage)
   assert.equal(rows[0].content_text, `before ${SECRETS.github} after`)
+})
+
+// @ref LLP 0572#spool-repair [tests]: a date column is exempt by type, so a text rule that matches it changes nothing
+test('a date column is kept verbatim at record time even when a text rule matches its value', async t => {
+  const redact = createRecordRedactor()
+  const row = { session_id: 's', started_at: SECRETS.slack, content_text: SECRETS.slack }
+  const result = redact([row], undefined, new Set(['started_at']))
+  assert.equal(result.rows[0].started_at, SECRETS.slack)
+  assert.equal(result.rows[0].content_text, MASK)
+
+  const cacheRoot = await tempCache(t)
+  const storage = createQueryStorageService({ cacheRoot })
+  /** @type {ColumnSpec[]} */
+  const columns = [...COLUMNS, { name: 'conversation_started_at', type: 'TIMESTAMP', nullable: false }]
+  await storage.appendRows(storage.cacheTablePath('messages', ['source=claude']), columns, [
+    { client_name: 'claude', session_id: 's', part_id: 'p', content_text: SECRETS.slack, conversation_started_at: SECRETS.entropy },
+  ])
+  const [spooled] = await Array.fromAsync(storage.readSpooledRows('messages'))
+  assert.equal(spooled.conversation_started_at, SECRETS.entropy)
+  assert.equal(spooled.content_text, MASK)
+})
+
+/** @type {ColumnSpec[]} */
+const DATED = [...COLUMNS,
+  { name: 'message_id', type: 'STRING', nullable: true },
+  { name: 'message_index', type: 'INT32', nullable: true },
+  { name: 'conversation_started_at', type: 'TIMESTAMP', nullable: false },
+  { name: 'message_created_at', type: 'TIMESTAMP', nullable: false }]
+const started = '2026-11-03T10:00:00.000Z'
+/** @param {number} minute */
+const minuteAt = minute => `2026-11-03T10:${String(minute).padStart(2, '0')}:00.000Z`
+
+// @ref LLP 0572#spool-repair [tests]: v1.48.0 rows with a masked date drain, rebuilt from their conversation or dropped
+test('a spooled row with a masked date is rebuilt from its conversation, or dropped when nothing can rebuild it', async t => {
+  const cacheRoot = await tempCache(t)
+  const storage = createQueryStorageService({ cacheRoot })
+  const base = { client_name: 'claude', session_id: 'dated', conversation_started_at: started }
+  // The preserve set keeps the mask verbatim in the spool, as v1.48.0 wrote it.
+  await storage.appendRows(storage.cacheTablePath('messages', ['source=claude']), DATED, [
+    { ...base, part_id: 'm1-a', message_id: 'm1', message_index: 0, message_created_at: minuteAt(1) },
+    { ...base, part_id: 'm1-b', message_id: 'm1', message_index: 1, message_created_at: MASK },
+    { ...base, part_id: 'm2', message_id: 'm2', message_index: 7, conversation_started_at: MASK, message_created_at: MASK },
+    { ...base, part_id: 'm3', message_id: 'm3', message_index: 8, message_created_at: minuteAt(9) },
+    { ...base, session_id: 'lonely', part_id: 'lost', message_id: 'x1', message_index: 0, conversation_started_at: MASK, message_created_at: MASK },
+  ])
+  const { records } = await withLogRecords(() => storage.flushAll({ force: true }))
+  const rows = await committedRows(storage)
+  const byPart = new Map(rows.map(row => [row.part_id, row]))
+  const iso = (/** @type {unknown} */ value) => new Date(/** @type {any} */ (value)).toISOString()
+  assert.deepEqual([...byPart.keys()].sort(), ['m1-a', 'm1-b', 'm2', 'm3'])
+  // Same message first, then the nearest message in the conversation.
+  assert.equal(iso(byPart.get('m1-b')?.message_created_at), minuteAt(1))
+  assert.equal(iso(byPart.get('m2')?.message_created_at), minuteAt(9))
+  assert.equal(iso(byPart.get('m2')?.conversation_started_at), started)
+  assert.deepEqual(await Array.fromAsync(storage.readSpooledRows('messages')), [])
+  const warn = records.find(record => record.body === 'cache.record_redaction_unstorable')
+  assert.ok(warn)
+  assert.equal(warn.attributes.reconstructed_count, 3)
+  assert.equal(warn.attributes.dropped_count, 1)
+  assert.equal(warn.attributes.nulled_count, undefined)
+})
+
+// @ref LLP 0572#spool-repair [tests]: a date is never nulled; other typed columns null when nullable, else drop
+test('the masked-value repair never nulls a date and returns the same batch when nothing is masked', () => {
+  /** @type {ColumnSpec[]} */
+  const columns = [
+    { name: 'session_id', type: 'STRING', nullable: true },
+    { name: 'received_at', type: 'TIMESTAMP', nullable: true },
+    { name: 'tokens', type: 'INT64', nullable: true },
+    { name: 'turn', type: 'INT32', nullable: false },
+  ]
+  const clean = [{ session_id: 's', received_at: started, tokens: 3, turn: 1 }]
+  assert.equal(repairMaskedTypedValues(columns, clean).rows, clean)
+  const rows = [
+    { session_id: 'alone', received_at: MASK, tokens: 1, turn: 1 },
+    { session_id: 's', received_at: started, tokens: MASK, turn: 2 },
+    { session_id: 's', received_at: started, tokens: 4, turn: MASK },
+    { received_at: MASK, tokens: 5, turn: 3 },
+  ]
+  const result = repairMaskedTypedValues(columns, rows)
+  assert.deepEqual(result.rows, [{ session_id: 's', received_at: started, tokens: null, turn: 2 }])
+  assert.deepEqual([result.reconstructed, result.nulled, result.dropped], [0, 1, 3])
+  assert.equal(rows[1].tokens, MASK, 'the caller keeps its own rows')
 })
