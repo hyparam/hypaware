@@ -462,7 +462,8 @@ reconcile. Database entries are bounded by the 1,024-database cap.
 tick, then ticks every `poll_interval`. Each tick:
 
 - refreshes discovery (#discovery);
-- stats every database in the set, in a round-robin order that starts after
+- stats every database in the set, in a round-robin order: the set sorted
+  by real path (#discovery step 2), starting at the first real path after
   the last database the previous tick opened;
 - opens changed databases one at a time in that order, at most 16, and
   stops opening once the session or row budget is spent. A changed database
@@ -480,12 +481,21 @@ tick, then ticks every `poll_interval`. Each tick:
   (#reconciliation step 5) are not pending; one left unadmitted is read on
   the next poll tick.
 
-**No database starves the others.** The next tick's order starts after the
-last database this tick opened, so a database that always has leftovers is
-opened again only after every other changed database has had its turn. LLP
-0527 always admits a tick's first session, so each tick makes progress, and
-every changed database is opened within as many ticks as there are changed
-databases, at most 1,024.
+**No database starves the others.** The cycle is the set sorted by real
+path, not index order: `projects.json` lists projects by last access, so
+using a project reorders the index, and an index-ordered cycle could move a
+changed database back behind the start. The next tick starts at the first
+real path after the last database this tick opened, compared as a path, so
+the rule holds when that database has left the set. Each tick opens a
+contiguous run of changed databases from that start and always opens the
+first one, because the budget is unspent when a tick begins and LLP 0527
+always admits a tick's first session. So the start moves at least one place
+per tick and never skips a changed database, and every changed database is
+opened within N ticks for N databases in the set, at most 1,024. A database
+that always has leftovers is opened again only after every other changed
+database has had its turn. The start is held in memory, not in the
+watermark: a restart begins the cycle at the first real path, and the same
+N-tick bound holds from the restart.
 
 A session whose scope guard another writer holds is deferred and holds its
 database's cursor and signature, as in goose.
