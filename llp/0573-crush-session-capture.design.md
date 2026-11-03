@@ -33,65 +33,77 @@
 Crush (charmbracelet/crush, FSL-1.1-MIT) is a terminal coding agent with a
 TUI and a headless `crush run`. The Research and Probe phases of mission
 HYP.0.243.2 ran Crush v0.99.0 (tag commit `e38655aa`) against a loopback
-fixture provider on Linux and read its pinned source. The facts this design
-rests on:
+fixture provider on Linux and read its pinned source. The probe drove only
+headless `crush run` with one provider type (`completions`), so each fact
+below is tagged: **[observed]** means the v0.99.0 Linux probe showed it
+(mission `probe/PROBE.md`), **[source]** means it was read from the pinned
+source and is a hypothesis until a fixture or validation run drives it. The
+TUI, `crush server`, the session subcommands, other provider types,
+summarize, cancel, and session delete and rename were not driven. The facts
+this design rests on:
 
-- **Storage is per project.** Each project gets `<git root>/.crush/` holding
+- **Storage is per project.** [observed] Each project gets `<git root>/.crush/` holding
   `crush.db` (SQLite, WAL mode), a `.gitignore` of `*`, and
   `logs/crush.log`. Starting Crush in a subdirectory uses the git root's
   data dir.
-- **A global index names every project.** `projects.json` lives in the global
-  data dir: `$CRUSH_GLOBAL_DATA` if set, else `$XDG_DATA_HOME/crush`, else
-  `~/.local/share/crush`. Each entry is `{path, data_dir, last_accessed}`.
+- **A global index names every project.** [observed for the default path and
+  the entry shape; source for the variables] `projects.json` lives in the
+  global data dir: `$CRUSH_GLOBAL_DATA` if set, else `$XDG_DATA_HOME/crush`,
+  else `~/.local/share/crush`. Each entry is `{path, data_dir, last_accessed}`.
   Several entries can share one `data_dir` (a subdirectory start records its
   own `path`).
-- **Schema.** Goose-style migrations in `goose_db_version`, latest applied
+- **Schema.** [observed, except the history] Goose-style migrations in `goose_db_version`, latest applied
   `20260928000001`. Tables `sessions`, `messages`, `files`, `read_files`,
   `mcp_disabled_servers`, `mcp_enabled_servers`. The schema moved five times
-  in four weeks before the pin.
-- **`sessions`:** text `id` primary key, `parent_session_id`, `title` (not
+  in four weeks before the pin [source: migration history].
+- **`sessions`:** [observed] text `id` primary key, `parent_session_id`, `title` (not
   null), `message_count`, `prompt_tokens`, `completion_tokens`, `cost`,
   `updated_at` and `created_at` (integer seconds), `summary_message_id`,
   `todos`, `channel`. An `AFTER UPDATE` trigger sets `updated_at`. There is
   no index on `updated_at`; `idx_sessions_created_at` exists.
-- **`messages`:** text `id` primary key over an implicit `rowid` (no
-  `AUTOINCREMENT`, so the largest rowid can be reused after its row is
-  deleted), `session_id` (foreign key, cascade delete), `role` (`user`,
+- **`messages`:** [observed schema dump; rowid reuse is source] text `id`
+  primary key over an implicit `rowid` (no `AUTOINCREMENT`, so the largest
+  rowid can be reused after its row is deleted), `session_id` (foreign key, cascade delete), `role` (`user`,
   `assistant`, `tool`), `parts` (a JSON array), `model`, `provider`,
   `created_at`, `updated_at`, `finished_at`, `is_summary_message`. Insert and
   delete triggers keep `sessions.message_count`, which bumps
   `sessions.updated_at`. Indexes: `idx_messages_session_id`,
   `idx_messages_created_at`, `idx_messages_role_created_at`.
-- **Parts** are `{"type", "data"}`: `text`, `reasoning`, `image_url`,
+- **Parts** [observed: `text`, `tool_call`, `tool_result`, `finish`; the rest
+  source] are `{"type", "data"}`: `text`, `reasoning`, `image_url`,
   `binary`, `tool_call` (`id`, `name`, `input` as a JSON string, `finished`),
   `tool_result` (`tool_call_id`, `name`, `content`, `metadata` as a JSON
   string, `is_error`), `finish` (`reason`, `time`) and `shell_command`
   (`command`, `output`, `exit_code`). A user message whose part is a
   `shell_command` is the user's own `!` shell run, not a prompt.
-- **Ordering needs rowid.** All of one probe session's messages shared one
+- **Ordering needs rowid.** [observed] All of one probe session's messages shared one
   `created_at` second. Crush orders by `created_at`; a reader adds `rowid`.
-- **Tool results embed the working directory.** `content` ends with
+- **Tool results embed the working directory.** [observed] `content` ends with
   `<cwd>...</cwd>` and `metadata` holds `working_directory`.
-- **Session usage is a gauge, not a total.** Each step sets
+- **Session usage is a gauge, not a total.** [observed: prompt minus
+  completion stays 90 across steps in the Part A dry run; the mechanism,
+  summarize and the parent roll-up are source] Each step sets
   `prompt_tokens` and `completion_tokens` to that step's values (agent
   `updateSessionTokenCounters`), and summarize sets `prompt_tokens` to 0.
   Only `cost` accumulates (`session.Cost += cost`), it is 0 under a flat-rate
   provider, and a parent's `cost` includes its task children's cost.
-- **Sessions.** A sub-agent task session has `parent_session_id` set and the
+- **Sessions.** [source for the task id format; the separate title call is
+  observed] A sub-agent task session has `parent_session_id` set and the
   id `<messageID>$$<toolCallID>`. A title session has the id `title-<parent>`.
-- **Summaries.** Summarize inserts an assistant message with
+- **Summaries.** [source] Summarize inserts an assistant message with
   `is_summary_message = 1` and points `summary_message_id` at it. Older
   messages are kept. If summarize fails, the summary message is deleted.
-- **Streaming.** An assistant message is created empty and updated in place
+- **Streaming.** [source] An assistant message is created empty and updated in place
   as it streams. Updates are debounced; a terminal change flushes at once.
   `finished_at` is set only on assistant messages when they finish.
-- **The request carries more than the DB keeps.** An injected context user
+- **The request carries more than the DB keeps.** [observed] An injected context user
   message is sent to the provider and not stored.
-- **Outbound.** With metrics and provider auto-update off, the only attempt
+- **Outbound.** [observed] With metrics and provider auto-update off, the only attempt
   was the `api.github.com` update check. Crush has no OTLP exporter.
   `crush.log` holds lifecycle lines, no content.
 
-Which writes bump `sessions.updated_at`:
+Which writes bump `sessions.updated_at` (the append row and the session
+update trigger are observed; the other rows are source):
 
 | Write | Rows | Bumps `updated_at` |
 | --- | --- | --- |
@@ -273,8 +285,26 @@ As goose (LLP 0570 `#sqlite`): `node:sqlite` `DatabaseSync` with
 `readOnly: true`; never write, never take a write lock, never checkpoint;
 retry `SQLITE_BUSY` and `SQLITE_LOCKED` up to 5 times, 20 ms apart, then
 fail that database for the tick with `error_kind` `sqlite_busy` and leave
-its watermark as it was. A read-only reader of a WAL database may create or
-update `crush.db-shm`; it never writes `crush.db` or `crush.db-wal`.
+its watermark as it was.
+
+A read-only reader writes no content and never checkpoints, but it is not
+free of side effects on the directory. The steward's Linux self-check
+(node 24.2 `node:sqlite`, 2026-11-03, not yet confirmed on macOS) showed:
+
+- a read-only open alone creates nothing;
+- the first read of a WAL database that has no `crush.db-wal` creates an
+  empty `crush.db-wal` (0 bytes) and a 32 KiB `crush.db-shm`, and both stay
+  after the reader closes;
+- every later read rewrites the `-shm` mtime, while `crush.db` and
+  `crush.db-wal` stay unchanged across idle reads;
+- a writer's commit grows `crush.db-wal`, and a writer's clean close
+  checkpoints and removes both files.
+
+So the reader creates SQLite's own empty WAL index files in `.crush/` when
+they are absent, and Crush removes them on its next clean close. The change
+gate (#reconciliation) leaves `-shm` out and records the signature after the
+reader closes, so the reader's own files never read as a commit. T10 (LLP
+0574) repeats the check on macOS.
 
 The reader checks that `goose_db_version` exists and that every column it
 reads exists. A missing table or column is `schema_unsupported`, naming it.
@@ -332,11 +362,13 @@ storage call, for the poll and backfill alike.
 
 The watermark sidecar lives in `ctx.paths.stateDir`. It holds:
 
-- per database: `{stat_sig, max_rowid}`, where `stat_sig` is the size,
-  mtime in nanoseconds and inode of `crush.db` and `crush.db-wal`;
+- per database: `{stat_sig, max_rowid, floor}`, where `stat_sig` is the size,
+  mtime in nanoseconds and inode of `crush.db` and `crush.db-wal` (never
+  `-shm`, #sqlite), and `floor` is an `updated_at` second at or below which
+  a session with no entry is history, not a candidate;
 - per session: `{db, updated_at, message_count, max_rowid, open, digest}`,
-  where `open` records that the last projection had an assistant message
-  with `finished_at` null.
+  where `open` records that the session's latest message, in the last
+  projection, was an assistant message with `finished_at` null.
 
 A failed commit advances nothing (LLP 0449 `#detection`), and an entry
 without a digest forces a reconcile.
@@ -350,10 +382,17 @@ autoincrement id and no `updated_at` index. The design instead gates on file
 metadata and reads by `rowid`:
 
 1. **Per-database gate.** Each tick stats `crush.db` and `crush.db-wal`. An
-   unchanged signature means nothing was committed, so the database is not
-   opened. Every commit in WAL mode grows or rewrites the WAL, and a
-   checkpoint rewrites the main file, so either way the signature moves. A
-   false positive only costs one open.
+   unchanged signature is taken to mean nothing was committed, so the
+   database is not opened. That rests on a hypothesis (#open-questions):
+   every WAL commit grows or rewrites the WAL, and a checkpoint rewrites the
+   main file, so the signature moves. The Linux self-check saw a commit move
+   the WAL; the checkpoint-and-reset case is tested in T3 and T4 on Linux and
+   in T10 on macOS. A false positive only costs one open. An opened
+   database is stat-checked twice, before the open and after the reader
+   closes. When the two agree, or differ only by the reader's own empty `-wal` (#sqlite), the
+   after-close signature is recorded. Otherwise a writer committed during the
+   read, and the before-open signature is kept so the next tick opens it
+   again.
 2. **Changed database.** Two reads:
    - `messages WHERE rowid > max_rowid` (excluding title sessions), giving the
      sessions with new rows. This must be a rowid range search.
@@ -363,20 +402,28 @@ metadata and reads by `rowid`:
      session, no payload) and is read only in a database whose signature
      moved. This is accepted and stated in #cost.
 3. **Candidates** are sessions with new rows, sessions whose `updated_at` or
-   `message_count` differ from their entry, sessions with no entry, and
-   sessions whose entry is `open`. For each, one seek on
-   `idx_messages_session_id` reads `MAX(rowid)`.
+   `message_count` differ from their entry, sessions with no entry whose
+   `updated_at` is above the database's `floor`, and sessions whose entry is
+   `open`. A session with no entry at or below the floor and no new rows is
+   history (#backfill) or an entry the sweep pruned or the cap evicted, and is
+   not hashed. For each candidate, one seek on `idx_messages_session_id`
+   reads `MAX(rowid)`.
 4. **Skip without hashing** only when `updated_at`, `message_count` and
    `max_rowid` all match and the entry is settled: its stored `updated_at` is
    before the second the tick observed. An unsettled entry is hashed. This
    guards one case the counts miss: a summary deleted and a message appended
    in the same second can reuse the deleted row's rowid and leave the count
    unchanged.
-5. **Open sessions stay candidates.** Streaming updates rewrite an assistant
-   message in place without bumping `updated_at`, so a session whose last
-   projection held an unfinished assistant message is hashed on every tick
-   where its database changed, until that message has `finished_at`. Writes
-   to the message change the WAL, so step 1 lets them through.
+5. **Open sessions stay candidates, within a bound.** Streaming updates
+   rewrite an assistant message in place without bumping `updated_at`, so a
+   session whose latest message is an unfinished assistant message is hashed
+   on every tick where its database changed. Writes to the message change the
+   WAL, so step 1 lets them through. `open` clears when the message has
+   `finished_at`, when a later message exists in the session, or when a
+   sweep finds the session's digest equal to its entry (nothing streamed
+   since the last hash, as after a crash or cancel mid-stream). So a message
+   that never finishes is hashed until the next sweep at most. Open sessions
+   are never pending (#source) and never schedule a catch-up tick.
 6. **The scheduled sweep** hashes every session in scope and catches any
    other in-place edit, up to one sweep interval late.
 
@@ -384,17 +431,20 @@ A hashed candidate whose digest is unchanged updates its entry without a
 commit. Its `max_rowid` cursor for the database advances only past sessions
 that were committed or found unchanged.
 
-On first start each database's cursor is set to its current `MAX(rowid)` and
-its signature recorded, so the poll does not walk history; history is the
-backfill's job (#backfill). A database first seen later (a new index entry)
-gets the same treatment, and the next backfill or sweep imports its history.
+On first start each database's cursor is set to its current `MAX(rowid)`,
+its `floor` to the second the baseline observed, and its signature recorded,
+so the poll neither walks nor hashes history; history is the backfill's job
+(#backfill). A database first seen later (a new index entry) gets the same
+treatment, and the next backfill or sweep imports its history.
 
 **Watermark scope and bound.** Entries exist only for sessions in the sweep's
 scope; each sweep prunes deleted and out-of-scope sessions and databases no
 longer in the set. The sidecar is capped at 10,000 session entries; past the
-cap the entry with the oldest `updated_at` is evicted, and that session's next
-change forces one idempotent reconcile. Database entries are bounded by the
-1,024-database cap.
+cap the entry with the oldest `updated_at` is evicted. Evicting or pruning an
+entry raises its database's `floor` to at least that entry's `updated_at`,
+so the session does not come back as a no-entry candidate on every tick;
+its next change bumps `updated_at` past the floor and forces one idempotent
+reconcile. Database entries are bounded by the 1,024-database cap.
 
 ### Source {#source}
 
@@ -410,7 +460,9 @@ tick, then ticks every `poll_interval`. Each tick:
   stops admitting at 4096 projected rows (LLP 0527);
 - commits one batch through `reconcileRowsBatch`, flushes the watermark once
   after the commit, and schedules a catch-up tick one second later while
-  databases or sessions are pending.
+  anything is pending. Pending means a changed database the 16-open budget
+  left unopened, or a candidate session the 64-session or 4096-row budget
+  left unadmitted. Open sessions (#reconciliation step 5) are not pending.
 
 A session whose scope guard another writer holds is deferred and holds its
 database's cursor and signature, as in goose.
@@ -486,10 +538,14 @@ Each tick logs `crush.poll` with `component=crush`, `operation`, `status`,
 - **A changed database** costs one open, the rowid range read (O(new rows)),
   the sessions scan (O(sessions in that database), small rows, no payload)
   and one index seek per candidate. At most 16 databases are opened per tick.
+  A session with no entry is a candidate only above the database's `floor`,
+  so old history and pruned or evicted entries are never hashed by the poll.
 - **Each changed session** costs a streamed digest and, when it moved, a
   projection, both O(that session's length). Open sessions are re-hashed on
-  each changed-database tick until they finish, so a long streaming reply in
-  a long session is the expensive case. The 64-session and 4096-row budget
+  each changed-database tick until their latest message finishes, a later
+  message exists, or a sweep finds them unchanged, so a long streaming reply
+  in a long session is the expensive case and a message that never finishes
+  costs at most one sweep interval of re-hashing. The 64-session and 4096-row budget
   caps a tick.
 - **The scheduled sweep** streams every session in scope once per sweep,
   one database at a time: O(messages in scope), bounded by
@@ -510,12 +566,12 @@ Each tick logs `crush.poll` with `component=crush`, `operation`, `status`,
 | 1 Product | pinned version in docs and the upstream-watch entry | Mac Part A, Linux probe |
 | 2 Upstream watch | `targets.json` entry at Close | upstream-watch `npm test` |
 | 3 Detection | manifest `detect`, `INIT_SOURCE_CHOICES`, `PickerSource`; index path resolution | `test/core/init-source-choices.test.js` present and absent cases; config tests for `CRUSH_GLOBAL_DATA`, `XDG_DATA_HOME` and stale entries |
-| 4 Onboarding | picker and the `hyp setup` configure phase | `walkthrough_picker_to_first_query` with Crush; a repeat picker run keeps `enabled = false` |
-| 5 Lifecycle | `enabled`, read-only reader | config test, smoke disable step, a test that no `crush.db` or `-wal` byte changes |
+| 4 Onboarding | picker and the `hyp setup` configure phase | `walkthrough_picker_to_first_query` with Crush; a repeat picker run keeps `enabled = false`; adding Crush to an existing install leaves other clients' config untouched |
+| 5 Lifecycle | `enabled`, read-only reader | config test, smoke disable step; the reader creates SQLite's own empty `-wal` and `-shm` in `.crush/` when absent and writes no content, and Crush removes them on its next clean close; tests cover starts with and without `-wal` |
 | 6 Collection | discovery, projector, reconciliation | projector tests (parts, shell command, summary, task and title sessions, cost attribute, no usage); reconcile tests for streaming update, deleted summary and rowid reuse; `crush_capture` smoke |
-| 7 History | backfill, window, busy retry, late project | backfill and crush-db tests; a project added to the index mid-run |
-| 8 Privacy | policy skip, session exclusions, D5 strip, D6 table guard, title rule | projector policy tests, exclusion admission test, a test that fails if any query names `files` or `read_files`, `source_optout_export_withhold` |
-| 9 Query | `ai_gateway_messages` rows | smoke SQL and grep readback |
+| 7 History | backfill, window, busy retry, late project, restart | backfill and crush-db tests; a project added to the index mid-run; a restart does not re-import; the sweep recovers sessions written while the daemon was down |
+| 8 Privacy | policy skip, session exclusions, local-only, D5 strip, D6 table guard, title rule | projector policy tests, exclusion admission test, a Crush local-only case in the smoke, a test that fails if any query names `files` or `read_files`, `source_optout_export_withhold` |
+| 9 Query | `ai_gateway_messages` rows, session graph | smoke SQL and grep readback; the session graph groups by Crush session id |
 | 10 Status | source health | source status tests for each row of #status |
 | 11 Cost | stat gate, rowid range read, open budget, tick budget, watermark cap | source tick tests on fixtures with many databases, sessions and messages; `EXPLAIN QUERY PLAN` check |
 | 12 Docs | `docs/integrations/crush.md`, `docs/INTEGRATIONS.md` row, README, CLIENTS, PRIVACY, TROUBLESHOOTING | doc commands run in the sandbox |
@@ -544,17 +600,19 @@ whose exclusions persist and whose backfill honors them, and states that the
 
 ## Open questions {#open-questions}
 
-- Mac Part A settles the macOS default index path, `projects.json` shape and
-  the migration version before T1's detect value is relied on. If the Mac
-  default differs, T1 changes `detect` and the resolver, and this design is
-  amended before Build continues.
+- Mac Part A (gate G-A in LLP 0574) settles the macOS default index path,
+  `projects.json` shape and the migration version before T2's detect value
+  is relied on. If the Mac default differs, T2 changes `detect` and the
+  resolver default, and this design is amended before T2 lands.
 - Build measures the reads with `EXPLAIN QUERY PLAN` on a fixture with many
   messages: the `messages` range read must search by rowid and the
   `MAX(rowid)` read must use `idx_messages_session_id`. The sessions read is
   an accepted scan. If either required search scans, Build stops and returns
   to design review rather than shipping it.
-- Build checks, on Linux and macOS, that a commit to a WAL database always
-  moves the `crush.db` or `crush.db-wal` stat signature, including a WAL
-  reset after checkpoint. If it does not, the gate falls back to a
+- The stat gate is partly observed: the Linux self-check (#sqlite) saw idle
+  reads leave `crush.db` and `-wal` unchanged and a commit move the `-wal`.
+  Still open: that every commit moves the `crush.db` or `crush.db-wal`
+  signature, including a WAL reset after checkpoint. T3 and T4 test that on
+  Linux, and T10 (Mac Part B) on macOS. If it does not hold, the gate falls back to a
   per-tick `data_version` read on a short-lived connection, which costs one
   open per database per tick and is bounded by the database cap.
