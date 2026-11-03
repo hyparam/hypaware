@@ -53,6 +53,7 @@ import { compareStrings } from '../util/compare_strings.js'
  *   configControl?: ConfigControlFacade,
  *   sourceWithholdResolver?: SourceWithholdResolver,
  *   redaction?: ExportRedactionConfig,
+ *   recordRedaction?: boolean,
  * }} [opts]
  * @returns {KernelRuntime}
  * @ref LLP 0003#intrinsic-not-plugin-provided [implements]: query + storage are wired in as intrinsic services, not plugin contributions
@@ -65,6 +66,7 @@ export function createKernelRuntime(opts = {}) {
     getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
     getSettleHook: (dataset) => query.getDataset(dataset)?.settleBatch,
     redaction: opts.redaction,
+    ...(opts.recordRedaction === false ? { recordRedaction: false } : {}),
     // @ref LLP 0070#enforce [implements]: every kernel boot enforces `local-only`
     // at the shared export read. The resolver's second source is the
     // machine-local list under `<stateDir>/usage-policy/`, and `cacheRoot` is

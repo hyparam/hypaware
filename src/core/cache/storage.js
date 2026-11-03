@@ -106,11 +106,12 @@ export function resolveIcebergDir(tablePath) {
  *   usagePolicyResolver?: UsagePolicyResolver,
  *   sourceWithholdResolver?: SourceWithholdResolver,
  *   redaction?: ExportRedactionConfig,
+ *   recordRedaction?: boolean,
  * }} args
  * @returns {ExtendedQueryStorageService}
  * @ref LLP 0013#write-path-and-query [implements]: kernel-owned cache write path; every source row lands here
  */
-export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver, redaction }) {
+export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver, redaction, recordRedaction = true }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
   const sessionPurges = createSessionPurgeStore(cacheRoot)
@@ -129,6 +130,8 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
    * @param {Set<Record<string, unknown>>} [done]
    */
   function recordRows(dataset, rows, done) {
+    // The server's cache stores rows clients already redacted; it skips this pass.
+    if (!recordRedaction) return { rows, redacted: 0, overBudget: 0 }
     const result = redactRecordRows(rows, done)
     if (result.overBudget > 0) {
       logger.warn('cache.record_redaction_over_budget', { [Attr.DATASET]: dataset, row_count: result.overBudget })

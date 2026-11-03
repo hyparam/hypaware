@@ -216,3 +216,33 @@ test('the record redactor returns the same batch and rows when nothing is masked
   assert.equal(masked.redacted, 1)
   assert.equal(masked.rows[0], rows[0])
 })
+
+test('a sensitive-file mask hides the payload but keeps timestamps and metadata, so the commit succeeds', async t => {
+  const cacheRoot = await tempCache(t)
+  const storage = createQueryStorageService({ cacheRoot })
+  /** @type {ColumnSpec[]} */
+  const columns = [...COLUMNS, { name: 'git_branch', type: 'STRING', nullable: true }, { name: 'client_version', type: 'STRING', nullable: true },
+    { name: 'conversation_started_at', type: 'TIMESTAMP', nullable: false }, { name: 'received_at', type: 'TIMESTAMP', nullable: true }]
+  const at = '2026-11-03T12:00:00.000Z'
+  const base = { client_name: 'claude', session_id: 'record-session', git_branch: 'main', client_version: '2.1.316', conversation_started_at: at, received_at: at }
+  await storage.appendRowsToPartition('messages', ['source=direct'], columns, [
+    { ...base, part_id: 'call', part_type: 'tool_call', tool_name: 'Read', tool_call_id: 'c1', tool_args: '{"file_path":"/work/.env"}', content_text: 'reading' },
+    { ...base, part_id: 'result', part_type: 'tool_result', tool_name: 'Read', tool_result_for: 'c1', content_text: 'DB_PASS=internal-only', raw_frame: '{"text":"DB_PASS=internal-only"}' },
+  ])
+  const rows = await committedRows(storage)
+  assert.equal(rows.length, 2)
+  for (const row of rows) {
+    assert.equal(new Date(/** @type {any} */ (row.conversation_started_at)).toISOString(), at)
+    assert.equal(row.git_branch, 'main')
+    assert.equal(row.client_version, '2.1.316')
+    assert.equal(JSON.stringify(row).includes('internal-only'), false)
+  }
+})
+
+test('a storage service built without record redaction persists rows as given', async t => {
+  const cacheRoot = await tempCache(t)
+  const storage = createQueryStorageService({ cacheRoot, recordRedaction: false })
+  await storage.appendRowsToPartition('messages', ['source=direct'], COLUMNS, [rowWith('plain', SECRETS.github, 0)])
+  const rows = await committedRows(storage)
+  assert.equal(rows[0].content_text, `before ${SECRETS.github} after`)
+})
