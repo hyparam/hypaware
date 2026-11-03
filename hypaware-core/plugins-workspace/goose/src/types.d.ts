@@ -123,6 +123,11 @@ export interface GoosePollRunner {
   exclusionsSignature?: string
 }
 
+/** Shares the running poll's runner with the backfill sweep (LLP 0570#backfill). */
+export interface GooseRunnerHolder {
+  runner?: GoosePollRunner
+}
+
 export interface GooseBusyRetryOptions {
   /** Maximum attempts (including the first) before giving up; defaults to `DEFAULT_BUSY_RETRY_ATTEMPTS`. */
   attempts?: number
