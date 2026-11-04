@@ -154,10 +154,12 @@ export async function writeFirstSyncHoldMarker({ stateDir, now = Date.now(), fs 
  * [LLP 0069](../../../llp/0069-local-only-dir-selection.spec.md) R6 protects;
  * what R6 forbids is a *silent* first forward, which nothing here can cause.
  *
- * Only ever called behind that prompt. The daemon never clears the marker,
- * so an unattended machine still waits out the full window.
+ * Called behind that prompt, and by the sink driver once it runs under an
+ * organization config that turns the hold off (LLP 0578). Otherwise the daemon
+ * never clears the marker, so an unattended machine still waits out the full
+ * window.
  *
- * @ref LLP 0101#no-release [implements]: the confirmed `hyp sync` is the one path that ends the window early
+ * @ref LLP 0101#no-release [implements]: the confirmed `hyp sync` is the one user path that ends the window early
  * @param {{ stateDir: string, fs?: typeof fsp }} opts
  * @returns {Promise<boolean>} true when a marker was removed, false when none was present
  */

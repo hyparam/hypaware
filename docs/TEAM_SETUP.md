@@ -74,8 +74,12 @@ When you are ready, run `hyp sync` to upload. Otherwise, uploads start when the
 pause expires.
 
 This review period applies to first-time browser sign-in. Signing in again or
-using `hyp join` with a token does not pause uploads. For unattended installs,
-set privacy controls before connecting; see [headless setup](integrations/ci-and-headless.md).
+using `hyp join` with a token does not pause uploads. An organization can turn
+this review period off by setting `"first_sync_hold": false` in its config.
+People then get no time to review before their first upload: a machine uploads
+once it receives that config, even if it is already paused. If your
+organization turns it off, or for unattended installs, set privacy controls
+before connecting; see [headless setup](integrations/ci-and-headless.md).
 
 ## Verify the setup
 
