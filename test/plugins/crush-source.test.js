@@ -466,6 +466,9 @@ test('an exclusions store that cannot load fails the tick closed', async () => {
   assert.equal(harness.committed.length, 0)
   assert.equal(JSON.stringify(readCrushWatermark(harness.dir)), before, 'nothing advances')
   assert.equal(runner.lastErrorKind, 'session_ignore_load_failed')
+  assert.equal(runner.lastError,
+    'Session exclusions could not be loaded; capture is disabled. Repair the session-ignores store and restart HypAware.',
+    'the repair sentence reaches status')
   assert.equal(harness.logs.find(entry => entry.message === 'crush.poll' && entry.level === 'error')?.fields?.error_kind,
     'session_ignore_load_failed')
 

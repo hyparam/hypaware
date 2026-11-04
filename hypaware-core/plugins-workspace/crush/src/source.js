@@ -239,7 +239,8 @@ export async function runCrushPollTick(runner, ctx) {
         // @ref LLP 0573#privacy [implements]: `withSpan` records the thrown
         // message, which can name a database path; the span gets the kind
         // and a path-free error. Status keeps the message only of a
-        // `CrushDbError`, whose text never names a path.
+        // `CrushDbError` or `CrushSessionIgnoreError`, whose texts never
+        // name a path.
         failure = err
         const kind = errorKind(err)
         span.setAttribute('error_kind', kind)
@@ -252,7 +253,9 @@ export async function runCrushPollTick(runner, ctx) {
   } catch (thrown) {
     const err = failure ?? thrown
     runner.lastErrorKind = errorKind(err)
-    runner.lastError = err instanceof CrushDbError ? err.message : `crush poll failed: ${runner.lastErrorKind}`
+    runner.lastError = err instanceof CrushDbError || err instanceof CrushSessionIgnoreError
+      ? err.message
+      : `crush poll failed: ${runner.lastErrorKind}`
     ctx.log.error('crush.poll', {
       component: 'crush',
       operation: 'crush.poll',
@@ -789,7 +792,7 @@ function refreshExclusions(runner) {
     try {
       refreshSessionIgnores(set)
     } catch {
-      throw new CrushSessionIgnoreError('session exclusions could not be loaded')
+      throw new CrushSessionIgnoreError(sessionIgnoreLoadError(set) ?? 'session exclusions could not be loaded')
     }
     runner.exclusionsSignature = signature
   }
