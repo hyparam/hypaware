@@ -356,7 +356,11 @@ export async function runReportSave(argv, ctx) {
       return 1
     }
     try {
-      // POSIX rename replaces the empty directory this save just claimed.
+      // POSIX rename replaces the empty directory this save just claimed; on
+      // win32 rename never replaces a directory, so release the claimed slot
+      // first. A concurrent save that reclaims the name in that gap makes the
+      // rename fail, which the catch below reports with nothing saved.
+      if (process.platform === 'win32') await fs.rmdir(dest)
       await fs.rename(staging, dest)
     } catch (err) {
       await fs.rmdir(dest).catch(() => {})

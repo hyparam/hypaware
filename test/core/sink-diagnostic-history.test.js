@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createSinkDriver } from '../../src/core/sinks/driver.js'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
-import { createDiagnosticHistory } from '../../src/core/sinks/diagnostic_history.js'
+import { batchIdTime, createDiagnosticHistory } from '../../src/core/sinks/diagnostic_history.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 async function stage(t, options = {}) {
@@ -44,9 +44,22 @@ async function stage(t, options = {}) {
   return { hypHome, stateRoot, dir, driver, snapshot, succeed() { outcome = { status: 'exported', partitionsExported: 0, error: '' } } }
 }
 
+// Symlink fixtures only run where an unprivileged process can create one.
+const CAN_SYMLINK = process.platform !== 'win32'
+
+/**
+ * The outbox filename a batch started at `isoStartedAt` gets, in this host's
+ * spelling (win32 ids drop the time's colons).
+ * @param {string} instance @param {string} isoStartedAt @param {number} seq
+ */
+function batchFile(instance, isoStartedAt, seq) {
+  return `${instance}-${batchIdTime(new Date(isoStartedAt))}-${seq}.json`
+}
+
 async function record(dir, instance, sequence, startedAt, recordedAt, tail = '') {
-  const batchId = `${instance}-${startedAt}-${sequence}`
-  const file = path.join(dir, `${batchId}.json`)
+  const name = batchFile(instance, startedAt, sequence)
+  const batchId = name.slice(0, -'.json'.length)
+  const file = path.join(dir, name)
   await fs.writeFile(file, recordedAt === undefined ? '{}' : `{"batchId":${JSON.stringify(batchId)},"sinkInstance":${JSON.stringify(instance)},"recordedAt":${JSON.stringify(recordedAt)},"partitions":[${tail}]}`)
   return file
 }
@@ -89,9 +102,11 @@ test('future recordedAt is not warning evidence and symlinks are not followed', 
   const s = await stage(t)
   const now = Date.now()
   await record(s.dir, 'central', 1, new Date(now - 60000).toISOString(), new Date(now + 60000).toISOString())
-  const outside = path.join(s.hypHome, 'outside.json')
-  await fs.writeFile(outside, '{}')
-  await fs.symlink(outside, path.join(s.dir, `central-${new Date(now - 30000).toISOString()}-2.json`))
+  if (CAN_SYMLINK) {
+    const outside = path.join(s.hypHome, 'outside.json')
+    await fs.writeFile(outside, '{}')
+    await fs.symlink(outside, path.join(s.dir, batchFile('central', new Date(now - 30000).toISOString(), 2)))
+  }
   const report = await s.snapshot()
   assert.equal(report.diagnostics.some(d => d.kind === 'sink_export_failing'), false)
   assert.equal(report.recentErrorCount, 1, 'future ordinary file retains historical counting rule, symlink contributes nothing')
@@ -104,15 +119,15 @@ test('initial historical cleanup ranks recordedAt, preserves unknown names and p
   for (let i = 1; i <= 180; i++) await record(s.dir, 'central', i, started, new Date(now - i * 1000).toISOString())
   await fs.writeFile(path.join(s.dir, 'notes.json'), 'keep')
   await record(s.dir, 'other', 1, started, started)
-  const symlink = path.join(s.dir, `central-${started}-999.json`)
-  await fs.symlink(path.join(s.hypHome, 'missing'), symlink)
+  const symlink = path.join(s.dir, batchFile('central', started, 999))
+  if (CAN_SYMLINK) await fs.symlink(path.join(s.hypHome, 'missing'), symlink)
   await s.driver.tick({ force: true })
   const files = await fs.readdir(s.dir)
-  assert.equal(files.length, 103)
-  assert.ok(files.includes(`central-${started}-1.json`), 'metadata determines history rank, not sequence')
-  assert.equal(files.includes(`central-${started}-180.json`), false)
+  assert.equal(files.length, CAN_SYMLINK ? 103 : 102)
+  assert.ok(files.includes(batchFile('central', started, 1)), 'metadata determines history rank, not sequence')
+  assert.equal(files.includes(batchFile('central', started, 180)), false)
   assert.equal(await fs.readFile(path.join(s.dir, 'notes.json'), 'utf8'), 'keep')
-  assert.ok((await fs.lstat(symlink)).isSymbolicLink())
+  if (CAN_SYMLINK) assert.ok((await fs.lstat(symlink)).isSymbolicLink())
 })
 
 test('age beyond 24 hours and equal recordedAt do not clear a failure; malformed metadata falls back', async t => {
@@ -122,7 +137,7 @@ test('age beyond 24 hours and equal recordedAt do not clear a failure; malformed
   let report = await s.snapshot(old)
   assert.equal(report.recentErrorCount, 0)
   assert.ok(report.diagnostics.some(d => d.kind === 'sink_export_failing'))
-  await fs.writeFile(path.join(s.dir, `central-${old}-1.json`), '{"recordedAt":"invalid","partitions":[')
+  await fs.writeFile(path.join(s.dir, batchFile('central', old, 1)), '{"recordedAt":"invalid","partitions":[')
   report = await s.snapshot('invalid')
   assert.ok(report.diagnostics.some(d => d.kind === 'sink_export_failing'))
 })
@@ -134,7 +149,7 @@ test('failed atomic publication preserves older evidence and original export rea
   const old = new Date(now.getTime() - 60000).toISOString()
   for (let i = 1; i <= 110; i++) await record(s.dir, 'central', i, old, old)
   // An existing directory makes the final rename fail without replacing old files.
-  const target = path.join(s.dir, `central-${now.toISOString()}-1.json`)
+  const target = path.join(s.dir, batchFile('central', now.toISOString(), 1))
   await fs.mkdir(target)
   const reports = await s.driver.tick({ force: true, now })
   assert.equal(reports.sinks[0].error, 'synthetic outage')
@@ -198,13 +213,13 @@ test('large history streams once, honors legacy/tie rank and serializes maintena
   const history = createDiagnosticHistory(s.dir, 'central', code => errors.push(code))
   await history.maintain()
   assert.equal((await fs.readdir(s.dir)).length, 400)
-  assert.ok(await fs.stat(path.join(s.dir, `central-${old}-2500.json`)))
-  await assert.rejects(fs.stat(path.join(s.dir, `central-${old}-2400.json`)), { code: 'ENOENT' })
+  assert.ok(await fs.stat(path.join(s.dir, batchFile('central', old, 2500))))
+  await assert.rejects(fs.stat(path.join(s.dir, batchFile('central', old, 2400))), { code: 'ENOENT' })
   assert.equal(scans, 2, 'one selection pass and one deletion pass')
   for (let i = 1; i <= 12; i++) {
     // A deliberately older fresh record still survives its own pruning.
     const started = new Date(Date.now() - 2 * 86400000).toISOString()
-    const name = `central-${started}-${i}.json`
+    const name = batchFile('central', started, i)
     await Promise.all([
       history.publish(name, async () => { await record(s.dir, 'central', i, started, started) }),
       history.maintain(), history.maintain(),
@@ -217,14 +232,14 @@ test('large history streams once, honors legacy/tie rank and serializes maintena
 })
 
 
-test('a colliding symlink prevents publication and preserves its target and history', async t => {
+test('a colliding symlink prevents publication and preserves its target and history', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async t => {
   const s = await stage(t)
   const now = new Date()
   const old = new Date(now.getTime() - 60000).toISOString()
   for (let i = 1; i <= 110; i++) await record(s.dir, 'central', i, old, old)
   const outside = path.join(s.hypHome, 'outside')
   await fs.writeFile(outside, 'private sentinel')
-  const target = path.join(s.dir, `central-${now.toISOString()}-1.json`)
+  const target = path.join(s.dir, batchFile('central', now.toISOString(), 1))
   await fs.symlink(outside, target)
   const result = await s.driver.tick({ force: true, now })
   assert.equal(result.sinks[0].error, 'synthetic outage')
@@ -260,7 +275,7 @@ test('future history preserves actionable evidence through cleanup, retry, publi
   assert.equal(await warning(), true, 'retry cannot erase warning without any success')
   assert.ok(await fs.stat(actionable))
   assert.equal((await fs.readdir(s.dir)).length, 100)
-  const newFuture = `central-${future}-102.json`
+  const newFuture = batchFile('central', future, 102)
   await history.publish(newFuture, () => record(s.dir, 'central', 102, future, future).then(() => {}))
   assert.ok(await fs.stat(path.join(s.dir, newFuture)), 'newly published record stays protected alongside actionable evidence')
   assert.ok(await fs.stat(actionable))

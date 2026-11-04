@@ -33,6 +33,9 @@ const result = await runInitWizard(/** @type {any} */ ({
   stdout: process.stdout,
   stderr: process.stderr,
   env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1' },
+  // The closing-pipe behavior under test is platform-independent; the injected
+  // platform keeps the wizard's setup gate (#975) from refusing on win32.
+  platform: 'linux',
   ctx: { commands: { run: async () => 0 } },
   capabilities: { has: () => false },
   catalog,

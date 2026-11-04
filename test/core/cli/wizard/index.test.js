@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { temporaryDirectory } from '../../../helpers/temp_dir.js'
+import { writeFakeExecutable } from '../../../helpers/fake_executable.js'
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { DurableBinRequiredError } from '../../../../src/core/cli/global_install.js'
@@ -192,6 +193,9 @@ function wizardOpts(home, over = {}) {
     stdout,
     stderr,
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1' },
+    // The lanes under test are platform-independent; the injected platform
+    // keeps the wizard's setup gate (#975) from refusing on a win32 host.
+    platform: 'linux',
     ctx: /** @type {any} */ ({ commands: { run: async () => 0 } }),
     capabilities: /** @type {any} */ ({ has: () => false }),
     catalog: emptyCatalog(),
@@ -1232,8 +1236,13 @@ test('runInitWizard: the durable CLI is settled before the fork and its answer r
   assert.equal(result.exitCode, 0)
   assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
   assert.deepEqual(npm.calls[0], ['install', '-g', 'hypaware'])
-  assert.equal(opts._joinOpts.binPath, '/tmp/global/bin/hypaware', 'enrollment installs the settled CLI')
-  assert.equal(opts._finaleArgs.finale.binPath, '/tmp/global/bin/hypaware', 'the finale records the same CLI')
+  // The settled path follows the host's npm global layout: <prefix>/bin/<name>
+  // on POSIX, <prefix>\<name>.cmd on Windows.
+  const settledBin = process.platform === 'win32'
+    ? path.join('/tmp/global', 'hypaware.cmd')
+    : '/tmp/global/bin/hypaware'
+  assert.equal(opts._joinOpts.binPath, settledBin, 'enrollment installs the settled CLI')
+  assert.equal(opts._finaleArgs.finale.binPath, settledBin, 'the finale records the same CLI')
 })
 
 test('runInitWizard: refusing the temporary CLI ends the run before the fork, with nothing written', async () => {
@@ -1817,8 +1826,7 @@ async function reportReadyHome({ skill, agent = skill }) {
     await fs.writeFile(file, '# analyst\n')
   }
   const bin = path.join(home, 'bin')
-  await fs.mkdir(bin, { recursive: true })
-  await fs.writeFile(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  await writeFakeExecutable(bin, 'claude')
   return { home, env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', PATH: bin } }
 }
 

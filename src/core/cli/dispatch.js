@@ -282,7 +282,7 @@ async function dispatchInternal(argv, opts) {
   // setup form here, ahead of the boot and the first network call. A help flag
   // anywhere in its argv still reaches the setup help below.
   if ((argv.length === 0 || earlyMatch?.command.name === 'setup') && !earlyMatch?.rest.some(isHelpFlag)) {
-    const refused = refuseUnsupportedSetupPlatform(stderr)
+    const refused = refuseUnsupportedSetupPlatform(stderr, opts.platform)
     if (refused !== undefined) return refused
   }
   if (earlyMatch?.command.name !== 'version' && !isHelpFlag(earlyMatch?.rest[0])) startInvocationDelivery()
@@ -554,6 +554,9 @@ async function dispatchInternal(argv, opts) {
       stdin,
       env,
       cwd,
+      // The platform seam travels with the context so the wizard's own gate
+      // (runInitWizard reads opts.platform) honors the same injection.
+      ...(opts.platform ? { platform: opts.platform } : {}),
       // Same owner, same rule: a plugin's command body reads the config through
       // its own slice, so contributing a command stops being a way to read a
       // neighbour's section and the inline credential in it (issue #1978). A

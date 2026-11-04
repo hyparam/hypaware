@@ -274,31 +274,37 @@ test('findInstalledHypawareBin only accepts a durable, runnable entry', async (t
     await fs.chmod(file, 0o755)
   }
 
+  // The walk probes PATHEXT spellings on win32 and never the bare name, so
+  // the fixtures carry the extension there (pinned via env.PATHEXT below).
+  const BIN = process.platform === 'win32' ? 'hypaware.cmd' : 'hypaware'
+  const PATHEXT = process.platform === 'win32' ? { PATHEXT: '.cmd' } : {}
   // npx's own shim directory, which sits at the FRONT of `$PATH` on the run
   // this helper exists for: resolving it re-records the cache path.
   const npxBinDir = path.join(root, '.npm', '_npx', 'a1b2c3', 'node_modules', '.bin')
-  await writeExecutable(path.join(npxBinDir, 'hypaware'))
-  // A directory named `hypaware`: searchable, so `access(X_OK)` says yes.
+  await writeExecutable(path.join(npxBinDir, BIN))
+  // A directory named like the command: searchable, so `access(X_OK)` says yes.
   const dirTrap = path.join(root, 'dir-trap')
-  await fs.mkdir(path.join(dirTrap, 'hypaware'), { recursive: true })
-  // A dangling link, the residue of an uninstall or a node version switch.
+  await fs.mkdir(path.join(dirTrap, BIN), { recursive: true })
+  // A dangling link, the residue of an uninstall or a node version switch
+  // (only where an unprivileged process can create one).
   const danglingDir = path.join(root, 'dangling')
   await fs.mkdir(danglingDir, { recursive: true })
-  await fs.symlink(path.join(root, 'gone'), path.join(danglingDir, 'hypaware'))
+  if (process.platform !== 'win32') await fs.symlink(path.join(root, 'gone'), path.join(danglingDir, BIN))
   // A project-local install. Real, executable, and on `$PATH` for the whole of
   // an `npx` or `npm run`, but the next `npm ci` deletes it, so recording it
   // rots the same way the cache path does and with no `_npx` to give it away.
   const projectBinDir = path.join(root, 'proj', 'node_modules', '.bin')
-  await writeExecutable(path.join(projectBinDir, 'hypaware'))
+  await writeExecutable(path.join(projectBinDir, BIN))
   const globalBinDir = path.join(root, 'npm-global', 'bin')
-  await writeExecutable(path.join(globalBinDir, 'hypaware'))
+  await writeExecutable(path.join(globalBinDir, BIN))
 
   const npmCache = path.join(root, '.npm')
   const env = {
     npm_config_cache: npmCache,
+    ...PATHEXT,
     PATH: [npxBinDir, dirTrap, danglingDir, projectBinDir, globalBinDir].join(path.delimiter),
   }
-  assert.equal(findInstalledHypawareBin(env), path.join(globalBinDir, 'hypaware'))
+  assert.equal(findInstalledHypawareBin(env), path.join(globalBinDir, BIN))
 
   // And with nothing durable at all behind it, a project-local copy is still
   // not the answer: `undefined` sends the caller to its own fallback.
@@ -339,14 +345,19 @@ test('findInstalledHypawareBin resumes the walk past a candidate accept rejects'
     await fs.chmod(file, 0o755)
   }
 
+  // The walk probes PATHEXT spellings on win32, pinned via env.PATHEXT.
+  const BIN = process.platform === 'win32' ? 'hypaware.cmd' : 'hypaware'
   const shimDir = path.join(root, 'shim', 'bin')
   const wantedDir = path.join(root, 'wanted', 'bin')
-  await writeExecutable(path.join(shimDir, 'hypaware'))
-  await writeExecutable(path.join(wantedDir, 'hypaware'))
-  const env = { PATH: [shimDir, wantedDir].join(path.delimiter) }
+  await writeExecutable(path.join(shimDir, BIN))
+  await writeExecutable(path.join(wantedDir, BIN))
+  const env = {
+    ...(process.platform === 'win32' ? { PATHEXT: '.cmd' } : {}),
+    PATH: [shimDir, wantedDir].join(path.delimiter),
+  }
 
   // Without a filter the first entry still wins, unchanged.
-  assert.equal(findInstalledHypawareBin(env), path.join(shimDir, 'hypaware'))
+  assert.equal(findInstalledHypawareBin(env), path.join(shimDir, BIN))
 
   /** @type {string[]} */
   const seen = []
@@ -356,9 +367,9 @@ test('findInstalledHypawareBin resumes the walk past a candidate accept rejects'
   }
   assert.equal(
     findInstalledHypawareBin(env, process.platform, accept),
-    path.join(wantedDir, 'hypaware')
+    path.join(wantedDir, BIN)
   )
-  assert.deepEqual(seen, [path.join(shimDir, 'hypaware'), path.join(wantedDir, 'hypaware')])
+  assert.deepEqual(seen, [path.join(shimDir, BIN), path.join(wantedDir, BIN)])
 
   // A filter nothing satisfies is `undefined`, not the last thing it walked.
   assert.equal(findInstalledHypawareBin(env, process.platform, () => false), undefined)
@@ -483,7 +494,9 @@ for (const scenario of [
     const answers = [...scenario.answers]
     const stderr = makeBuf()
     let installs = 0
-    const binPath = '/tmp/_npx/hypaware/bin/hypaware.js'
+    // Pre-resolved: the keep-existing return carries the resolved spelling,
+    // which on win32 gains a drive letter and backslashes.
+    const binPath = path.resolve('/tmp/_npx/hypaware/bin/hypaware.js')
     const operation = ensureDurableBin({
       binPath, env: {}, stdout: makeBuf(), stderr, interactive: true,
       confirm: async (question) => {
@@ -510,7 +523,7 @@ for (const scenario of [
 
 test('headless durable CLI fails closed unless force permits the original path', async () => {
   for (const force of [false, true]) {
-    const binPath = '/tmp/_npx/hypaware/bin/hypaware.js'
+    const binPath = path.resolve('/tmp/_npx/hypaware/bin/hypaware.js')
     const stderr = makeBuf()
     const operation = ensureDurableBin({
       binPath, env: {}, stdout: makeBuf(), stderr, interactive: false, force,
@@ -525,7 +538,7 @@ test('headless durable CLI fails closed unless force permits the original path',
 })
 
 test('a prefix lookup failure also allows an explicit temporary fallback', async () => {
-  const binPath = '/tmp/_npx/hypaware/bin/hypaware.js'
+  const binPath = path.resolve('/tmp/_npx/hypaware/bin/hypaware.js')
   const stderr = makeBuf()
   const result = await ensureDurableBin({
     binPath, env: {}, stdout: makeBuf(), stderr, interactive: false, force: true,
@@ -535,7 +548,7 @@ test('a prefix lookup failure also allows an explicit temporary fallback', async
   assert.match(stderr.text(), /npm config get prefix failed/)
 })
 
-test('PATH guidance ignores npm temporary bins and quotes paths without editing the shell', async (t) => {
+test('PATH guidance ignores npm temporary bins and quotes paths without editing the shell', { skip: process.platform === 'win32' && 'the guidance is a POSIX-shell surface (export PATH=), and its alias probe needs symlinks' }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "hyp-path's-"))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   const binDir = path.join(root, 'global bin')

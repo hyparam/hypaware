@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
+import { batchIdTime } from '../../src/core/sinks/diagnostic_history.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { renderStatusSummary } from '../../src/core/commands/status.js'
@@ -81,7 +82,9 @@ async function writeOutbox(stateRoot, instance, batches) {
   for (const batch of batches) {
     seq += 1
     const recordedAt = new Date(Date.now() - batch.agoMs).toISOString()
-    const batchId = `${instance}-${recordedAt}-${seq}`
+    // The filename uses the host's batch-id spelling (win32 drops the
+    // time's colons); the JSON body keeps the plain ISO string.
+    const batchId = `${instance}-${batchIdTime(new Date(recordedAt))}-${seq}`
     await fs.writeFile(path.join(dir, `${batchId}.json`), JSON.stringify({
       batchId,
       sinkInstance: instance,
@@ -576,9 +579,10 @@ test('export warning: a success sharing the failure millisecond warns, one milli
   t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
   const outbox = path.join(stateRoot, 'sinks', 'central', 'outbox')
   const [batchFile] = await fs.readdir(outbox)
-  const stamp = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\d+\.json$/.exec(batchFile)
+  // The time's colons are optional in the stamp: win32 ids drop them.
+  const stamp = /-(\d{4}-\d{2}-\d{2}T\d{2}):?(\d{2}):?(\d{2}\.\d{3}Z)-\d+\.json$/.exec(batchFile)
   assert.ok(stamp, `the fixture filename carries the batch stamp: ${batchFile}`)
-  const failedAtMs = Date.parse(stamp[1])
+  const failedAtMs = Date.parse(`${stamp[1]}:${stamp[2]}:${stamp[3]}`)
 
   /** @param {number} ms */
   const reportWithSuccessAt = async (ms) => {
@@ -776,11 +780,11 @@ test('export warning: an unreadable central layer still warns about a failing si
 // naming a gone slot, a pointer that is a regular file, or a control
 // directory this process cannot list. None is the operator removing the
 // destination, so each keeps the warning a parse failure keeps (issue #2432).
-/** @type {Array<[string, (controlDir: string) => Promise<void>]>} */
+/** @type {Array<[string, (controlDir: string) => Promise<void>, (string | false)?]>} */
 const UNREADABLE_CENTRAL_WITHOUT_PARSE = [
   ['an active pointer naming a gone slot', async (controlDir) => {
     await fs.symlink('config.b.json', path.join(controlDir, 'active'))
-  }],
+  }, process.platform === 'win32' && 'symlink creation needs Developer Mode on win32'],
   ['an active pointer that is a regular file', async (controlDir) => {
     await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2, plugins: [] }))
     await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
@@ -788,12 +792,12 @@ const UNREADABLE_CENTRAL_WITHOUT_PARSE = [
   ['a central config directory that cannot be listed', async (controlDir) => {
     await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2, plugins: [] }))
     await fs.chmod(controlDir, 0o000)
-  }],
+  }, process.platform === 'win32' && 'chmod 0o000 does not make a directory unlistable on win32'],
 ]
 
-for (const [label, arrange] of UNREADABLE_CENTRAL_WITHOUT_PARSE) {
+for (const [label, arrange, skip] of UNREADABLE_CENTRAL_WITHOUT_PARSE) {
   // @ref LLP 0453#warning-rule [tests]: every unreadable central state is uncertainty, not a configured-set removal, so the destination still warns
-  test(`export warning: ${label} still warns about a failing sink`, async (t) => {
+  test(`export warning: ${label} still warns about a failing sink`, { skip: skip ?? false }, async (t) => {
     const { hypHome, stateRoot } = await makeHome()
     const controlDir = path.dirname(centralSeedPath(stateRoot))
     t.after(async () => {
