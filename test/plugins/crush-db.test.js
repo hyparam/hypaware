@@ -50,7 +50,7 @@ function seed(dbPath) {
 
 /**
  * @param {TestContext} t
- * @returns {Promise<{ dir: string, dbPath: string }>}
+ * @returns {Promise<{ dir: string, dbPath: string, closeAtEnd: <T extends { close(): unknown }>(handle: T) => T }>}
  */
 async function fixture(t) {
   const dir = await tmpDir()

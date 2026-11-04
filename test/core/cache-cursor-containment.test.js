@@ -28,8 +28,6 @@ import { createQueryStorageService } from '../../src/core/cache/storage.js'
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
-const SKIP_SYMLINKS = process.platform === 'win32' && 'symlink creation needs Developer Mode on win32'
-
 /** @type {ColumnSpec[]} */
 const SESSION_COLUMNS = [
   { name: 'id', type: 'INT32', nullable: false },
@@ -360,11 +358,11 @@ async function plantSymlinkedGeneration(partition, outside, name) {
   const precious = path.join(outside, 'metadata', 'precious.txt')
   await fs.writeFile(precious, 'a file the cache has no business in')
   await fs.utimes(precious, STALE, STALE)
-  await fs.symlink(outside, path.join(partition, name), 'dir')
+  await fs.symlink(outside, path.join(partition, name), process.platform === 'win32' ? 'junction' : 'dir')
   return { leak, precious }
 }
 
-test('a tableDir naming a symlink out of the partition sweeps nothing at its target', { skip: SKIP_SYMLINKS }, async () => {
+test('a tableDir naming a symlink out of the partition sweeps nothing at its target', async () => {
   const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
   try {
     const dir = partitionDir(cacheRoot)
@@ -388,7 +386,7 @@ test('a tableDir naming a symlink out of the partition sweeps nothing at its tar
 
 // The default generation name is the same door: nothing about `table` makes
 // it likelier to be a real directory than `table-<ms>` is.
-test('a tableDir naming a symlinked default generation is rejected too', { skip: SKIP_SYMLINKS }, async () => {
+test('a tableDir naming a symlinked default generation is rejected too', async () => {
   const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
   try {
     const dir = partitionDir(cacheRoot)
@@ -443,11 +441,11 @@ test('a tableDir naming no directory at all is still a name this partition owns'
 // containment check can plausibly break: `$HYP_HOME` on another volume, or
 // `/tmp` pointing at `/private/tmp` on macOS. The check reads the last
 // component and nothing above it, so the lifecycle is untouched.
-test('a cache reached through a symlinked ancestor keeps every cursor readable', { skip: SKIP_SYMLINKS }, async () => {
+test('a cache reached through a symlinked ancestor keeps every cursor readable', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cursor-symlinked-home-'))
   try {
     await fs.mkdir(path.join(root, 'volume', 'hyp-home'), { recursive: true })
-    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), 'dir')
+    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), process.platform === 'win32' ? 'junction' : 'dir')
     const cacheRoot = path.join(root, 'home', 'hyp-home', 'cache')
 
     await appendRowsToSourceTable(
@@ -552,13 +550,13 @@ test('append, generation swap, and retention leave every cursor readable', async
 // #not-a-symlink covers the name the cursor writes down; these cover the two
 // names it does not, and the two path components below them.
 
-test('a cursor that names no generation is still not a pointer to one', { skip: SKIP_SYMLINKS }, async () => {
+test('a cursor that names no generation is still not a pointer to one', async () => {
   const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
   try {
     const dir = partitionDir(cacheRoot)
     const leak = await plantStaleStagedName(outside)
     await fs.rm(path.join(dir, 'table'), { recursive: true, force: true })
-    await fs.symlink(outside, path.join(dir, 'table'), 'dir')
+    await fs.symlink(outside, path.join(dir, 'table'), process.platform === 'win32' ? 'junction' : 'dir')
     // The pre-`tableDir` spelling: legitimate, and it still resolves to a
     // generation name every reader joins onto the partition path.
     const { epoch, rowCount } = readCursorSync(dir)
@@ -578,13 +576,13 @@ test('a cursor that names no generation is still not a pointer to one', { skip: 
   }
 })
 
-test('a legacy epoch cursor resolves a default name too, and it is asked the same question', { skip: SKIP_SYMLINKS }, async () => {
+test('a legacy epoch cursor resolves a default name too, and it is asked the same question', async () => {
   const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
   try {
     const dir = partitionDir(cacheRoot)
     await plantStaleStagedName(outside)
     await fs.rm(path.join(dir, 'table'), { recursive: true, force: true })
-    await fs.symlink(outside, path.join(dir, 'epoch=0'), 'dir')
+    await fs.symlink(outside, path.join(dir, 'epoch=0'), process.platform === 'win32' ? 'junction' : 'dir')
     await fs.writeFile(path.join(dir, 'cursor.json'), JSON.stringify({ epoch: 0, rowCount: 1, compaction: null }))
 
     assert.equal(tryReadCursorSync(dir), null, '`epoch=<n>` is a generation name the readers resolve')
@@ -606,10 +604,10 @@ async function plantSymlinkedComponent(cacheRoot, outside, component) {
   const generation = path.join(partitionDir(cacheRoot), 'table')
   await fs.rm(path.join(generation, component), { recursive: true, force: true })
   await fs.mkdir(path.join(outside, component), { recursive: true })
-  await fs.symlink(path.join(outside, component), path.join(generation, component), 'dir')
+  await fs.symlink(path.join(outside, component), path.join(generation, component), process.platform === 'win32' ? 'junction' : 'dir')
 }
 
-test('the sweep reclaims nothing through a symlinked metadata directory', { skip: SKIP_SYMLINKS }, async () => {
+test('the sweep reclaims nothing through a symlinked metadata directory', async () => {
   const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
   try {
     const leak = await plantStaleStagedName(outside)
@@ -627,7 +625,7 @@ test('the sweep reclaims nothing through a symlinked metadata directory', { skip
   }
 })
 
-test('the sweep reclaims nothing through a symlinked data directory either', { skip: SKIP_SYMLINKS }, async () => {
+test('the sweep reclaims nothing through a symlinked data directory either', async () => {
   const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
   try {
     await plantSymlinkedComponent(cacheRoot, outside, 'data')
@@ -666,11 +664,11 @@ test('the sweep still reclaims a stale staged name inside a generation it owns',
 // The same control through a symlinked ancestor, which is where a guard
 // spelled as a canonicalization (`realpath(p) === p`) stops sweeping and a
 // guard spelled as `lstat` does not.
-test('and still reclaims it in a cache reached through a symlinked ancestor', { skip: SKIP_SYMLINKS }, async () => {
+test('and still reclaims it in a cache reached through a symlinked ancestor', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sweep-symlinked-home-'))
   try {
     await fs.mkdir(path.join(root, 'volume', 'hyp-home'), { recursive: true })
-    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), 'dir')
+    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), process.platform === 'win32' ? 'junction' : 'dir')
     const cacheRoot = path.join(root, 'home', 'hyp-home', 'cache')
     await appendRowsToSourceTable(
       cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
@@ -709,7 +707,7 @@ function spoolInto(cacheRoot, sink) {
 /** @type {ColumnSpec[]} */
 const ID_COLUMN = [{ name: 'id', type: 'INT32', nullable: false }]
 
-test('the spool flush reads and unlinks nothing through a symlinked spool directory', { skip: SKIP_SYMLINKS }, async () => {
+test('the spool flush reads and unlinks nothing through a symlinked spool directory', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-spool-escape-'))
   try {
     const cacheRoot = path.join(root, 'cache')
@@ -717,7 +715,7 @@ test('the spool flush reads and unlinks nothing through a symlinked spool direct
     const outside = path.join(root, 'outside')
     await fs.mkdir(tablePath, { recursive: true })
     await fs.mkdir(outside, { recursive: true })
-    await fs.symlink(outside, path.join(tablePath, SPOOL_DIR), 'dir')
+    await fs.symlink(outside, path.join(tablePath, SPOOL_DIR), process.platform === 'win32' ? 'junction' : 'dir')
     // The one file shape the drain reads and then removes by path.
     const planted = path.join(outside, 'flush-1700000000000-1-abcdef.jsonl')
     await fs.writeFile(planted, 'bytes that belong to whoever owns this directory\n')
@@ -759,11 +757,11 @@ test('an ordinary spool still drains and still reclaims its own flush files', as
   }
 })
 
-test('and a spool reached through a symlinked ancestor drains like any other', { skip: SKIP_SYMLINKS }, async () => {
+test('and a spool reached through a symlinked ancestor drains like any other', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-spool-symlinked-home-'))
   try {
     await fs.mkdir(path.join(root, 'volume', 'hyp-home'), { recursive: true })
-    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), 'dir')
+    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), process.platform === 'win32' ? 'junction' : 'dir')
     const cacheRoot = path.join(root, 'home', 'hyp-home', 'cache')
     const tablePath = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
     await fs.mkdir(tablePath, { recursive: true })
