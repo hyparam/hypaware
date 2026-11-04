@@ -24,7 +24,7 @@ under HYP_HOME. The source drains that journal automatically, including records
 left by an application that has exited. This removes a network delivery loop
 from the application and makes collector outages ordinary pending files.
 
-The journal has 256 fixed reservation slots, each holding at most 512 KiB.
+The journal has 256 fixed reservation slots, each holding at most 5 MiB.
 Exclusive directory creation reserves a slot across producer processes; atomic
 rename publishes a complete event. A failed or full journal never fails the
 agent. Status on the callback reports dropped events and errors. Staging
@@ -82,7 +82,7 @@ have one implementation. No new runtime packages are installed by HypAware.
 
 The callback supports synchronous and asynchronous graph execution through
 LangChain's synchronous callback dispatch. Its lock serializes concurrent callback
-threads. IPC carries at most one 512 KiB event and one bounded acknowledgement;
+threads. IPC carries at most one 5 MiB event and one bounded acknowledgement;
 a ten-second timeout closes a broken helper and marks capture failed without
 failing the application. There is no background payload retry queue. Collector
 outages do not interrupt this helper: completed events remain in the same disk

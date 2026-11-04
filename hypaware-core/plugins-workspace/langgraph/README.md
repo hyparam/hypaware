@@ -65,7 +65,7 @@ their LangChain callbacks for token counts to be available.
 Completed events are saved locally while HypAware is stopped and collected when
 it restarts, even if the application has exited. Replaying saved events does not
 duplicate session rows or token usage. The private queue holds 256 events of at
-most 512 KiB each. Oversized events or a full queue drop recording of that event;
+most 5 MiB each. Oversized events or a full queue drop recording of that event;
 they do not fail the application. An application killed during an unfinished
 model/tool call cannot supply its result. Disk/policy failures appear in source
 status or callback status. Unknown-owner staging slots require manual inspection

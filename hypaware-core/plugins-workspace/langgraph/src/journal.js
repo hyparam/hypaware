@@ -3,7 +3,7 @@ import { constants } from 'node:fs'
 import path from 'node:path'
 import { randomInt } from 'node:crypto'
 
-export const MAX_EVENT_BYTES = 512 * 1024
+export const MAX_EVENT_BYTES = 5 * 1024 * 1024
 export const SLOT_COUNT = 256
 const slotName = i => String(i).padStart(3, '0')
 export const journalPath = stateDir => path.join(stateDir, 'langgraph', 'outbox')

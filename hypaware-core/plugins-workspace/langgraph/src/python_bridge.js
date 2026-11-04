@@ -9,7 +9,11 @@ const methods = new Set(['handleChainStart', 'handleChainEnd', 'handleChainError
 /** @import { LangGraphRecorder } from '../../../../hypaware-core/plugins-workspace/langgraph/src/recorder.js' */
 /** @type {LangGraphRecorder | undefined} */
 let capture
-let bytes = Buffer.alloc(0)
+// Collect a line's pieces and join them once: concatenating per chunk copies
+// the partial line again for every 64 KiB pipe read.
+/** @type {Buffer[]} */
+let parts = []
+let size = 0
 async function receive(line) {
   const request = JSON.parse(line)
   if (!capture) {
@@ -31,12 +35,14 @@ try {
     for (let start = 0; start < chunk.length;) {
       const newline = chunk.indexOf(10, start)
       const end = newline < 0 ? chunk.length : newline
-      if (bytes.length + end - start > MAX_EVENT_BYTES) throw new Error('event_limit')
-      bytes = Buffer.concat([bytes, chunk.subarray(start, end)])
+      if (size + end - start > MAX_EVENT_BYTES) throw new Error('event_limit')
+      parts.push(chunk.subarray(start, end))
+      size += end - start
       start = end + 1
       if (newline >= 0) {
-        await receive(bytes.toString('utf8'))
-        bytes = Buffer.alloc(0)
+        await receive(Buffer.concat(parts, size).toString('utf8'))
+        parts = []
+        size = 0
       }
     }
   }
