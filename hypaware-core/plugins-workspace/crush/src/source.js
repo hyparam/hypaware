@@ -299,7 +299,8 @@ async function pollOnce(runner, ctx) {
   if (!changed.length) {
     runner.sessionsPending = 0
     runner.dbsPending = 0
-    return { status: 'unchanged', dbsTotal: result.databases.length, dbsChanged: 0, dbsOpened: 0, sessionsChanged: 0, rows: 0 }
+    const kind = discoveryErrorKind(result)
+    return { status: 'unchanged', dbsTotal: result.databases.length, dbsChanged: 0, dbsOpened: 0, sessionsChanged: 0, rows: 0, ...(kind ? { errorKind: kind } : {}) }
   }
   // Fairness across ticks: start at the first changed path after the one the
   // previous tick opened last, wrapping to the first path when none sorts
@@ -666,7 +667,7 @@ async function pollOnce(runner, ctx) {
   }
 
   const onlyBaselines = visited.length > 0 && visited.every(v => v.baseline)
-  const kinds = Object.keys(runner.errorCounts)
+  const kind = discoveryErrorKind(result) ?? Object.keys(runner.errorCounts)[0]
   return {
     status: onlyBaselines ? 'baseline' : 'ok',
     dbsTotal: result.databases.length,
@@ -674,8 +675,21 @@ async function pollOnce(runner, ctx) {
     dbsOpened,
     sessionsChanged,
     rows: written,
-    ...(kinds.length ? { errorKind: kinds[0] } : {}),
+    ...(kind ? { errorKind: kind } : {}),
   }
+}
+
+/**
+ * The degraded kind a discovery pass carries on its own, ahead of any
+ * per-database kind, in the order status ranks them.
+ *
+ * @param {CrushDiscoveryResult} result
+ * @returns {string | undefined}
+ */
+function discoveryErrorKind(result) {
+  if (result.indexUnreadable) return 'index_unreadable'
+  if (result.overCap > 0) return 'too_many_projects'
+  return undefined
 }
 
 /**
