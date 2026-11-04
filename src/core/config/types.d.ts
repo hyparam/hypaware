@@ -543,6 +543,13 @@ export interface ActionContext {
    * uses. Set whenever `clients` is (LLP 0045 §Part 1).
    */
   endpoint?: string
+  /**
+   * The port each plugin's telemetry listener bound this boot, keyed by the
+   * owning plugin, so an OTEL-mode attach whose settings name another port is
+   * a forward gap (LLP 0577 #reattach). Absent, or missing a plugin, when
+   * no listener reported one: the marker then stays current on that key.
+   */
+  telemetryPorts?: Map<string, number>
   /** Injectable clock (test seam). */
   now: () => number
   log: PluginLogger
@@ -627,6 +634,11 @@ export interface ReconcileInput {
    * (LLP 0045 §Part 1).
    */
   endpoint?: string
+  /**
+   * The port each plugin's telemetry listener bound this boot, keyed by the
+   * owning plugin; threaded onto {@link ActionContext}.
+   */
+  telemetryPorts?: Map<string, number>
 }
 
 /** What the reconciler did with one (handler, requestKey) unit on a pass. */
