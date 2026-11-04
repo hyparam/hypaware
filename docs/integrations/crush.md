@@ -94,6 +94,9 @@ hyp backfill crush
 ```
 
 New messages arrive on the next poll, up to a minute after Crush writes them.
+That holds for a project HypAware has already read. The first session in a
+new project, the one that creates its `.crush/crush.db`, arrives with the
+next scheduled import, up to 15 minutes, or at once with `hyp backfill crush`.
 A scheduled import also runs every 15 minutes. It picks up changes Crush
 makes to a message it already finished, so those can take up to 15 minutes
 to appear. Set `backfill.window_days` to limit both imports to recent
@@ -152,3 +155,6 @@ setting that turns that check off.
 
 For status messages and fixes, see
 [troubleshooting](../TROUBLESHOOTING.md#crush-records-nothing).
+
+Design: [LLP 0573](../../llp/0573-crush-session-capture.design.md) and
+[LLP 0574](../../llp/0574-crush-session-capture.plan.md).

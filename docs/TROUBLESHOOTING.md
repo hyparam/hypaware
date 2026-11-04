@@ -112,7 +112,7 @@ rows below, show in `hyp status --json` as the `crush` entry's
 | `<N> sessions appear in more than one crush database` | A project's `.crush` directory was copied, so two databases hold the same session. HypAware records each such session from the first database it read. Remove the copy, or mark it with `hyp privacy ignore <dir>`. |
 | `no crush installation detected at <path>` | HypAware found no index at that path. If you set `CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, set `data_dirs` as shown on the [Crush page](integrations/crush.md#use-a-different-data-location), then run `hyp daemon restart`. |
 | `crush index at <path> lists no projects yet` | Capture is ready. Start Crush in a project. |
-| `polling <N> crush projects every 60000ms, no sessions yet` | Capture is ready. Finish a Crush turn and wait up to a minute. Older sessions arrive with the scheduled import within 15 minutes, or now with `hyp backfill crush`. |
+| `polling <N> crush projects every 60000ms, no sessions yet` | Capture is ready. Finish a Crush turn and wait up to a minute. Older sessions, and the first session in a project HypAware has not read before, arrive with the scheduled import within 15 minutes, or now with `hyp backfill crush`. |
 | `crush ongoing capture disabled (crush.enabled = false)` | Capture is off in your configuration. Set `crush.enabled` to `true`, then run `hyp daemon restart`. |
 
 A status that ends `; <N> listed projects have no crush.db` names index
