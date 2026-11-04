@@ -14,6 +14,8 @@ OTLP variable in the user's environment is named as a diagnostic of its own)
 state, `unknown`, for a comparison the bounded transcript read could not settle)
 **Extended-by:** LLP 0546 (#status-and-health: a marker-less transcript-lane
 client's capture-health line reads its newest cached row)
+**Extended-by:** LLP 0577 (the default listener port is per OS user, and an
+attach naming a port the listener no longer binds is re-attached)
 
 > The source that receives Claude Code's own telemetry: an OTLP http/json
 > listener plus a body-file reader, registered by `@hypaware/claude`, producing

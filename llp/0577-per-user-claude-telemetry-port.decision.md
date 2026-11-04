@@ -39,6 +39,14 @@ unrelated process. Two large uids can still collide modulo 12000. That is rare
 on one machine, and the fallback and the existing `client_telemetry_stale`
 diagnostic cover it.
 
+<a id="reattach"></a>An upgrade can move a user's port while Claude's settings
+still name 4319. The Claude attach marker records the telemetry port the attach
+wrote, and when the listener has bound a different port the reconciler counts
+the attach as stale and re-attaches, which writes the bound port. A running
+Claude Code session keeps its old endpoint until it restarts. The reconciler
+runs only on a joined host; elsewhere `client_telemetry_stale` in `hyp status`
+remains the signal.
+
 ## Out of scope
 
 The gateway default (LLP 0114) stays fixed. Fleet Claude Desktop profiles depend

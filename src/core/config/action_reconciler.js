@@ -145,6 +145,7 @@ export function createActionReconciler(opts) {
       skills: input.skills,
       agents: input.agents,
       failedPlugins: input.failedPlugins,
+      telemetryPorts: input.telemetryPorts,
       now,
       log,
     }
