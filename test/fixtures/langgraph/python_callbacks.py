@@ -77,7 +77,7 @@ with make('s' * 4096 if mode == 'long-session' else 'python-test') as capture:
         assert capture.status()['dropped'] > 0, capture.status()
         assert capture.status()['lastError'] == 'recording_failed', capture.status()
     elif mode == 'bounds':
-        capture.on_tool_start({'name': 'add'}, 'x' * (600 * 1024), run_id='too-large')
+        capture.on_tool_start({'name': 'add'}, 'x' * (6 * 1024 * 1024), run_id='too-large')
         assert capture.status()['dropped'] == 1, capture.status()
         assert capture.status()['active_callbacks'] == 0, capture.status()
         circular = {}

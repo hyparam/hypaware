@@ -222,7 +222,7 @@ the application has exited. Replaying the same saved event does not duplicate
 rows or token usage. Rerunning the application is new work with new model calls,
 not a replay of the same event.
 
-The shared queue holds 256 events of at most 512 KiB each. A full queue or an
+The shared queue holds 256 events of at most 5 MiB each. A full queue or an
 oversized event is dropped and reported by the callback; it does not fail the
 application. This is bounded recovery of completed callbacks, not unlimited
 offline retention, recovery of unfinished calls, or a power-loss guarantee.
