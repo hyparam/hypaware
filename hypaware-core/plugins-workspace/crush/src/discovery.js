@@ -81,11 +81,12 @@ export function discoverDatabases(state, input) {
     seenReal.add(real)
     listed++
     const dbPath = path.join(real, 'crush.db')
-    if (!isFile(dbPath)) {
+    const dbSig = fileSig(dbPath)
+    if (dbSig === null) {
       stale++
       continue
     }
-    databases.push({ dataDir: real, dbPath, projectDir: path.dirname(real) })
+    databases.push({ dataDir: real, dbPath, projectDir: path.dirname(real), dbSig })
   }
 
   return {
@@ -151,11 +152,20 @@ function refreshIndex(state, indexPath) {
   return true
 }
 
-/** @param {string} p @returns {boolean} */
-function isFile(p) {
+/**
+ * The `size:mtimeNs:ino` signature of a regular file, null when it is
+ * absent or not a file. Nanosecond mtime, so two writes inside one
+ * millisecond still move it; the poll reuses it as the database half of its
+ * change gate, so an idle database costs this stat and one of its `-wal`.
+ *
+ * @param {string} p
+ * @returns {string | null}
+ */
+export function fileSig(p) {
   try {
-    return fs.statSync(p).isFile()
+    const st = fs.statSync(p, { bigint: true })
+    return st.isFile() ? `${st.size}:${st.mtimeNs}:${st.ino}` : null
   } catch {
-    return false
+    return null
   }
 }

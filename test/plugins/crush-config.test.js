@@ -143,7 +143,8 @@ test('data_dirs expands a leading ~ and trims entries', () => {
 test('a missing index resolves without error and the source reports it', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crush-config-'))
   try {
-    const ctx = makeCtx(undefined, { CRUSH_GLOBAL_DATA: dir })
+    const ctx = makeCtx(undefined, { CRUSH_GLOBAL_DATA: dir, HYP_HOME: dir })
+    Object.assign(ctx, { paths: { stateDir: path.join(dir, 'state') } })
     const source = await startCrushSource(ctx)
     assert.ok(source.status)
     const status = await source.status()

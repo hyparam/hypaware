@@ -72,7 +72,9 @@ test('two index entries sharing one data_dir give one database', () => {
     writeIndex(indexPath, [dataDir, path.join(root, 'a-link', '.crush'), dataDir])
     const result = discoverDatabases(createDiscoveryState(), { indexPath, dataDirs: [dataDir] })
     assert.equal(result.databases.length, 1)
-    assert.deepEqual(result.databases[0], {
+    const { dbSig, ...database } = result.databases[0]
+    assert.match(dbSig, /^\d+:\d+:\d+$/)
+    assert.deepEqual(database, {
       dataDir,
       dbPath: path.join(dataDir, 'crush.db'),
       projectDir: path.join(root, 'a'),

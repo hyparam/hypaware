@@ -1,7 +1,11 @@
 /**
  * Shared shapes for the `@hypaware/crush` adapter: discovery of the
- * per-project databases and the reader's error codes.
+ * per-project databases, the reader's error codes, the poll watermark, and
+ * the poll runner state.
  */
+
+import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
+import type { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
 
 /** `CrushDbError.code`, also the `error_kind` the source reports (LLP 0573#status). */
 export type CrushDbErrorCode =
@@ -20,6 +24,8 @@ export interface CrushDatabase {
   dbPath: string
   /** The data dir's parent: the git root Crush chose. */
   projectDir: string
+  /** `size:mtimeNs:ino` of `crush.db` from this pass's existence check. */
+  dbSig: string
 }
 
 /** What discovery remembers between ticks. */
@@ -141,4 +147,91 @@ export interface CrushChanges {
   sessions: CrushSessionMeta[]
   /** The database's largest message rowid at the same snapshot, 0 when empty. */
   maxRowid: number
+}
+
+/** One database's poll watermark (LLP 0573#reconciliation). */
+export interface CrushDbWatermark {
+  /** `size:mtimeNs:ino` of `crush.db` and `crush.db-wal`, null before the first record. */
+  stat_sig: string | null
+  /** Message rowid cursor: rows above it are new. */
+  max_rowid: number
+  /** Unix second; a session with no entry and `updated_at` above it is a candidate. */
+  floor: number
+}
+
+/** One session's poll watermark entry. */
+export interface CrushSessionWatermark {
+  /** The database path that owns the session id. */
+  db: string
+  updated_at: number
+  message_count: number
+  max_rowid: number
+  open: boolean
+  digest?: string
+}
+
+export interface CrushWatermarkState {
+  /** Keyed by database path. */
+  dbs: Record<string, CrushDbWatermark>
+  /** Keyed by Crush session id. */
+  sessions: Record<string, CrushSessionWatermark>
+}
+
+/** One session admitted to a tick's batch. */
+export interface CrushBatchEntry {
+  session_id: string
+  db: string
+  /** The entry to record once committed, null to drop it. */
+  mark: CrushSessionWatermark | null
+  /** Absent when the session's rows are unchanged (digest equal). */
+  snapshot?: {
+    rows: Record<string, unknown>[]
+    scope: { where: Record<string, string>, key: string }
+    columns: ColumnSpec[]
+  }
+}
+
+/** The poll's state between ticks. */
+export interface CrushPollRunner {
+  indexPath: string
+  dataDirs: string[]
+  pollIntervalMs: number
+  homeDir: string
+  stateDir: string
+  resolver: UsagePolicyResolver
+  localOnlyListPath: string
+  devRunId?: string
+  discovery: CrushDiscoveryState
+  watermark: CrushWatermarkState | null
+  /** Database path the previous tick opened last; in memory only, so a restart begins at the first path. */
+  lastOpened?: string
+  /** Signature of each ignore-policy database at its last visit; in memory only. */
+  ignoredSigs?: Map<string, string>
+  /**
+   * Sessions whose entry was recorded in the second it carries. In memory
+   * only: after a restart the sweep catches a same-second write.
+   */
+  unsettled?: Set<string>
+  rowsWritten: number
+  sessionsTracked: number
+  sessionsPending: number
+  lastPollAt?: string
+  lastError?: string
+  lastErrorKind?: string
+  lastResult?: CrushDiscoveryResult
+  /** Databases per `error_kind` on the last tick, for the status wording. */
+  errorCounts: Record<string, number>
+  /** First `schema_unsupported` message on the last tick; names the table or column, never a path. */
+  schemaDetail?: string
+  /** Changed databases left unopened on the last tick (LLP 0573#source). */
+  dbsPending: number
+  /** `SessionIgnoreSet` shared with the control plane; unset in tests that do not exercise it. */
+  ignoredSessions?: Set<string>
+  /** Directory-signature of the exclusion markers at the last refresh. */
+  exclusionsSignature?: string
+}
+
+/** Shares the running poll's runner with the backfill sweep (LLP 0573#backfill). */
+export interface CrushRunnerHolder {
+  runner?: CrushPollRunner
 }
