@@ -189,8 +189,9 @@ reason here. D2 is overturned; the others stand as accepted.
   opt-out and export rules, and never in a log, span, status line or file
   name.
 - **D8. The docs disclose two Crush behaviors.** Crush checks
-  `api.github.com` for updates unless that is turned off, and its stored
-  transcript omits the context message it injects into each request, so the
+  `api.github.com` for updates on every start, and v0.99.0 has no setting
+  that turns that check off (`internal/app/app.go`; its metrics and provider
+  catalog fetch can be turned off), and its stored transcript omits the context message it injects into each request, so the
   rows hold what the user and model wrote, not the whole request.
 
 ### Plugin and manifest {#manifest}
