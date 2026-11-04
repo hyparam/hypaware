@@ -11,6 +11,7 @@ import {
   runCrushPollTick,
   startCrushSource,
 } from '../../hypaware-core/plugins-workspace/crush/src/source.js'
+import { MAX_DATABASES } from '../../hypaware-core/plugins-workspace/crush/src/discovery.js'
 import { readCrushWatermark } from '../../hypaware-core/plugins-workspace/crush/src/watermark.js'
 import { TracerProvider } from '../../src/core/observability/runtime.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
@@ -594,6 +595,47 @@ test('a database missing a required column degrades with schema_unsupported nami
   assert.ok(!(status.message ?? '').includes(harness.dbPaths[0]), 'the schema detail names no path')
 })
 
+test('an index that stops parsing degrades with index_unreadable and keeps polling the last good list', async () => {
+  const { runner, ctx, logs, w, indexPath } = await baselined()
+  await fs.writeFile(indexPath, '{ not json')
+  insertSession(w, { id: 's1' })
+  addTurn(w, 's1', 'first')
+  await runCrushPollTick(runner, ctx)
+  w.close()
+  const status = statusOf(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'index_unreadable')
+  assert.equal(status.message, `cannot read the crush index at ${indexPath}`)
+  const last = crushPollLogs(logs).at(-1)
+  assert.equal(last?.fields?.error_kind, 'index_unreadable')
+  assert.equal(last?.fields?.dbs_total, 1)
+  assert.ok(Number(last?.fields?.rows) > 0, 'the last good list is still polled')
+})
+
+test('past the database cap the tick logs too_many_projects ahead of any per-database kind', async () => {
+  const harness = await createCrushHarness({ projects: [] })
+  /** @type {string[]} */
+  const dataDirs = []
+  for (let i = 0; i < MAX_DATABASES + 3; i++) {
+    const dataDir = path.join(harness.dir, `p${String(i).padStart(4, '0')}`, '.crush')
+    await fs.mkdir(dataDir, { recursive: true })
+    // An empty file is a database with no tables: each one opened fails as
+    // schema_unsupported, which the cap outranks.
+    await fs.writeFile(path.join(dataDir, 'crush.db'), '')
+    dataDirs.push(dataDir)
+  }
+  await harness.writeIndex(dataDirs)
+  const runner = createCrushPollRunner(harness.ctx)
+  await runCrushPollTick(runner, harness.ctx)
+  const status = statusOf(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'too_many_projects')
+  assert.equal(status.message, '3 crush projects skipped over the 1,024 limit')
+  const last = crushPollLogs(harness.logs).at(-1)
+  assert.equal(last?.fields?.error_kind, 'too_many_projects')
+  assert.equal(last?.fields?.dbs_total, MAX_DATABASES)
+})
+
 test('no log line carries message text, a title, the project dir or the database path', async () => {
   const { runner, ctx, logs, w, projectDirs, dbPaths } = await baselined()
   insertSession(w, { id: 's1', title: 'Fixture title' })
@@ -607,7 +649,7 @@ test('no log line carries message text, a title, the project dir or the database
   const ok = crushPollLogs(logs, 'ok')
   assert.ok(ok.length > 0, 'a recording tick ran')
   for (const entry of ok) {
-    for (const key of ['component', 'operation', 'status', 'dbs_total', 'dbs_opened', 'sessions_changed', 'sessions_pending', 'rows']) {
+    for (const key of ['component', 'operation', 'status', 'dbs_total', 'dbs_changed', 'dbs_opened', 'dbs_pending', 'sessions_changed', 'sessions_pending', 'rows']) {
       assert.ok(entry.fields && key in entry.fields, `crush.poll carries ${key}`)
     }
   }
