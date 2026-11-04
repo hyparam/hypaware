@@ -358,7 +358,7 @@ async function hangingOpenCodeOnPath() {
 // read between sessions, so the abort was not observed either. Both tests run
 // the real runner against a real hung child and shorten only the wait, then
 // assert the budget the call site chose alongside.
-test('a hung OpenCode session listing is killed on its budget and fails the run', async () => {
+test('a hung OpenCode session listing is killed on its budget and fails the run', { skip: process.platform === 'win32' && 'launching a .cmd client on win32 is deferred (needs cmd.exe-safe quoting of untrusted prompt text)' }, async () => {
   const restore = await hangingOpenCodeOnPath()
   /** @type {number[]} */
   const budgets = []
@@ -379,7 +379,7 @@ test('a hung OpenCode session listing is killed on its budget and fails the run'
   }
 })
 
-test('a hung OpenCode export is killed on its budget and warns past the session', async () => {
+test('a hung OpenCode export is killed on its budget and warns past the session', { skip: process.platform === 'win32' && 'launching a .cmd client on win32 is deferred (needs cmd.exe-safe quoting of untrusted prompt text)' }, async () => {
   const restore = await hangingOpenCodeOnPath()
   /** @type {number[]} */
   const budgets = []

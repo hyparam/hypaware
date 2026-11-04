@@ -522,14 +522,19 @@ test('a body refused with 421 is drained only up to a cap', async (t) => {
   serverSockets.length = 0
   const overCap = Buffer.alloc(256 * 1024, 'x')
   const measured = await streamAtRefusal(rig.proxy.port, overCap)
-  assert.match(measured.response, /^HTTP\/1\.1 421 /)
-  // The reset must not be answered as a reusable connection, or a pooling
-  // client meets it on a request it already considers finished.
-  assert.match(
-    measured.response,
-    /\r\nconnection: close\r\n/i,
-    `the oversized sender got ${JSON.stringify(measured.response.slice(0, 200))}`
-  )
+  // Winsock discards data already queued for the receiver when the reset
+  // lands, so on win32 even this finished sender can read nothing; the cap
+  // itself is asserted on the listener's own socket below either way.
+  if (process.platform !== 'win32' || measured.response) {
+    assert.match(measured.response, /^HTTP\/1\.1 421 /)
+    // The reset must not be answered as a reusable connection, or a pooling
+    // client meets it on a request it already considers finished.
+    assert.match(
+      measured.response,
+      /\r\nconnection: close\r\n/i,
+      `the oversized sender got ${JSON.stringify(measured.response.slice(0, 200))}`
+    )
+  }
   const served = serverSockets.find((entry) => entry.port === rig.proxy.port)?.socket
   assert.ok(served, 'the refused upload opened no listener connection to measure')
   if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
@@ -593,10 +598,17 @@ test('a refusal whose body fits under the cap keeps the pooled connection', asyn
   assert.notEqual(small.connection, 'close')
   assert.equal(after.port, small.port, 'a refused body that fits under the cap cost the client its pooled socket')
 
-  // Past the cap the connection is reset, so that one must say so.
-  const oversized = await refuse('/nope', 'x'.repeat(128 * 1024))
-  assert.equal(oversized.status, 404)
-  assert.equal(oversized.connection, 'close')
+  // Past the cap the connection is reset, so that one must say so. Winsock
+  // discards the queued answer when the reset lands, so on win32 this sender
+  // can meet ECONNRESET instead of reading the closing 404.
+  const oversized = await refuse('/nope', 'x'.repeat(128 * 1024)).catch((/** @type {any} */ err) => {
+    if (process.platform === 'win32' && err.code === 'ECONNRESET') return undefined
+    throw err
+  })
+  if (oversized) {
+    assert.equal(oversized.status, 404)
+    assert.equal(oversized.connection, 'close')
+  }
 
   assert.deepEqual(rig.upstreamHits, [])
 })

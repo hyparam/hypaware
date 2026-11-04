@@ -67,7 +67,7 @@ test('two index entries sharing one data_dir give one database', () => {
   const root = tmp('crush-disc-')
   try {
     const dataDir = makeProject(root, 'a')
-    fs.symlinkSync(path.join(root, 'a'), path.join(root, 'a-link'))
+    fs.symlinkSync(path.join(root, 'a'), path.join(root, 'a-link'), process.platform === 'win32' ? 'junction' : null)
     const indexPath = path.join(root, 'projects.json')
     writeIndex(indexPath, [dataDir, path.join(root, 'a-link', '.crush'), dataDir])
     const result = discoverDatabases(createDiscoveryState(), { indexPath, dataDirs: [dataDir] })

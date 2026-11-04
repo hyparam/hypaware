@@ -191,8 +191,10 @@ test('atomic marker read/write round-trips through readClientActionStatus and re
     // File is mode 0600 and ends with a trailing newline (atomic-write idiom).
     const raw = fs.readFileSync(markerPath(stateRoot), 'utf8')
     assert.ok(raw.endsWith('}\n'))
-    const mode = fs.statSync(markerPath(stateRoot)).mode & 0o777
-    assert.equal(mode, 0o600)
+    if (process.platform !== 'win32') { // No POSIX mode bits on win32.
+      const mode = fs.statSync(markerPath(stateRoot)).mode & 0o777
+      assert.equal(mode, 0o600)
+    }
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }

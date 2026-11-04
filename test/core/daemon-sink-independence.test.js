@@ -12,6 +12,7 @@ import { readStatusFile, collectHypAwareStatus } from '../../src/core/daemon/sta
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
+import { batchIdTime } from '../../src/core/sinks/diagnostic_history.js'
 
 function statusAt(stateRoot) {
   const status = readStatusFile(stateRoot)
@@ -310,7 +311,8 @@ test('disposable runtime retries denied diagnostic cleanup without changing expo
   const { home, stateRoot } = await stage(t, endpoint(server), { maintenance: true, beforeBoot: async home => {
     outbox = path.join(home, 'hypaware', 'sinks', 'z-local', 'outbox')
     await fs.mkdir(outbox, { recursive: true })
-    const at = new Date(Date.now() - 60000).toISOString()
+    // The host's batch-id spelling: win32 ids drop the colons NTFS forbids.
+    const at = batchIdTime(new Date(Date.now() - 60000))
     for (let i = 1; i <= 120; i++) await fs.writeFile(path.join(outbox, `z-local-${at}-${i}.json`), '{}')
     await fs.writeFile(path.join(home, 'fail'), '1')
   } })

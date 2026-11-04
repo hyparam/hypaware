@@ -33,11 +33,15 @@ test('fresh policy follows enrollment, slot flips and disabled central ownership
     await fs.writeFile(seed, JSON.stringify({ plugins: [{ name: '@hypaware/ollama', recording: false }] }))
     assert.deepEqual(read(), { recording: false, reason: 'recording_disabled' })
     await fs.writeFile(path.join(f.control, 'config.a.json'), JSON.stringify({ plugins: [{ name: '@hypaware/ollama', enabled: false }] }))
-    await fs.symlink('config.a.json', path.join(f.control, 'active'))
+    // The pointer the apply engine writes on this host: a symlink on POSIX,
+    // a regular pointer file on win32 (LLP 0578).
+    if (process.platform === 'win32') await fs.writeFile(path.join(f.control, 'active'), 'config.a.json\n')
+    else await fs.symlink('config.a.json', path.join(f.control, 'active'))
     assert.deepEqual(read(), { recording: false, reason: 'owner_disabled' })
     await fs.writeFile(path.join(f.control, 'config.b.json'), JSON.stringify({ plugins: [{ name: '@hypaware/ollama' }] }))
     await fs.unlink(path.join(f.control, 'active'))
-    await fs.symlink('config.b.json', path.join(f.control, 'active'))
+    if (process.platform === 'win32') await fs.writeFile(path.join(f.control, 'active'), 'config.b.json\n')
+    else await fs.symlink('config.b.json', path.join(f.control, 'active'))
     assert.equal(read().recording, true)
     const before = await fs.readFile(f.configPath, 'utf8')
     assert.equal((await writeClientRecording({ env: f.env, plugin: '@hypaware/ollama', recording: false })).status, 'central_managed')

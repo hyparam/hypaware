@@ -184,9 +184,15 @@ test('boot recovers a wedged active slot by falling back to the seed when one su
   // surviving seed and a bad_etag matching the active slot.
   fs.writeFileSync(path.join(controlDir, 'config.b.json'), JSON.stringify(REMOTE_CONFIG, null, 2) + '\n')
   fs.writeFileSync(path.join(controlDir, 'config.b.etag'), 'etag-1\n')
-  const tmpLink = path.join(controlDir, 'active.tmp')
-  fs.symlinkSync('config.b.json', tmpLink)
-  fs.renameSync(tmpLink, path.join(controlDir, 'active'))
+  // The pointer the apply engine writes on this host: a symlink on POSIX,
+  // a regular pointer file on win32 (LLP 0578).
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(controlDir, 'active'), 'config.b.json\n')
+  } else {
+    const tmpLink = path.join(controlDir, 'active.tmp')
+    fs.symlinkSync('config.b.json', tmpLink)
+    fs.renameSync(tmpLink, path.join(controlDir, 'active'))
+  }
   fs.writeFileSync(centralSeedPath(stateRoot), JSON.stringify(SEED_CONFIG, null, 2) + '\n')
   writeState(stateRoot, {
     bad_etag: { etag: 'etag-1', reason: 'probation_expired', recorded_at: new Date().toISOString() },

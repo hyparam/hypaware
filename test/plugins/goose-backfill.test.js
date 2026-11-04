@@ -430,7 +430,7 @@ test('goose backfill: a missing sessions.db is a no-op', async () => {
   assert.equal(result.scanned, 0)
 })
 
-test('goose backfill: an unreadable sessions.db fails by kind and keeps the path out of the log', async () => {
+test('goose backfill: an unreadable sessions.db fails by kind and keeps the path out of the log', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' }, async () => {
   const h = await stage()
   h.db.close()
   await fs.chmod(h.sessionsDb, 0o000)
@@ -445,7 +445,7 @@ test('goose backfill: an unreadable sessions.db fails by kind and keeps the path
   }
 })
 
-test('goose backfill: an unreadable sessions.db keeps the path out of the kernel provider_error log', async () => {
+test('goose backfill: an unreadable sessions.db keeps the path out of the kernel provider_error log', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' }, async () => {
   const h = await stage()
   h.db.close()
   await fs.chmod(h.sessionsDb, 0o000)

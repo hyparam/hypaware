@@ -38,17 +38,20 @@ test('project context handles a Git repo, credential remote, detached HEAD, no r
 })
 
 test('project context degrades when Git is missing and bounds every lookup', async () => {
+  // Resolved: the context resolves the cwd it is handed, which on win32
+  // gains a drive letter and backslashes over a POSIX-written fixture.
+  const root = path.resolve('/example')
   let count = 0
-  const result = await projectContext('/example', async (file, args, options) => {
+  const result = await projectContext(root, async (file, args, options) => {
     count++
     assert.equal(file, 'git')
-    assert.deepEqual(args.slice(0, 2), ['-C', '/example'])
+    assert.deepEqual(args.slice(0, 2), ['-C', root])
     assert.equal(options.timeout, 2000)
     assert.equal(options.maxBuffer, 8192)
     throw new Error('ENOENT')
   })
   assert.equal(count, 4)
-  assert.deepEqual(result, { cwd: '/example' })
+  assert.deepEqual(result, { cwd: root })
 })
 
 test('repeated request history is omitted but identical new messages at later positions survive', () => {

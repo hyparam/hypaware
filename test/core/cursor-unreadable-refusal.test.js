@@ -94,7 +94,9 @@ test('a cursor.json that does not parse is refused out loud, once per condition'
       assert.equal(tryReadCursorSync(partition), null, 'the partition is still skipped')
     }, REFUSAL)
     assert.equal(first.length, 1, 'the refusal that skips this partition forever is said exactly once')
-    assert.ok(first[0].includes(partition), 'and it names the partition, which is the only way to act on it')
+    // The partition as it appears inside a JSON log line (win32 backslashes
+    // arrive escaped there).
+    assert.ok(first[0].includes(JSON.stringify(partition).slice(1, -1)), 'and it names the partition, which is the only way to act on it')
 
     // The gate is shared, so one poisoned cursor is read by many callers in
     // a tick. The line is per condition, not per read (LLP 0332).

@@ -439,7 +439,9 @@ test('a partition frozen by a failed retry is reported as skipped on every later
 // partition whose rewrite committed a verdict before the tick threw is
 // described by that verdict, which says something about the partition, and not
 // by the bare fact that the attempt ended in an error, which does not.
-test('a committed verdict outranks the failed attempt that followed it', async () => {
+test('a committed verdict outranks the failed attempt that followed it', {
+  skip: process.platform === 'win32' && 'chmod 0o555 does not make a directory unwritable on win32, so the late throw cannot be staged',
+}, async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-verdict-wins-'))
   try {
     // The late-throw shape needs the generation-swap rewrite, which routine
@@ -499,7 +501,9 @@ test('a committed verdict outranks the failed attempt that followed it', async (
 // the partition back onto the retired generation, orphaning the rewrite's
 // output for the grace sweep to reap and losing the verdict it just recorded,
 // so the partition is skipped silently forever instead of reported.
-test('a rewrite that throws after committing its cursor keeps the generation it committed', async () => {
+test('a rewrite that throws after committing its cursor keeps the generation it committed', {
+  skip: process.platform === 'win32' && 'chmod 0o555 does not make a directory unwritable on win32, so the late throw cannot be staged',
+}, async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-throw-late-'))
   try {
     // Routed to the generation-swap rewrite the same way as the test above:

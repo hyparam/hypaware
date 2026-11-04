@@ -83,7 +83,7 @@ function selectReturning(value) {
   return { fn, seen }
 }
 
-test('resolveOnPath: finds an executable on PATH, ignores a non-executable match', async () => {
+test('resolveOnPath: finds an executable on PATH, ignores a non-executable match', { skip: process.platform === 'win32' && 'the darwin-mode probe splits a drive-lettered PATH on ":" and X_OK ignores mode bits on win32' }, async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-'))
   const exe = path.join(dir, 'fakeclient')
   await fsp.writeFile(exe, '#!/bin/sh\n', { mode: 0o755 })
@@ -97,7 +97,7 @@ test('resolveOnPath: finds an executable on PATH, ignores a non-executable match
   assert.equal(await resolveOnPath('fakeclient', {}, 'darwin'), undefined)
 })
 
-test('resolveOnPath: a mode-0755 directory named claude on PATH is not an installed CLI', async () => {
+test('resolveOnPath: a mode-0755 directory named claude on PATH is not an installed CLI', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async () => {
   // @ref LLP 0198#path-probe [tests]: the probe looks for a launch binary, and
   // the execute bit on a directory means traversable, not runnable
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-dir-'))

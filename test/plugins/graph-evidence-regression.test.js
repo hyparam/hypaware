@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import * as kit from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 import { matchesPredicate, mergeRow } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
@@ -36,7 +37,9 @@ test('direct shell and patch file controls, skill roots, and bounds', () => {
   for (const root of ['.codex/skills', '.agents/skills', '.codex/skills/.system', '.codex/plugins/cache/vendor/plugin/1.0/skills']) {
     assert.ok(project('exec_command', { cmd: `cat /home/test/${root}/review/SKILL.md` }).some(r => r.node_type === 'Skill' && r.natural_key === 'review'))
   }
-  assert.deepEqual(project('exec_command', { cmd: 'cat a.js b.js' }).filter(r => r.node_type === 'File').map(r => r.natural_key), ['/repo/a.js', '/repo/b.js'])
+  // Resolved: relative arguments resolve against the cwd, which on win32
+  // gains a drive letter and backslashes over a POSIX-written fixture.
+  assert.deepEqual(project('exec_command', { cmd: 'cat a.js b.js' }).filter(r => r.node_type === 'File').map(r => r.natural_key), [path.resolve('/repo/a.js'), path.resolve('/repo/b.js')])
   assert.deepEqual(project('apply_patch', '*** Begin Patch\n*** Update File: /repo/a.js\n@@\n-x\n+y\n*** Add File: /repo/b.js\n+z\n*** End Patch').filter(r => r.node_type === 'File').map(r => r.natural_key), ['/repo/a.js', '/repo/b.js'])
   for (const cmd of ['echo /home/test/.agents/skills/review/SKILL.md', 'cat a.js && rm b.js', 'cat $(echo a.js)', 'cat *.js']) {
     assert.equal(project('exec_command', { cmd }).filter(r => r.node_type === 'File' || r.node_type === 'Skill').length, 0, cmd)

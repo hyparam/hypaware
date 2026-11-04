@@ -231,7 +231,10 @@ test('runDaemon does not run the boot pass while probation is still active (fres
     const central = JSON.stringify({ version: 2, plugins: [] }) + '\n'
     await fs.writeFile(path.join(controlDir, 'config.a.json'), central)
     await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1')
-    await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+    // The pointer the apply engine writes on this host: a symlink on POSIX,
+    // a regular pointer file on win32 (LLP 0578).
+    if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
+    else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
     const until = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
     await fs.writeFile(
       path.join(controlDir, 'state.json'),
@@ -291,7 +294,10 @@ test('the confirmation edge during active probation drives exactly one reconcile
     const central = JSON.stringify({ version: 2, plugins: [] }) + '\n'
     await fs.writeFile(path.join(controlDir, 'config.a.json'), central)
     await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1')
-    await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+    // The pointer the apply engine writes on this host: a symlink on POSIX,
+    // a regular pointer file on win32 (LLP 0578).
+    if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
+    else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
     const until = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
     await fs.writeFile(
       path.join(controlDir, 'state.json'),

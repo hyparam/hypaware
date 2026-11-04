@@ -6,13 +6,14 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 
 // Issue #2477. The hermetic smokes redirected HOME and HYP_HOME but not the
 // temp env, so every plugin boot dir landed in the real OS temp root and
 // stayed there, one set per flow per run, even on a pass.
 
-const harnessPath = fileURLToPath(new URL('../../hypaware-core/smoke/lib/harness.js', import.meta.url))
+// The URL, not the path: an ESM import specifier must be a file:// URL, and a
+// bare win32 path reads as a 'c:' protocol.
+const harnessPath = new URL('../../hypaware-core/smoke/lib/harness.js', import.meta.url).href
 
 /**
  * @param {string} outer the TMPDIR the smoke inherits

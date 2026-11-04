@@ -356,9 +356,11 @@ test('a session whose cwd is .hypignore-ignored is skipped, others still import'
   try {
     const stateDbPath = await buildFixtureStateDb(dir)
     const ignoredDir = '/home/dev/project'
-    const hypignore = path.join(ignoredDir, '.hypignore')
+    // Resolved: the matcher hands the fs the resolved spelling, which on win32
+    // gains a drive letter and backslashes over a POSIX-written fixture.
+    const marker = path.resolve(ignoredDir, '.hypignore')
     const resolver = createUsagePolicyResolver({
-      existsSync: (p) => p === hypignore,
+      existsSync: (p) => path.resolve(p) === marker,
       readFileSync: () => 'ignore\n',
     })
 

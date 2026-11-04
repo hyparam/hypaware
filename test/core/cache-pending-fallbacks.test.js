@@ -424,7 +424,9 @@ test('a scan that could not read the table is retried on a cooldown, never on ev
   }
 })
 
-test('a failure stamp that cannot be written costs a re-scan, not the partition\'s tick', async () => {
+test('a failure stamp that cannot be written costs a re-scan, not the partition\'s tick', {
+  skip: process.platform === 'win32' && 'chmod 0o555 does not make a directory unwritable on win32, so the stamp cannot be made to fail',
+}, async () => {
   const env = await stageEnv()
   try {
     const { storage, getSettleHook } = buildGateway(env)

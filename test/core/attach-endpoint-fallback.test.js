@@ -143,7 +143,7 @@ test('attach without endpoint: no daemon installed names hyp daemon install/star
   })
 })
 
-test('attach without endpoint: installed-but-unreachable daemon names hyp daemon start and nothing else', async () => {
+test('attach without endpoint: installed-but-unreachable daemon names hyp daemon start and nothing else', { skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have' }, async () => {
   await withTempHome(async (home) => {
     // A daemon service IS installed (marker on disk) but not currently
     // reachable: the give-up message names only the start step, never the

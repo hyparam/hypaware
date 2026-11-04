@@ -258,7 +258,7 @@ async function command(f, argv) {
 }
 
 // @ref LLP 0474#recording [tests]: processing-only source reload retains the live generation after explicit detach and reattach
-test('actual split processing SIGHUP keeps resumed fresh capture and recording generations', async t => {
+test('actual split processing SIGHUP keeps resumed fresh capture and recording generations', { skip: process.platform === 'win32' && 'SIGHUP delivery to the processor is a POSIX surface' }, async t => {
   const f = await service(t, true, false, 25)
   const verify = () => command(f, ['ollama', 'verify', '--model', 'tiny:local', '--json'])
   assert.equal((await verify()).code, 0)
