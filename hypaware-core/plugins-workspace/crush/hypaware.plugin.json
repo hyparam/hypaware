@@ -18,6 +18,18 @@
     }
   },
   "contributes": {
+    "picker": [
+      {
+        "name": "crush",
+        "label": "Crush",
+        "summary": "Records your Crush conversations and imports recent history. Makes no changes to Crush.",
+        "detect": { "settings_file": ".local/share/crush/projects.json" },
+        "compose": {
+          "plugin": { "name": "@hypaware/crush" },
+          "requires_gateway": true
+        }
+      }
+    ],
     "config_sections": [
       {
         "section": "crush",

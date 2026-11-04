@@ -14,8 +14,8 @@ import {
 /**
  * Manifest and bundling tests for `@hypaware/crush`.
  *
- * @ref LLP 0573#manifest [tests]: the goose manifest field for field, with no
- *   `client`, `skills` or picker contribution until T2.
+ * @ref LLP 0573#manifest [tests]: the goose manifest field for field, with a
+ *   picker row and no `client` or `skills` contribution.
  */
 
 const WORKSPACE = path.resolve(
@@ -42,7 +42,7 @@ test('crush manifest loads and validates', async () => {
   assert.equal(manifest.requires?.plugins?.['@hypaware/ai-gateway'], '^2.0.0')
 })
 
-test('crush contributes a config section and a source, and no client, skills or picker', async () => {
+test('crush contributes a picker row, a config section and a source, and no client or skills', async () => {
   const manifest = await loadCrush()
   const sections = (manifest.contributes?.config_sections ?? []).map((s) => /** @type {{ section: string }} */ (s).section)
   assert.deepEqual(sections, ['crush'])
@@ -52,7 +52,13 @@ test('crush contributes a config section and a source, and no client, skills or 
   assert.equal(contributes.datasets, undefined)
   assert.equal(contributes.client, undefined)
   assert.equal(contributes.skills, undefined)
-  assert.equal(contributes.picker, undefined)
+  assert.deepEqual(manifest.contributes?.picker, [{
+    name: 'crush',
+    label: 'Crush',
+    summary: 'Records your Crush conversations and imports recent history. Makes no changes to Crush.',
+    detect: { settings_file: '.local/share/crush/projects.json' },
+    compose: { plugin: { name: '@hypaware/crush' }, requires_gateway: true },
+  }])
 })
 
 test('crush is bundled and default-activated beside goose', () => {

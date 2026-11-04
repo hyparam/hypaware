@@ -176,3 +176,71 @@ test('adding goose to a config with another client leaves that client unchanged'
   // Both rows share one gateway entry; goose adds no upstream.
   assert.equal(added.plugins?.filter((p) => p.name === '@hypaware/ai-gateway').length, 1)
 })
+
+// Crush, like goose, is a picker row and a `--source` value but not a
+// `--client` one: it contributes no client (LLP 0573#manifest). Detection is
+// one stat of the index file; it never reads the index and never opens a
+// project's `crush.db`.
+// @ref LLP 0574#tasks [tests]: T2 picker row, detection, and setup re-run cases
+test('the picker pre-checks crush only when ~/.local/share/crush/projects.json exists, and opens no database', async () => {
+  const catalog = await realCatalog()
+  assert.deepEqual(catalog.pickerDescriptors.get('crush')?.detect, { settings_file: '.local/share/crush/projects.json' })
+  assert.equal(INIT_CLIENT_CHOICES.includes(/** @type {InitFlags['clients'][number]} */ ('crush')), false)
+  assert.deepEqual(resolveInitSources(flags({ sources: ['crush'] })), ['crush'])
+
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-crush-detect-'))
+  try {
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('crush'), false)
+    const indexDir = path.join(home, '.local', 'share', 'crush')
+    const dataDir = path.join(home, 'project', '.crush')
+    await fs.mkdir(indexDir, { recursive: true })
+    await fs.mkdir(dataDir, { recursive: true })
+    const index = JSON.stringify({ projects: [{ path: path.join(home, 'project'), data_dir: dataDir }] })
+    await fs.writeFile(path.join(indexDir, 'projects.json'), index)
+    // Not a SQLite file: detection must not need to open it, and must leave
+    // no -wal, -shm or -journal companion behind.
+    const bytes = 'not a sqlite database'
+    await fs.writeFile(path.join(dataDir, 'crush.db'), bytes)
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('crush'), true)
+    assert.deepEqual(await fs.readdir(indexDir), ['projects.json'])
+    assert.equal(await fs.readFile(path.join(indexDir, 'projects.json'), 'utf8'), index)
+    assert.deepEqual(await fs.readdir(dataDir), ['crush.db'])
+    assert.equal(await fs.readFile(path.join(dataDir, 'crush.db'), 'utf8'), bytes)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('re-running setup with crush picked keeps crush.enabled = false, byte for byte', async () => {
+  const catalog = await realCatalog()
+  const existing = composeSetup(catalog, ['crush'])
+  const crush = existing.plugins?.find((p) => p.name === '@hypaware/crush')
+  assert.ok(crush, 'the crush row composes @hypaware/crush')
+  crush.config = { enabled: false }
+  const before = JSON.stringify(existing, null, 2) + '\n'
+
+  const rerun = composeSetup(catalog, ['crush'], JSON.parse(before))
+  assert.equal(JSON.stringify(rerun, null, 2) + '\n', before)
+  assert.deepEqual(rerun.plugins?.find((p) => p.name === '@hypaware/crush')?.config, { enabled: false })
+})
+
+test('adding crush to a config with other clients leaves their sections unchanged', async () => {
+  const catalog = await realCatalog()
+  const existing = composeSetup(catalog, ['hermes', 'goose'])
+  const hermes = existing.plugins?.find((p) => p.name === '@hypaware/hermes')
+  const goose = existing.plugins?.find((p) => p.name === '@hypaware/goose')
+  assert.ok(hermes && goose)
+  hermes.config = { enabled: false, poll_interval: '45s' }
+  goose.config = { enabled: true, poll_interval: '20s' }
+  const prior = JSON.stringify([hermes, goose])
+
+  const added = composeSetup(catalog, ['hermes', 'goose', 'crush'], structuredClone(existing))
+  const after = JSON.stringify([
+    added.plugins?.find((p) => p.name === '@hypaware/hermes'),
+    added.plugins?.find((p) => p.name === '@hypaware/goose'),
+  ])
+  assert.equal(after, prior)
+  assert.ok(added.plugins?.some((p) => p.name === '@hypaware/crush'))
+  // All three rows share one gateway entry; crush adds no upstream.
+  assert.equal(added.plugins?.filter((p) => p.name === '@hypaware/ai-gateway').length, 1)
+})
