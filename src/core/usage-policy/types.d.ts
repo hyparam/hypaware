@@ -89,7 +89,8 @@ export interface LocalOnlyEntry {
 // `folded` is true for the gate's scopes and false for the one-shot CLI
 // helpers', because unconditional NFC folding is sound only where widening is
 // free, which is the gate and not a deletion or disclosure predicate.
-// `caseInsensitive` is false on every non-darwin host, on any volume whose probe
+// `caseInsensitive` is false on every host the probe is inert on (neither
+// darwin nor win32), on any volume whose probe
 // was undetermined, and on every unfolded scope; it is carried because the `cwd`
 // side has to be folded through the *same* verdict for the comparison to mean
 // anything.

@@ -173,11 +173,16 @@ export function sameDirectoryOnDisk(a, b, { statSync = nodeFs.statSync, logSkip 
  * because what decides the verdict is the `dev`/`ino` identity of the two
  * spellings, not whether the flipped name resolves.
  *
+ * The segment cut follows the probed platform, not the host: win32 accepts
+ * both separators in one path, while on POSIX a backslash is a legal filename
+ * character, so splitting on it there would flip a partial segment.
+ *
  * @param {string} p
+ * @param {boolean} [win32]
  * @returns {string | null}
  */
-function flipCase(p) {
-  const cut = p.lastIndexOf(path.sep)
+function flipCase(p, win32 = process.platform === 'win32') {
+  const cut = win32 ? Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')) : p.lastIndexOf('/')
   const head = cut < 0 ? '' : p.slice(0, cut + 1)
   const tail = cut < 0 ? p : p.slice(cut + 1)
   let flipped = ''
@@ -211,12 +216,17 @@ function flipCase(p) {
  * refresh, and the flipped-spelling probe genuinely runs once per volume for
  * the life of the resolver.
  *
- * **Inert off darwin.** On any other platform the probe returns `false`
- * immediately and issues **no syscall at all**, because no shipping
- * Linux/Windows filesystem this codebase targets presents the macOS
- * case-insensitive-by-default behaviour that motivates the fold. That also
- * means the whole probe is dead code on a Linux host, and therefore that its
- * darwin behaviour cannot be executed, let alone verified, there.
+ * **Inert off darwin and win32.** On any other platform the probe returns
+ * `false` immediately and issues **no syscall at all**, because no shipping
+ * Linux filesystem this codebase targets presents the case-insensitive-by-
+ * default behaviour that motivates the fold. That also means the whole probe
+ * is dead code on a Linux host, and therefore that its darwin/win32 behaviour
+ * cannot be executed, let alone verified, there. win32 probes because NTFS is
+ * case-insensitive by default, exactly the aliasing the fold exists for; a
+ * directory made case-sensitive there (`fsutil file setCaseSensitiveInfo`) is
+ * per-directory, not per-volume, and a wrong `true` memo for it only widens
+ * matching, which `max(declared, folded)` makes an over-restriction, never a
+ * leak.
  *
  * **Undetermined resolves to `false`**, which is the pre-fold behaviour: a
  * directory that does not exist, a `stat` that is refused, or a path with no
@@ -224,6 +234,7 @@ function flipCase(p) {
  * *add* reach; it can never remove a verdict some spelling already produced.
  *
  * @ref LLP 0050#normalization [implements]: case folding is per-volume and probed, never a platform constant
+ * @ref LLP 0575#decision [implements]: win32 probes like darwin; every other platform stays inert
  * @ref LLP 0049#fail-safe [constrained-by]: an undetermined probe resolves to the pre-fold behaviour, never to a looser gate
  * @param {object} [deps]
  * @param {string} [deps.platform] defaults to `process.platform`
@@ -236,7 +247,7 @@ export function createVolumeCaseProbe({
   statSync = nodeFs.statSync,
   logSkip,
 } = {}) {
-  if (platform !== 'darwin') return () => false
+  if (platform !== 'darwin' && platform !== 'win32') return () => false
 
   /** @type {Map<number, boolean>} */
   const byDev = new Map()
@@ -271,7 +282,7 @@ export function createVolumeCaseProbe({
     const memoized = byDev.get(st.dev)
     if (memoized !== undefined) return memoized
 
-    const flipped = flipCase(dir)
+    const flipped = flipCase(dir, platform === 'win32')
     if (flipped === null) {
       // Not memoized: another path on this same volume may well have a cased
       // character, and would then reach a definite answer.

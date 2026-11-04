@@ -212,6 +212,13 @@ test('durable publication syncs file before rename and the immediate parent dire
     },
   }
   const options = { fsync: true, fs: /** @type {typeof fs} */ (io) }
+  if (process.platform === 'win32') {
+    // Windows has no directory fsync, so the parent sync is skipped there:
+    // the injected failure never fires and the file sync still happens.
+    await atomicWriteJson(target, { admitted: true }, options)
+    assert.deepEqual(events, ['file-sync', 'rename'])
+    return
+  }
   await assert.rejects(atomicWriteJson(target, { admitted: true }, options), /directory sync failure/)
   assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
   assert.deepEqual(await fs.readdir(path.dirname(target)), ['journal.json'])

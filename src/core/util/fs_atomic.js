@@ -105,7 +105,10 @@ export async function atomicWriteFile(filePath, data, options = {}) {
     if (mode !== undefined) await fs.chmod(tmpPath, mode)
     await fs.rename(tmpPath, filePath)
     renamed = true
-    if (fsync) {
+    if (fsync && process.platform !== 'win32') {
+      // win32 is excluded because Windows has no directory fsync: the sync
+      // on a directory handle reports EPERM, which failed every fsync'd
+      // write there. NTFS journals the rename's metadata on its own.
       // @ref LLP 0417#cache-reclamation [implements]: journal admission must survive before delete commits
       const directory = path.dirname(filePath)
       const handle = await fs.open(directory, 'r')

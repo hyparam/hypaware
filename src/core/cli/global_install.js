@@ -492,10 +492,16 @@ async function globalPrefix(run, env) {
 /** @type {CommandRunner} */
 function runCommand(cmd, args, opts) {
   return new Promise((resolve) => {
+    // On Windows npm is npm.cmd, and spawn without a shell refuses `.cmd`
+    // targets with EINVAL (Node's CVE-2024-27980 fix). A shell means the
+    // arguments are not escaped, so callers may pass only fixed, bare
+    // tokens (the package name and static npm flags).
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       env: opts.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32',
+      windowsHide: true,
     })
     let stdout = ''
     let stderr = ''

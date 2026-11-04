@@ -1,10 +1,10 @@
 // @ts-check
 
-import { spawn } from 'node:child_process'
 import http from 'node:http'
 import readline from 'node:readline/promises'
 
 import { askLineOnce } from '../../../../src/core/cli/line_asker.js'
+import { openBrowser } from '../../../../src/core/util/open_browser.js'
 import { CLAUDE_ACCOUNT_CONFIG_SECTION, resolveMode, validateClaudeAccountConfig } from './config.js'
 import { resolveCredential } from './credential.js'
 import {
@@ -238,7 +238,9 @@ async function runLogin(cmdCtx, mode, stateDir) {
   cmdCtx.stdout.write('Sign in with your Claude account.\n\n')
   cmdCtx.stdout.write(`Opening your browser (or open this URL yourself):\n\n  ${url}\n\n`)
   cmdCtx.stdout.write('Waiting for the browser; if it cannot reach this machine, paste the code below.\n')
-  openInBrowser(url)
+  // core's opener, not `cmd /c start`: cmd truncates a multi-param
+  // authorize URL at its first `&`.
+  openBrowser(url)
 
   const rl = readline.createInterface({
     input: /** @type {NodeJS.ReadableStream} */ (cmdCtx.stdin),
@@ -320,27 +322,6 @@ function startCallbackServer(expectedState) {
       resolve({ port: address.port, result, close: () => server.close() })
     })
   })
-}
-
-/**
- * Best-effort: open the sign-in URL in the default browser, the way the
- * Claude CLI's own login does. The printed URL stays the source of
- * truth; a missing opener or headless session just skips silently.
- *
- * @param {string} url
- */
-function openInBrowser(url) {
-  const opener = process.platform === 'darwin' ? 'open'
-    : process.platform === 'win32' ? 'cmd'
-    : 'xdg-open'
-  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
-  try {
-    const child = spawn(opener, args, { stdio: 'ignore', detached: true })
-    child.on('error', () => {})
-    child.unref()
-  } catch {
-    // No opener available: the URL is printed above; nothing else to do.
-  }
 }
 
 /**
