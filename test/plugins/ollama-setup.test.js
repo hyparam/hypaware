@@ -24,8 +24,9 @@ async function fixture(t, handler) {
 test('readiness uses only version/tags at the preserved base and never executes PATH evidence', async t => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ollama-ready-'))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
-  // The PATH probe honors PATHEXT on win32, so the fake carries .cmd there.
-  if (process.platform === 'win32') await fs.writeFile(path.join(home, 'ollama.cmd'), '@exit /b 99\r\n')
+  // The probe looks for `ollama.exe` on win32 (what Ollama ships there);
+  // it never executes the evidence, so the bytes are irrelevant.
+  if (process.platform === 'win32') await fs.writeFile(path.join(home, 'ollama.exe'), 'exit 99')
   else await fs.writeFile(path.join(home, 'ollama'), '#!/bin/sh\nexit 99\n', { mode: 0o755 })
   const seen = []
   const root = await fixture(t, (req, res) => {
