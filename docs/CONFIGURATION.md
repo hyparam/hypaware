@@ -17,7 +17,9 @@ Configuration uses `version: 2`, an explicit `plugins` list, optional `sinks`,
 and `query.cache` settings. The top-level `auto_update` setting defaults to
 `true` for supervised global installations; see [automatic updates](CLI.md#update-hypaware).
 To disable automatic updates, set `"auto_update": false` and restart the daemon.
-Organization policy may control this setting. Each plugin owns its own `config` block. Use
+Organization policy may control this setting. The top-level `first_sync_hold`
+setting is organization policy only: `false` in the organization's config turns off the
+[first-upload review](TEAM_SETUP.md#review-before-the-first-upload), and a local value has no effect. Each plugin owns its own `config` block. Use
 `hyp plugin info PLUGIN` to inspect an installed plugin's manifest.
 
 On an enrolled host, a separate central layer under `config-control/` is

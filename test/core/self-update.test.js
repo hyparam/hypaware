@@ -950,6 +950,24 @@ test('describeSelfUpdate: quiet when healthy, loud when off or an update waits',
   }
 })
 
+// @ref LLP 0578#org-owned [tests]: a local value can't remove the review hold
+test('config: first_sync_hold parses as a boolean and only the central layer counts', () => {
+  const ok = parseConfigShape({ version: 2, first_sync_hold: false })
+  assert.equal(ok.ok, true)
+  if (ok.ok) assert.equal(ok.config.first_sync_hold, false)
+
+  const bad = parseConfigShape({ version: 2, first_sync_hold: 'no' })
+  assert.equal(bad.ok, false)
+  if (!bad.ok) assert.equal(bad.errors[0].pointer, '/first_sync_hold')
+
+  const off = /** @type {any} */ ({ version: 2, first_sync_hold: false })
+  const on = /** @type {any} */ ({ version: 2, first_sync_hold: true })
+  assert.equal(mergeConfigLayers(off, on).effective.first_sync_hold, false)
+  assert.equal(mergeConfigLayers(on, off).effective.first_sync_hold, true)
+  assert.equal(mergeConfigLayers(/** @type {any} */ ({ version: 2 }), off).effective.first_sync_hold, undefined)
+  assert.equal(mergeConfigLayers(null, off).effective.first_sync_hold, undefined)
+})
+
 test('config: auto_update parses as a boolean and central wins the merge', () => {
   const ok = parseConfigShape({ version: 2, auto_update: false })
   assert.equal(ok.ok, true)

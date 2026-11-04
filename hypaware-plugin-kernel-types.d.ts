@@ -826,6 +826,11 @@ export interface HypAwareV2Config {
    * local when both layers set it.
    */
   auto_update?: boolean
+  /**
+   * Whether browser sign-in pauses a machine's first upload for review. Default
+   * true when absent. Only the central layer can turn it off.
+   */
+  first_sync_hold?: boolean
   /** Built-in export redaction is always applied; custom patterns add to it. */
   redaction?: ExportRedactionConfig
 }

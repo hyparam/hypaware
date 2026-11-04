@@ -5,7 +5,7 @@ import path from 'node:path'
 import { noteProductPipeline } from '../product_telemetry/client.js'
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
-import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { clearFirstSyncHold, readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { sinkInstanceName, onSinkHandleClose } from '../registry/sinks.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { sinkOutboxDir } from '../runtime/paths.js'
@@ -168,6 +168,14 @@ export function createSinkDriver(opts) {
   async function firstSyncHeld(now, source) {
     const deadline = await readFirstSyncDeadline({ stateDir: stateRoot, now: now.getTime() })
     if (deadline === null || now.getTime() >= deadline) return false
+    // Sign-in writes the marker before the org's config arrives, so a machine is
+    // held until the first run under that config, and then every reader agrees.
+    // @ref LLP 0578#marker-cleared [implements]: the org's setting clears the marker, not each reader
+    if (config?.first_sync_hold === false) {
+      const cleared = await clearFirstSyncHold({ stateDir: stateRoot })
+      log.info('sink.first_sync_hold_off_by_org', { [Attr.COMPONENT]: 'sinks', [Attr.OPERATION]: 'sink.tick', hyp_cleared: cleared })
+      return false
+    }
     log.info('sink.tick_held_first_sync', { [Attr.COMPONENT]: 'sinks', [Attr.OPERATION]: 'sink.tick', hyp_reason: 'first_sync_hold', hyp_deadline: new Date(deadline).toISOString(), source })
     return true
   }
