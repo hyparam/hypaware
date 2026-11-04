@@ -1486,12 +1486,14 @@ function runCommand(cmd, args, opts) {
     // On Windows npm is npm.cmd, and spawn without a shell refuses `.cmd`
     // targets with EINVAL (Node's CVE-2024-27980 fix). A shell means the
     // arguments are not escaped, so callers may pass only fixed, bare
-    // tokens (fetchLatestVersion pins the version to one).
+    // tokens (fetchLatestVersion pins the version to one). Only npm gets
+    // the shell: the node preflight and skills runs pass process.execPath,
+    // which the shell would split at the space in C:\Program Files.
     const child = spawn(cmd, args, {
       env: opts.env,
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
+      shell: process.platform === 'win32' && cmd === 'npm',
       windowsHide: true,
     })
     // Keep only a bounded tail: skill installation loads plugins, whose
