@@ -1118,6 +1118,13 @@ function managedHookCommands(binPath, stateFile) {
 /** @param {string} value */
 function shellQuote(value) {
   if (/^[A-Za-z0-9_./:-]+$/.test(value)) return value
+  if (process.platform === 'win32') {
+    // Claude Code runs hook commands through cmd.exe here, where a single
+    // quote is a literal character, so the POSIX quoting below would hand
+    // the hook a malformed command. A double quote cannot appear in a
+    // Windows path, so wrapping is the whole job.
+    return '"' + value + '"'
+  }
   const quote = String.fromCharCode(39)
   return quote + value.split(quote).join(quote + '\\' + quote + quote) + quote
 }

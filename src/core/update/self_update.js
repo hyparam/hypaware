@@ -498,7 +498,10 @@ export async function fetchLatestVersion(opts) {
     if (!res.ok) throw new Error(`registry responded ${res.status}`)
     const body = /** @type {{ version?: unknown } | null} */ (await res.json())
     const version = body && typeof body === 'object' ? body.version : undefined
-    if (typeof version !== 'string' || !parseSemver(version)) {
+    // parseSemver matches a prefix; the allowlist pins the whole string,
+    // because this value is later interpolated into `npm install -g
+    // name@version`, which runs through a shell on win32.
+    if (typeof version !== 'string' || !parseSemver(version) || !/^[0-9A-Za-z.+-]+$/.test(version)) {
       throw new Error('registry response had no parseable version')
     }
     return version
@@ -1480,10 +1483,16 @@ function probeFailureIsEntrenched(state, nowMs) {
 function runCommand(cmd, args, opts) {
   const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : NPM_TIMEOUT_MS
   return new Promise((resolve) => {
+    // On Windows npm is npm.cmd, and spawn without a shell refuses `.cmd`
+    // targets with EINVAL (Node's CVE-2024-27980 fix). A shell means the
+    // arguments are not escaped, so callers may pass only fixed, bare
+    // tokens (fetchLatestVersion pins the version to one).
     const child = spawn(cmd, args, {
       env: opts.env,
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32',
+      windowsHide: true,
     })
     // Keep only a bounded tail: skill installation loads plugins, whose
     // diagnostics must not grow the updater's memory for the child's lifetime.

@@ -25,6 +25,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/matcher.js'
 import { createVolumeCaseProbe, foldPath, PATH_CASE_PROBE_ERROR_KIND } from '../../src/core/usage-policy/fold.js'
@@ -255,13 +256,15 @@ test('resolve: the case verdict is asked per entry, so a per-volume answer appli
     {
       caseInsensitiveVolume: (dir) => {
         asked.push(dir)
-        return dir.startsWith('/insensitive/')
+        // The resolver hands the probe the resolved spelling, which on a
+        // win32 host gains a drive letter and backslashes.
+        return dir.includes('insensitive')
       },
     }
   )
   assert.equal(r.resolve('/insensitive/a').class, 'ignore')
   assert.equal(r.resolve('/sensitive/b').class, 'full')
-  assert.deepEqual(asked, ['/insensitive/A', '/sensitive/B'])
+  assert.deepEqual(asked, [path.resolve('/insensitive/A'), path.resolve('/sensitive/B')])
 })
 
 // --- the probe itself ------------------------------------------------------
@@ -280,6 +283,15 @@ test('createVolumeCaseProbe is inert off darwin: constant false, and it issues n
   assert.equal(probe('/root/Proj'), false)
   assert.equal(probe('/anything'), false)
   assert.equal(statCalls, 0)
+})
+
+test('createVolumeCaseProbe probes on win32, where NTFS is case-insensitive by default', () => {
+  // Same dev/ino identity test as darwin; only the platform gate differs.
+  const probe = createVolumeCaseProbe({
+    platform: 'win32',
+    statSync: () => ({ dev: 7, ino: 42 }),
+  })
+  assert.equal(probe('/vol/Proj'), true)
 })
 
 test('createVolumeCaseProbe memoizes a definite verdict per volume, not per path', () => {

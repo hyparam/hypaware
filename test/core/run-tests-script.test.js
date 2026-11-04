@@ -8,7 +8,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
-import { buildNodeTestArgs } from '../../scripts/run-tests.js'
+import { batchTestFiles, buildNodeTestArgs } from '../../scripts/run-tests.js'
 
 test('run-tests forwards node --test flags before discovered test files', () => {
   assert.deepEqual(
@@ -33,6 +33,25 @@ test('run-tests appends discovered test files when no flags are forwarded', () =
     buildNodeTestArgs(['test/a.test.js']),
     ['--test', 'test/a.test.js'],
   )
+})
+
+test('run-tests keeps a single batch under an infinite command-line limit', () => {
+  const files = Array.from({ length: 700 }, (_, i) => `test/suite-${i}.test.js`)
+  assert.deepEqual(batchTestFiles(files, [], Infinity), [files])
+})
+
+test('run-tests splits batches at the command-line limit without losing or reordering files', () => {
+  const files = Array.from({ length: 50 }, (_, i) => `test/suite-${String(i).padStart(3, '0')}.test.js`)
+  const batches = batchTestFiles(files, ['--test-reporter', 'spec'], process.execPath.length + 200)
+  assert.ok(batches.length > 1, 'a tight limit must produce more than one batch')
+  assert.deepEqual(batches.flat(), files)
+})
+
+test('run-tests batching keeps an oversized single file instead of dropping it', () => {
+  const files = ['test/' + 'x'.repeat(500) + '.test.js', 'test/b.test.js']
+  const batches = batchTestFiles(files, [], process.execPath.length + 100)
+  assert.deepEqual(batches.flat(), files)
+  assert.deepEqual(batches[0], [files[0]])
 })
 
 for (const fails of [false, true]) {
@@ -67,7 +86,11 @@ for (const fails of [false, true]) {
 
 // A fixture the suite left unreadable must not replace the run's exit status.
 // Root ignores directory permissions, so only an unprivileged run can build one.
-test('a temp root that cannot be removed warns without masking the suite result', { skip: process.getuid?.() === 0 ? 'needs an unprivileged uid' : false }, t => {
+test('a temp root that cannot be removed warns without masking the suite result', {
+  skip: process.platform === 'win32'
+    ? 'chmod 0o000 does not make a directory unremovable on Windows'
+    : process.getuid?.() === 0 && 'needs an unprivileged uid',
+}, t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-unremovable-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   fs.mkdirSync(path.join(root, 'test'))
