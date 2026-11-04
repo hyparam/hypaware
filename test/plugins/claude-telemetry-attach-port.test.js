@@ -8,6 +8,7 @@ import test from 'node:test'
 
 import {
   DEFAULT_TELEMETRY_PORT,
+  telemetryPortForUid,
   resolveAttachTelemetryPort,
 } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
@@ -98,4 +99,16 @@ test('a dead daemon status is ignored', async (t) => {
     config: { telemetry: { listen_port: 5555 } },
   })
   assert.equal(port, 5555)
+})
+
+test('the default telemetry port is stable and distinct per OS user', () => {
+  for (const uid of [undefined, 0, 501, 1000]) assert.equal(telemetryPortForUid(uid), 4319)
+  assert.equal(telemetryPortForUid(502), telemetryPortForUid(502))
+  assert.notEqual(telemetryPortForUid(502), telemetryPortForUid(503))
+  assert.notEqual(telemetryPortForUid(502), 4319)
+  // Directory-backed accounts have large uids. Stay below every OS's ephemeral range.
+  for (const uid of [502, 1001, 1234567890]) {
+    const port = telemetryPortForUid(uid)
+    assert.ok(port >= 20000 && port < 32000, `port ${port}`)
+  }
 })
