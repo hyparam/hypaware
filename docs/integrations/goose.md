@@ -127,3 +127,6 @@ controls do not cover them.
 
 For status messages and fixes, see
 [troubleshooting](../TROUBLESHOOTING.md#goose-records-nothing).
+
+Design: [LLP 0570](../../llp/0570-goose-session-capture.design.md) and
+[LLP 0571](../../llp/0571-goose-session-capture.plan.md).
