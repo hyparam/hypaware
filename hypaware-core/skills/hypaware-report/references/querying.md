@@ -55,6 +55,16 @@ identities across partition boundaries before summing overlapping captures.
 
 ## Bound queries and choose evidence
 
+Unless the assignment is specifically about something else (tool usage, token
+cost, assistant behavior, one error), start from the human-typed turns and let
+them frame the rest: they say what the person wanted, and they are a small
+share of the rows, since most `role = 'user'` rows are injected text and
+assistant and tool rows outnumber them many times over. Use the human-turn
+predicate from the installed `hypaware-query` skill's `sql.md`
+(`attributes.claude.origin.kind = 'human'` or Codex `content_item_kinds`
+with `user.text`; the text fallback on rows from before 1.48.0), then widen
+to the assistant and tool rows that answered each request.
+
 Use read-only SELECTs, date predicates, narrow projections (also inside CTEs),
 aggregates for counts, and LIMIT for text samples. A LIMIT bounds returned rows,
 not scan or sort cost. Split expensive work by date; avoid concurrent heavy

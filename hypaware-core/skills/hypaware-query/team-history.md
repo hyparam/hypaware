@@ -48,7 +48,7 @@ ORDER BY message_created_at DESC, message_id
 LIMIT 5
 ```
 
-If captured boilerplate dominates, refine the search or exclude the observed boilerplate for discovery, then verify the original rows. A hit is an excerpt, not the whole exchange. Read a bounded time window in the same session around that hit, remove the keyword predicate, and return original text in chronological order. Keep `part_id` as well as `message_id` when reading the window: a message can span multiple parts. Widen the window if the request or response is cut off. Follow linked agent or sidechain exchanges when the main thread points to them.
+If captured boilerplate dominates, refine the search or exclude the observed boilerplate for discovery, then verify the original rows. To keep only what a person typed, add the human-turn predicate from [sql.md](sql.md) and apply its pre-label fallback on days without labels. A hit is an excerpt, not the whole exchange. Read a bounded time window in the same session around that hit, remove the keyword predicate, and return original text in chronological order. Keep `part_id` as well as `message_id` when reading the window: a message can span multiple parts. Widen the window if the request or response is cut off. Follow linked agent or sidechain exchanges when the main thread points to them.
 
 If the server advertises `session_evidence`, use its advertised input schema to request the session and relevant time window or message IDs. Continue `partial` responses with `next_cursor`; inspect `skipped_parts`, deadline/error statuses and coverage. Remote SQL is the working path when that tool is unavailable. A server without an enabled index can still answer correctly, but may scan more data.
 

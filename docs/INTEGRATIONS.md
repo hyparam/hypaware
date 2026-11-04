@@ -36,6 +36,8 @@ collector inside the cloud environment.
 | [OpenCode](integrations/opencode.md) | Supported | Your machine | A managed OpenCode plugin sends live session snapshots, for the CLI and desktop app | Yes | `opencode` |
 | [Pi](integrations/pi.md) | Supported | Your machine | A managed Pi extension sends completed entries, plus session recovery every five minutes | Yes | `pi` |
 | [Factory Droid](integrations/droid.md) | Supported | Your machine, a server, or CI | Native hooks signal local transcript changes, plus recovery every five minutes; no billed token usage or cost | Yes | `droid` |
+| [Goose](integrations/goose.md) | Supported | Your machine | Goose's local session database, read-only, for the CLI and desktop app, polled every 60 seconds, plus recovery every 15 minutes | Yes | `goose` |
+| [Crush](integrations/crush.md) | Supported | Your machine | Each project's `crush.db`, read-only, found through Crush's project index, polled every 60 seconds, plus recovery every 15 minutes; no token usage | Yes | `crush` |
 | [Antigravity](integrations/antigravity.md) | Beta | Your machine | Antigravity CLI and Desktop local conversation stores, polled every 30 seconds, plus recovery every five minutes | Yes | `antigravity`, `antigravity-desktop` |
 
 ## Cloud agents

@@ -20,6 +20,8 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory; no billed token usage or cost |
 | `openclaw` | OpenClaw conversations from gateway traffic and local transcripts |
 | `hermes` | Hermes Agent conversations read from its local state database |
+| `goose` | Goose CLI and Desktop conversations read from its local session database, including tool calls and results, token usage, and working directory |
+| `crush` | Crush conversations read from each project's local database, including tool calls and results and the project directory; no token usage. The `files` table, which holds copies of file contents, is never read |
 | `antigravity`, `antigravity-desktop` | Antigravity CLI and Desktop conversations read from their local summary databases and transcripts, including model thinking, tool calls and results, and working directory |
 | `copilot` | VS Code Copilot completed spans from its local databases, for sessions with a verified local working directory |
 | `nanoclaw` | NanoClaw Claude transcripts read from an explicitly configured local installation |
@@ -172,7 +174,7 @@ Three caveats apply to both surfaces:
 
 **Class resolution needs a working directory.** The client sources
 (Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, Droid, OpenClaw,
-Copilot, LangGraph) supply one. NanoClaw uses the host `groups/<folder>`
+Goose, Crush, Copilot, LangGraph) supply one. NanoClaw uses the host `groups/<folder>`
 workspace. Antigravity takes it from the conversation's workspace; a
 conversation with no workspace has no scope to match and is recorded
 unconditionally. Hermes supplies the real one for an interactive session it
@@ -215,17 +217,22 @@ For another supported recorder, pass an explicitly verified session ID as
 shown in the [session reference](CLI_REFERENCE.md#control-the-current-session).
 
 The command sends the exclusion to local recorder control routes for the gateway,
-Claude telemetry, OpenCode, Pi, Droid, and Cursor when they are running. The Claude
+Claude telemetry, OpenCode, Pi, Droid, and Cursor when they are running. Goose
+and Crush have no control route; they read the saved exclusion on their next
+poll. A Crush session is ignored by its HypAware session ID, `crush-` followed
+by the Crush session ID. On an install that records only Goose or Crush the
+command saves nothing, so mark the session's working directory with
+`hyp privacy ignore <dir>` instead. The Claude
 listener deletes ignored sessions' spooled bodies unread. Use
 `hyp session unignore` to resume and `hyp session status` to check the result.
 
-Gateway, Claude, OpenCode, Pi, and Droid exclusions are saved under
+Gateway, Claude, OpenCode, Pi, Droid, Goose, and Crush exclusions are saved under
 `<HYP_HOME>/hypaware/session-ignores/` and survive restarts. **Cursor exclusions
 are currently in memory only and must be reapplied after a recorder restart.**
 OpenClaw and Hermes do not support this session control; use directory markings
 or disable their capture integrations.
 
-Claude (including Desktop transcripts), Codex, OpenCode, Pi, and Droid backfill honor
+Claude (including Desktop transcripts), Codex, OpenCode, Pi, Droid, Goose, and Crush backfill honor
 saved exclusions, including manual imports in a separate process. Saving must
 succeed before a persistent recorder reports success. If its exclusion store is
 unreadable or corrupt, capture and transcript imports pause while AI requests
