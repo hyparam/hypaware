@@ -1,4 +1,4 @@
-// @ts-check
+﻿// @ts-check
 
 /**
  * The managed Claude hook must never be pinned to npm's `_npx` cache.
@@ -62,13 +62,16 @@ async function rig(opts = {}) {
   await writeExecutable(path.join(projectBinDir, 'hypaware'))
 
   const globalBinDir = path.join(root, 'npm-global', 'bin')
-  const globalBin = path.join(globalBinDir, 'hypaware')
+  // The PATH walk probes PATHEXT spellings on win32 (pinned via env.PATHEXT),
+  // never the bare name.
+  const globalBin = path.join(globalBinDir, process.platform === 'win32' ? 'hypaware.cmd' : 'hypaware')
   if (opts.installedBin === true) await writeExecutable(globalBin)
   else await fsp.mkdir(globalBinDir, { recursive: true })
 
   const env = {
     HOME: root,
     npm_config_cache: path.join(root, '.npm'),
+    ...(process.platform === 'win32' ? { PATHEXT: '.cmd' } : {}),
     PATH: [npxBinDir, projectBinDir, globalBinDir].join(path.delimiter),
   }
 
@@ -207,7 +210,7 @@ test('an unchanged recorded path reports no swap', async (t) => {
 // is a link into that same root. One install under two names is not a swap,
 // and saying it is tells an operator their one CLI may be two versions of
 // itself.
-test('one install reached by two spellings reports no swap', async (t) => {
+test('one install reached by two spellings reports no swap', { skip: process.platform === 'win32' && 'the pnpm shim here is a file symlink, which needs Developer Mode on win32' }, async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-hook-bin-'))
   t.after(() => fsp.rm(root, { recursive: true, force: true }))
 

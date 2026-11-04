@@ -1,4 +1,4 @@
-// @ts-check
+﻿// @ts-check
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -90,17 +90,21 @@ function sqliteError(errcode) {
 
 test('the reader opens read-only: a write through its handle throws', async (t) => {
   const dir = await tempDir()
-  t.after(() => fs.rm(dir, { recursive: true, force: true }))
-  const reader = await openGooseSessionsDb(buildFixtureSessionsDb(dir))
+    const reader = await openGooseSessionsDb(buildFixtureSessionsDb(dir))
   t.after(() => reader.close())
+  // Close before the rm (hooks run in registration order): win32 cannot
+  // unlink a database an open handle still maps (EBUSY).
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   assert.throws(() => reader.db.exec("UPDATE sessions SET name = 'x'"), /readonly/i)
 })
 
 test('listSessions skips hidden sessions and orders by created_at', async (t) => {
   const dir = await tempDir()
-  t.after(() => fs.rm(dir, { recursive: true, force: true }))
-  const reader = await openGooseSessionsDb(buildFixtureSessionsDb(dir))
+    const reader = await openGooseSessionsDb(buildFixtureSessionsDb(dir))
   t.after(() => reader.close())
+  // Close before the rm (hooks run in registration order): win32 cannot
+  // unlink a database an open handle still maps (EBUSY).
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const sessions = await reader.listSessions()
   assert.deepEqual(sessions.map((s) => s.id), ['20261102_1', '20261102_3'])
   assert.equal(sessions[1].parent_session_id, '20261102_1')
@@ -108,9 +112,11 @@ test('listSessions skips hidden sessions and orders by created_at', async (t) =>
 
 test('readSessionSnapshot returns ordered messages, and null for a hidden or missing session', async (t) => {
   const dir = await tempDir()
-  t.after(() => fs.rm(dir, { recursive: true, force: true }))
-  const reader = await openGooseSessionsDb(buildFixtureSessionsDb(dir))
+    const reader = await openGooseSessionsDb(buildFixtureSessionsDb(dir))
   t.after(() => reader.close())
+  // Close before the rm (hooks run in registration order): win32 cannot
+  // unlink a database an open handle still maps (EBUSY).
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const snapshot = await reader.readSessionSnapshot('20261102_1')
   assert.ok(snapshot)
   assert.equal(snapshot.session.name, 'Fixture session')
@@ -121,9 +127,11 @@ test('readSessionSnapshot returns ordered messages, and null for a hidden or mis
 
 test('a missing required column fails with schema_unsupported naming it', async (t) => {
   const dir = await tempDir()
-  t.after(() => fs.rm(dir, { recursive: true, force: true }))
-  const reader = await openGooseSessionsDb(buildFixtureSessionsDb(dir, { dropMessageColumn: 'metadata_json' }))
+    const reader = await openGooseSessionsDb(buildFixtureSessionsDb(dir, { dropMessageColumn: 'metadata_json' }))
   t.after(() => reader.close())
+  // Close before the rm (hooks run in registration order): win32 cannot
+  // unlink a database an open handle still maps (EBUSY).
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   await assert.rejects(reader.listSessions(), (err) => {
     assert.ok(err instanceof GooseSessionsDbError)
     assert.equal(err.code, 'schema_unsupported')
@@ -172,6 +180,7 @@ test('open refuses a missing file, an unreadable file and a missing node:sqlite'
   await assert.rejects(openGooseSessionsDb(path.join(dir, 'absent.db')), (err) => err instanceof GooseSessionsDbError && err.code === 'missing')
   assert.throws(() => loadSqliteModule(() => { throw new Error('no such module') }), (err) => err instanceof GooseSessionsDbError && err.code === 'sqlite_unavailable')
   if (process.getuid?.() === 0) return t.diagnostic('running as root; the permission case is skipped')
+  if (process.platform === 'win32') return t.diagnostic('chmod 0o000 does not make a file unreadable on win32; the permission case is skipped')
   const dbPath = buildFixtureSessionsDb(dir)
   await fs.chmod(dbPath, 0o000)
   await assert.rejects(openGooseSessionsDb(dbPath), (err) => err instanceof GooseSessionsDbError && err.code === 'permission_denied')

@@ -1,4 +1,4 @@
-// @ts-check
+﻿// @ts-check
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -10,7 +10,7 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { centralSeedPath, resolveCentralLayerPath } from '../../src/core/config/apply.js'
 
 /**
- * `hyp leave`, the level-3 exit verb (LLP 0063 §prerequisites): removes the
+ * `hyp leave`, the level-3 exit verb (LLP 0063 Â§prerequisites): removes the
  * central config layer, reverses org-driven attaches via the one core undo,
  * and drops the forward identity, while leaving the query-session store, the
  * user-owned local layer, and the daemon service untouched.
@@ -101,7 +101,10 @@ test('leave clears an applied central slot, not just the seed', async () => {
   }
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(applied, null, 2) + '\n')
   await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1\n')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  // The pointer the apply engine writes on this host: a symlink on POSIX,
+  // a regular pointer file on win32 (LLP 0578).
+  if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
+  else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
@@ -121,7 +124,10 @@ test('leave names the neutral destination when the central layer carries no sink
     sinks: { central: { plugin: '@hypaware/central', config: { identity: {} } } },
   }
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(applied, null, 2) + '\n')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  // The pointer the apply engine writes on this host: a symlink on POSIX,
+  // a regular pointer file on win32 (LLP 0578).
+  if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
+  else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
@@ -277,11 +283,17 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
   // follow, so keying leave's "nothing to do" on the resolved path alone would
   // make that advice a dead end: the gate would refuse forever and leave would
   // claim there is nothing to disconnect.
-  for (const [name, writePointer] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
-    ['a regular file where the pointer symlink should be', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
-    ['a pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
-    ['a pointer that is a symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
-  ])) {
+  // On win32 a regular pointer file is the written representation (LLP 0578),
+  // so the unresolvable shape there is a file naming no slot; the symlink
+  // shapes stay POSIX-only.
+  const shapes = /** @type {[string, (dir: string) => Promise<unknown>][]} */ (process.platform === 'win32'
+    ? [['a pointer file naming neither slot', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.c.json\n')]]
+    : [
+      ['a regular file where the pointer symlink should be', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
+      ['a pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
+      ['a pointer that is a symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
+    ])
+  for (const [name, writePointer] of shapes) {
     const { stateRoot, stdout, opts } = await makeDispatchOpts()
     const controlDir = path.join(stateRoot, 'config-control')
     await fs.mkdir(controlDir, { recursive: true })
@@ -303,7 +315,7 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
   }
 })
 
-test('leave reports a central layer it cannot remove instead of throwing (#623)', async () => {
+test('leave reports a central layer it cannot remove instead of throwing (#623)', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a directory unremovable on win32' }, async () => {
   // An unreadable control directory is one of the states the D4 gate refuses
   // on, so leave has to reach its later steps and name the problem rather than
   // aborting on an uncaught EACCES.
@@ -362,7 +374,7 @@ test('leave still tears down when only a stale attach marker survives a prior pa
 })
 
 test('leave removes the assets its attach marker records, and leaves manual copies alone', async () => {
-  // LLP 0107 §reversal: leave removes the skills the org installed, exactly as
+  // LLP 0107 Â§reversal: leave removes the skills the org installed, exactly as
   // it reverses the settings edits. LLP 0138 #marker-undo makes that
   // implementable - the marker's `installed_assets` is the only record of what
   // was copied, so leave must read it before it drops the marker.
