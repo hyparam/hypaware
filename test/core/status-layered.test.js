@@ -29,6 +29,18 @@ function env(hypHome) {
   return { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
 }
 
+/**
+ * Write the active-slot pointer the way the apply engine does on this host:
+ * a relative symlink on POSIX, a regular pointer file on win32 (LLP 0578).
+ *
+ * @param {string} controlDir
+ * @param {string} slotName
+ */
+async function writeActivePointer(controlDir, slotName) {
+  if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), `${slotName}\n`)
+  else await fs.symlink(slotName, path.join(controlDir, 'active'))
+}
+
 test('a never-joined host reports no layering (V1 surface unchanged)', async () => {
   const hypHome = await makeHome()
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
@@ -238,7 +250,7 @@ test('an unparseable applied slot is named through the active pointer', async ()
   await fs.mkdir(controlDir, { recursive: true })
   const slotPath = path.join(controlDir, 'config.a.json')
   await fs.writeFile(slotPath, 'truncated-garbage')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  await writeActivePointer(controlDir, 'config.a.json')
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/ai-gateway' }],
@@ -278,7 +290,7 @@ test('an active-slot pointer naming a slot file that is gone reports the central
   // The pointer resolves (by name) to a slot the apply engine never wrote
   // here, or already rotated away - `readActiveSlot` only checks the target
   // name, not that the file exists.
-  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  await writeActivePointer(controlDir, 'config.b.json')
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/ai-gateway' }],
@@ -300,13 +312,15 @@ test('an active pointer replaced by a regular file reports the central layer unr
   const controlDir = path.join(stateRoot, 'config-control')
   await fs.mkdir(controlDir, { recursive: true })
   // The slot file still holds a central sink, but the pointer that would
-  // name it is a plain file, not a symlink: `readActiveSlot` cannot follow it.
+  // name it cannot be followed: on POSIX a plain file where the symlink
+  // belongs (any content), on win32 - where a plain pointer file is the
+  // written representation (LLP 0578) - one whose content names no slot.
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/central' }],
     sinks: { central: { plugin: '@hypaware/central', config: {} } },
   }) + '\n')
-  await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  await fs.writeFile(path.join(controlDir, 'active'), process.platform === 'win32' ? 'not-a-slot' : 'config.a.json')
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/ai-gateway' }],
@@ -324,7 +338,7 @@ test('an active pointer replaced by a regular file reports the central layer unr
   assert.equal(report.overall, 'healthy')
 })
 
-test('a central config directory that cannot be listed reports the central layer unreadable', async () => {
+test('a central config directory that cannot be listed reports the central layer unreadable', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a directory unlistable on win32' }, async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')
   const controlDir = path.join(stateRoot, 'config-control')
@@ -360,7 +374,7 @@ test('config_missing does not claim "neither a central layer" when the central l
   const stateRoot = path.join(hypHome, 'hypaware')
   const controlDir = path.join(stateRoot, 'config-control')
   await fs.mkdir(controlDir, { recursive: true })
-  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  await writeActivePointer(controlDir, 'config.b.json')
   // No local config at all, and the central layer resolves to a slot file
   // that is gone: both `config_missing` and `config_central_unreadable` fire.
 
@@ -379,22 +393,24 @@ test('config_missing does not claim "neither a central layer" when the central l
 // host (`layered` and `clientSync` null), so the text views must read the
 // collector's diagnostic rather than infer a solo host (issue #2431).
 
-/** @type {Array<[string, (controlDir: string) => Promise<void>]>} */
+/** @type {Array<[string, (controlDir: string) => Promise<void>, (string | false)?]>} */
 const UNREADABLE_CENTRAL_STATES = [
   ['an unparseable seed', async (controlDir) => {
     await fs.writeFile(path.join(controlDir, 'seed.json'), '{ not json at all\n')
   }],
   ['an active pointer naming a gone slot', async (controlDir) => {
-    await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+    await writeActivePointer(controlDir, 'config.b.json')
   }],
   ['an active pointer that is a regular file', async (controlDir) => {
+    // On win32 a regular pointer file is the written representation
+    // (LLP 0578), so the unfollowable shape there is one naming no slot.
     await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2 }) + '\n')
-    await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+    await fs.writeFile(path.join(controlDir, 'active'), process.platform === 'win32' ? 'not-a-slot' : 'config.a.json')
   }],
   ['a control directory that cannot be listed', async (controlDir) => {
     await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
     await fs.chmod(controlDir, 0o000)
-  }],
+  }, process.platform === 'win32' && 'chmod 0o000 does not make a directory unlistable on win32'],
 ]
 
 /** @param {HypAwareStatusReport} report */
@@ -412,8 +428,8 @@ function renderBothViews(report) {
   return { compact: compact.text(), verbose: verbose.text() }
 }
 
-for (const [label, arrange] of UNREADABLE_CENTRAL_STATES) {
-  test(`${label} renders Unknown sharing in the compact and verbose views`, async () => {
+for (const [label, arrange, skip] of UNREADABLE_CENTRAL_STATES) {
+  test(`${label} renders Unknown sharing in the compact and verbose views`, { skip: skip ?? false }, async () => {
     const hypHome = await makeHome()
     const controlDir = path.join(hypHome, 'hypaware', 'config-control')
     await fs.mkdir(controlDir, { recursive: true })

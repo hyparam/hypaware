@@ -1370,6 +1370,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   retentionDays: number,
  *   interactive: boolean,
+ *   platform?: NodeJS.Platform,
  *   force?: boolean,
  *   stdin?: NodeJS.ReadableStream,
  *   backfill?: PickerBackfillRunner,
@@ -1395,6 +1396,10 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  */
 export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
+  // Platform seam, the one DispatchOptions/runInitWizard carry (#975 tests):
+  // decides only which incomplete-daemon note is printed and whether a
+  // restart is attempted; everything else runs on the real host.
+  const platform = args.platform ?? process.platform
   const dryRun = finale.dryRun === true
   // Each act is reported in one line, by the names the user picked from
   // (LLP 0437 #finish).
@@ -1546,7 +1551,7 @@ export async function runPickerFinale(args) {
       // (#1395). The same class raised after the install succeeded does have a `hyp`,
       // so the flag decides rather than `instanceof`.
       const noHypOnPath = err instanceof GlobalInstallError && !err.globalBinInstalled
-      if (!noHypOnPath) stderr.write(daemonIncompleteNote(process.platform))
+      if (!noHypOnPath) stderr.write(daemonIncompleteNote(platform))
     })
   }
 
@@ -1832,8 +1837,8 @@ export async function runPickerFinale(args) {
     // first `daemon/install.js`.
     try {
       const service = args.daemonService ?? await import('../daemon/install.js')
-      let restartable = platformIsSupported(process.platform) && !installFailed
-      if (platformIsSupported(process.platform) && installFailed) {
+      let restartable = platformIsSupported(platform) && !installFailed
+      if (platformIsSupported(platform) && installFailed) {
         const status = await service.serviceDaemonStatus(serviceOptions)
         restartable = status.pid !== undefined
         // A probe that could not reach the service manager has no pid to give
