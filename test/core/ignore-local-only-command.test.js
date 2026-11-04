@@ -258,7 +258,7 @@ test('hyp privacy set <path> ignore on the real path upgrades an entry declared 
     const real = path.join(root, 'real', 'proj')
     mkdirSync(real, { recursive: true })
     const link = path.join(root, 'link')
-    symlinkSync(real, link)
+    symlinkSync(real, link, process.platform === 'win32' ? 'junction' : null)
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [link] })
 
     const res = await run('privacy set', [real, 'ignore'], { cwd: root, hypHome })
@@ -274,7 +274,7 @@ test('hyp privacy unset <path> local-only by symlink spelling removes an entry d
     const real = path.join(root, 'real', 'proj')
     mkdirSync(real, { recursive: true })
     const link = path.join(root, 'link')
-    symlinkSync(real, link)
+    symlinkSync(real, link, process.platform === 'win32' ? 'junction' : null)
     const unrelated = path.join(root, 'other')
     mkdirSync(unrelated)
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [real, unrelated] })
@@ -377,7 +377,7 @@ test('hyp privacy show scopes the residual count to the entry the gate used, not
     // residual count by "longest declared string" counts rows under the link
     // path, which nothing was ever recorded under, and reports 0.
     const link = path.join(root, 'a-very-long-link-name')
-    symlinkSync(path.join(scope, 'p'), link)
+    symlinkSync(path.join(scope, 'p'), link, process.platform === 'win32' ? 'junction' : null)
     await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [link, scope] })
 
     const { query, storage } = makeAiGatewayCache([
