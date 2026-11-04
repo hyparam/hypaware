@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 
 // LLP 0323: a partition cursor may only name a generation inside its own
 // partition. `tryReadCursorSync` is the one gate, so a `tableDir` that

@@ -44,8 +44,9 @@ test('prefix routes, shape decides, and only the two permanent codes stop', () =
 })
 
 test('the record sits beside identity.json and follows a custom persisted_path', () => {
-  assert.equal(serviceTokenPath('/h/state/central/identity.json'), '/h/state/central/service-token')
-  assert.equal(serviceTokenPath('/elsewhere/gw/id.json'), '/elsewhere/gw/service-token')
+  // path.join spellings, so the expectation follows the host separator.
+  assert.equal(serviceTokenPath('/h/state/central/identity.json'), path.join('/h/state/central', 'service-token'))
+  assert.equal(serviceTokenPath('/elsewhere/gw/id.json'), path.join('/elsewhere/gw', 'service-token'))
 })
 
 test('a written record reads back, private from creation', async () => {
@@ -59,8 +60,11 @@ test('a written record reads back, private from creation', async () => {
     written_at: '1970-01-01T00:00:00.000Z',
   })
   assert.deepEqual(await writeKeptServiceToken(p, record), { outcome: 'written' })
-  assert.equal(fs.statSync(p).mode & 0o777, 0o600)
-  assert.equal(fs.statSync(path.dirname(p)).mode & 0o777, 0o700)
+  if (process.platform !== 'win32') {
+    // No POSIX mode bits on win32.
+    assert.equal(fs.statSync(p).mode & 0o777, 0o600)
+    assert.equal(fs.statSync(path.dirname(p)).mode & 0o777, 0o700)
+  }
   assert.deepEqual(await readKeptServiceToken(p), { state: 'ok', record })
   const stopped = { ...record, stopped_code: 'service_token_revoked' }
   await writeKeptServiceToken(p, stopped)
@@ -122,7 +126,13 @@ test('a failed write is classified by reading the target back once', async () =>
       return fsp.open(target, flags, mode)
     },
   })
-  assert.deepEqual(await writeKeptServiceToken(visible, record, { fs: noDirSync }), { outcome: 'visible', error: 'EIO' })
+  if (process.platform === 'win32') {
+    // The parent-directory sync is skipped on win32 (no directory fsync),
+    // so the injected open failure never fires and the write just lands.
+    assert.deepEqual(await writeKeptServiceToken(visible, record, { fs: noDirSync }), { outcome: 'written' })
+  } else {
+    assert.deepEqual(await writeKeptServiceToken(visible, record, { fs: noDirSync }), { outcome: 'visible', error: 'EIO' })
+  }
   assert.deepEqual(await readKeptServiceToken(visible), { state: 'ok', record })
 
   // The write and the read-back both fail: unreadable.

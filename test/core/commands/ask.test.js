@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
@@ -627,8 +627,8 @@ test('runAsk "<question>": a real keypress still lifts the deadline, stray byte 
 // unit, and the picker offers that same order so its deadline fallback is
 // the same default. Mixed case and non-ASCII ids, scrambled, so neither the
 // input order nor a locale compare can pass for it.
-const MIXED_IDS = ['Ã©mile', 'zeta', 'Zulu', 'beta', 'Ã‰mile', 'alpha']
-const MIXED_ORDER = ['Zulu', 'alpha', 'beta', 'zeta', 'Ã‰mile', 'Ã©mile']
+const MIXED_IDS = ['émile', 'zeta', 'Zulu', 'beta', 'Émile', 'alpha']
+const MIXED_ORDER = ['Zulu', 'alpha', 'beta', 'zeta', 'Émile', 'émile']
 
 /**
  * The real `resolveLaunchers` over fixture clients, each a stub on disk
@@ -674,11 +674,11 @@ test('runAsk "<question>": the default and the picker share ascending client-id 
     /** @param {any} spec */
     select: async (spec) => {
       offered = spec.options.map((/** @type {any} */ o) => o.value)
-      return 'Ã©mile'
+      return 'émile'
     },
   }), 0)
   assert.deepEqual(offered, MIXED_ORDER)
-  assert.equal(await picked.started(), 'Ã©mile')
+  assert.equal(await picked.started(), 'émile')
 
   // An unanswered picker falls back to that same first.
   const idle = await mixedFixture()

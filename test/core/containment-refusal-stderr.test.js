@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 
 // LLP 0329: a containment refusal must be observable, and the channel is the
 // process's stderr. On a default install (no HYP_DEV_TELEMETRY, no

@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -10,7 +10,7 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { centralSeedPath, resolveCentralLayerPath } from '../../src/core/config/apply.js'
 
 /**
- * `hyp leave`, the level-3 exit verb (LLP 0063 Â§prerequisites): removes the
+ * `hyp leave`, the level-3 exit verb (LLP 0063 §prerequisites): removes the
  * central config layer, reverses org-driven attaches via the one core undo,
  * and drops the forward identity, while leaving the query-session store, the
  * user-owned local layer, and the daemon service untouched.
@@ -374,7 +374,7 @@ test('leave still tears down when only a stale attach marker survives a prior pa
 })
 
 test('leave removes the assets its attach marker records, and leaves manual copies alone', async () => {
-  // LLP 0107 Â§reversal: leave removes the skills the org installed, exactly as
+  // LLP 0107 §reversal: leave removes the skills the org installed, exactly as
   // it reverses the settings edits. LLP 0138 #marker-undo makes that
   // implementable - the marker's `installed_assets` is the only record of what
   // was copied, so leave must read it before it drops the marker.

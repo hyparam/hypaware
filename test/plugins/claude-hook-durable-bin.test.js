@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 
 /**
  * The managed Claude hook must never be pinned to npm's `_npx` cache.

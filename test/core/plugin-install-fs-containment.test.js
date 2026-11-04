@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 
 // Issue #2118: the install-name guard is lexical, so a symlink planted below
 // the plugins root steered recursive deletes, mkdirs and renames outside it.

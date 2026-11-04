@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 
 /**
  * @import { TestContext } from 'node:test'
