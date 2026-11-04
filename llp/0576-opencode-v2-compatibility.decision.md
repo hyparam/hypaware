@@ -18,7 +18,8 @@ returns cleanup that aborts the subscription and pending capture. V2 runs
 every location's events, including sessions in locations that never booted.
 A process-wide registry on `globalThis` lets only the oldest live setup
 schedule snapshots, so a server keeps one capture queue; a location filter
-would drop those unbooted sessions. A shared
+would drop those unbooted sessions. A closing setup drops its queued
+wake-ups, as V1 dispose does; the next event or an export recovers them. A shared
 server does not identify the originating frontend, so V2 records `unknown`.
 Active context excludes messages before compaction; exact-session full export
 remains their recovery lane.

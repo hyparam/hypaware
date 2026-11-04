@@ -315,6 +315,19 @@ test('the installed plugin reads the session through the SDK route contract and 
     await waitFor(() => received.length === 4)
     assert.equal(received[3].body.messages[0].text, '/work/b')
     await closeB()
+
+    // A subscription that ends while its setup lives must not keep the lead.
+    const closeD = await module.default.setup({
+      ...v2Context('/work/d'),
+      event: { async *subscribe() { throw new Error('subscribe failed') } },
+    })
+    const closeE = await module.default.setup(v2Context('/work/e'))
+    await waitFor(() => feeds.length === 3)
+    feeds[2]({ type: 'session.updated', data: { sessionID: 'ses_shared' } })
+    await waitFor(() => received.length === 5)
+    assert.equal(received[4].body.messages[0].text, '/work/e')
+    await closeE()
+    await closeD()
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)))
     await fs.rm(home, { recursive: true, force: true })

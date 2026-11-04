@@ -199,8 +199,9 @@ async function* runBackfill(deps) {
 
 /**
  * Keep the provider's logical commands stable while choosing each major's
- * public CLI surface once per import. Neither listing is scoped to our cwd
- * or restricted to root sessions. Only metadata crosses this boundary.
+ * public CLI surface once per import. From 1.3 neither listing is scoped to
+ * our cwd or restricted to root sessions; 1.0 to 1.2 keep the project-scoped
+ * root list. Only metadata crosses this boundary.
  * @param {(args: string[], timeoutMs: number) => Promise<string>} [runCommand]
  * @ref LLP 0576#discovery: project-scoped root lists cannot recover other projects or children
  */
