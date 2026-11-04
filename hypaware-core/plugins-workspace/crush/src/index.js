@@ -18,6 +18,7 @@
  * @import { CrushDiscoveryResult } from './types.js'
  */
 
+import { groupThousands } from '../../../../src/core/util/format_number.js'
 import {
   CRUSH_CONFIG_SECTION,
   resolveCrushEnabled,
@@ -120,7 +121,7 @@ export function crushSourceStatus(result, opts) {
     message = `cannot read the crush index at ${indexPath}`
   } else if (result.overCap > 0) {
     errorKind = 'too_many_projects'
-    message = `${result.overCap} crush projects skipped over the ${MAX_DATABASES.toLocaleString('en-US')} limit`
+    message = `${result.overCap} crush projects skipped over the ${groupThousands(MAX_DATABASES)} limit`
   } else if (!result.indexPresent && result.listed === 0) {
     message = `no crush installation detected at ${indexPath}`
   } else if (result.listed === 0) {
