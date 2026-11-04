@@ -218,7 +218,7 @@ test('the installed plugin reads the session through the SDK route contract and 
         },
       },
     }
-    const hooks = await module.HypAware({ client, directory: '/work/probe', worktree: '/work/probe', project: { id: 'proj' } })
+    const hooks = await module.default.server({ client, directory: '/work/probe', worktree: '/work/probe', project: { id: 'proj' } })
     hooks.event({ event: { type: 'message.part.updated', properties: { part: { sessionID: 'ses_1', id: 'part_1' } } } })
     await waitFor(() => received.length === 1)
 
@@ -240,6 +240,38 @@ test('the installed plugin reads the session through the SDK route contract and 
     await new Promise((resolve) => setTimeout(resolve, 1100))
     assert.equal(received.length, 1)
     hooks.dispose()
+
+    // V2 supplies unwrapped values, flat route inputs, a separate request
+    // options argument and an abortable event iterator.
+    const v2Calls = []
+    const cleanup = await module.default.setup({
+      location: { directory: '/work/v2' },
+      session: {
+        async get(input, options) {
+          v2Calls.push(['get', input, options])
+          return { id: 'ses_v2', location: { directory: '/work/v2' } }
+        },
+        async context(input, options) {
+          v2Calls.push(['context', input, options])
+          return [{ id: 'msg_v2', type: 'user', text: 'V2 fixture' }]
+        },
+      },
+      event: {
+        async *subscribe({ signal }) {
+          yield { type: 'session.step.ended', data: { sessionID: 'ses_v2' } }
+          await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))
+        },
+      },
+    })
+    await waitFor(() => received.length === 2)
+    await cleanup()
+    assert.deepEqual(v2Calls.map(([name, input]) => [name, input]), [
+      ['get', { sessionID: 'ses_v2' }], ['context', { sessionID: 'ses_v2' }],
+    ])
+    assert.equal(v2Calls[0][2].signal, v2Calls[1][2].signal)
+    assert.equal(received[1].body.session.location.directory, '/work/v2')
+    assert.equal(received[1].body.messages[0].text, 'V2 fixture')
+    assert.equal(received[1].body.entrypoint, 'unknown')
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)))
     await fs.rm(home, { recursive: true, force: true })

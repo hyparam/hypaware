@@ -10,7 +10,7 @@ import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/ind
 import { declaresBodyOverDrainCap, drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_writer.js'
 import { opencodeListenPort } from './config.js'
-import { projectOpenCodeSnapshot } from './projector.js'
+import { openCodeSessionCwd, projectOpenCodeSnapshot } from './projector.js'
 
 /**
  * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
@@ -209,9 +209,7 @@ async function receiveSnapshot(req, res, deps) {
           sendJson(res, 202, { status: 'skipped', reason: 'session_ignored' })
           return
         }
-        const cwd = session && typeof session === 'object' && typeof session.directory === 'string'
-          ? session.directory
-          : undefined
+        const cwd = openCodeSessionCwd(session)
         if (!cwd) {
           deps.state.missingCwd += 1
           deps.ctx.log.warn('opencode.snapshot.missing_cwd', {

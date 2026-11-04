@@ -6,7 +6,33 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createOpenCodeBackfillProvider, runOpenCode } from '../../hypaware-core/plugins-workspace/opencode/src/backfill.js'
+import { createOpenCodeBackfillProvider, createOpenCodeCommandRunner, runOpenCode } from '../../hypaware-core/plugins-workspace/opencode/src/backfill.js'
+
+test('real CLI command selection lists global metadata, including children, on each major', async () => {
+  for (const major of [1, 2]) {
+    const calls = []
+    const run = createOpenCodeCommandRunner(async args => {
+      calls.push(args)
+      if (args[0] === '--version') return `opencode v${major}.2.4\n`
+      if (args[0] === 'db') return JSON.stringify([{ id: 'ses_child', directory: '/other/repo', updated: 1000 }])
+      if (args[0] === 'api') return JSON.stringify({ data: [{ id: 'ses_child', parentID: 'ses_parent', location: { directory: '/other/repo' }, time: { updated: 1000 } }], cursor: {} })
+      return '{}'
+    })
+    const listed = JSON.parse(await run(['session', 'list'], 10000))
+    assert.equal(listed[0].id, 'ses_child')
+    assert.equal(listed[0].directory, '/other/repo')
+    await run(['export', 'ses_child'], 60000)
+    assert.equal(calls.filter(args => args[0] === '--version').length, 1)
+    if (major === 1) {
+      assert.match(calls[1][1], /FROM session ORDER BY.*LIMIT 1000/)
+      assert.doesNotMatch(calls[1][1], /WHERE|parent_id|project_id/)
+      assert.deepEqual(calls[2], ['export', 'ses_child'])
+    } else {
+      assert.deepEqual(calls[1], ['api', 'session.list', '--param', 'limit=1000', '--param', 'order=desc'])
+      assert.deepEqual(calls[2], ['session', 'export', 'ses_child'])
+    }
+  }
+})
 
 /**
  * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'

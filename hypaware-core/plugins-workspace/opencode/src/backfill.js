@@ -7,7 +7,7 @@ import { refreshSessionIgnores } from '../../../../src/core/control/session_igno
 import { AI_GATEWAY_MESSAGES_DATASET, errMessage, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
-import { projectOpenCodeSnapshot } from './projector.js'
+import { openCodeSessionCwd, projectOpenCodeSnapshot } from './projector.js'
 
 /** @import { BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -32,7 +32,6 @@ const EXPORT_TIMEOUT_MS = 60_000
  */
 export function createOpenCodeBackfillProvider(opts = {}) {
   const resolver = createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
-  const runCommand = opts.runCommand ?? runOpenCode
   return {
     name: 'opencode',
     plugin: '@hypaware/opencode',
@@ -43,7 +42,7 @@ export function createOpenCodeBackfillProvider(opts = {}) {
       yield* runBackfill({
         ctx,
         resolver,
-        runCommand,
+        runCommand: opts.runCommand ?? createOpenCodeCommandRunner(),
         exactSessionIds: opts.exactSessionIds,
         ignoredSessions: opts.ignoredSessions,
       })
@@ -163,7 +162,7 @@ async function* runBackfill(deps) {
       continue
     }
     const session = isPlainObject(exported) && isPlainObject(exported.info) ? exported.info : undefined
-    const cwd = stringValue(session?.directory)
+    const cwd = openCodeSessionCwd(session)
     if (!cwd) {
       yield /** @type {BackfillEvent} */ ({
         type: 'event',
@@ -195,6 +194,42 @@ async function* runBackfill(deps) {
       source_path: `opencode export ${item.id}`,
       native_id: item.id,
     })
+  }
+}
+
+/**
+ * Keep the provider's logical commands stable while choosing each major's
+ * public CLI surface once per import. Neither listing is scoped to our cwd
+ * or restricted to root sessions. Only metadata crosses this boundary.
+ * @param {(args: string[], timeoutMs: number) => Promise<string>} [runCommand]
+ * @ref LLP 0576#discovery: project-scoped root lists cannot recover other projects or children
+ */
+export function createOpenCodeCommandRunner(runCommand = runOpenCode) {
+  /** @type {Promise<boolean> | undefined} */
+  let isV2
+  return async (/** @type {string[]} */ args, /** @type {number} */ timeoutMs) => {
+    isV2 ??= runCommand(['--version'], LIST_TIMEOUT_MS).then(version => {
+      const major = /(?:^|\s)v?(\d+)\./.exec(version)?.[1]
+      if (major !== '1' && major !== '2') throw new Error(`Unsupported OpenCode version: ${version.trim().slice(0,80)}`)
+      return major === '2'
+    })
+    const v2 = await isV2
+    if (args[0] === 'session' && args[1] === 'list') {
+      if (!v2) return runCommand([
+        'db',
+        `SELECT id, time_updated AS updated, time_created AS created, directory FROM session ORDER BY time_updated DESC, id DESC LIMIT ${MAX_SESSION_LIST}`,
+        '--format', 'json',
+      ], timeoutMs)
+      const result = JSON.parse(await runCommand(['api', 'session.list', '--param', `limit=${MAX_SESSION_LIST}`, '--param', 'order=desc'], timeoutMs))
+      if (!isPlainObject(result) || !Array.isArray(result.data)) throw new Error('opencode session API did not return a data array')
+      return JSON.stringify(result.data.filter(isPlainObject).map(session => ({
+        id: session.id,
+        updated: isPlainObject(session.time) ? session.time.updated : undefined,
+        created: isPlainObject(session.time) ? session.time.created : undefined,
+        directory: openCodeSessionCwd(session),
+      })))
+    }
+    return runCommand(v2 && args[0] === 'export' ? ['session', ...args] : args, timeoutMs)
   }
 }
 

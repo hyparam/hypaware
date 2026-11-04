@@ -33,4 +33,12 @@ hyp backfill opencode --dry-run
 hyp backfill opencode
 ```
 
-Backfill reads sessions with `opencode export`, one session at a time.
+OpenCode 1.x and 2.x are supported. Backfill selects up to 1,000 recently
+updated sessions across projects, including subagents, applies the requested
+time window, and exports each selected session. It uses `opencode export` on
+1.x and `opencode session export` on 2.x.
+
+OpenCode 2.x runs plugins in its shared server. Its live snapshots use the
+active context; history import recovers messages from before compaction. The
+frontend is recorded as `unknown` because the shared server does not identify
+which frontend caused an event.
