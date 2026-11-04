@@ -137,9 +137,32 @@ an owner, an evidence path in the mission folder and a done-when.
 
 ### Validation results {#validation-results}
 
+Recorded 2026-11-04. T1-T8 landed in #2868; T9 ran the packaged candidate on
+Linux and T10 ran packaged master on macOS. Paths are in the mission folder.
+
 | Task | Platform | Result | Evidence |
 | --- | --- | --- | --- |
-| T9 | Linux sandbox | not run | |
-| T10 | macOS arm64 | not run | |
+| T1-T8 | CI | Landed in #2868 (merge 202e3b80, landing head fd76a24a) | The merge queue run on 202e3b80 (CI 41781412486) and the push run on master (CI 41781941586) |
+| T9 | Linux x86_64, `hyp-sandbox` with mock systemctl, Crush v0.99.0, loopback fixture provider | Passed. Every command exited as expected; `hyp session ignore` exits 3 on a Crush-only install, as the docs say. Settles coverage rows 4 to 10, 12 and 13 on Linux. | `validation/T9-linux/RECEIPT.md`: the 1.48.0 tarball packed from the PR head ede32770 (base 576db198), sha256 `12b6e430`, Crush binary `51a53155`, marker `HYPPROBE-20261104T053425Z-6c8b84e6`. The delta from ede32770 to the landing head is status wording only |
+| T10 | macOS 27.2 arm64, the dedicated Mac test account, Crush v0.99.0 Darwin arm64, loopback fixture provider, operator-run (Codex operator through the HypForge caller, receipt `MAC-OPERATOR-20261104.md`) | Passed: 48 checks pass, 0 fail, 0 skip, 4 observations, exit 0. The first read of a database with no `-wal` leaves a 0-byte `-wal` and a 32768-byte `-shm`, as on Linux; an idle read leaves `crush.db` and `-wal` unchanged and the next idle tick opens nothing; the checkpoint-and-reset gate check passes 7 of 7 spaced steps | Part B run `run-20261104T210719Z-84efe037` under `mac-job/partB/`, master 202e3b80 packed as 1.48.0, sha256 `8f192436` (not the T9 tarball), Crush binary `8c1dfa5f`; all 68 SHA256SUMS entries verified after copy-back. Part A run `run-20261104T210614Z-5301710c` under `mac-job/partA/`: 48 of 48 comparison fields match Linux, 26 entries verified |
 
-What the runs do not prove: filled in when T9 and T10 report.
+What the runs do not prove:
+
+- Both platforms used a labeled loopback provider through headless
+  `crush run`, so they prove Crush's storage and HypAware's capture, not
+  authenticated inference, the TUI or `crush server`.
+- T10 ran packaged master, not the T9 tarball, so the two platforms ran
+  different packages of the same plugin code.
+- On a Crush-only install `hyp session ignore` exits 3 because no gateway
+  port is bound; `hyp privacy ignore <dir>` works and was checked on both
+  platforms.
+- Neither run read the cost attribute, provider/model or repo identity back
+  from captured rows; both read rows by session, role, part type and
+  entrypoint. Those fields rest on the fixture tests and the `crush_capture`
+  smoke (Crush stores no per-response usage). Summarize, cancel, delete and task sub-sessions, the missing-index,
+  locked and unsupported-schema states, and upgrade are fixture-only on both
+  platforms (upgrade has no earlier Crush-capable release to start from).
+- CPU and memory rest on the T4 fixture measurements; neither run measured
+  the cost of many databases.
+
+Nothing LLP 0573 or this plan decided changes.
