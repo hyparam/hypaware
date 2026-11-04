@@ -358,6 +358,9 @@ export function openCrushDb(dbPath, opts = {}) {
   if (!existsSync(dbPath)) {
     throw new CrushDbError('no crush.db in the data dir', { code: 'missing' })
   }
+  // @ref LLP 0573#status [implements]: every access failure becomes a typed,
+  // path-free error, so a raw fs message never carries a project path into
+  // status, and one bad database is counted rather than failing the tick.
   try {
     accessSync(dbPath, constants.R_OK)
   } catch (cause) {
@@ -365,7 +368,10 @@ export function openCrushDb(dbPath, opts = {}) {
     if (code === 'EACCES' || code === 'EPERM') {
       throw new CrushDbError('crush.db is not readable', { code: 'permission_denied', cause })
     }
-    throw cause
+    if (code === 'ENOENT') {
+      throw new CrushDbError('no crush.db in the data dir', { code: 'missing', cause })
+    }
+    throw new CrushDbError('crush.db could not be opened read-only', { code: 'open_failed', cause })
   }
   /** @type {DatabaseSync} */
   let db

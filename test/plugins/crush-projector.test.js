@@ -271,6 +271,9 @@ test('no part carries the working directory or a file path', async () => {
 test('stripCwd removes only the trailing cwd element', () => {
   assert.equal(stripCwd('out\n<cwd>/a/b</cwd>\n'), 'out')
   assert.equal(stripCwd('<cwd>/a</cwd> in the middle'), '<cwd>/a</cwd> in the middle')
+  // An earlier element in the output is content: only the last one goes.
+  assert.equal(stripCwd('grep hit: <cwd>x</cwd> more\n<cwd>/a/b</cwd>\n'), 'grep hit: <cwd>x</cwd> more')
+  assert.equal(stripCwd('a literal <cwd> tag\n<cwd>/a</cwd>'), 'a literal <cwd> tag')
   assert.equal(stripCwd('no element'), 'no element')
 })
 

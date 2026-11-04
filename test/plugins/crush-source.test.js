@@ -1,9 +1,11 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import nodeFs from 'node:fs'
 import fs from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import path from 'node:path'
-import test from 'node:test'
+import test, { mock } from 'node:test'
 
 import {
   createCrushPollRunner,
@@ -567,6 +569,51 @@ test('an unreadable crush.db degrades with permission_denied and keeps the path 
   } finally {
     await fs.chmod(dbPath, 0o600)
   }
+})
+
+test('a database that fails its access check for another reason degrades with open_failed and no path', async () => {
+  const { runner, ctx, committed, logs, dbPaths, projectDirs, w } = await baselined({ projects: ['p1', 'p2'] })
+  w.close()
+  const other = openWriter(dbPaths[1])
+  insertSession(other, { id: 's2' })
+  addTurn(other, 's2', 'first')
+  other.close()
+  const realAccess = nodeFs.accessSync
+  mock.method(nodeFs, 'accessSync', (/** @type {string} */ file, /** @type {number} */ mode) => {
+    if (file === dbPaths[0]) throw Object.assign(new Error(`EIO: i/o error, access '${file}'`), { code: 'EIO' })
+    return realAccess(file, mode)
+  })
+  syncBuiltinESMExports()
+  try {
+    // Touch the failing database so the stat gate opens it.
+    const touch = openWriter(dbPaths[0])
+    insertSession(touch, { id: 's1' })
+    touch.close()
+    await runCrushPollTick(runner, ctx)
+  } finally {
+    mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  assert.deepEqual(texts(committed, 's2'), ['first prompt', 'first reply'], 'the other database is still read')
+  const status = statusOf(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'open_failed')
+  assert.equal(status.message, 'cannot read 1 crush databases')
+  for (const marker of [dbPaths[0], projectDirs[0]]) {
+    assert.ok(!JSON.stringify(status).includes(marker), 'the path stays out of status')
+    assert.ok(!JSON.stringify(logs).includes(marker), 'the path stays out of the log')
+  }
+})
+
+test('a tick that fails on a non-crush error keeps its message out of status', async () => {
+  const { runner, ctx, w } = await baselined({ hooks: { failBatch: () => true, failReconcile: () => true } })
+  insertSession(w, { id: 's1' })
+  addTurn(w, 's1', 'first')
+  w.close()
+  await runCrushPollTick(runner, ctx)
+  assert.equal(runner.lastErrorKind, 'unknown')
+  assert.equal(runner.lastError, 'crush poll failed: unknown')
+  assert.equal(statusOf(runner).message, 'crush poll failed: unknown')
 })
 
 test('a database locked past the bounded retry degrades with sqlite_busy and recovers next poll', async () => {

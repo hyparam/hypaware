@@ -6,10 +6,11 @@
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import nodeFs, { readFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import path from 'node:path'
-import test from 'node:test'
+import test, { mock } from 'node:test'
 
 import * as crushDb from '../../hypaware-core/plugins-workspace/crush/src/crush_db.js'
 import { CrushDbError } from '../../hypaware-core/plugins-workspace/crush/src/errors.js'
@@ -245,4 +246,27 @@ test('open refuses a missing file, an unreadable file and a missing node:sqlite'
   const dbPath = await createCrushDb(path.join(dir, 'project'))
   await fs.chmod(dbPath, 0o000)
   assert.throws(() => openCrushDb(dbPath), (err) => err instanceof CrushDbError && err.code === 'permission_denied')
+})
+
+test('any other access failure is a typed error whose message names no path', async (t) => {
+  const dir = await tmpDir()
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const dbPath = await createCrushDb(path.join(dir, 'project'))
+  /** @param {string} code */
+  const failWith = (code) => {
+    mock.method(nodeFs, 'accessSync', () => {
+      throw Object.assign(new Error(`${code}: failed, access '${dbPath}'`), { code })
+    })
+    syncBuiltinESMExports()
+  }
+  try {
+    failWith('EIO')
+    assert.throws(() => openCrushDb(dbPath), (err) => err instanceof CrushDbError && err.code === 'open_failed' && !err.message.includes(dir))
+    // The file went between the existence check and the access check.
+    failWith('ENOENT')
+    assert.throws(() => openCrushDb(dbPath), (err) => err instanceof CrushDbError && err.code === 'missing' && !err.message.includes(dir))
+  } finally {
+    mock.restoreAll()
+    syncBuiltinESMExports()
+  }
 })

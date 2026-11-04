@@ -7,8 +7,7 @@
 **Date:** 2026-11-03
 **Related:** LLP 0570, LLP 0571, LLP 0118, LLP 0119, LLP 0120, LLP 0121, LLP 0122, LLP 0123, LLP 0124, LLP 0449, LLP 0527, LLP 0359, LLP 0035, LLP 0050, LLP 0070, LLP 0130, LLP 0131, LLP 0394, LLP 0403, LLP 0549, LLP 0553, LLP 0574
 
-> Buildable design for a `@hypaware/crush` client adapter. Status stays Draft
-> until the Build tasks in LLP 0574 land.
+> Buildable design for a `@hypaware/crush` client adapter.
 > `@ref LLP 0570 [constrained-by]`: the goose adapter is the template; this
 > design names only where Crush differs and why.
 > `@ref LLP 0118 [constrained-by]`: same shape of capture as hermes, a pull

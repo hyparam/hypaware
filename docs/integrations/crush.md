@@ -111,8 +111,8 @@ hyp query sql "select distinct session_id from ai_gateway_messages where client_
 hyp session ignore crush-<session-id>
 ```
 
-Crush reads saved exclusions on its next poll, so an ignore takes effect
-within a minute.
+HypAware reads saved exclusions on the next Crush poll, so an ignore takes
+effect within a minute.
 
 The command saves the exclusion through the HypAware gateway, so it works only
 while HypAware also records another client through its gateway. On an install

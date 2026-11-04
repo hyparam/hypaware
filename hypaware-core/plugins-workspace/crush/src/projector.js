@@ -70,7 +70,7 @@ export function mintCrushPartId(sessionId, messageId, index, suffix) {
  *
  * @ref LLP 0573#owner-decisions [implements]: D5, the working directory is stripped before a row is built.
  */
-const TRAILING_CWD = /\s*<cwd>[\s\S]*?<\/cwd>\s*$/
+const TRAILING_CWD = /\s*<cwd>(?:(?!<cwd>)[\s\S])*<\/cwd>\s*$/
 
 /**
  * @param {string} text

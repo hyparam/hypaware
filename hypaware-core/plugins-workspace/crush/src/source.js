@@ -238,7 +238,8 @@ export async function runCrushPollTick(runner, ctx) {
       } catch (err) {
         // @ref LLP 0573#privacy [implements]: `withSpan` records the thrown
         // message, which can name a database path; the span gets the kind
-        // and a path-free error, and status keeps the original message.
+        // and a path-free error. Status keeps the message only of a
+        // `CrushDbError`, whose text never names a path.
         failure = err
         const kind = errorKind(err)
         span.setAttribute('error_kind', kind)
@@ -250,8 +251,8 @@ export async function runCrushPollTick(runner, ctx) {
     runner.lastErrorKind = undefined
   } catch (thrown) {
     const err = failure ?? thrown
-    runner.lastError = err instanceof Error ? err.message : String(err)
     runner.lastErrorKind = errorKind(err)
+    runner.lastError = err instanceof CrushDbError ? err.message : `crush poll failed: ${runner.lastErrorKind}`
     ctx.log.error('crush.poll', {
       component: 'crush',
       operation: 'crush.poll',
