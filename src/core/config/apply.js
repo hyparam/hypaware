@@ -115,7 +115,7 @@ export function hasAppliedCentralConfig({ stateRoot }) {
   // yet from one this process cannot read (EACCES, EIO, a pointer that is
   // not a symlink at all).
   try {
-    fs.readlinkSync(configControlActivePath(stateRoot))
+    readActivePointerTarget(configControlActivePath(stateRoot))
   } catch (err) {
     const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
     if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err
@@ -317,7 +317,15 @@ export function createConfigControl(opts) {
    */
   function flipPointer(slot) {
     const tmp = `${activePath}.tmp.${process.pid}.${now()}`
-    fs.symlinkSync(path.basename(slotPath(slot)), tmp)
+    if (process.platform === 'win32') {
+      // An unprivileged win32 process cannot create a file symlink, so the
+      // pointer is a regular file holding the slot's basename; the rename
+      // still replaces atomically, keeping the old-or-new crash guarantee.
+      // @ref LLP 0578#decision [implements]: the win32 pointer is a regular file, POSIX keeps the symlink
+      fs.writeFileSync(tmp, `${path.basename(slotPath(slot))}\n`, { mode: 0o600 })
+    } else {
+      fs.symlinkSync(path.basename(slotPath(slot)), tmp)
+    }
     fs.renameSync(tmp, activePath)
   }
 
@@ -881,6 +889,32 @@ function readControlState(statePath) {
 }
 
 /**
+ * The active pointer's target (a slot basename), whatever this host's
+ * pointer representation: a relative symlink on POSIX, a regular file
+ * holding the basename on win32, where an unprivileged process cannot
+ * create a file symlink (see `flipPointer`). Throws the way
+ * readlink/readFile do when the pointer cannot be read. On POSIX a
+ * regular file at the pointer path stays an error: the symlink is the
+ * only representation ever written there, so a file is tampering
+ * evidence, not a layout.
+ *
+ * @param {string} activePath
+ * @returns {string}
+ */
+function readActivePointerTarget(activePath) {
+  if (process.platform !== 'win32') return fs.readlinkSync(activePath)
+  try {
+    return fs.readlinkSync(activePath)
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err)?.code
+    // EINVAL (or libuv's UNKNOWN): present but not a symlink, so read the
+    // pointer file spelling.
+    if (code !== 'EINVAL' && code !== 'UNKNOWN') throw err
+    return fs.readFileSync(activePath, 'utf8').trim()
+  }
+}
+
+/**
  * Which slot the active-slot pointer (`config-control/active`) points
  * at, or null when no apply has flipped it yet (seed-config mode) or it
  * is missing.
@@ -892,7 +926,7 @@ function readActiveSlot(stateRoot) {
   const activePath = configControlActivePath(stateRoot)
   let target
   try {
-    target = fs.readlinkSync(activePath)
+    target = readActivePointerTarget(activePath)
   } catch {
     return null
   }
