@@ -1,4 +1,4 @@
-// @ts-check
+﻿// @ts-check
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -98,7 +98,7 @@ test('verify: up-to-date plist, live wrapper and clean residue is a green exit c
 })
 
 // @ref LLP 0116#helper-contract [tests]: the plist names only the wrapper's path, so a rotted bake renders an identical plist and only reading the wrapper can see it
-test('verify: a wrapper whose baked CLI path is gone is STALE despite an up-to-date plist', async () => {
+test('verify: a wrapper whose baked CLI path is gone is STALE despite an up-to-date plist', { skip: process.platform === 'win32' && 'the sh credential wrapper and its baked paths are darwin artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
@@ -114,7 +114,7 @@ test('verify: a wrapper whose baked CLI path is gone is STALE despite an up-to-d
   assert.match(bufs.stdout.text(), /re-run 'hyp client claude-desktop install'/)
 })
 
-test('verify: a wrapper whose baked interpreter is gone is STALE (the node-version-switch case)', async () => {
+test('verify: a wrapper whose baked interpreter is gone is STALE (the node-version-switch case)', { skip: process.platform === 'win32' && 'the sh credential wrapper and its baked paths are darwin artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
@@ -131,7 +131,7 @@ test('verify: a wrapper whose baked interpreter is gone is STALE (the node-versi
 // The one case that is stale while still on disk today: npm owns the cache
 // and prunes it on its own schedule, the same reasoning core applies to the
 // sibling Claude hook in `markerRecordsEphemeralHookBin`.
-test('verify: a baked _npx CLI path is STALE even while it still resolves', async () => {
+test('verify: a baked _npx CLI path is STALE even while it still resolves', { skip: process.platform === 'win32' && 'the sh credential wrapper and its baked paths are darwin artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
@@ -185,7 +185,7 @@ test('verify: a wrapper this plugin did not generate is left alone, not judged s
   assert.doesNotMatch(bufs.stdout.text(), /STALE/)
 })
 
-test('verify: a wrapper whose baked paths hold quotes and spaces is read back correctly', async () => {
+test('verify: a wrapper whose baked paths hold quotes and spaces is read back correctly', { skip: process.platform === 'win32' && 'the sh credential wrapper and its baked paths are darwin artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-desktop-verify-o'dd "))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
@@ -270,7 +270,7 @@ test('verify: an overrun read does not fall back to an exec line the shell never
 })
 
 // @ref LLP 0116#helper-contract [tests]: Desktop runs the wrapper as a bare executable, so a lost execute bit fails exactly as silently as a rotted path
-test('verify: a wrapper that lost its execute bit is STALE, not "installed"', async () => {
+test('verify: a wrapper that lost its execute bit is STALE, not "installed"', { skip: process.platform === 'win32' && 'the sh credential wrapper and its baked paths are darwin artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
@@ -386,7 +386,7 @@ test('verify: a wrapper that execs its CLI directly is judged on the one path it
 // so its mode is now load-bearing where it never was before: a CLI that is
 // present but not executable fails Desktop's credential call and nothing on
 // this machine says why.
-test('verify: a direct-exec wrapper whose baked CLI lost its execute bit is STALE', async () => {
+test('verify: a direct-exec wrapper whose baked CLI lost its execute bit is STALE', { skip: process.platform === 'win32' && 'the sh credential wrapper and its baked paths are darwin artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)

@@ -1,4 +1,4 @@
-// @ts-check
+﻿// @ts-check
 
 // Issue #2118: the install-name guard is lexical, so a symlink planted below
 // the plugins root steered recursive deletes, mkdirs and renames outside it.
@@ -66,7 +66,7 @@ async function inTemp(body) {
   }
 }
 
-test('removePlugin: a scope symlink out of the root is not followed, the row is cleared and the skip is reported', () => inTemp(async (tmpRoot) => {
+test('removePlugin: a scope symlink out of the root is not followed, the row is cleared and the skip is reported', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, () => inTemp(async (tmpRoot) => {
   const stateDir = path.join(tmpRoot, 'hypaware')
   const root = path.join(stateDir, 'plugins')
   const { outside, intact } = await makeOutside(tmpRoot)
@@ -86,7 +86,7 @@ test('removePlugin: a scope symlink out of the root is not followed, the row is 
   }
 }))
 
-test('removePlugin: a recorded install_dir that walks through a link deletes the derived directory, not the link target', () => inTemp(async (tmpRoot) => {
+test('removePlugin: a recorded install_dir that walks through a link deletes the derived directory, not the link target', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, () => inTemp(async (tmpRoot) => {
   const stateDir = path.join(tmpRoot, 'hypaware')
   const root = path.join(stateDir, 'plugins')
   const outside = path.join(tmpRoot, 'outside')
@@ -109,7 +109,7 @@ test('removePlugin: a recorded install_dir that walks through a link deletes the
   assert.deepEqual((await loadLock(stateDir)).plugins, {})
 }))
 
-test('removePlugin: a final link is unlinked and its target survives; a normal directory is removed', () => inTemp(async (tmpRoot) => {
+test('removePlugin: a final link is unlinked and its target survives; a normal directory is removed', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, () => inTemp(async (tmpRoot) => {
   const stateDir = path.join(tmpRoot, 'hypaware')
   const root = path.join(stateDir, 'plugins')
   const { outside, intact } = await makeOutside(tmpRoot)
@@ -137,7 +137,7 @@ test('removePlugin: a final link is unlinked and its target survives; a normal d
   assert.deepEqual((await loadLock(stateDir)).plugins, {})
 }))
 
-test('installPlugin (local-dir): a pre-existing scope symlink refuses before anything is removed', () => inTemp(async (tmpRoot) => {
+test('installPlugin (local-dir): a pre-existing scope symlink refuses before anything is removed', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, () => inTemp(async (tmpRoot) => {
   const stateDir = path.join(tmpRoot, 'hypaware')
   const root = path.join(stateDir, 'plugins')
   const { outside, intact } = await makeOutside(tmpRoot)
@@ -156,7 +156,7 @@ test('installPlugin (local-dir): a pre-existing scope symlink refuses before any
   assert.deepEqual(await fs.readdir(path.join(root, 'prior')), ['hypaware.plugin.json', 'index.js'])
 }))
 
-test('installPlugin (git): a pre-existing scope symlink refuses before the backup rename', () => inTemp(async (tmpRoot) => {
+test('installPlugin (git): a pre-existing scope symlink refuses before the backup rename', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, () => inTemp(async (tmpRoot) => {
   const sourceUrl = await buildGitSource(tmpRoot, '@evil/sub')
   const stateDir = path.join(tmpRoot, 'state')
   const root = path.join(stateDir, 'plugins')
@@ -176,7 +176,7 @@ test('installPlugin (git): a pre-existing scope symlink refuses before the backu
   assert.deepEqual((await loadLock(stateDir)).plugins, {})
 }))
 
-test('installPlugin and removePlugin: a symlinked HYP_HOME and a missing scope still install and remove', () => inTemp(async (tmpRoot) => {
+test('installPlugin and removePlugin: a symlinked HYP_HOME and a missing scope still install and remove', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, () => inTemp(async (tmpRoot) => {
   const realHome = path.join(tmpRoot, 'real-home')
   await fs.mkdir(realHome)
   await fs.symlink(realHome, path.join(tmpRoot, 'home-link'))
@@ -198,7 +198,7 @@ test('installPlugin and removePlugin: a symlinked HYP_HOME and a missing scope s
   assert.deepEqual(await fs.readdir(scopeDir), [])
 }))
 
-test('checkInstallDestination: absent paths pass; linked, looping and uninspectable components refuse', () => inTemp(async (tmpRoot) => {
+test('checkInstallDestination: absent paths pass; linked, looping and uninspectable components refuse', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, () => inTemp(async (tmpRoot) => {
   const stateDir = path.join(tmpRoot, 'hypaware')
   const root = path.join(stateDir, 'plugins')
   assert.deepEqual(await checkInstallDestination(stateDir, '@none/x'), { ok: true })
@@ -240,7 +240,7 @@ test('checkInstallDestination: absent paths pass; linked, looping and uninspecta
   assert.deepEqual(await checkInstallDestination(other, '@other/x'), { ok: true })
 }))
 
-test('runPluginRemove: a withheld delete is named on stderr after the removal line', () => inTemp(async (tmpRoot) => {
+test('runPluginRemove: a withheld delete is named on stderr after the removal line', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, () => inTemp(async (tmpRoot) => {
   let out = ''
   let err = ''
   const ctx = /** @type {any} */ ({
