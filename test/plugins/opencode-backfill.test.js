@@ -23,6 +23,8 @@ test('real CLI command selection lists global metadata, including children, on e
     assert.equal(listed[0].directory, '/other/repo')
     await run(['export', 'ses_child'], 60000)
     assert.equal(calls.filter(args => args[0] === '--version').length, 1)
+    // A failed export's warning names the command that actually ran.
+    assert.equal(run.commandLine(['export', 'ses_child']), major === 1 ? 'opencode export ses_child' : 'opencode session export ses_child')
     if (major === 1) {
       assert.match(calls[1][1], /FROM session ORDER BY.*LIMIT 1000/)
       assert.doesNotMatch(calls[1][1], /WHERE|parent_id|project_id/)
@@ -32,6 +34,10 @@ test('real CLI command selection lists global metadata, including children, on e
       assert.deepEqual(calls[2], ['session', 'export', 'ses_child'])
     }
   }
+  const unsupported = createOpenCodeCommandRunner(async () => 'opencode v3.0.0\n')
+  await assert.rejects(unsupported(['session', 'list'], 10000), {
+    message: 'Unsupported OpenCode version opencode v3.0.0: history import supports OpenCode 1.x and 2.x.',
+  })
 })
 
 /**

@@ -38,7 +38,8 @@ updated sessions across projects, including subagents, applies the requested
 time window, and exports each selected session. It uses `opencode export` on
 1.x and `opencode session export` on 2.x.
 
-OpenCode 2.x runs plugins in its shared server. Its live snapshots use the
-active context; history import recovers messages from before compaction. The
-frontend is recorded as `unknown` because the shared server does not identify
-which frontend caused an event.
+OpenCode 2.x runs plugins in its shared server. On 2.x, live capture records
+only the messages since the session's last compaction. To record the earlier
+ones, run `hyp backfill opencode`. On 2.x the `entrypoint` column is `unknown`,
+because the shared server does not say which frontend sent an event. On 1.x it
+is `cli` or `desktop`.

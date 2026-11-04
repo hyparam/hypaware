@@ -272,6 +272,49 @@ test('the installed plugin reads the session through the SDK route contract and 
     assert.equal(received[1].body.session.location.directory, '/work/v2')
     assert.equal(received[1].body.messages[0].text, 'V2 fixture')
     assert.equal(received[1].body.entrypoint, 'unknown')
+
+    // V2 boots one setup per location in one server and every subscription
+    // sees every event, so only one live setup may schedule a snapshot.
+    /** @type {Array<(event: object) => void>} */
+    const feeds = []
+    /** @param {string} directory */
+    const v2Context = (directory) => ({
+      location: { directory },
+      session: {
+        async get() { return { id: 'ses_shared', location: { directory: '/work/shared' } } },
+        async context() { return [{ id: 'msg_shared', type: 'user', text: directory }] },
+      },
+      event: {
+        async *subscribe({ signal }) {
+          /** @type {object[]} */
+          const queue = []
+          /** @type {(() => void) | undefined} */
+          let notify
+          feeds.push(event => { queue.push(event); notify?.() })
+          signal.addEventListener('abort', () => notify?.(), { once: true })
+          while (!signal.aborted) {
+            const next = queue.shift()
+            if (next) yield next
+            else await new Promise(resolve => { notify = () => resolve(undefined) })
+          }
+        },
+      },
+    })
+    const closeA = await module.default.setup(v2Context('/work/a'))
+    const closeB = await module.default.setup(v2Context('/work/b'))
+    await waitFor(() => feeds.length === 2)
+    for (const feed of feeds) feed({ type: 'session.updated', data: { sessionID: 'ses_shared' } })
+    await waitFor(() => received.length === 3)
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    assert.equal(received.length, 3)
+    assert.equal(received[2].body.messages[0].text, '/work/a')
+
+    // Closing the scheduling setup hands the stream to the next live one.
+    await closeA()
+    feeds[1]({ type: 'session.updated', data: { sessionID: 'ses_shared' } })
+    await waitFor(() => received.length === 4)
+    assert.equal(received[3].body.messages[0].text, '/work/b')
+    await closeB()
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)))
     await fs.rm(home, { recursive: true, force: true })

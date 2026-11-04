@@ -50,7 +50,7 @@ export function createOpenCodeBackfillProvider(opts = {}) {
   }
 }
 
-/** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: (args: string[], timeoutMs: number) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
+/** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: ((args: string[], timeoutMs: number) => Promise<string>) & { commandLine?: (args: string[]) => string }, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
 async function* runBackfill(deps) {
   const window = resolveWindow(deps.ctx)
   let emptyStdout = false
@@ -153,7 +153,7 @@ async function* runBackfill(deps) {
       deps.ctx.log.warn('opencode.backfill.session_read_failed', {
         component: 'plugin.opencode.backfill',
         operation: 'backfill.scan',
-        source_path: `opencode export ${item.id}`,
+        source_path: deps.runCommand.commandLine?.(['export', item.id]) ?? `opencode export ${item.id}`,
         session_id: item.id,
         status: 'error',
         error_kind: 'session_read_failed',
@@ -207,13 +207,16 @@ async function* runBackfill(deps) {
 export function createOpenCodeCommandRunner(runCommand = runOpenCode) {
   /** @type {Promise<boolean> | undefined} */
   let isV2
-  return async (/** @type {string[]} */ args, /** @type {number} */ timeoutMs) => {
+  let resolvedV2 = false
+  /** @param {boolean} v2 @param {string[]} args */
+  const resolveArgs = (v2, args) => v2 && args[0] === 'export' ? ['session', ...args] : args
+  const run = async (/** @type {string[]} */ args, /** @type {number} */ timeoutMs) => {
     isV2 ??= runCommand(['--version'], LIST_TIMEOUT_MS).then(version => {
       const major = /(?:^|\s)v?(\d+)\./.exec(version)?.[1]
-      if (major !== '1' && major !== '2') throw new Error(`Unsupported OpenCode version: ${version.trim().slice(0,80)}`)
+      if (major !== '1' && major !== '2') throw new Error(`Unsupported OpenCode version ${version.trim().slice(0,80)}: history import supports OpenCode 1.x and 2.x.`)
       return major === '2'
     })
-    const v2 = await isV2
+    const v2 = resolvedV2 = await isV2
     if (args[0] === 'session' && args[1] === 'list') {
       if (!v2) return runCommand([
         'db',
@@ -229,8 +232,13 @@ export function createOpenCodeCommandRunner(runCommand = runOpenCode) {
         directory: openCodeSessionCwd(session),
       })))
     }
-    return runCommand(v2 && args[0] === 'export' ? ['session', ...args] : args, timeoutMs)
+    return runCommand(resolveArgs(v2, args), timeoutMs)
   }
+  // A failed export's warning names the command that ran, so a retry by hand
+  // from the log uses the right one on each major.
+  return Object.assign(run, {
+    commandLine: (/** @type {string[]} */ args) => ['opencode', ...resolveArgs(resolvedV2, args)].join(' '),
+  })
 }
 
 /**

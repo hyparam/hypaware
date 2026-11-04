@@ -13,7 +13,12 @@ Extend LLP 0306 for OpenCode 2's rewritten plugin and transcript APIs. One
 managed file exports a default definition with `id`, a V1 `server` factory,
 and a V2 `setup` function. Both use LLP 0502's bounded queue. V2 subscribes to
 the abortable event iterator, reads `session.get` and `session.context`, and
-returns cleanup that aborts the subscription and pending capture. A shared
+returns cleanup that aborts the subscription and pending capture. V2 runs
+`setup` once per booted location in one server, and every subscription sees
+every location's events, including sessions in locations that never booted.
+A process-wide registry on `globalThis` lets only the oldest live setup
+schedule snapshots, so a server keeps one capture queue; a location filter
+would drop those unbooted sessions. A shared
 server does not identify the originating frontend, so V2 records `unknown`.
 Active context excludes messages before compaction; exact-session full export
 remains their recovery lane.
