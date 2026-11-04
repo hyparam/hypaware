@@ -7,6 +7,32 @@ import { createProjectedExchangeWriter } from '../../hypaware-core/plugins-works
 import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { projectOpenCodeSnapshot } from '../../hypaware-core/plugins-workspace/opencode/src/projector.js'
 
+test('OpenCode 2 snapshots retain content, usage and stable identities across live and export', () => {
+  const raw = {
+    info: { id: 'ses_v2', location: { directory: '/work/v2' }, projectID: 'project', model: { id: 'model', providerID: 'openai' }, time: { created: 1000 } },
+    messages: [
+      { id: 'msg_user_v2', type: 'user', text: 'Read notes', time: { created: 1001 } },
+      { id: 'msg_assistant_v2', type: 'assistant', model: { id: 'model', providerID: 'openai' }, finish: 'tool-calls', time: { created: 1002, completed: 1003 },
+        tokens: { input: 12, output: 8, reasoning: 2, cache: { read: 3, write: 1 } }, cost: 0.002,
+        content: [{ type: 'text', text: 'Reading' }, { type: 'tool', id: 'call_v2', name: 'read', state: { status: 'completed', input: { file: 'notes' }, content: [{ type: 'text', text: 'Contents' }] } }] },
+    ],
+  }
+  const exported = projectOpenCodeSnapshot(raw)
+  const live = projectOpenCodeSnapshot({ session: raw.info, messages: raw.messages })
+  assert.ok(exported)
+  assert.deepEqual(live, exported)
+  assert.equal(exported.cwd, '/work/v2')
+  assert.equal(exported.messages.length, 2)
+  assert.equal(exported.messages[1].model, 'model')
+  assert.equal(/** @type {any} */ (exported.messages[0].content[0]).text, 'Read notes')
+  assert.equal(/** @type {any} */ (exported.messages[1].content[1]).tool_use_id, 'call_v2')
+  assert.equal(/** @type {any} */ (exported.messages[1].content[1]).content, 'Contents')
+  assert.equal(/** @type {any} */ (exported.messages[1].attributes?.usage).input_tokens, 12)
+  const streaming = structuredClone(raw)
+  delete streaming.messages[1].time.completed
+  assert.equal(projectOpenCodeSnapshot(streaming)?.messages.length, 1, 'finish alone precedes tool settlement in v2')
+})
+
 function exportFixture() {
   return {
     info: {
