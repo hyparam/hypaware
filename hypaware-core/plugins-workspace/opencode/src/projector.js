@@ -20,7 +20,7 @@ export function projectOpenCodeSnapshot(raw, opts = {}) {
   const messages = Array.isArray(raw.messages) ? raw.messages : undefined
   const sessionId = stringValue(session?.id)
   if (!session || !messages || !sessionId) return undefined
-  const cwd = stringValue(session.directory)
+  const cwd = openCodeSessionCwd(session)
   if (!cwd) return undefined
 
   /** @type {AiGatewayProjectedMessage[]} */
@@ -29,7 +29,8 @@ export function projectOpenCodeSnapshot(raw, opts = {}) {
     if (!isPlainObject(rawMessage)) continue
     const info = isPlainObject(rawMessage.info) ? rawMessage.info : rawMessage
     const parts = Array.isArray(rawMessage.parts) ? rawMessage.parts : []
-    const message = projectMessage(info, parts, projected.length)
+    const v2 = !isPlainObject(rawMessage.info) && typeof info.type === 'string'
+    const message = projectMessage(info, parts, projected.length, v2)
     if (message) projected.push(message)
   }
   if (projected.length === 0) return undefined
@@ -53,7 +54,7 @@ export function projectOpenCodeSnapshot(raw, opts = {}) {
       opencode: {
         entrypoint_source: opts.entrypointSource ?? 'historical-export',
         project_id: stringValue(session.projectID) ?? null,
-        workspace_id: stringValue(session.workspaceID) ?? null,
+        workspace_id: stringValue(session.workspaceID) ?? (isPlainObject(session.location) ? stringValue(session.location.workspaceID) : undefined) ?? null,
         parent_session_id: stringValue(session.parentID) ?? null,
       },
     },
@@ -79,22 +80,24 @@ export function projectOpenCodeSnapshot(raw, opts = {}) {
  * @ref LLP 0306#recovery-lane [implements]: an unsettled turn is not persisted,
  *   because the append-only dedupe would keep its final state from landing
  */
-function projectMessage(info, parts, index) {
+function projectMessage(info, parts, index, v2 = false) {
   const role = stringValue(info.role) ?? stringValue(info.type)
   const id = stringValue(info.id)
   if (!role || !id) return undefined
-  if (role === 'assistant' && !isSettledAssistantMessage(info)) return undefined
+  if (role === 'assistant' && (v2 ? readTime(info.time, 'completed') === undefined : !isSettledAssistantMessage(info))) return undefined
+  if (v2 && (info.type === 'shell' || info.type === 'compaction') && info.status === 'running') return undefined
   /** @type {JsonObject[]} */
   const content = []
-  for (const rawPart of parts) {
+  const sourceParts = v2 ? (Array.isArray(info.content) ? info.content : [{ type: role, text: info.text ?? info.summary }]) : parts
+  for (const [ordinal, rawPart] of sourceParts.entries()) {
     if (!isPlainObject(rawPart)) continue
-    const block = projectPart(rawPart)
+    const block = v2 ? projectV2Part(rawPart, id, ordinal) : projectPart(rawPart)
     if (block) content.push(block)
   }
   if (content.length === 0) return undefined
   const parent = stringValue(info.parentID)
   const provider = stringValue(info.providerID) ?? (isPlainObject(info.model) ? stringValue(info.model.providerID) : undefined)
-  const model = stringValue(info.modelID) ?? (isPlainObject(info.model) ? stringValue(info.model.modelID) : undefined)
+  const model = stringValue(info.modelID) ?? (isPlainObject(info.model) ? stringValue(info.model.id) ?? stringValue(info.model.modelID) : undefined)
   /** @type {AiGatewayProjectedMessage} */
   const message = {
     role,
@@ -122,6 +125,43 @@ function projectMessage(info, parts, index) {
     }
   }
   return message
+}
+
+/** @param {unknown} session */
+export function openCodeSessionCwd(session) {
+  if (!isPlainObject(session)) return undefined
+  return stringValue(session.directory) ?? (isPlainObject(session.location) ? stringValue(session.location.directory) : undefined)
+}
+
+/**
+ * V2 content has no part IDs. A completed message's authoritative ordinal
+ * gives both lanes the same identity, while tool call IDs remain native.
+ * @param {Record<string, unknown>} part @param {string} messageId @param {number} ordinal
+ * @ref LLP 0576#interfaces: completed V2 content ordinals substitute for absent native part IDs
+ */
+function projectV2Part(part, messageId, ordinal) {
+  const id = `${messageId}:${ordinal}`
+  if (part.type === 'tool') {
+    const state = isPlainObject(part.state) ? part.state : undefined
+    if (state?.status !== 'completed' && state?.status !== 'error') return undefined
+    return /** @type {JsonObject} */ ({
+      type: 'tool_result', part_id: id,
+      tool_use_id: stringValue(part.id) ?? id,
+      name: stringValue(part.name) ?? 'unknown',
+      input: jsonValue(state.input),
+      content: Array.isArray(state.content)
+        ? state.content.map(item => isPlainObject(item) ? stringValue(item.text) ?? jsonText(item) : jsonText(item)).join('\n')
+        : jsonText(state.error) ?? '',
+      is_error: state.status === 'error',
+      raw_frame: jsonObject(part),
+    })
+  }
+  if (typeof part.text === 'string') {
+    return /** @type {JsonObject} */ (part.type === 'reasoning'
+      ? { type: 'thinking', part_id: id, thinking: part.text, raw_frame: jsonObject(part) }
+      : { type: 'text', part_id: id, text: part.text, raw_frame: jsonObject(part) })
+  }
+  return /** @type {JsonObject} */ ({ type: stringValue(part.type) ?? 'unknown', part_id: id, raw_frame: jsonObject(part) })
 }
 
 /**

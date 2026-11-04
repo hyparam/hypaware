@@ -7,7 +7,7 @@ import { refreshSessionIgnores } from '../../../../src/core/control/session_igno
 import { AI_GATEWAY_MESSAGES_DATASET, errMessage, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
-import { projectOpenCodeSnapshot } from './projector.js'
+import { openCodeSessionCwd, projectOpenCodeSnapshot } from './projector.js'
 
 /** @import { BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -32,7 +32,6 @@ const EXPORT_TIMEOUT_MS = 60_000
  */
 export function createOpenCodeBackfillProvider(opts = {}) {
   const resolver = createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
-  const runCommand = opts.runCommand ?? runOpenCode
   return {
     name: 'opencode',
     plugin: '@hypaware/opencode',
@@ -43,7 +42,7 @@ export function createOpenCodeBackfillProvider(opts = {}) {
       yield* runBackfill({
         ctx,
         resolver,
-        runCommand,
+        runCommand: opts.runCommand ?? createOpenCodeCommandRunner(),
         exactSessionIds: opts.exactSessionIds,
         ignoredSessions: opts.ignoredSessions,
       })
@@ -51,7 +50,7 @@ export function createOpenCodeBackfillProvider(opts = {}) {
   }
 }
 
-/** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: (args: string[], timeoutMs: number) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
+/** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: ((args: string[], timeoutMs: number) => Promise<string>) & { commandLine?: (args: string[]) => string }, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
 async function* runBackfill(deps) {
   const window = resolveWindow(deps.ctx)
   let emptyStdout = false
@@ -154,7 +153,7 @@ async function* runBackfill(deps) {
       deps.ctx.log.warn('opencode.backfill.session_read_failed', {
         component: 'plugin.opencode.backfill',
         operation: 'backfill.scan',
-        source_path: `opencode export ${item.id}`,
+        source_path: deps.runCommand.commandLine?.(['export', item.id]) ?? `opencode export ${item.id}`,
         session_id: item.id,
         status: 'error',
         error_kind: 'session_read_failed',
@@ -163,7 +162,7 @@ async function* runBackfill(deps) {
       continue
     }
     const session = isPlainObject(exported) && isPlainObject(exported.info) ? exported.info : undefined
-    const cwd = stringValue(session?.directory)
+    const cwd = openCodeSessionCwd(session)
     if (!cwd) {
       yield /** @type {BackfillEvent} */ ({
         type: 'event',
@@ -196,6 +195,55 @@ async function* runBackfill(deps) {
       native_id: item.id,
     })
   }
+}
+
+/**
+ * Keep the provider's logical commands stable while choosing each major's
+ * public CLI surface once per import. From 1.3 neither listing is scoped to
+ * our cwd or restricted to root sessions; 1.0 to 1.2 keep the project-scoped
+ * root list. Only metadata crosses this boundary.
+ * @param {(args: string[], timeoutMs: number) => Promise<string>} [runCommand]
+ * @ref LLP 0576#discovery: project-scoped root lists cannot recover other projects or children
+ */
+export function createOpenCodeCommandRunner(runCommand = runOpenCode) {
+  /** @type {Promise<boolean> | undefined} */
+  let isV2
+  let resolvedV2 = false
+  let legacyList = false
+  /** @param {boolean} v2 @param {string[]} args */
+  const resolveArgs = (v2, args) => v2 && args[0] === 'export' ? ['session', ...args] : args
+  const run = async (/** @type {string[]} */ args, /** @type {number} */ timeoutMs) => {
+    isV2 ??= runCommand(['--version'], LIST_TIMEOUT_MS).then(version => {
+      const [, major, minor] = /(?:^|\s)v?(\d+)\.(\d+)/.exec(version) ?? []
+      if (major !== '1' && major !== '2') throw new Error(`Unsupported OpenCode version ${version.trim().slice(0,80)}: history import supports OpenCode 1.x and 2.x.`)
+      // `opencode db` arrived in 1.3; older 1.x keeps its project-scoped list.
+      legacyList = major === '1' && Number(minor) < 3
+      return major === '2'
+    })
+    const v2 = resolvedV2 = await isV2
+    if (args[0] === 'session' && args[1] === 'list') {
+      if (!v2 && legacyList) return runCommand(args, timeoutMs)
+      if (!v2) return runCommand([
+        'db',
+        `SELECT id, time_updated AS updated, time_created AS created, directory FROM session ORDER BY time_updated DESC, id DESC LIMIT ${MAX_SESSION_LIST}`,
+        '--format', 'json',
+      ], timeoutMs)
+      const result = JSON.parse(await runCommand(['api', 'session.list', '--param', `limit=${MAX_SESSION_LIST}`, '--param', 'order=desc'], timeoutMs))
+      if (!isPlainObject(result) || !Array.isArray(result.data)) throw new Error('opencode session API did not return a data array')
+      return JSON.stringify(result.data.filter(isPlainObject).map(session => ({
+        id: session.id,
+        updated: isPlainObject(session.time) ? session.time.updated : undefined,
+        created: isPlainObject(session.time) ? session.time.created : undefined,
+        directory: openCodeSessionCwd(session),
+      })))
+    }
+    return runCommand(resolveArgs(v2, args), timeoutMs)
+  }
+  // A failed export's warning names the command that ran, so a retry by hand
+  // from the log uses the right one on each major.
+  return Object.assign(run, {
+    commandLine: (/** @type {string[]} */ args) => ['opencode', ...resolveArgs(resolvedV2, args)].join(' '),
+  })
 }
 
 /**

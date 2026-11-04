@@ -16,7 +16,7 @@ function value(result) {
 }
 
 function sessionID(event) {
-  const props = event && typeof event === 'object' ? event.properties : undefined
+  const props = event && typeof event === 'object' ? event.properties ?? event.data : undefined
   if (!props || typeof props !== 'object') return undefined
   for (const candidate of [
     props.sessionID,
@@ -34,10 +34,10 @@ function sessionID(event) {
   return undefined
 }
 
-export const HypAware = async ({ client, directory, worktree, project }) => {
+/** @param {{ client: any, directory?: string, worktree?: string, project?: { id: string }, entrypoint?: string }} input */
+const HypAware = async ({ client, directory, worktree, project, entrypoint = process.env.OPENCODE_CLIENT || 'cli' }) => {
   // OpenCode itself defaults this flag to `cli`; Desktop sets `desktop`
   // before launching its shared sidecar.
-  const entrypoint = process.env.OPENCODE_CLIENT || 'cli'
   const pending = new Map()
   let timer
   let running = false
@@ -135,4 +135,48 @@ export const HypAware = async ({ client, directory, worktree, project }) => {
       lifetime.abort()
     },
   }
+}
+
+// V2 runs setup once per booted location in one shared server, each with its
+// own module copy, and every subscription sees every location's events. The
+// set lives on globalThis so only the oldest live setup schedules snapshots;
+// a location filter would drop sessions of locations that never booted.
+const V2_SETUPS = Symbol.for('hypaware.opencode.v2.setups')
+
+// V1 loads the server factory above; V2 loads this definition. Both use the
+// same bounded queue and snapshot listener. Context is V2's public message
+// snapshot API; full history export recovers pre-compaction messages.
+// @ref LLP 0576#interfaces: one module satisfies both loaders without two capture queues
+export default {
+  id: 'hypaware',
+  server: HypAware,
+  async setup(context) {
+    const lifetime = new AbortController()
+    const hooks = await HypAware({
+      directory: context.location.directory,
+      entrypoint: 'unknown',
+      client: { session: {
+        get: ({ path, signal }) => context.session.get({ sessionID: path.id }, { signal }),
+        messages: ({ path, signal }) => context.session.context({ sessionID: path.id }, { signal }),
+      } },
+    })
+    /** @type {Set<object>} */
+    const setups = globalThis[V2_SETUPS] ??= new Set()
+    const self = {}
+    setups.add(self)
+    const events = (async () => {
+      for await (const event of context.event.subscribe({ signal: lifetime.signal })) {
+        if (setups.values().next().value === self) hooks.event({ event })
+      }
+    })().catch(() => {}).finally(() => {
+      // An ended subscription hands scheduling to the next live setup.
+      setups.delete(self)
+    })
+    return async () => {
+      setups.delete(self)
+      lifetime.abort()
+      hooks.dispose()
+      await events
+    }
+  },
 }

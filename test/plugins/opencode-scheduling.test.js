@@ -35,7 +35,7 @@ async function harness() {
       return upload(options.signal)
     },
   })
-  vm.runInContext(source.replace('export const HypAware =', 'globalThis.HypAware ='), context)
+  vm.runInContext(source.replace('const HypAware =', 'globalThis.HypAware =').replace('server: HypAware', 'server: globalThis.HypAware').replace('export default', 'globalThis.definition ='), context)
   const hooks = await context.HypAware({
     directory: '/work',
     client: { session: {

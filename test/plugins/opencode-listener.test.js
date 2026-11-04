@@ -187,7 +187,7 @@ test('OpenCode listener writes text and tool rows, converges replays, and publis
   }
 })
 
-test('OpenCode listener applies .hypignore, machine policy, local-only, session ignore, and missing-cwd gates before writes', async () => {
+test('OpenCode 1 and 2 listeners apply privacy gates before writing the session directory', async () => {
   const listener = await startListener()
   const dotIgnored = path.join(listener.root, 'dot-ignored')
   const privateDir = path.join(listener.root, 'machine-private')
@@ -212,21 +212,32 @@ test('OpenCode listener applies .hypignore, machine policy, local-only, session 
     })
     assert.equal(ignoredControl.status, 200)
 
-    assert.equal((await listener.post(snapshot('ses_dot', dotIgnored))).status, 202)
-    assert.equal((await listener.post(snapshot('ses_private', privateDir))).status, 202)
-    assert.equal((await listener.post(snapshot('ses_optout', localOnly))).status, 202)
-    assert.equal((await listener.post(snapshot('ses_missing', undefined))).status, 202)
-    assert.equal((await listener.post(snapshot('ses_local', localOnly, 'unknown'))).status, 200)
+    for (const v2 of [false, true]) {
+      const body = (id, cwd, entrypoint = 'cli') => {
+        const raw = /** @type {any} */ (snapshot(id, cwd, entrypoint))
+        if (v2) {
+          raw.session.location = { directory: raw.session.directory }
+          delete raw.session.directory
+          raw.messages = [{ id: `${id}-user`, type: 'user', text: 'V2 fixture', time: { created: 1000 } }]
+        }
+        return raw
+      }
+      assert.equal((await listener.post(body('ses_dot', dotIgnored))).status, 202)
+      assert.equal((await listener.post(body('ses_private', privateDir))).status, 202)
+      assert.equal((await listener.post(body('ses_optout', localOnly))).status, 202)
+      assert.equal((await listener.post(body('ses_missing', undefined))).status, 202)
+      assert.equal((await listener.post(body(`ses_local${v2 ? '_v2' : ''}`, localOnly, 'unknown'))).status, 200)
+    }
 
-    assert.equal(listener.storage.appended.length, 3)
-    assert.equal(listener.storage.appended.every((row) => row.session_id === 'ses_local'), true)
+    assert.equal(listener.storage.appended.length, 4)
+    assert.equal(listener.storage.appended.every((row) => String(row.session_id).startsWith('ses_local')), true)
     assert.equal(listener.storage.appended.every((row) => row.cwd === localOnly), true)
 
     const status = await listener.source.status?.()
-    assert.equal(status?.details?.policy_drops, 2)
-    assert.equal(status?.details?.session_drops, 1)
-    assert.equal(status?.details?.missing_cwd, 1)
-    assert.equal(status?.details?.unknown_entrypoints, 1)
+    assert.equal(status?.details?.policy_drops, 4)
+    assert.equal(status?.details?.session_drops, 2)
+    assert.equal(status?.details?.missing_cwd, 2)
+    assert.equal(status?.details?.unknown_entrypoints, 2)
     assert.equal(status?.details?.ignored_sessions, 1)
     assert.equal(status?.details?.store_activity_gaps, 0)
   } finally {
