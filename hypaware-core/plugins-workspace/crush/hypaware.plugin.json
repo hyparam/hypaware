@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/crush",
+  "version": "1.0.0",
+  "description": "Crush client adapter for HypAware. Reads each project's crush.db read-only (LLP 0573), found through Crush's projects.json index, and materializes sessions/messages into ai_gateway_messages via the shared ai_gateway.projected_exchange materializer: a backfill provider for history and a poll source for ongoing capture. No gateway proxying, no changes to Crush.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22.12",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "read_home",
+    "read_state",
+    "write_state"
+  ],
+  "requires": {
+    "plugins": {
+      "@hypaware/ai-gateway": "^2.0.0"
+    }
+  },
+  "contributes": {
+    "config_sections": [
+      {
+        "section": "crush",
+        "summary": "Crush adapter config: enabled, data_dirs, poll_interval."
+      }
+    ],
+    "sources": [{ "name": "crush" }]
+  }
+}
