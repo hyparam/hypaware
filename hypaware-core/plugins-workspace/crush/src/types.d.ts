@@ -1,10 +1,10 @@
 /**
  * Shared shapes for the `@hypaware/crush` adapter: discovery of the
  * per-project databases, the reader's error codes, the poll watermark, and
- * the poll runner state.
+ * the poll runner state, and the backfill provider options.
  */
 
-import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
+import type { ColumnSpec, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
 import type { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
 
 /** `CrushDbError.code`, also the `error_kind` the source reports (LLP 0573#status). */
@@ -234,4 +234,18 @@ export interface CrushPollRunner {
 /** Shares the running poll's runner with the backfill sweep (LLP 0573#backfill). */
 export interface CrushRunnerHolder {
   runner?: CrushPollRunner
+}
+
+/** Options for the backfill provider (LLP 0573#backfill). */
+export interface CrushBackfillOptions {
+  /** `projects.json` at activation; a running poll's own path wins. */
+  indexPath: string
+  dataDirs: string[]
+  stateDir: string
+  config?: JsonObject
+  ignoredSessions?: Set<string>
+  localOnlyListPath?: string
+  /** Injectable for tests; otherwise one resolver per run. */
+  resolver?: UsagePolicyResolver
+  holder?: CrushRunnerHolder
 }
