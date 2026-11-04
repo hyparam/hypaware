@@ -348,7 +348,9 @@ order. Key: `(session_id, part_id)`.
   `crush` for a root session and `crush-task` for a task session, whose
   `parent_thread_id` is `crushScopeId(parent_session_id)`.
 - Repository identity comes from the project directory (#discovery) through
-  the git-repo helper.
+  the git-repo helper. The project directory is also the row's `cwd`, the
+  marking #privacy's local-only withholding reads; D5 strips only the paths
+  inside tool results.
 - Provenance carries `client_name`, the native session id, and the database
   path as `source_path`, which stays in the row and is never logged.
 - No usage (D2). The root-session cost attribute is set as D2 says.

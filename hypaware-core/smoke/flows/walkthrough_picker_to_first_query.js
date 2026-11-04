@@ -258,6 +258,7 @@ export async function run({ harness, expect }) {
         '--source', 'claude',
         '--source', 'codex',
         '--source', 'opencode',
+        '--source', 'crush',
         '--source', 'otel',
         '--export', 'local-parquet',
         '--retention-days', '30',
@@ -495,6 +496,7 @@ export async function run({ harness, expect }) {
         '--source', 'claude',
         '--source', 'codex',
         '--source', 'opencode',
+        '--source', 'crush',
         '--source', 'otel',
         '--export', 'local-parquet',
         '--retention-days', '30',
@@ -626,7 +628,7 @@ export async function run({ harness, expect }) {
       finishSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_picked === 4 &&
+        v.sources_picked === 5 &&
         v.export_picked === 'local-parquet' &&
         v.clients_picked === 3 &&
         v.retention_days === 30
@@ -834,6 +836,8 @@ async function goldenPickerConfig(hypHome) {
     { name: '@hypaware/format-parquet' },
     { name: '@hypaware/claude' },
     { name: '@hypaware/codex', config: {} },
+    // A sweep-only source: picked with `--source crush`, no client attach.
+    { name: '@hypaware/crush' },
   ]
 
   // Riders land after every picked plugin, in the order the composer folds

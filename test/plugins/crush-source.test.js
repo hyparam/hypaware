@@ -421,6 +421,15 @@ test('a usage-policy ignore removes the project\'s rows, opens nothing and does 
   w.close()
 })
 
+test('a first tick beside an ignore-policy project still reports baseline', async () => {
+  const harness = await createCrushHarness({ projects: ['p1', 'p2'] })
+  await fs.writeFile(path.join(harness.projectDirs[1], '.hypignore'), 'ignore\n')
+  const runner = createCrushPollRunner(harness.ctx)
+  await runCrushPollTick(runner, harness.ctx)
+  assert.equal(crushPollLogs(harness.logs).at(-1)?.fields?.poll_status, 'baseline')
+  assert.equal(harness.committed.length, 0)
+})
+
 test('an excluded session is never projected and does not count as pending', async () => {
   const harness = await createCrushHarness({ projects: ['p1'] })
   const ignoredSessions = new SessionIgnoreSet(harness.dir)

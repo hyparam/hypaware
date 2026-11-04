@@ -179,7 +179,7 @@ test('exchange identity: scoped session id, client, entrypoint, repo and reconci
   assert.equal(exchange.conversation_started_at, new Date(T0 * 1000).toISOString())
   assert.equal(exchange.git_remote, 'https://fixture.invalid/repo.git')
   assert.equal(exchange.repo_root, 'fixture-root')
-  assert.equal(exchange.cwd, undefined, 'D5: no working directory')
+  assert.equal(exchange.cwd, PROJECT_DIR, 'the project directory is the local-only marking (LLP 0573#privacy)')
   assert.equal(exchange.parent_thread_id, undefined)
   assert.deepEqual(item.reconcile, { where: { client_name: 'crush', session_id: `crush-${ROOT}` }, key: 'part_id' })
   assert.deepEqual(item.provenance, { client_name: 'crush', native_id: ROOT })

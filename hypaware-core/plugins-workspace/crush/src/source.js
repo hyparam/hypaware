@@ -666,7 +666,10 @@ async function pollOnce(runner, ctx) {
     throw err
   }
 
-  const onlyBaselines = visited.length > 0 && visited.every(v => v.baseline)
+  // An ignore-policy visit reads nothing, so it does not make a tick that
+  // only recorded cursors read as one that imported rows.
+  const read = visited.filter(v => !v.ignored)
+  const onlyBaselines = read.length > 0 && read.every(v => v.baseline)
   const kind = discoveryErrorKind(result) ?? Object.keys(runner.errorCounts)[0]
   return {
     status: onlyBaselines ? 'baseline' : 'ok',

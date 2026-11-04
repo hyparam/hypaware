@@ -298,9 +298,11 @@ export async function projectCrushSession(args) {
   if (conversationStartedAt) exchange.conversation_started_at = conversationStartedAt
   // @ref LLP 0573#owner-decisions [implements]: D3, a task session links to its parent.
   if (session.parent_session_id) exchange.parent_thread_id = crushScopeId(session.parent_session_id)
-  // The project directory gives repository identity only; it is not
-  // carried as `cwd` (D5).
+  // @ref LLP 0573#privacy [implements]: the project directory is the row's
+  // `cwd`, the marking the LLP 0070 export seam withholds local-only rows by.
+  // D5 strips only the paths inside tool results.
   if (projectDir) {
+    exchange.cwd = projectDir
     const derived = await deriveRepo(projectDir)
     if (derived.git_remote) exchange.git_remote = derived.git_remote
     if (derived.repo_root) exchange.repo_root = derived.repo_root
