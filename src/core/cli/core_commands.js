@@ -52,7 +52,7 @@ import {
   runSkillsInstall,
   runUnignore,
 } from '../commands/clients.js'
-import { runPolicyClient, runPolicyFolders, runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
+import { runPolicyClient, runPolicyFolders, runPolicyList, runPolicySet, runPolicyShow, runPrivacyPause, runPrivacyResume, runPolicyUnset } from '../commands/policy.js'
 import { runTelemetry } from '../product_telemetry/commands.js'
 
 /**
@@ -517,6 +517,23 @@ function buildCoreCommands(registry) {
         'asked about at all).',
       ].join('\n'),
     }),
+    {
+      name: 'privacy pause',
+      summary: 'Stop recording on this machine until you resume',
+      usage: 'hyp privacy pause',
+      help: [
+        'Nothing from any AI client on this machine is recorded from now until',
+        "'hyp privacy resume', and transcripts from that time can't be imported later.",
+        'What was already recorded still syncs. Use hyp session ignore for one session.',
+      ].join('\n'),
+      run: runPrivacyPause,
+    },
+    {
+      name: 'privacy resume',
+      summary: 'Resume recording after hyp privacy pause',
+      usage: 'hyp privacy resume',
+      run: runPrivacyResume,
+    },
     {
       name: 'privacy set',
       aliases: ['policy set'],

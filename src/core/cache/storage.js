@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createRecordingPauseFilter } from '../usage-policy/recording_pause.js'
 import { Attr, getLogger, getMeter, withSpan } from '../observability/index.js'
 import {
   dataSourceForTable,
@@ -251,18 +252,22 @@ export function resolveIcebergDir(tablePath) {
  *   sourceWithholdResolver?: SourceWithholdResolver,
  *   redaction?: ExportRedactionConfig,
  *   recordRedaction?: boolean,
+ *   pauseStateDir?: string,
  * }} args
  * @returns {ExtendedQueryStorageService}
  * @ref LLP 0013#write-path-and-query [implements]: kernel-owned cache write path; every source row lands here
  */
-export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver, redaction, recordRedaction = true }) {
+export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver, redaction, recordRedaction = true, pauseStateDir }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
   const sessionPurges = createSessionPurgeStore(cacheRoot)
+  const recordingPause = pauseStateDir ? createRecordingPauseFilter(pauseStateDir) : undefined
   /** @param {Record<string, unknown>[]} rows */
   function survivingRows(rows) {
     sessionPurges.refresh()
-    return sessionPurges.size ? rows.filter((row) => !sessionPurges.has(row)) : rows
+    // @ref LLP 0579#seam [implements]: every recorder's rows pass here, so one check covers them all
+    const recordable = recordingPause ? recordingPause.keep(rows) : rows
+    return sessionPurges.size ? recordable.filter((row) => !sessionPurges.has(row)) : recordable
   }
   const redactRecordRows = createRecordRedactor()
   /**

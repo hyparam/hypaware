@@ -139,6 +139,7 @@ export {
   assessCaptureHealth,
   formatGapDuration,
 } from './status/capture_health.js'
+import { readPausedSince } from '../usage-policy/recording_pause.js'
 export { RECENT_ERROR_WINDOW_HOURS, RECENT_ERROR_WINDOW_MS } from './status/recent_errors.js'
 
 /**
@@ -1937,6 +1938,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // hold", the same as the driver's own check sees it.
   // @ref LLP 0100#requirements [implements]: R9 - hyp status shows the pending first-sync deadline while the hold is live
   const firstSyncHoldDeadline = await readFirstSyncDeadline({ stateDir: stateRoot })
+  const recordingPausedSince = await readPausedSince({ stateDir: stateRoot })
 
   // ----- proxy-mode trust (LLP 0237 / LLP 0239) -----
   const proxyTrust = await collectProxyTrust({
@@ -2056,6 +2058,7 @@ export async function collectHypAwareStatus(opts = {}) {
     clientActions,
     usagePolicy,
     firstSyncHoldDeadline,
+    recordingPausedSince,
     recentEntrypoints,
     maintenance,
     captureHealth,
