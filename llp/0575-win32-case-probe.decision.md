@@ -15,13 +15,13 @@
 
 LLP 0050 put case folding behind a per-volume probe (`dev`/`ino` identity of a
 path against a case-flipped spelling of its last segment) and made the probe
-inert — constant `false`, no syscall — off darwin, "because no shipping
+inert (constant `false`, no syscall) off darwin, "because no shipping
 Linux/Windows filesystem this codebase targets presents the macOS
 case-insensitive-by-default behaviour". For Windows that premise is wrong:
 NTFS is case-insensitive by default, which is exactly the aliasing the fold
 exists to close. With the probe inert there, a machine-local entry declared
 `C:\Users\kenny\Secret` did not govern a session whose `cwd` arrived spelled
-`c:\users\kenny\secret` — the same directory, a differently-cased spelling —
+`c:\users\kenny\secret` (the same directory, a differently-cased spelling),
 so the privacy rule failed **open**, the direction
 [LLP 0049 §fail-safe](./0049-hypignore-usage-policy.spec.md#fail-safe) forbids.
 
@@ -52,7 +52,7 @@ other platform stays inert. Two win32-specific notes:
   strictly a property of the volume, and the per-`dev` memo can return a wrong
   `true` for such a directory. That error only widens matching, which the
   gate's `max(declared, folded)` lattice (LLP 0050 §normalization) turns into
-  an over-restriction — a usability cost, never a leak. A wrong `false` is not
+  an over-restriction: a usability cost, never a leak. A wrong `false` is not
   reachable this way: the memo learns `false` only from a volume whose default
   state is case-sensitive.
 
