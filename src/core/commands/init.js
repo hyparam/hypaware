@@ -379,7 +379,7 @@ function hasInitFlags(argv) {
  */
 export const INIT_SOURCE_CHOICES = Object.freeze(/** @type {PickerSource[]} */ ([
   'ollama', 'langgraph', 'codex-cloud', 'chatgpt-work',
-  'claude', 'claude-desktop', 'codex', 'opencode', 'antigravity', 'antigravity-desktop', 'cursor', 'copilot', 'pi', 'droid', 'openclaw', 'hermes', 'goose', 'raw-anthropic', 'raw-openai', 'otel',
+  'claude', 'claude-desktop', 'codex', 'opencode', 'antigravity', 'antigravity-desktop', 'cursor', 'copilot', 'pi', 'droid', 'openclaw', 'hermes', 'goose', 'crush', 'raw-anthropic', 'raw-openai', 'otel',
 ]))
 
 /**
