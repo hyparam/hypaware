@@ -52,9 +52,13 @@ other platform stays inert. Two win32-specific notes:
   strictly a property of the volume, and the per-`dev` memo can return a wrong
   `true` for such a directory. That error only widens matching, which the
   gate's `max(declared, folded)` lattice (LLP 0050 §normalization) turns into
-  an over-restriction: a usability cost, never a leak. A wrong `false` is not
-  reachable this way: the memo learns `false` only from a volume whose default
-  state is case-sensitive.
+  an over-restriction: a usability cost, never a leak. A wrong `false` is also
+  reachable, and it is the fail-open direction: if the first directory probed
+  on an NTFS volume is itself case-sensitive (`setCaseSensitiveInfo`, or a
+  WSL-created directory under `/mnt/c`), the volume memo learns `false`, and
+  later lookups on every other directory of that volume skip the fold, so an
+  alias spelling can miss a declared rule. That is a residual risk, not a
+  regression: before this decision win32 was always `false`.
 
 Drive-letter case (`C:` vs `c:`) needs no separate handling: a case-insensitive
 verdict lowers the whole folded spelling, drive letter included.
