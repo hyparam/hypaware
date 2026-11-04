@@ -1,7 +1,7 @@
 # LLP 0573: Crush session capture - technical design
 
 **Type:** Design
-**Status:** Draft
+**Status:** Active
 **Systems:** Sources, Plugins
 **Author:** HypForge
 **Date:** 2026-11-03

@@ -1,7 +1,7 @@
 # LLP 0574: Crush session capture, implementation plan
 
 **Type:** plan
-**Status:** Draft
+**Status:** Active
 **Systems:** Sources, Plugins
 **Author:** HypForge
 **Date:** 2026-11-03
