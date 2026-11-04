@@ -115,10 +115,14 @@ test('NanoClaw refuses unknown catalogs, path escapes, symlinks and oversized or
   const outside = path.join(root, 'outside.jsonl')
   await fs.writeFile(outside, fixture)
   await fs.unlink(file)
-  await fs.symlink(outside, file)
-  await assert.rejects(readTranscript(root, { file, group }), /unsafe_path/)
-  assert.equal((await discoverFiles(root, [group])).length, 0)
-  await fs.unlink(file)
+  // The planted file symlink needs Developer Mode on win32; the other
+  // refusal shapes below still run there.
+  if (process.platform !== 'win32') {
+    await fs.symlink(outside, file)
+    await assert.rejects(readTranscript(root, { file, group }), /unsafe_path/)
+    assert.equal((await discoverFiles(root, [group])).length, 0)
+    await fs.unlink(file)
+  }
   await fs.writeFile(file, '{malformed}\n')
   await collect(provider)
   assert.equal(health.files_failed, 1)
@@ -295,7 +299,7 @@ test('NanoClaw discovery validates catalog and contained Claude layout without r
   assert.deepEqual(await discoverNanoclawRoots([...Array(8).fill(path.join(root, 'missing')), root]), [])
   await fs.rename(group.projects, group.projects + '-aside')
   assert.deepEqual(await discoverNanoclawRoots([root]), [])
-  await fs.symlink(group.projects + '-aside', group.projects)
+  await fs.symlink(group.projects + '-aside', group.projects, process.platform === 'win32' ? 'junction' : null)
   assert.deepEqual(await discoverNanoclawRoots([root]), [])
   await fs.unlink(group.projects)
   await fs.rename(group.projects + '-aside', group.projects)
@@ -303,7 +307,7 @@ test('NanoClaw discovery validates catalog and contained Claude layout without r
   assert.deepEqual(await discoverNanoclawRoots([root]), [])
 })
 
-test('client discover escapes a root for the terminal and keeps it exact in JSON', async t => {
+test('client discover escapes a root for the terminal and keeps it exact in JSON', { skip: process.platform === 'win32' && 'NTFS forbids control characters in file names, so the forged-root fixture cannot exist' }, async t => {
   const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-nanoclaw-')))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
   const root = path.join(home, 'root\nFORGED\u001b[2J')
