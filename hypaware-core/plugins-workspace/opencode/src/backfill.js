@@ -208,16 +208,20 @@ export function createOpenCodeCommandRunner(runCommand = runOpenCode) {
   /** @type {Promise<boolean> | undefined} */
   let isV2
   let resolvedV2 = false
+  let legacyList = false
   /** @param {boolean} v2 @param {string[]} args */
   const resolveArgs = (v2, args) => v2 && args[0] === 'export' ? ['session', ...args] : args
   const run = async (/** @type {string[]} */ args, /** @type {number} */ timeoutMs) => {
     isV2 ??= runCommand(['--version'], LIST_TIMEOUT_MS).then(version => {
-      const major = /(?:^|\s)v?(\d+)\./.exec(version)?.[1]
+      const [, major, minor] = /(?:^|\s)v?(\d+)\.(\d+)/.exec(version) ?? []
       if (major !== '1' && major !== '2') throw new Error(`Unsupported OpenCode version ${version.trim().slice(0,80)}: history import supports OpenCode 1.x and 2.x.`)
+      // `opencode db` arrived in 1.3; older 1.x keeps its project-scoped list.
+      legacyList = major === '1' && Number(minor) < 3
       return major === '2'
     })
     const v2 = resolvedV2 = await isV2
     if (args[0] === 'session' && args[1] === 'list') {
+      if (!v2 && legacyList) return runCommand(args, timeoutMs)
       if (!v2) return runCommand([
         'db',
         `SELECT id, time_updated AS updated, time_created AS created, directory FROM session ORDER BY time_updated DESC, id DESC LIMIT ${MAX_SESSION_LIST}`,

@@ -13,7 +13,7 @@ test('real CLI command selection lists global metadata, including children, on e
     const calls = []
     const run = createOpenCodeCommandRunner(async args => {
       calls.push(args)
-      if (args[0] === '--version') return `opencode v${major}.2.4\n`
+      if (args[0] === '--version') return major === 1 ? 'opencode v1.18.22\n' : 'opencode v2.2.4\n'
       if (args[0] === 'db') return JSON.stringify([{ id: 'ses_child', directory: '/other/repo', updated: 1000 }])
       if (args[0] === 'api') return JSON.stringify({ data: [{ id: 'ses_child', parentID: 'ses_parent', location: { directory: '/other/repo' }, time: { updated: 1000 } }], cursor: {} })
       return '{}'
@@ -34,6 +34,14 @@ test('real CLI command selection lists global metadata, including children, on e
       assert.deepEqual(calls[2], ['session', 'export', 'ses_child'])
     }
   }
+  // 1.0 through 1.2 have no `db` command; they keep the project-scoped list.
+  const legacyCalls = []
+  const legacy = createOpenCodeCommandRunner(async args => {
+    legacyCalls.push(args)
+    return args[0] === '--version' ? '1.2.27\n' : '[]'
+  })
+  await legacy(['session', 'list', '--format', 'json', '--max-count', '1000'], 10000)
+  assert.deepEqual(legacyCalls[1], ['session', 'list', '--format', 'json', '--max-count', '1000'])
   const unsupported = createOpenCodeCommandRunner(async () => 'opencode v3.0.0\n')
   await assert.rejects(unsupported(['session', 'list'], 10000), {
     message: 'Unsupported OpenCode version opencode v3.0.0: history import supports OpenCode 1.x and 2.x.',

@@ -40,7 +40,8 @@ V1 public `db` CLI runs a read-only metadata SELECT; the V2 public `api
 session.list` CLI requests descending metadata without project or parent
 filters. Both retain the 1,000-session ceiling and existing time-window and
 privacy checks. Version is probed once per import; V2 uses `session export`
-and V1 uses `export`. No fallback selects a latest unrelated chat.
+and V1 uses `export`. V1 before 1.3 has no `db` command and keeps its
+project-scoped root list. No fallback selects a latest unrelated chat.
 
 ## Validation and cost {#validation}
 
