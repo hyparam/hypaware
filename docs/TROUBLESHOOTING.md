@@ -93,6 +93,40 @@ New messages arrive within a minute. A change Goose makes to a session it
 already wrote, such as rewriting earlier messages, arrives with the scheduled
 import, up to 15 minutes later. Run `hyp backfill goose` to pick it up at once.
 
+## Crush records nothing
+
+Crush capture reads each project's Crush database, so `hyp status` is where
+its health shows. `hyp client status` does not list Crush. `hyp status` prints
+a Crush line only when something is wrong. The ready messages, the last four
+rows below, show in `hyp status --json` as the `crush` entry's
+`health.message`.
+
+| Crush status says | What to do |
+| --- | --- |
+| `cannot read the crush index at <path>` | `projects.json` exists but could not be read or parsed. HypAware keeps reading the projects it last found there. Check that Crush itself still starts; Crush rewrites the index when it opens a project. |
+| `<N> crush projects skipped over the 1,024 limit` | HypAware reads at most 1,024 project databases. Remove projects you no longer use from Crush's index, or list the ones you want in `data_dirs`. |
+| `crush.db has no <table> table (<N> crush databases)` or `crush.db has no <table>.<column> column (<N> crush databases)` | Your Crush version uses a database schema this HypAware release does not support. A table named `goose_db_version` is Crush's own migration record, not a Goose problem. Nothing is recorded from those databases until you upgrade HypAware to a release that supports it. |
+| `cannot read <N> crush databases` | The daemon's user cannot open those databases, or the Node.js that runs HypAware has no built-in SQLite. Or a database is damaged; check that Crush still opens that project. Run HypAware as the same user as Crush, and use Node 22.12 or later; `hyp backfill crush` prints `crush capture requires Node >= 22.12` in the second case. Then run `hyp daemon restart`. |
+| `crush poll failed: <kind>` | HypAware retries on the next poll. If it persists, run `hyp daemon restart`. |
+| `<N> crush databases busy, retrying next poll` | Crush was writing when HypAware read. It retries on the next poll; if this persists, check for a stuck Crush process. |
+| `<N> sessions appear in more than one crush database` | A project's `.crush` directory was copied, so two databases hold the same session. HypAware records each such session from the first database it read. Remove the copy, or mark it with `hyp privacy ignore <dir>`. |
+| `no crush installation detected at <path>` | HypAware found no index at that path. If you set `CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, set `data_dirs` as shown on the [Crush page](integrations/crush.md#use-a-different-data-location), then run `hyp daemon restart`. |
+| `crush index at <path> lists no projects yet` | Capture is ready. Start Crush in a project. |
+| `polling <N> crush projects every 60000ms, no sessions yet` | Capture is ready. Finish a Crush turn and wait up to a minute. Older sessions arrive with the scheduled import within 15 minutes, or now with `hyp backfill crush`. |
+| `crush ongoing capture disabled (crush.enabled = false)` | Capture is off in your configuration. Set `crush.enabled` to `true`, then run `hyp daemon restart`. |
+
+A status that ends `; <N> listed projects have no crush.db` names index
+entries or `data_dirs` whose database is gone, such as a deleted project.
+They are skipped and need no action.
+
+New messages arrive within a minute. A change Crush makes to a message it
+already finished arrives with the scheduled import, up to 15 minutes later.
+Run `hyp backfill crush` to pick it up at once.
+
+Reading a database can leave an empty `crush.db-wal` and a 32 KiB
+`crush.db-shm` in the project's `.crush/` directory until Crush next closes it
+cleanly. These are SQLite's own index files and hold no content.
+
 ## Ollama capture is unconfirmed
 
 <!-- @ref LLP 0474#diagnostics [implements]: default status and local diagnostics distinguish readiness, observed traffic, persistence evidence and actionable finite failures -->
