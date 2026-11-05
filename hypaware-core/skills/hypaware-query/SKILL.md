@@ -57,17 +57,19 @@ hyp query schema ai_gateway_messages --remote <target> --format json
 
 Schema output is complete; it has no `--max-bytes` flag. For other datasets, use schema discovery on the selected target, not guessed table names. `columns: none declared` permits a `SELECT * FROM <table> LIMIT 1` probe, which reads the source.
 
-`SELECT` and `SHOW TABLES` are supported; `DESCRIBE` and `information_schema` are not. Bound message scans by `date` and transcripts by `session_id`. Other datasets may lack `date`: inspect their schema before choosing a time filter. `node` uses `node_type`, `edge` uses `edge_type`, neither uses `type`. Read [sql.md](sql.md) before using JSON extraction, functions, joins, or other advanced syntax. Read query errors before correcting names; never retry an unchanged memory-budget refusal.
+`SELECT` and `SHOW TABLES` are supported; `DESCRIBE` and `information_schema` are not. Bound message scans by `date` and transcripts by `session_id`. Other datasets may lack `date`: inspect their schema before choosing a time filter. `node` uses `node_type`, `edge` uses `edge_type`, neither uses `type`. Read [sql.md](sql.md) before aggregating usage or using JSON extraction, functions, joins, or other advanced syntax. Read query errors before correcting names; never retry an unchanged memory-budget refusal.
 
 Read token usage from `attributes.usage`, not `raw_frame`. Keep `input_tokens`,
 `output_tokens`, `cache_read_tokens`, and `cache_write_tokens` separate. Input
 is net of cache; reasoning tokens may already be included in output. Missing
-usage is unknown, not zero consumption. Use `COALESCE` for each aggregate sum
+usage is unknown, not zero consumption; bytes are not tokens. COALESCE every token sum
 and each operand in an addition, without treating missing usage as measured zero.
 
 Before aggregating usage, check for duplicate captures or cumulative updates.
+One carrier row per response does not establish uniqueness across capture sources
+or historical stream updates.
 Deduplicate only with verified response identity, keeping counters from the
-same final record. Keep unmatched captures; never merge missing request IDs
+same final record. Keep unmatched captures. Never merge unrelated records with missing request IDs
 or deduplicate on identical token values. If identity is unresolved, disclose
 the limitation rather than claiming an exact total.
 
@@ -88,6 +90,9 @@ before it), read them to establish what was asked, then widen to the assistant
 and tool rows that answered.
 
 ## Results and coverage
+
+Use the query surface rather than opening private raw transcripts. Never enable
+`--include-local-only` without the user's informed consent.
 
 Check exit status and stderr before treating empty output as zero matches. Never discard/merge stderr or pipe results through `head`/`tail`. Bound SQL results with projection, aggregates, and LIMIT. `--format json --output <file>` preserves returned rows and cells without display truncation; inspect the file in bounded sections. It does not bypass query/server limits.
 

@@ -213,6 +213,19 @@ test('publish packs a folder as a gzipped ustar bundle', async (t) => {
   assert.ok(memberNames.every((name) => !name.startsWith('./')))
 })
 
+// @ref LLP 0585#pages [tests]: the contract's five default pages all reach the bundle
+test('publish packs the default comparison, work, automation and repeated-work pages', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-default-pages-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const pages = ['report.md', 'comparison.md', 'work.md', 'automation.md', 'repeated-work.md', 'recommendation-batch.md']
+  for (const page of pages) await fs.writeFile(path.join(dir, page), `# ${page}\n`)
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-3', kind: 'k', period: 'p' } } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx), 0, err.join(''))
+  const tar = zlib.gunzipSync(/** @type {Buffer} */ (calls[0].body))
+  assert.deepEqual(ustarMemberNames(tar), [...pages].sort())
+})
+
 test('publish rejects a folder without an entry document before any upload', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-noentry-'))
   await fs.writeFile(path.join(dir, 'notes.md'), 'not an entry doc')
@@ -2522,6 +2535,14 @@ test('save moves a validated report folder into the store and removes the draft'
   assert.match(text, /list: hyp report list --local/)
   // The period hint is the range the generator encoded in the name, never today.
   assert.match(text, new RegExp(`publish: hyp report publish ${name} --kind usage-review --period 2026-08-01-to-2026-08-31\n`))
+})
+
+// @ref LLP 0585#pages [tests]: save takes the same default pages through the shared allow-list
+test('save stores the default comparison, automation and repeated-work pages', async (t) => {
+  const pages = { 'report.md': '# Brief\n', 'comparison.md': '# Comparison\n', 'work.md': '# Work\n', 'automation.md': '# Automation\n', 'repeated-work.md': '# Repeated work\n' }
+  const { ctx, out, draft, name, store } = await storeFixture(t, { pages })
+  assert.equal(await runReportSave([draft], ctx), 0, out.join(''))
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), Object.keys(pages).sort())
 })
 
 test('save resolves a relative folder against the command\'s cwd', async (t) => {
