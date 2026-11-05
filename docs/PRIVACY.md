@@ -303,7 +303,11 @@ running; files written there before this release keep their old modes. Parent di
 
 On Windows, where POSIX modes do not apply, each start sets the same roots
 to an access list naming only your account, SYSTEM, and Administrators, and
-everything HypAware creates under them inherits it. The same care applies:
+everything HypAware creates under them inherits it. Permissions a root picked
+up from its parent folder are removed, but a permission someone granted by
+hand on the root itself is kept, so a folder shared on purpose stays shared:
+HypAware sets the grants for those three accounts and leaves other explicit
+grants alone. The same care applies:
 a shared or foreign directory is left as found with the warning above.
 Files that already existed under a custom location outside your user
 profile keep their old access until they are rewritten; the default
