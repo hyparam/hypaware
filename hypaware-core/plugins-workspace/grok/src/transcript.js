@@ -124,6 +124,12 @@ async function findSubagentParent(root, bucket, id) {
   return undefined
 }
 
+/** @param {unknown} value @returns {number | undefined} */
+function timeOf(value) {
+  const ms = typeof value === 'string' ? Date.parse(value) : NaN
+  return Number.isFinite(ms) ? ms : undefined
+}
+
 /** @param {any} summary */
 function gitOf(summary) {
   /** @type {NonNullable<GrokSession['git']>} */
@@ -165,6 +171,8 @@ export async function readGrokSession(dir, root) {
   const session = { id, cwd, lineage: [id], fork_sources: [] }
   const model = stringValue(summary?.current_model_id)
   if (model) session.model = model
+  const startedAt = timeOf(summary?.created_at)
+  if (startedAt !== undefined) session.started_at = new Date(startedAt).toISOString()
   const git = gitOf(summary)
   if (git) session.git = git
   // @ref LLP 0585#lineage: exclusions follow a session into what it spawned
@@ -182,7 +190,10 @@ export async function readGrokSession(dir, root) {
     session.lineage.push(parent)
     // A subagent starts its own log. A fork copies its parent's.
     copying = copying && !isSubagent
-    if (copying) session.fork_sources.push(parent)
+    if (copying) {
+      const beforeMs = timeOf(current?.forked_at)
+      session.fork_sources.push({ id: parent, ...(beforeMs === undefined ? {} : { before_ms: beforeMs }) })
+    }
     const parentDir = await findSessionDir(root, bucket, parent)
     if (!parentDir) break
     current = await readSummary(parentDir)
@@ -226,23 +237,25 @@ export async function* readGrokTranscript(file, opts) {
     // The link is written around the moment a child starts. Rows are written
     // once, so wait for it rather than record a subagent as a root session.
     if (session.parent_pending && !idle) return
-    const floor = opts.withheld ? await opts.withheld.floor(session) : 0
+    const floors = opts.withheld ? await opts.withheld.floors(session) : []
     const inode = `${stat.dev}:${stat.ino}`
     let offset = 0
     let lineNumber = 0
-    let startModel
+    /** @type {{ model?: string, previous?: string }} */
+    let startAt = {}
     const cursor = opts.cursor
     // The log is append-only, so an intact boundary vouches for what is below it.
     if (cursor && cursor.inode === inode && cursor.offset <= stat.size && cursor.boundary === await boundary(fd, cursor.offset)) {
       offset = cursor.offset
       lineNumber = cursor.line
-      startModel = cursor.model
+      startAt = { model: cursor.model, previous: cursor.previous }
     }
     const budget = opts.maxBytes ?? stat.size
-    const folder = createGrokFolder(session, startModel)
+    const folder = createGrokFolder(session, startAt)
     let settledOffset = offset
     let settledLine = lineNumber
-    let settledModel = startModel
+    let settledModel = startAt.model
+    let settledPrevious = startAt.previous
     let batch = []
     let batchBytes = 0
     let oversized = 0
@@ -253,7 +266,8 @@ export async function* readGrokTranscript(file, opts) {
       /** @type {any[]} */
       const ready = []
       for (const item of closed) {
-        if (item.offset < floor) continue
+        // A fork's new messages sit past the copy, whatever their parent's size.
+        if (floors.some(f => item.offset < f.offset && !(f.before_ms !== undefined && item.atMs >= f.before_ms))) continue
         if ((window?.sinceMs !== undefined && item.atMs < window.sinceMs) || (window?.untilMs !== undefined && item.atMs > window.untilMs)) continue
         if (batch.length && (batch.length >= MAX_BATCH_MESSAGES || batchBytes + item.bytes > MAX_BATCH_BYTES)) {
           ready.push(batch)
@@ -292,6 +306,7 @@ export async function* readGrokTranscript(file, opts) {
       settledOffset = open ? open.offset : line.end
       settledLine = open ? open.line : lineNumber
       settledModel = open ? open.model : folder.model()
+      settledPrevious = open ? open.previous : folder.previous()
       // Stop at the budget only once the cursor can move, so an open item with
       // more than a budget of updates behind it cannot stall this lane.
       if (line.end < stat.size && line.end - offset >= budget && settledOffset > offset) {
@@ -313,6 +328,7 @@ export async function* readGrokTranscript(file, opts) {
       settledOffset = start
       settledLine = lineNumber
       settledModel = folder.model()
+      settledPrevious = folder.previous()
     }
     if (!opts.policy.allowed(session)) {
       yield await drop()
@@ -324,6 +340,7 @@ export async function* readGrokTranscript(file, opts) {
     /** @type {GrokCursor} */
     const next = { offset: settledOffset, line: settledLine, inode, fingerprint: fingerprint(stat), boundary: await boundary(fd, settledOffset) }
     if (settledModel) next.model = settledModel
+    if (settledPrevious) next.previous = settledPrevious
     yield { cursor: next, oversized }
   } finally { await fd.close() }
 }

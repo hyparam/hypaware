@@ -6,7 +6,7 @@ import path from 'node:path'
 import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 
-/** @import { GrokPolicy, GrokSession, GrokWithheldStore } from '../../../../hypaware-core/plugins-workspace/grok/src/types.js' */
+/** @import { GrokFloor, GrokPolicy, GrokSession, GrokWithheldStore } from '../../../../hypaware-core/plugins-workspace/grok/src/types.js' */
 
 /**
  * @param {Set<string> | undefined} ignored
@@ -49,10 +49,16 @@ export function createGrokWithheldStore(stateDir) {
     return offset
   }
   return {
-    async floor(session) {
-      let floor = await read(session.id)
-      for (const id of session.fork_sources) floor = Math.max(floor, await read(id))
-      return floor
+    async floors(session) {
+      /** @type {GrokFloor[]} */
+      const floors = []
+      const own = await read(session.id)
+      if (own) floors.push({ offset: own })
+      for (const { id, before_ms } of session.fork_sources) {
+        const offset = await read(id)
+        if (offset) floors.push({ offset, ...(before_ms === undefined ? {} : { before_ms }) })
+      }
+      return floors
     },
     async mark(sessionId, offset) {
       if (offset <= await read(sessionId)) return

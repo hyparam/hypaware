@@ -73,7 +73,7 @@ test('folds chunks and tool lifecycles into one message per line of origin', asy
   assert.equal(content[0].text, 'Read the config')
   assert.equal(content[1].thinking, 'Need the file.')
   assert.deepEqual(content[2], { type: 'tool_use', id: 't1', name: 'read_file', input: { path: 'config.toml' } })
-  assert.deepEqual(content[3], { type: 'tool_result', tool_use_id: 't1', content: 'key = 1', is_error: false })
+  assert.deepEqual(content[3], { type: 'tool_result', tool_use_id: 't1', name: 'read_file', content: 'key = 1', is_error: false })
   assert.equal(content[4].text, 'key is one.')
   assert.equal(messages[0].message_created_at, new Date(1793000000100).toISOString())
   assert.equal(messages[0].model, undefined)
@@ -147,7 +147,7 @@ test('host output, torn lines and failures keep identity and meaning', async t =
   assert.ok(!JSON.stringify(messages).includes('c2VjcmV0'))
   const failed = /** @type {any} */ (messages[1].content)
   assert.equal(failed[0].type, 'tool_use')
-  assert.deepEqual(failed[1], { type: 'tool_result', tool_use_id: 'bad', content: '{"error":"no"}', is_error: true })
+  assert.deepEqual(failed[1], { type: 'tool_result', tool_use_id: 'bad', name: 'bash', content: '{"error":"no"}', is_error: true })
   assert.equal(/** @type {any} */ (messages[2].content)[0].is_error, true)
 })
 
@@ -166,7 +166,7 @@ test('session identity survives a missing summary and refuses a mismatched one',
   const fork = await readGrokSession(dir, root)
   assert.equal(fork.parent_thread_id, undefined)
   assert.deepEqual(fork.lineage, [SESSION, 'parent'])
-  assert.deepEqual(fork.fork_sources, ['parent'])
+  assert.deepEqual(fork.fork_sources, [{ id: 'parent' }])
   assert.deepEqual(fork.git, { git_branch: 'main', git_remote: 'https://example.com/o/r.git', repo_root: '/repo', head_sha: 'a'.repeat(40) })
 })
 
@@ -205,10 +205,11 @@ test('ignoring a session covers what it spawned, and stays out after unignore', 
   // A later fork copies those bytes and inherits the floor from its source.
   const session = await readGrokSession(dir, root)
   await withheld.mark('the-parent', 500)
-  assert.ok(await withheld.floor(session) >= 500)
+  const offsets = async () => (await withheld.floors(session)).map(f => f.offset)
+  assert.ok((await offsets()).includes(500))
   // A marking cannot lower a floor, and a corrupt one fails rather than records.
   await withheld.mark('the-parent', 10)
-  assert.ok(await withheld.floor(session) >= 500)
+  assert.ok((await offsets()).includes(500))
   const floors = path.join(home, 'state', 'grok-withheld')
   for (const name of await fs.readdir(floors)) await fs.writeFile(path.join(floors, name), '{"offset":"x"}')
   await assert.rejects(read(file, { root, policy, withheld }), /withheld_floor_invalid/)
@@ -285,6 +286,65 @@ test('a repeat read at the end of the file does no work', async t => {
   const again = await read(file, { root, cursor })
   assert.deepEqual(again.messages, [])
   assert.equal(again.cursor.offset, cursor.offset)
+})
+
+test('rows from separate batches and reads keep one chain, tool names and start time', async t => {
+  const updates = []
+  for (let i = 0; i < 70; i++) {
+    updates.push(envelope({ sessionUpdate: 'tool_call', toolCallId: `c${i}`, title: 'bash' }))
+    updates.push(envelope({ sessionUpdate: 'tool_call_update', toolCallId: `c${i}`, status: 'completed', rawOutput: 'ok' }))
+  }
+  const started = '2026-11-05T19:30:13.349123Z'
+  const { root, file } = await setup(t, { text: jsonl(updates), summary: { info: { id: SESSION, cwd: '/tmp' }, created_at: started } })
+  const rows = []
+  let batches = 0
+  // Each projection on its own, as the listener and backfill write them.
+  for await (const item of readGrokTranscript(file, { root, policy: allowAll })) {
+    if (!item.projection) continue
+    batches++
+    rows.push(...aiGatewayRowsFromProjectedExchange(item.projection))
+  }
+  assert.ok(batches > 1)
+  assert.equal(rows.length, 140)
+  rows.forEach((row, i) => assert.deepEqual(row.previous_message_id, i ? [rows[i - 1].message_id] : []))
+  assert.ok(rows.every(row => row.tool_name === 'bash'))
+  assert.deepEqual([...new Set(rows.map(row => row.conversation_started_at))], [new Date(started).toISOString()])
+})
+
+test('without a summary the start time still comes from the session, not the write', async t => {
+  const { root, file } = await setup(t, { summary: null })
+  const projections = []
+  for await (const item of readGrokTranscript(file, { root, policy: allowAll })) if (item.projection) projections.push(item.projection)
+  assert.equal(projections[0].conversation_started_at, new Date(1793000000100).toISOString())
+})
+
+test('a fork shorter than its parent keeps its own messages under the parent floor', async t => {
+  const forkedAt = 1793000500000
+  const chunk = (/** @type {string} */ text, /** @type {number} */ seconds) => ({ ...envelope({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text } }), timestamp: seconds })
+  const done = { timestamp: 1793000600, params: { update: { sessionUpdate: 'turn_completed' } } }
+  const copied = jsonl([chunk('withheld copy', 1793000000), done])
+  const { root, file, dir, cwd, home } = await setup(t, { text: copied + jsonl([chunk('the fork', 1793000600), done]), summary: null })
+  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, parent_session_id: 'the-parent', forked_at: new Date(forkedAt).toISOString() }))
+  const withheld = createGrokWithheldStore(path.join(home, 'state'))
+  // The parent grew far past the copy before it was read while ignored.
+  await withheld.mark('the-parent', 1024 * 1024)
+  const { messages } = await read(file, { root, withheld })
+  assert.deepEqual(messages.map(m => /** @type {any} */ (m.content)[0].text), ['the fork'])
+})
+
+test('a tool that runs for many lines stops holding the cursor back', async t => {
+  // Alternating kinds, so each run closes and only the tool can hold the cursor.
+  const chunks = Array.from({ length: 1100 }, (_, i) => envelope({ sessionUpdate: i % 2 ? 'agent_thought_chunk' : 'agent_message_chunk', content: { type: 'text', text: 't' } }))
+  const open = envelope({ sessionUpdate: 'tool_call', toolCallId: 'long', title: 'bash', rawInput: { command: 'sleep' } })
+  const { root, file } = await setup(t, { text: jsonl([open, ...chunks]) })
+  const first = await read(file, { root })
+  assert.ok(first.cursor.line > 1000)
+  assert.ok(first.messages.some(m => /** @type {any} */ (m.content)[0].name === 'bash'))
+  // Its late result still links by id, and no call is recorded twice.
+  await fs.appendFile(file, jsonl([envelope({ sessionUpdate: 'tool_call_update', toolCallId: 'long', status: 'completed', rawOutput: 'done' })]))
+  const late = await read(file, { root, cursor: first.cursor })
+  assert.ok(late.messages.some(m => /** @type {any} */ (m.content)[0].tool_use_id === 'long'))
+  assert.ok(!late.messages.some(m => /** @type {any} */ (m.content)[0].type === 'tool_use'))
 })
 
 test('the session id Grok hands its tools resolves to that session', () => {

@@ -10,6 +10,8 @@ const MAX_RUN_BYTES = 8 * 1024 * 1024
 const RUN_KINDS = /** @type {Record<string, string>} */ ({ user_message_chunk: 'user', agent_message_chunk: 'assistant', agent_thought_chunk: 'thinking' })
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'error'])
 const TOOL_META_KEY = 'x.ai/tool'
+// A tool still running after this many lines stops holding the cursor back.
+const MAX_OPEN_TOOL_LINES = 1024
 
 /**
  * @param {string} sessionId
@@ -34,14 +36,17 @@ function timestampOf(entry, meta) {
  * open line and a re-read always rebuilds the same messages.
  *
  * @param {GrokSession} session
- * @param {string} [startModel] the model in force where this read begins
+ * @param {{ model?: string, previous?: string }} [start] the model in force and last message built where this read begins
  * @ref LLP 0585#folding: runs and tool lifecycles settle at deterministic lines
  */
-export function createGrokFolder(session, startModel) {
+export function createGrokFolder(session, start = {}) {
   /** @type {any} */
   let run
   // Only user chunks name a model, so replies inherit the one in force.
-  let currentModel = startModel
+  let currentModel = start.model
+  // Written explicitly because reads are split into batches, each with its own
+  // writer state, and the chain has to come out the same however they fall.
+  let lastId = start.previous
   /** @type {Map<string, any>} */
   const tools = new Map()
 
@@ -52,6 +57,8 @@ export function createGrokFolder(session, startModel) {
     if (partial.at !== undefined) out.message_created_at = new Date(partial.at).toISOString()
     if (partial.eventId) out.provider_uuid = partial.eventId
     if (partial.promptId) out.prompt_id = partial.promptId
+    out.previous_message_id = lastId ? [lastId] : []
+    lastId = out.message_id
     if (partial.role === 'assistant') {
       const model = partial.model ?? partial.currentModel ?? session.model
       if (model) out.model = model
@@ -87,12 +94,11 @@ export function createGrokFolder(session, startModel) {
     return closed
   }
 
-  return {
-    /**
-     * @param {any} entry
-     * @param {{ line: number, offset: number, bytes: number }} at
-     */
-    push(entry, at) {
+  /**
+   * @param {any} entry
+   * @param {{ line: number, offset: number, bytes: number }} at
+   */
+  function fold(entry, at) {
       const params = isPlainObject(entry.params) ? entry.params : entry
       const update = isPlainObject(params.update) ? params.update : params
       // Timing and event ids ride the envelope. Grok puts modelId, promptIndex
@@ -111,7 +117,7 @@ export function createGrokFolder(session, startModel) {
         const out = closeRun()
         const id = stringValue(update.toolCallId)
         if (id) {
-          tools.set(id, { ...common, id, name: toolName(update), input: toolInput(update) })
+          tools.set(id, { ...common, previous: lastId, id, name: toolName(update), input: toolInput(update) })
           if (TERMINAL.has(update.status)) out.push(...settleTool(id, update, common))
         }
         return out
@@ -132,15 +138,33 @@ export function createGrokFolder(session, startModel) {
       // apart from a background tool, whose late result still links by id.
       if (kind === 'turn_completed') return [...closeRun(), ...closeTools()]
       return []
+  }
+
+  return {
+    /**
+     * @param {any} entry
+     * @param {{ line: number, offset: number, bytes: number }} at
+     */
+    push(entry, at) {
+      const out = fold(entry, at)
+      // @ref LLP 0585#bounds: a long tool must not make every hook reread the turn.
+      // Insertion order, so only the oldest needs checking.
+      for (const [id, tool] of tools) {
+        if (at.line - tool.line < MAX_OPEN_TOOL_LINES) break
+        tools.delete(id)
+        out.push(useMessage(tool))
+      }
+      return out
     },
     /** The earliest line still open, where a re-read must resume. */
     earliestOpen() {
       /** @type {any} */
       let earliest = run
       for (const tool of tools.values()) if (!earliest || tool.line < earliest.line) earliest = tool
-      return earliest ? { line: earliest.line, offset: earliest.offset, model: earliest.currentModel } : undefined
+      return earliest ? { line: earliest.line, offset: earliest.offset, model: earliest.currentModel, previous: earliest.previous } : undefined
     },
     model() { return currentModel },
+    previous() { return lastId },
     /** Settle everything left open, for a session that has gone quiet. */
     flush() { return [...closeRun(), ...closeTools()] },
   }
@@ -153,7 +177,7 @@ export function createGrokFolder(session, startModel) {
     if (boundary) out.push(...closeRun())
     // A new prompt ends the last turn. Older files have no turn_completed.
     if (runKind === 'user' && boundary) out.push(...closeTools())
-    if (!run) run = { ...common, kind: runKind, text: '', images: [], bytes: 0 }
+    if (!run) run = { ...common, previous: lastId, kind: runKind, text: '', images: [], bytes: 0 }
     run.bytes += common.bytes
     const content = update.content
     if (isPlainObject(content)) {
@@ -168,12 +192,13 @@ export function createGrokFolder(session, startModel) {
   function settleTool(id, update, common) {
     const tool = tools.get(id)
     tools.delete(id)
-    const block = { type: 'tool_result', tool_use_id: id, content: toolOutput(update), is_error: update.status !== 'completed' || nonZeroExit(update) }
+    // Named here because a batch boundary can separate a result from its call.
+    const block = { type: 'tool_result', tool_use_id: id, ...(tool?.name ? { name: tool.name } : {}), content: toolOutput(update), is_error: update.status !== 'completed' || nonZeroExit(update) }
     // A tool_call that arrives already finished owns one line, so one message
     // carries both halves and the line stays a unique identity.
     if (tool?.line === common.line) return [message({ ...tool, role: 'assistant', content: [useBlock(tool), block] })]
-    const result = message({ ...common, role: 'user', content: [block] })
-    return tool ? [useMessage(tool), result] : [result]
+    const use = tool ? [useMessage(tool)] : []
+    return [...use, message({ ...common, role: 'user', content: [block] })]
   }
 }
 
@@ -231,5 +256,7 @@ export function grokExchange(session, messages) {
   return { provider: 'unknown', session_id: session.id, conversation_id: session.id,
     ...(session.parent_thread_id ? { parent_thread_id: session.parent_thread_id, is_sidechain: true } : {}),
     ...(session.git ?? {}),
+    // Otherwise the gateway stamps the time of each write.
+    conversation_started_at: session.started_at ?? messages[0].message_created_at,
     conversation_source: 'grok', client_name: 'grok', cwd: session.cwd, entrypoint: 'unknown', messages }
 }

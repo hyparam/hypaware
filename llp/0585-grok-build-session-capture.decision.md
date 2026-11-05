@@ -43,7 +43,9 @@ before the earliest open line, so a re-read rebuilds identical messages. A
 new prompt or `turn_completed` closes what is open, and a file quiet for five
 minutes settles the rest, torn last line included, which covers crashes. Only
 user chunks name a model, so replies inherit the one in force, carried in the
-cursor. A shell command that exits non-zero is `completed` to Grok and an error
+cursor. Each message names its predecessor itself, also carried in the cursor,
+because reads are split into batches with separate writer state. A tool result names
+its tool for the same reason. A shell command that exits non-zero is `completed` to Grok and an error
 here. Tool results keep placeholders for binary content. Output with `hostTurn` is
 display-only slash-command text and is dropped.
 
@@ -77,7 +79,8 @@ Unignore must not import what was written while ignored, but the ignore store
 keeps only membership. So reading a session dropped by an exclusion saves the
 file's size as a byte floor, and messages starting below it are never projected,
 in any later read or manual import. Forks also apply the floors of the logs they
-copied. A floor file exists only for sessions read while ignored. An unreadable
+copied, only to messages older than `forked_at`, since a fork's own later messages
+can sit below a longer parent's size. A floor file exists only for sessions read while ignored. An unreadable
 floor fails the read. Only exclusions set a floor: `.hypignore` keeps its existing
 meaning. The floor depends on a read happening while ignored; each hook and sweep
 is one, so only an unignore before the next one misses it.
@@ -88,7 +91,8 @@ Files cap at 256 MiB, lines at 16 MiB (inline images, whole tool outputs),
 beyond which a line is skipped and still counted, batches at 64 messages or 1 MiB of source, and a folded run at 8 MiB. Discovery
 caps at 100,000 entries without following symlinks. A live notification reads at
 about 8 MiB, stopping there only once its cursor can move, so an open item cannot
-stall it. The log is append-only, so a cursor with an intact 128-byte boundary is
+stall it. A tool open for 1,024 lines settles its call, so a long tool cannot make
+every hook reread the turn, and its late result links by id. The log is append-only, so a cursor with an intact 128-byte boundary is
 trusted without rereading. Sweeps keep a success-only cursor per file and read only new bytes,
 since Grok sessions run long and re-reading them every five minutes would scale
 with history rather than activity; a scan reserves at most 256 MiB. Policy and
