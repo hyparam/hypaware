@@ -10,6 +10,7 @@
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
+ * @import { Socket } from 'node:net'
  */
 
 /**
@@ -140,7 +141,7 @@ export function drainRequestBody(req, res) {
  * cost a reading caller the flushed answer, and the grace would hold every
  * refused socket open for nothing.
  *
- * @param {import('node:net').Socket | null} socket
+ * @param {Socket | null} socket
  */
 function winsockSoftClose(socket) {
   let cut = /** @type {NodeJS.Timeout | null} */ (null)
