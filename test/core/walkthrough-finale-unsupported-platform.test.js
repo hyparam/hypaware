@@ -14,6 +14,11 @@ import { SystemdUnitError } from '../../src/core/daemon/linux.js'
 import { LaunchAgentError } from '../../src/core/daemon/macos.js'
 import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
 
+// win32 is a supported daemon platform since LLP 0584 (it installs a Scheduled
+// Task), so it is no longer the example of "a platform with no service
+// manager". `aix` is: a real NodeJS.Platform HypAware does not install on.
+const NO_SERVICE = /** @type {NodeJS.Platform} */ ('aix')
+
 /**
  * The local pathway's daemon-install failure (#1383). `installDaemon` throws
  * `DaemonInstallError` on a platform with no service manager and the finale
@@ -67,7 +72,7 @@ test('a local-pathway setup on a platform with no service manager finishes attac
   /** @type {string[]} */
   const backfilled = []
 
-  const result = await withPlatform('win32', () => runPickerFinale({
+  const result = await withPlatform(NO_SERVICE, () => runPickerFinale({
     capabilities: /** @type {any} */ ({
       has: (/** @type {string} */ id) => id === 'hypaware.ai-gateway',
       require: () => ({
@@ -101,7 +106,7 @@ test('a local-pathway setup on a platform with no service manager finishes attac
 
   assert.notEqual(result.cancelled, true, 'the finale finishes rather than throwing out to the CLI')
   assert.equal(result.daemonInstall.failed, true, 'the install step is recorded as failed, not as a clean skip')
-  assert.match(stderr.text(), /win32 has no background service to install/)
+  assert.match(stderr.text(), new RegExp(`${NO_SERVICE} has no background service to install`))
   assert.doesNotMatch(stderr.text(), /hyp daemon install/, 'a platform with no service manager is not told to run the installer')
   assert.deepEqual(attached, ['claude'], 'client attach still runs; it needs no service manager')
   assert.deepEqual(backfilled, ['claude'], 'backfill still runs; it is a local file import')
@@ -112,11 +117,17 @@ test('a local-pathway setup on a platform with no service manager finishes attac
 
 test('daemonIncompleteNote without a context clause names the missing service and nothing else', () => {
   assert.equal(
-    daemonIncompleteNote('win32'),
-    'note: win32 has no background service to install\n'
+    daemonIncompleteNote(NO_SERVICE),
+    `note: ${NO_SERVICE} has no background service to install\n`
   )
   assert.equal(
     daemonIncompleteNote('darwin'),
+    "note: the daemon install did not finish - run 'hyp daemon install'\n"
+  )
+  // win32 joined the supported platforms (LLP 0584), so its note now points at
+  // the installer like darwin/linux, not at a missing service.
+  assert.equal(
+    daemonIncompleteNote('win32'),
     "note: the daemon install did not finish - run 'hyp daemon install'\n"
   )
 })
@@ -328,7 +339,7 @@ test('a dry run whose install plan failed does not go on to claim it would resta
   const events = []
   const stderr = makeBuf()
   const stdout = makeBuf()
-  const summary = await withPlatform('win32', () => runPickerFinale(/** @type {any} */ ({
+  const summary = await withPlatform(NO_SERVICE, () => runPickerFinale(/** @type {any} */ ({
     ...finaleArgs(home, events, stderr),
     stdout,
     finale: { dryRun: true, skipDaemonRestart: false },
@@ -545,7 +556,7 @@ test('a daemon_incomplete join on a platform with no service manager attempts no
   /** @type {string[]} */
   const events = []
   const stderr = makeBuf()
-  const summary = await withPlatform('win32', () => runPickerFinale(/** @type {any} */ ({
+  const summary = await withPlatform(NO_SERVICE, () => runPickerFinale(/** @type {any} */ ({
     ...finaleArgs(home, events, stderr),
     finale: { dryRun: false, skipDaemonRestart: false, skipDaemonInstall: true },
   })))

@@ -8,6 +8,7 @@ import { ensureDurableBin, writeCliPathGuidance } from '../cli/global_install.js
 import {
   LAUNCH_LABEL,
   SYSTEMD_UNIT_BASE,
+  WIN32_TASK_FOLDER,
   daemonKindLabel,
   defaultConfigPath,
   defaultLogDir,
@@ -15,6 +16,7 @@ import {
 } from './platform.js'
 import * as macos from './macos.js'
 import * as linux from './linux.js'
+import * as win32 from './win32.js'
 
 /**
  * Resolve the default service label for `platform`. macOS uses the
@@ -27,7 +29,12 @@ import * as linux from './linux.js'
  * @returns {string}
  */
 function defaultLabelFor(platform) {
-  return platform === 'linux' ? SYSTEMD_UNIT_BASE : LAUNCH_LABEL
+  if (platform === 'linux') return SYSTEMD_UNIT_BASE
+  // A folder-only hint on win32 (no leading backslash), so the win32 backend
+  // resolves the real `\hypaware\<SID>` task name itself rather than mistaking
+  // this span label for a full task path.
+  if (platform === 'win32') return WIN32_TASK_FOLDER
+  return LAUNCH_LABEL
 }
 
 /**
@@ -61,14 +68,15 @@ export function planDaemonInstall(options) {
   const platform = options.platform ?? process.platform
   if (!platformIsSupported(platform)) {
     throw new DaemonInstallError(
-      `unsupported platform: ${platform} (only darwin and linux are supported)`
+      `unsupported platform: ${platform} (only macOS, Linux and Windows are supported)`
     )
   }
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
   const logDir = options.logDir ?? defaultLogDir(options.homeDir)
   const merged = { ...options, configPath, logDir }
   if (platform === 'darwin') return macos.planLaunchAgentInstall(merged)
-  return linux.planSystemdInstall(merged)
+  if (platform === 'linux') return linux.planSystemdInstall(merged)
+  return win32.planTaskInstall(merged)
 }
 
 /**
@@ -79,11 +87,13 @@ export function planDaemonInstall(options) {
  */
 export function renderDaemonInstall(options) {
   const plan = planDaemonInstall(options)
-  /** @type {{ unitName?: string, plistDir?: string, unitDir?: string }} */
+  /** @type {{ unitName?: string, plistDir?: string, unitDir?: string, taskName?: string }} */
   const platformExtras = {}
   if (plan.platform === 'linux') {
     platformExtras.unitName = plan.unitName
     platformExtras.unitDir = plan.unitDir
+  } else if (plan.platform === 'win32') {
+    platformExtras.taskName = plan.taskName
   } else {
     platformExtras.plistDir = plan.plistDir
   }
@@ -186,7 +196,7 @@ export async function installDaemon(options) {
   const platform = options.platform ?? process.platform
   if (!platformIsSupported(platform)) {
     throw new DaemonInstallError(
-      `unsupported platform: ${platform} (only darwin and linux are supported)`
+      `unsupported platform: ${platform} (only macOS, Linux and Windows are supported)`
     )
   }
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
@@ -203,7 +213,9 @@ export async function installDaemon(options) {
       const withBin = binPath === merged.binPath ? merged : { ...merged, binPath }
       const plan = platform === 'darwin'
         ? await macos.installLaunchAgent(withBin)
-        : await linux.installSystemdUnit(withBin)
+        : platform === 'linux'
+          ? await linux.installSystemdUnit(withBin)
+          : await win32.installTask(withBin)
       writeCliPathGuidance(binPath, merged.durableBin?.env ?? process.env,
         merged.durableBin?.stderr ?? process.stderr)
       return Object.assign(plan, { globalInstall })
@@ -227,14 +239,16 @@ export async function uninstallDaemon(options) {
   const platform = options.platform ?? process.platform
   if (!platformIsSupported(platform)) {
     throw new DaemonInstallError(
-      `unsupported platform: ${platform} (only darwin and linux are supported)`
+      `unsupported platform: ${platform} (only macOS, Linux and Windows are supported)`
     )
   }
   await withDaemonOp(
     'uninstall',
     platform,
     options.label ?? defaultLabelFor(platform),
-    () => platform === 'darwin' ? macos.uninstallLaunchAgent(options) : linux.uninstallSystemdUnit(options),
+    () => platform === 'darwin' ? macos.uninstallLaunchAgent(options)
+      : platform === 'linux' ? linux.uninstallSystemdUnit(options)
+        : win32.uninstallTask(options),
   )
 }
 
@@ -253,7 +267,9 @@ export async function startServiceDaemon(options) {
     'start',
     platform,
     options.label ?? defaultLabelFor(platform),
-    () => platform === 'darwin' ? macos.startLaunchAgent(options) : linux.startSystemdUnit(options),
+    () => platform === 'darwin' ? macos.startLaunchAgent(options)
+      : platform === 'linux' ? linux.startSystemdUnit(options)
+        : win32.startTask(options),
   )
 }
 
@@ -271,7 +287,9 @@ export async function stopServiceDaemon(options) {
     'stop',
     platform,
     options.label ?? defaultLabelFor(platform),
-    () => platform === 'darwin' ? macos.stopLaunchAgent(options) : linux.stopSystemdUnit(options),
+    () => platform === 'darwin' ? macos.stopLaunchAgent(options)
+      : platform === 'linux' ? linux.stopSystemdUnit(options)
+        : win32.stopTask(options),
   )
 }
 
@@ -290,7 +308,11 @@ export async function restartServiceDaemon(options) {
     await macos.restartLaunchAgent(options)
     return
   }
-  await linux.restartSystemdUnit(options)
+  if (platform === 'linux') {
+    await linux.restartSystemdUnit(options)
+    return
+  }
+  await win32.restartTask(options)
 }
 
 /**
@@ -320,7 +342,9 @@ async function serviceRuntimeStatus(platform, options, label) {
   try {
     return platform === 'darwin'
       ? await macos.launchAgentStatus(options)
-      : await linux.systemdUnitStatus(options)
+      : platform === 'linux'
+        ? await linux.systemdUnitStatus(options)
+        : await win32.taskStatus(options)
   } catch (err) {
     const code = err !== null && typeof err === 'object' && 'code' in err
       ? String(/** @type {{ code: unknown }} */ (err).code)
@@ -363,7 +387,9 @@ export async function serviceDaemonStatus(options) {
     async function() {
       const installed = platform === 'darwin'
         ? macos.isLaunchAgentInstalled(options)
-        : linux.isSystemdUnitInstalled(options)
+        : platform === 'linux'
+          ? linux.isSystemdUnitInstalled(options)
+          : await win32.isTaskInstalled(options)
       // No plist / unit file on disk means the service manager has nothing to
       // report on, so skip the probe entirely. Probing regardless is what made
       // this query *throw* on a host with no service manager at all (a
@@ -394,4 +420,4 @@ export async function serviceDaemonStatus(options) {
 }
 
 export { LAUNCH_LABEL, daemonKindLabel, defaultConfigPath, defaultLogDir, platformIsSupported }
-export { macos, linux }
+export { macos, linux, win32 }
