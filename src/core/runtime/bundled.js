@@ -32,6 +32,7 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
   '@hypaware/hermes',
   '@hypaware/goose',
   '@hypaware/crush',
+  '@hypaware/mastracode',
   '@hypaware/openclaw',
   '@hypaware/opencode',
   '@hypaware/cursor',
