@@ -34,11 +34,14 @@ function timestampOf(entry, meta) {
  * open line and a re-read always rebuilds the same messages.
  *
  * @param {GrokSession} session
+ * @param {string} [startModel] the model in force where this read begins
  * @ref LLP 0585#folding: runs and tool lifecycles settle at deterministic lines
  */
-export function createGrokFolder(session) {
+export function createGrokFolder(session, startModel) {
   /** @type {any} */
   let run
+  // Only user chunks name a model, so replies inherit the one in force.
+  let currentModel = startModel
   /** @type {Map<string, any>} */
   const tools = new Map()
 
@@ -50,10 +53,10 @@ export function createGrokFolder(session) {
     if (partial.eventId) out.provider_uuid = partial.eventId
     if (partial.promptId) out.prompt_id = partial.promptId
     if (partial.role === 'assistant') {
-      const model = partial.model ?? session.model
+      const model = partial.model ?? partial.currentModel ?? session.model
       if (model) out.model = model
     }
-    return { message: out, atMs: partial.at, bytes: partial.bytes ?? 0 }
+    return { message: out, atMs: partial.at, bytes: partial.bytes ?? 0, offset: partial.offset }
   }
 
   function closeRun() {
@@ -97,9 +100,12 @@ export function createGrokFolder(session) {
       const meta = /** @type {any} */ ({ ...(isPlainObject(params._meta) ? params._meta : {}), ...(isPlainObject(update._meta) ? update._meta : {}) })
       const kind = update.sessionUpdate
       const when = timestampOf(entry, meta)
+      /** @type {any} */
       const common = { line: at.line, offset: at.offset, at: when, eventId: stringValue(meta.eventId), promptId: stringValue(meta.promptId), promptIndex: meta.promptIndex, model: stringValue(meta.modelId), bytes: at.bytes }
       // Slash-command output the host displayed. The model never saw it.
       if (meta.hostTurn === true) return []
+      if (kind === 'user_message_chunk' && common.model) currentModel = common.model
+      common.currentModel = currentModel
       if (RUN_KINDS[kind]) return pushChunk(kind, update, common)
       if (kind === 'tool_call') {
         const out = closeRun()
@@ -132,8 +138,9 @@ export function createGrokFolder(session) {
       /** @type {any} */
       let earliest = run
       for (const tool of tools.values()) if (!earliest || tool.line < earliest.line) earliest = tool
-      return earliest ? { line: earliest.line, offset: earliest.offset } : undefined
+      return earliest ? { line: earliest.line, offset: earliest.offset, model: earliest.currentModel } : undefined
     },
+    model() { return currentModel },
     /** Settle everything left open, for a session that has gone quiet. */
     flush() { return [...closeRun(), ...closeTools()] },
   }
@@ -161,7 +168,7 @@ export function createGrokFolder(session) {
   function settleTool(id, update, common) {
     const tool = tools.get(id)
     tools.delete(id)
-    const block = { type: 'tool_result', tool_use_id: id, content: toolOutput(update), is_error: update.status !== 'completed' }
+    const block = { type: 'tool_result', tool_use_id: id, content: toolOutput(update), is_error: update.status !== 'completed' || nonZeroExit(update) }
     // A tool_call that arrives already finished owns one line, so one message
     // carries both halves and the line stays a unique identity.
     if (tool?.line === common.line) return [message({ ...tool, role: 'assistant', content: [useBlock(tool), block] })]
@@ -187,14 +194,31 @@ function toolInput(update) {
 function toolOutput(update) {
   // Prefer the rendered text. rawOutput repeats it inside a typed wrapper with
   // several concise and absolute-path variants, often at triple the size.
-  if (Array.isArray(update.content) && update.content.length) {
-    return update.content.map((/** @type {any} */ block) => {
-      if (block?.type === 'content' && block.content?.type === 'text') return String(block.content.text ?? '')
-      return JSON.stringify(block)
-    }).join('\n')
-  }
+  if (Array.isArray(update.content) && update.content.length) return update.content.map(blockText).join('\n')
   if (typeof update.rawOutput === 'string') return update.rawOutput
   return update.rawOutput === undefined || update.rawOutput === null ? '' : JSON.stringify(update.rawOutput)
+}
+
+/**
+ * Text for one tool content block. Never copy image, audio or file bytes into rows.
+ * @param {any} block
+ */
+function blockText(block) {
+  if (block?.type !== 'content') return JSON.stringify(block)
+  const inner = block.content
+  if (inner?.type === 'text') return String(inner.text ?? '')
+  if (inner?.type === 'image' || inner?.type === 'audio') return `[${inner.type} ${String(inner.mimeType ?? '')}]`.replace(' ]', ']')
+  if (inner?.type === 'resource' || inner?.type === 'resource_link') return `[resource ${String(inner.resource?.uri ?? inner.uri ?? '')}]`.replace(' ]', ']')
+  return `[${String(inner?.type ?? 'unknown')}]`
+}
+
+/**
+ * Grok marks a shell command that ran and exited non-zero as `completed`.
+ * @param {any} update
+ */
+function nonZeroExit(update) {
+  const code = update.rawOutput?.exit_code
+  return typeof code === 'number' && code !== 0
 }
 
 /**
@@ -205,6 +229,7 @@ function toolOutput(update) {
 export function grokExchange(session, messages) {
   if (!messages.length) return undefined
   return { provider: 'unknown', session_id: session.id, conversation_id: session.id,
-    ...(session.parent_thread_id ? { parent_thread_id: session.parent_thread_id } : {}),
+    ...(session.parent_thread_id ? { parent_thread_id: session.parent_thread_id, is_sidechain: true } : {}),
+    ...(session.git ?? {}),
     conversation_source: 'grok', client_name: 'grok', cwd: session.cwd, entrypoint: 'unknown', messages }
 }

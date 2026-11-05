@@ -10,15 +10,16 @@ import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/ind
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_writer.js'
 import { grokListenPort } from './config.js'
+import { createGrokPolicy } from './policy.js'
 import { present } from '../../droid/src/transcript.js'
 import { grokSessionsRoot, MAX_LIVE_BYTES, readGrokTranscript } from './transcript.js'
 
 /** @import { PluginActivationContext, StartedSource } from '../../../../hypaware-plugin-kernel-types.js' */
-/** @import { GrokCursor } from '../../../../hypaware-core/plugins-workspace/grok/src/types.js' */
+/** @import { GrokCursor, GrokWithheldStore } from '../../../../hypaware-core/plugins-workspace/grok/src/types.js' */
 
 const TRAILING_READ_MS = 2000
 
-/** @param {{ localOnlyListPath?: string, ignoredSessions?: Set<string> }} deps */
+/** @param {{ localOnlyListPath?: string, ignoredSessions?: Set<string>, withheld?: GrokWithheldStore }} deps */
 export function createStartGrokSource(deps) {
   /** @param {PluginActivationContext} ctx @returns {Promise<StartedSource>} */
   return async function startGrokSource(ctx) {
@@ -67,19 +68,20 @@ export function createStartGrokSource(deps) {
 
     /** @param {string} file @param {string} sessionId */
     async function capture(file, sessionId) {
-      const resolver = createUsagePolicyResolver({ localOnlyListPath: deps.localOnlyListPath, existsSync: present })
+      const policy = createGrokPolicy(ignored, createUsagePolicyResolver({ localOnlyListPath: deps.localOnlyListPath, existsSync: present }))
+      const writer = createProjectedExchangeWriter({ storage: ctx.storage })
       let rows = 0
       let skipped = 0
       let dropped = false
-      for await (const item of readGrokTranscript(file, { root, sessionId, cursor: cursors.get(file), maxBytes: MAX_LIVE_BYTES, signal: abort.signal,
-        allowed: session => !sessionIgnoreLoadError(ignored) && !ignored.has(session.id) && resolver.resolve(session.cwd).class !== 'ignore',
+      for await (const item of readGrokTranscript(file, { root, sessionId, cursor: cursors.get(file), maxBytes: MAX_LIVE_BYTES, signal: abort.signal, policy,
+        ...(deps.withheld ? { withheld: deps.withheld } : {}),
       })) {
         if (item.dropped) {
           dropped = true
           cursors.delete(file)
         }
         if (item.projection) {
-          const result = await createProjectedExchangeWriter({ storage: ctx.storage }).record(item.projection)
+          const result = await writer.record(item.projection)
           rows += result.rowsWritten
           skipped += result.rowsSkipped
         }

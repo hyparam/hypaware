@@ -159,8 +159,15 @@ export async function boundary(fd, offset) {
   return buffer.subarray(0, bytesRead).toString('base64')
 }
 
-/** LF framing only: never parse an unfinished append. @param {FileHandle} fd @param {number} start @param {number} end @param {number} [maxLineBytes] */
-export async function* lines(fd, start, end, maxLineBytes = MAX_LINE_BYTES) {
+/**
+ * LF framing only: never parse an unfinished append.
+ * @param {FileHandle} fd
+ * @param {number} start
+ * @param {number} end
+ * @param {number} [maxLineBytes]
+ * @param {boolean} [skipOversized] yield an oversized line as `oversized` with empty text, instead of throwing
+ */
+export async function* lines(fd, start, end, maxLineBytes = MAX_LINE_BYTES, skipOversized = false) {
   if (start >= end) return
   /** @type {Buffer[]} */
   let fragments = []
@@ -179,7 +186,20 @@ export async function* lines(fd, start, end, maxLineBytes = MAX_LINE_BYTES) {
       const stop = newline < 0 ? chunk.length : newline
       const fragment = chunk.subarray(index, stop)
       bytes += fragment.length
-      if (bytes > maxLineBytes) throw new Error('line_budget')
+      const oversized = bytes > maxLineBytes
+      if (oversized && !skipOversized) throw new Error('line_budget')
+      if (oversized && newline >= 0) {
+        offset += bytes + 1
+        yield { text: '', end: offset, bytes, oversized: true }
+        fragments = []
+        bytes = 0
+        index = stop + 1
+        continue
+      }
+      if (oversized) {
+        fragments = []
+        break
+      }
       if (newline < 0) {
         fragments.push(fragment)
         break

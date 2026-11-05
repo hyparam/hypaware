@@ -12,11 +12,13 @@ directly to your provider.
 Prompts, responses, reasoning summaries, tool calls and results, model where
 available, and each session's working directory. Tool results can include file
 contents and command output. Rows land in `ai_gateway_messages` with the client
-name `grok`. Subagents are separate sessions linked to their parent, and a fork
-is its own conversation.
+name `grok`, along with repo, branch and commit when the session has them. A
+subagent is its own session linked to its parent, and a fork is its own
+conversation that starts with a copy of its parent's history.
 
 Rewound turns stay in the recording, because they did happen. Token usage and
-cost are not recorded. Images keep a placeholder rather than their bytes.
+cost are not recorded. Images and files in prompts and tool results keep a
+placeholder rather than their bytes.
 HypAware does not read Grok credentials.
 
 ## Set it up
@@ -52,7 +54,13 @@ Imports are safe to repeat, and the provider's `backfill.window_days` bounds the
 
 - The last message of a turn appears once the turn completes, or within about
   five minutes of a crash, because streamed text is folded into whole messages.
-- A session file over 256 MiB, or a single line over 16 MiB, is skipped and
-  reported as `file_failed` in the backfill output.
+- A session file over 256 MiB is skipped and reported as `file_failed` in the
+  backfill output. A single line over 16 MiB is skipped and the rest of the
+  session is still recorded.
 - Sessions that exist only on a remote or cloud host are not captured.
-- Set `hyp session ignore <session-id>` or a `.hypignore` to stop recording.
+- Run `hyp session ignore` from a tool inside Grok, or pass a session id, or use
+  a `.hypignore`, to stop recording. An ignored session's forks and subagents are
+  ignored with it. After `hyp session unignore`, recording resumes from new
+  messages, and what was written while the session was ignored stays out. The
+  daemon must have seen the session while it was ignored, which it does on the
+  session's next hook or sweep.

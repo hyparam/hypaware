@@ -13,6 +13,7 @@ import { attachGrokHooks } from './attach.js'
 import { createGrokBackfillProvider } from './backfill.js'
 import { GROK_CONFIG_SECTION, grokListenPort, validateGrokConfig } from './config.js'
 import { createStartGrokSource } from './listener.js'
+import { createGrokWithheldStore } from './policy.js'
 
 /** @import { ClientAttachContext, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -35,7 +36,9 @@ export async function activate(ctx) {
   ensureAiGatewayStorageContracts(ctx)
   const localPolicyPath = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
   const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
+  const withheld = createGrokWithheldStore(readObservabilityEnv(ctx.env).stateDir)
   ctx.backfills.register(createGrokBackfillProvider({
+    withheld,
     localOnlyListPath: localPolicyPath,
     ignoredSessions,
     env: ctx.env,
@@ -47,7 +50,7 @@ export async function activate(ctx) {
     plugin: PLUGIN_NAME,
     summary: 'Loopback Grok session-change listener',
     configSection: GROK_CONFIG_SECTION,
-    start: createStartGrokSource({ localOnlyListPath: localPolicyPath, ignoredSessions }),
+    start: createStartGrokSource({ localOnlyListPath: localPolicyPath, ignoredSessions, withheld }),
   })
 
   registerSessionCommands(ctx)

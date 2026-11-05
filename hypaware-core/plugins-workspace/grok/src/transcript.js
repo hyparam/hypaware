@@ -4,21 +4,25 @@ import fs from 'node:fs/promises'
 import { constants } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { boundary, fingerprint, fingerprintSettled, lines } from '../../droid/src/transcript.js'
+import { boundary, fingerprint, lines } from '../../droid/src/transcript.js'
 import { isPlainObject, stringValue } from '../../../../src/core/util/index.js'
+import { redactRemoteUserinfo } from '../../goose/src/git_repo.js'
 import { createGrokFolder, grokExchange } from './projector.js'
 
-/** @import { GrokCursor, GrokSession } from '../../../../hypaware-core/plugins-workspace/grok/src/types.js' */
+/** @import { GrokCursor, GrokPolicy, GrokSession, GrokWithheldStore } from '../../../../hypaware-core/plugins-workspace/grok/src/types.js' */
 
 export const UPDATES_FILE = 'updates.jsonl'
 export const MAX_FILE_BYTES = 256 * 1024 * 1024
-// User chunks carry images inline and tool updates carry whole outputs.
+// User chunks carry images inline and tool updates carry whole outputs. A line
+// past this is skipped, not parsed, and still counts toward line numbers.
 export const MAX_LINE_BYTES = 16 * 1024 * 1024
 export const MAX_LIVE_BYTES = 8 * 1024 * 1024
 const MAX_SUMMARY_BYTES = 1024 * 1024
 const MAX_BATCH_MESSAGES = 64
 const MAX_BATCH_BYTES = 1024 * 1024
 const MAX_DISCOVERY_ENTRIES = 100000
+const MAX_LINEAGE_DEPTH = 16
+const MAX_SUBAGENT_PARENTS = 1024
 /** A file untouched this long will not settle anything that is still open. */
 export const IDLE_FLUSH_MS = 5 * 60 * 1000
 
@@ -32,12 +36,107 @@ async function readBounded(file) {
   let fd
   try {
     fd = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
-    const buffer = Buffer.alloc(MAX_SUMMARY_BYTES + 1)
-    const { bytesRead } = await fd.read(buffer, 0, buffer.length, 0)
-    return bytesRead > MAX_SUMMARY_BYTES ? undefined : buffer.subarray(0, bytesRead).toString('utf8')
+    const { size } = await fd.stat()
+    if (size > MAX_SUMMARY_BYTES) return undefined
+    const buffer = Buffer.alloc(size)
+    const { bytesRead } = await fd.read(buffer, 0, size, 0)
+    return buffer.subarray(0, bytesRead).toString('utf8')
   } catch {
     return undefined
   } finally { await fd?.close() }
+}
+
+/** @param {string} dir @returns {Promise<any>} */
+async function readSummary(dir) {
+  const raw = await readBounded(path.join(dir, 'summary.json'))
+  if (raw === undefined) return undefined
+  try { return JSON.parse(raw) } catch { return undefined }
+}
+
+/**
+ * Directory entries of a bounded listing, or none when it is gone.
+ * @param {string} dir
+ * @returns {Promise<string[]>}
+ */
+async function subdirs(dir) {
+  /** @type {string[]} */
+  const names = []
+  let handle
+  try { handle = await fs.opendir(dir) } catch { return names }
+  for await (const entry of handle) {
+    if (entry.isDirectory() && !entry.name.startsWith('.')) names.push(entry.name)
+    if (names.length >= MAX_DISCOVERY_ENTRIES) break
+  }
+  return names
+}
+
+/** @param {string} file */
+async function exists(file) {
+  try {
+    await fs.access(file)
+    return true
+  } catch { return false }
+}
+
+/** @param {string} root @param {string} bucket @returns {AsyncGenerator<string>} own bucket first, since most relatives share a cwd */
+async function* bucketsFrom(root, bucket) {
+  yield bucket
+  for (const name of await subdirs(root)) {
+    const other = path.join(root, name)
+    if (other !== bucket) yield other
+  }
+}
+
+/** @param {string} root @param {string} bucket @param {string} id */
+async function findSessionDir(root, bucket, id) {
+  for await (const candidate of bucketsFrom(root, bucket)) {
+    const dir = path.join(candidate, id)
+    if (await exists(dir)) return dir
+  }
+  return undefined
+}
+
+/** @type {Map<string, string>} */
+const subagentParents = new Map()
+
+/**
+ * A child session names no parent. Only the parent's directory records the
+ * link, so look for it there and remember what is found.
+ *
+ * @param {string} root
+ * @param {string} bucket
+ * @param {string} id
+ * @ref LLP 0585#lineage: subagents/<child>/meta.json is the only record
+ */
+async function findSubagentParent(root, bucket, id) {
+  const key = `${root}\0${id}`
+  const known = subagentParents.get(key)
+  if (known) return known
+  for await (const candidate of bucketsFrom(root, bucket)) {
+    for (const parent of await subdirs(candidate)) {
+      if (parent !== id && await exists(path.join(candidate, parent, 'subagents', id, 'meta.json'))) {
+        if (subagentParents.size >= MAX_SUBAGENT_PARENTS) subagentParents.delete(subagentParents.keys().next().value ?? '')
+        subagentParents.set(key, parent)
+        return parent
+      }
+    }
+  }
+  return undefined
+}
+
+/** @param {any} summary */
+function gitOf(summary) {
+  /** @type {NonNullable<GrokSession['git']>} */
+  const git = {}
+  const branch = stringValue(summary?.head_branch)
+  if (branch) git.git_branch = branch
+  const remote = Array.isArray(summary?.git_remotes) ? stringValue(summary.git_remotes[0]) : undefined
+  if (remote) git.git_remote = redactRemoteUserinfo(remote)
+  const repoRoot = stringValue(summary?.git_root_dir)
+  if (repoRoot) git.repo_root = repoRoot.length > 1 ? repoRoot.replace(/\/+$/, '') : repoRoot
+  const head = stringValue(summary?.head_commit)
+  if (head && /^[0-9a-f]{40}$/.test(head)) git.head_sha = head
+  return Object.keys(git).length ? git : undefined
 }
 
 /**
@@ -46,18 +145,14 @@ async function readBounded(file) {
  * bucket name stands in for its cwd. Hashed long buckets record theirs in .cwd.
  *
  * @param {string} dir
+ * @param {string} root
  * @returns {Promise<GrokSession>}
  * @ref LLP 0585#format: summary.json may lag the update stream
  */
-export async function readGrokSession(dir) {
+export async function readGrokSession(dir, root) {
   const id = path.basename(dir)
   const bucket = path.dirname(dir)
-  /** @type {any} */
-  let summary
-  const raw = await readBounded(path.join(dir, 'summary.json'))
-  if (raw !== undefined) {
-    try { summary = JSON.parse(raw) } catch { summary = undefined }
-  }
+  const summary = await readSummary(dir)
   const info = isPlainObject(summary?.info) ? summary.info : undefined
   if (info?.id !== undefined && String(info.id) !== id) throw new Error('unsupported_session')
   let cwd = stringValue(info?.cwd)
@@ -67,12 +162,32 @@ export async function readGrokSession(dir) {
   }
   if (!cwd || !path.isAbsolute(cwd)) throw new Error('unsupported_session')
   /** @type {GrokSession} */
-  const session = { id, cwd }
+  const session = { id, cwd, lineage: [id], fork_sources: [] }
   const model = stringValue(summary?.current_model_id)
   if (model) session.model = model
-  const parent = stringValue(summary?.parent_session_id)
-  // Forks also name a parent, but they are peer conversations, not subthreads.
-  if (parent && String(summary?.session_kind ?? '').startsWith('subagent')) session.parent_thread_id = parent
+  const git = gitOf(summary)
+  if (git) session.git = git
+  // @ref LLP 0585#lineage: exclusions follow a session into what it spawned
+  let current = summary
+  let currentId = id
+  let copying = true
+  for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth++) {
+    const isSubagent = String(current?.session_kind ?? '').startsWith('subagent')
+    const parent = isSubagent ? await findSubagentParent(root, bucket, currentId) : stringValue(current?.parent_session_id)
+    if (depth === 0 && isSubagent) {
+      if (parent) session.parent_thread_id = parent
+      else session.parent_pending = true
+    }
+    if (!parent || session.lineage.includes(parent)) break
+    session.lineage.push(parent)
+    // A subagent starts its own log. A fork copies its parent's.
+    copying = copying && !isSubagent
+    if (copying) session.fork_sources.push(parent)
+    const parentDir = await findSessionDir(root, bucket, parent)
+    if (!parentDir) break
+    current = await readSummary(parentDir)
+    currentId = parent
+  }
   return session
 }
 
@@ -83,7 +198,7 @@ export async function readGrokSession(dir) {
  *
  * @param {string} file
  * @param {{ root: string, cursor?: GrokCursor, maxBytes?: number, sessionId?: string,
- *   allowed: (session: GrokSession) => boolean, signal?: AbortSignal,
+ *   policy: GrokPolicy, withheld?: GrokWithheldStore, signal?: AbortSignal,
  *   window?: { sinceMs?: number, untilMs?: number } }} opts
  * @ref LLP 0585#bounds: offset reads held before the earliest open item
  */
@@ -92,39 +207,53 @@ export async function* readGrokTranscript(file, opts) {
   const realFile = await fs.realpath(file)
   const parts = path.relative(realRoot, realFile).split(path.sep)
   if (parts.length !== 3 || parts[0].startsWith('.') || parts[2] !== UPDATES_FILE) throw new Error('transcript_outside_root')
-  const session = await readGrokSession(path.dirname(realFile))
+  const session = await readGrokSession(path.dirname(realFile), realRoot)
   if (opts.sessionId !== undefined && session.id !== opts.sessionId) throw new Error('unsupported_session')
-  if (!opts.allowed(session)) {
-    yield { dropped: true }
-    return
-  }
   const fd = await fs.open(realFile, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const stat = await fd.stat()
     if (!stat.isFile() || stat.size > MAX_FILE_BYTES) throw new Error('file_budget')
+    // @ref LLP 0585#withheld: what was written while ignored stays out after unignore
+    const drop = async () => {
+      if (opts.withheld && opts.policy.sessionIgnored(session)) await opts.withheld.mark(session.id, (await fd.stat()).size)
+      return { dropped: true }
+    }
+    if (!opts.policy.allowed(session)) {
+      yield await drop()
+      return
+    }
+    const idle = Date.now() - stat.mtimeMs >= IDLE_FLUSH_MS
+    // The link is written around the moment a child starts. Rows are written
+    // once, so wait for it rather than record a subagent as a root session.
+    if (session.parent_pending && !idle) return
+    const floor = opts.withheld ? await opts.withheld.floor(session) : 0
     const inode = `${stat.dev}:${stat.ino}`
-    const currentFingerprint = fingerprint(stat)
     let offset = 0
     let lineNumber = 0
+    let startModel
     const cursor = opts.cursor
-    if (cursor && cursor.inode === inode && cursor.offset <= stat.size &&
-        (cursor.offset < stat.size || (cursor.fingerprint === currentFingerprint && fingerprintSettled(stat))) &&
-        cursor.boundary === await boundary(fd, cursor.offset)) {
+    // The log is append-only, so an intact boundary vouches for what is below it.
+    if (cursor && cursor.inode === inode && cursor.offset <= stat.size && cursor.boundary === await boundary(fd, cursor.offset)) {
       offset = cursor.offset
       lineNumber = cursor.line
+      startModel = cursor.model
     }
-    const end = Math.min(stat.size, offset + (opts.maxBytes ?? stat.size))
-    const folder = createGrokFolder(session)
+    const budget = opts.maxBytes ?? stat.size
+    const folder = createGrokFolder(session, startModel)
     let settledOffset = offset
     let settledLine = lineNumber
+    let settledModel = startModel
     let batch = []
     let batchBytes = 0
+    let oversized = 0
+    let reachedEnd = true
     const window = opts.window
     /** @param {any[]} closed */
     const add = closed => {
       /** @type {any[]} */
       const ready = []
       for (const item of closed) {
+        if (item.offset < floor) continue
         if ((window?.sinceMs !== undefined && item.atMs < window.sinceMs) || (window?.untilMs !== undefined && item.atMs > window.untilMs)) continue
         if (batch.length && (batch.length >= MAX_BATCH_MESSAGES || batchBytes + item.bytes > MAX_BATCH_BYTES)) {
           ready.push(batch)
@@ -137,13 +266,14 @@ export async function* readGrokTranscript(file, opts) {
       return ready
     }
     let start = offset
-    for await (const line of lines(fd, offset, end, MAX_LINE_BYTES)) {
+    for await (const line of lines(fd, offset, stat.size, MAX_LINE_BYTES, true)) {
       if (opts.signal?.aborted) return
       const at = { line: lineNumber, offset: start, bytes: line.bytes }
       lineNumber++
       start = line.end
       let closed = []
-      if (line.text.trim()) {
+      if (line.oversized) oversized++
+      else if (line.text.trim()) {
         let entry
         // A crash can tear a line that a resumed session then appends after.
         // Skipping it keeps every later line number, and so every identity.
@@ -151,8 +281,8 @@ export async function* readGrokTranscript(file, opts) {
         if (isPlainObject(entry)) closed = folder.push(entry, at)
       }
       for (const ready of add(closed)) {
-        if (!opts.allowed(session)) {
-          yield { dropped: true }
+        if (!opts.policy.allowed(session)) {
+          yield await drop()
           return
         }
         const projection = grokExchange(session, ready)
@@ -161,12 +291,20 @@ export async function* readGrokTranscript(file, opts) {
       const open = folder.earliestOpen()
       settledOffset = open ? open.offset : line.end
       settledLine = open ? open.line : lineNumber
+      settledModel = open ? open.model : folder.model()
+      // Stop at the budget only once the cursor can move, so an open item with
+      // more than a budget of updates behind it cannot stall this lane.
+      if (line.end < stat.size && line.end - offset >= budget && settledOffset > offset) {
+        reachedEnd = false
+        break
+      }
     }
-    // @ref LLP 0585#folding: a quiet file has nothing left to settle what is open
-    if (start === stat.size && Date.now() - stat.mtimeMs >= IDLE_FLUSH_MS) {
+    // @ref LLP 0585#folding: a quiet file has nothing left to settle what is
+    // open, including when a crash left a torn last line behind it
+    if (reachedEnd && idle) {
       for (const ready of add(folder.flush())) {
-        if (!opts.allowed(session)) {
-          yield { dropped: true }
+        if (!opts.policy.allowed(session)) {
+          yield await drop()
           return
         }
         const projection = grokExchange(session, ready)
@@ -174,17 +312,19 @@ export async function* readGrokTranscript(file, opts) {
       }
       settledOffset = start
       settledLine = lineNumber
+      settledModel = folder.model()
     }
-    if (!opts.allowed(session)) {
-      yield { dropped: true }
+    if (!opts.policy.allowed(session)) {
+      yield await drop()
       return
     }
     const projection = grokExchange(session, batch)
     if (projection) yield { projection }
     if (opts.signal?.aborted) return
     /** @type {GrokCursor} */
-    const next = { offset: settledOffset, line: settledLine, inode, fingerprint: currentFingerprint, boundary: await boundary(fd, settledOffset) }
-    yield { cursor: next }
+    const next = { offset: settledOffset, line: settledLine, inode, fingerprint: fingerprint(stat), boundary: await boundary(fd, settledOffset) }
+    if (settledModel) next.model = settledModel
+    yield { cursor: next, oversized }
   } finally { await fd.close() }
 }
 

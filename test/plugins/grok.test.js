@@ -12,14 +12,16 @@ import { attachGrokHooks, grokHooksPath, GROK_EVENTS } from '../../hypaware-core
 import { createGrokBackfillProvider } from '../../hypaware-core/plugins-workspace/grok/src/backfill.js'
 import { validateGrokConfig } from '../../hypaware-core/plugins-workspace/grok/src/config.js'
 import { grokMessageId } from '../../hypaware-core/plugins-workspace/grok/src/projector.js'
-import { grokSessionFiles, grokSessionsRoot, IDLE_FLUSH_MS, readGrokSession, readGrokTranscript } from '../../hypaware-core/plugins-workspace/grok/src/transcript.js'
+import { createGrokPolicy, createGrokWithheldStore } from '../../hypaware-core/plugins-workspace/grok/src/policy.js'
+import { resolveSessionIdForCli } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
+import { grokSessionFiles, grokSessionsRoot, IDLE_FLUSH_MS, MAX_LINE_BYTES, readGrokSession, readGrokTranscript } from '../../hypaware-core/plugins-workspace/grok/src/transcript.js'
 import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { runClaudeSessionContextHook } from '../../hypaware-core/plugins-workspace/claude/src/hook_command.js'
 
 const fixtureText = await fs.readFile(new URL('../../hypaware-core/smoke/fixtures/grok-updates.jsonl', import.meta.url), 'utf8')
 const silent = { info() {}, warn() {}, debug() {}, error() {} }
-const allowAll = () => true
+const allowAll = { allowed: () => true, sessionIgnored: () => false }
 const SESSION = '0198a0b0-1111-7222-8333-444455556666'
 
 /** @param {any} t @param {{ text?: string, summary?: any }} [opts] */
@@ -43,7 +45,7 @@ async function read(file, opts) {
   const messages = []
   let cursor
   let dropped = false
-  for await (const item of readGrokTranscript(file, { allowed: allowAll, ...opts })) {
+  for await (const item of readGrokTranscript(file, { policy: allowAll, ...opts })) {
     if (item.projection) messages.push(...item.projection.messages)
     if (item.cursor) cursor = item.cursor
     if (item.dropped) dropped = true
@@ -75,8 +77,8 @@ test('folds chunks and tool lifecycles into one message per line of origin', asy
   assert.equal(content[4].text, 'key is one.')
   assert.equal(messages[0].message_created_at, new Date(1793000000100).toISOString())
   assert.equal(messages[0].model, undefined)
-  assert.equal(messages[1].model, 'grok-summary')
-  assert.equal(messages[4].model, 'grok-summary')
+  assert.equal(messages[1].model, 'grok-build')
+  assert.equal(messages[4].model, 'grok-build')
   assert.equal(messages[0].message_id, grokMessageId(SESSION, 1))
   assert.equal(cursor.offset, Buffer.byteLength(fixtureText))
   assert.equal(cursor.line, 11)
@@ -156,14 +158,139 @@ test('consecutive prompts stay separate messages', async t => {
 })
 
 test('session identity survives a missing summary and refuses a mismatched one', async t => {
-  const { dir, cwd } = await setup(t, { summary: null })
-  assert.deepEqual(await readGrokSession(dir), { id: SESSION, cwd })
+  const { dir, cwd, root } = await setup(t, { summary: null })
+  assert.deepEqual(await readGrokSession(dir, root), { id: SESSION, cwd, lineage: [SESSION], fork_sources: [] })
   await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: 'other', cwd } }))
-  await assert.rejects(readGrokSession(dir), /unsupported_session/)
-  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, parent_session_id: 'parent' }))
-  assert.equal((await readGrokSession(dir)).parent_thread_id, undefined)
-  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, parent_session_id: 'parent', session_kind: 'subagent:review' }))
-  assert.equal((await readGrokSession(dir)).parent_thread_id, 'parent')
+  await assert.rejects(readGrokSession(dir, root), /unsupported_session/)
+  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, parent_session_id: 'parent', head_branch: 'main', git_root_dir: '/repo/', git_remotes: ['https://user:token@example.com/o/r.git'], head_commit: 'a'.repeat(40) }))
+  const fork = await readGrokSession(dir, root)
+  assert.equal(fork.parent_thread_id, undefined)
+  assert.deepEqual(fork.lineage, [SESSION, 'parent'])
+  assert.deepEqual(fork.fork_sources, ['parent'])
+  assert.deepEqual(fork.git, { git_branch: 'main', git_remote: 'https://example.com/o/r.git', repo_root: '/repo', head_sha: 'a'.repeat(40) })
+})
+
+test('a subagent finds its parent from the parent side, and waits until the link exists', async t => {
+  const { dir, cwd, root, file } = await setup(t, { summary: null })
+  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, session_kind: 'subagent' }))
+  assert.equal((await readGrokSession(dir, root)).parent_pending, true)
+  assert.deepEqual((await read(file, { root })).messages, [])
+  const meta = path.join(path.dirname(dir), 'the-parent', 'subagents', SESSION)
+  await fs.mkdir(meta, { recursive: true })
+  await fs.writeFile(path.join(meta, 'meta.json'), '{}')
+  const child = await readGrokSession(dir, root)
+  assert.equal(child.parent_thread_id, 'the-parent')
+  assert.deepEqual(child.lineage, [SESSION, 'the-parent'])
+  assert.deepEqual(child.fork_sources, [])
+  const out = []
+  for await (const item of readGrokTranscript(file, { root, policy: allowAll })) if (item.projection) out.push(item.projection)
+  assert.equal(out[0].parent_thread_id, 'the-parent')
+  assert.equal(out[0].is_sidechain, true)
+})
+
+test('ignoring a session covers what it spawned, and stays out after unignore', async t => {
+  const { root, file, dir, cwd, home } = await setup(t, { summary: null })
+  const ignored = new Set(['the-parent'])
+  const policy = createGrokPolicy(ignored, { resolve: () => ({ class: 'sync' }) })
+  const withheld = createGrokWithheldStore(path.join(home, 'state'))
+  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, parent_session_id: 'the-parent' }))
+  assert.equal((await read(file, { root, policy, withheld })).dropped, true)
+  // Nothing written while it was ignored appears once it is not.
+  ignored.delete('the-parent')
+  assert.deepEqual((await read(file, { root, policy, withheld })).messages, [])
+  await fs.appendFile(file, jsonl([envelope({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'after' } }), { timestamp: 1, params: { update: { sessionUpdate: 'turn_completed' } } }]))
+  const { messages } = await read(file, { root, policy, withheld })
+  assert.deepEqual(messages.map(m => /** @type {any} */ (m.content)[0].text), ['after'])
+  assert.equal(messages[0].message_index, 11)
+  // A later fork copies those bytes and inherits the floor from its source.
+  const session = await readGrokSession(dir, root)
+  await withheld.mark('the-parent', 500)
+  assert.ok(await withheld.floor(session) >= 500)
+  // A marking cannot lower a floor, and a corrupt one fails rather than records.
+  await withheld.mark('the-parent', 10)
+  assert.ok(await withheld.floor(session) >= 500)
+  const floors = path.join(home, 'state', 'grok-withheld')
+  for (const name of await fs.readdir(floors)) await fs.writeFile(path.join(floors, name), '{"offset":"x"}')
+  await assert.rejects(read(file, { root, policy, withheld }), /withheld_floor_invalid/)
+})
+
+test('tool results never carry binary bytes, and a non-zero exit is an error', async t => {
+  const b64 = 'iVBORw0KGgo'
+  const { root, file } = await setup(t, { text: jsonl([
+    envelope({ sessionUpdate: 'tool_call', toolCallId: 'img', title: 'read_file' }),
+    envelope({ sessionUpdate: 'tool_call_update', toolCallId: 'img', status: 'completed', content: [{ type: 'content', content: { type: 'image', data: b64, mimeType: 'image/png' } }, { type: 'content', content: { type: 'resource', resource: { uri: 'file:///a.pdf', blob: b64 } } }] }),
+    envelope({ sessionUpdate: 'tool_call', toolCallId: 'sh', title: 'run_terminal_command' }),
+    envelope({ sessionUpdate: 'tool_call_update', toolCallId: 'sh', status: 'completed', rawOutput: { type: 'Bash', exit_code: 1 }, content: [{ type: 'content', content: { type: 'text', text: 'nope' } }] }),
+    envelope({ sessionUpdate: 'tool_call', toolCallId: 'ok', title: 'run_terminal_command' }),
+    envelope({ sessionUpdate: 'tool_call_update', toolCallId: 'ok', status: 'completed', rawOutput: { type: 'Bash', exit_code: 0 }, content: [{ type: 'content', content: { type: 'text', text: 'yes' } }] }),
+  ]) })
+  const { messages } = await read(file, { root })
+  assert.ok(!JSON.stringify(messages).includes(b64))
+  const results = messages.flatMap(m => /** @type {any[]} */ (m.content)).filter(b => b.type === 'tool_result')
+  assert.deepEqual(results.map(b => [b.tool_use_id, b.content, b.is_error]), [['img', '[image image/png]\n[resource file:///a.pdf]', false], ['sh', 'nope', true], ['ok', 'yes', false]])
+})
+
+test('each reply carries the model of its own prompt, across a resumed read', async t => {
+  const prompt = (/** @type {string} */ modelId) => envelope({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: modelId }, _meta: { modelId, promptIndex: modelId === 'grok-a' ? 0 : 1 } })
+  const reply = envelope({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'r' } })
+  const done = { timestamp: 1, params: { update: { sessionUpdate: 'turn_completed' } } }
+  const { root, file } = await setup(t, { text: jsonl([prompt('grok-a'), reply, done]) })
+  const first = await read(file, { root })
+  assert.equal(first.messages[1].model, 'grok-a')
+  assert.equal(first.cursor.model, 'grok-a')
+  await fs.appendFile(file, jsonl([reply, done, prompt('grok-b'), reply, done]))
+  const second = await read(file, { root, cursor: first.cursor })
+  assert.deepEqual(second.messages.map(m => m.model), ['grok-a', undefined, 'grok-b'])
+  const whole = await read(file, { root })
+  assert.deepEqual(whole.messages.filter(m => m.role === 'assistant').map(m => m.model), ['grok-a', 'grok-a', 'grok-b'])
+})
+
+test('an oversized line is skipped, keeping what surrounds it and its line number', async t => {
+  const chunk = (/** @type {string} */ text, /** @type {number} */ promptIndex) => envelope({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text }, _meta: { promptIndex } })
+  const done = { timestamp: 1, params: { update: { sessionUpdate: 'turn_completed' } } }
+  const { root, file } = await setup(t, { text: jsonl([chunk('before', 0), done, chunk('x'.repeat(MAX_LINE_BYTES + 10), 1), done, chunk('after', 2), done]) })
+  const { messages, cursor } = await read(file, { root })
+  assert.deepEqual(messages.map(m => [m.message_index, /** @type {any} */ (m.content)[0].text]), [[0, 'before'], [4, 'after']])
+  assert.equal(cursor.line, 6)
+})
+
+test('a live read budget cannot stall behind a large line or an open item', async t => {
+  const big = 'y'.repeat(4 * 1024 * 1024)
+  const text = (/** @type {string} */ value, /** @type {number} */ promptIndex) => envelope({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: value }, _meta: { promptIndex } })
+  const open = envelope({ sessionUpdate: 'tool_call', toolCallId: 'long', title: 'bash' })
+  const done = { timestamp: 1, params: { update: { sessionUpdate: 'turn_completed' } } }
+  const { root, file } = await setup(t, { text: jsonl([open, envelope({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: big } }), done, text('z'.repeat(10 * 1024 * 1024), 0), done, text('tail', 1), done]) })
+  let cursor
+  /** @type {any[]} */
+  const seen = []
+  for (let i = 0; i < 4; i++) {
+    const result = await read(file, { root, cursor, maxBytes: 1024 * 1024 })
+    seen.push(...result.messages)
+    cursor = result.cursor
+  }
+  assert.ok(seen.some(m => /** @type {any} */ (m.content)[0].text === 'tail'))
+  assert.equal(cursor?.offset, (await fs.stat(file)).size)
+})
+
+test('a quiet file settles what is open even behind a torn last line', async t => {
+  const { root, file } = await setup(t, { text: jsonl([envelope({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'last reply' } })]) + '{"timestamp":17' })
+  const old = new Date(Date.now() - IDLE_FLUSH_MS - 1000)
+  await fs.utimes(file, old, old)
+  assert.equal(/** @type {any} */ ((await read(file, { root })).messages[0].content)[0].text, 'last reply')
+})
+
+test('a repeat read at the end of the file does no work', async t => {
+  const { root, file } = await setup(t)
+  const { cursor } = await read(file, { root })
+  const again = await read(file, { root, cursor })
+  assert.deepEqual(again.messages, [])
+  assert.equal(again.cursor.offset, cursor.offset)
+})
+
+test('the session id Grok hands its tools resolves to that session', () => {
+  assert.deepEqual(resolveSessionIdForCli({ env: { GROK_SESSION_ID: 'g1', HOME: '/none' }, cwd: '/x' }), { ok: true, sessionId: 'g1', source: 'grok_env' })
+  const both = resolveSessionIdForCli({ env: { GROK_SESSION_ID: 'g1', CLAUDE_CODE_SESSION_ID: 'c1', HOME: '/none' }, cwd: '/x' })
+  assert.equal(both.ok, false)
 })
 
 test('reads stay inside the sessions tree and a mismatched session id is refused', async t => {
@@ -172,7 +299,7 @@ test('reads stay inside the sessions tree and a mismatched session id is refused
   const outside = path.join(home, 'updates.jsonl')
   await fs.writeFile(outside, fixtureText)
   await assert.rejects(read(outside, { root }), /transcript_outside_root/)
-  assert.equal((await read(file, { root, allowed: () => false })).dropped, true)
+  assert.equal((await read(file, { root, policy: { allowed: () => false, sessionIgnored: () => false } })).dropped, true)
 })
 
 test('discovery skips relocation staging and stray files', async t => {
