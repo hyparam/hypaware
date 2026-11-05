@@ -473,10 +473,12 @@ test('daemonIncompleteNote: names the retry on a supported platform and never cl
 })
 
 test('daemonIncompleteNote: a platform with no service manager is not told to retry the install', () => {
-  const note = daemonIncompleteNote('win32', 'enrolled')
+  // win32 is a supported daemon platform since LLP 0584; `aix` is the
+  // still-unsupported stand-in for a host with no background service.
+  const note = daemonIncompleteNote('aix', 'enrolled')
   assert.match(note, /^note: enrolled, but /)
   assert.doesNotMatch(note, /hyp daemon install/)
-  assert.match(note, /win32 has no background service to install\n$/)
+  assert.match(note, /aix has no background service to install\n$/)
   assert.doesNotMatch(note, /nothing is captured/, 'foreground capture still works there, so no absolute')
 })
 

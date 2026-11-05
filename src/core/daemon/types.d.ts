@@ -933,7 +933,81 @@ export interface LaunchAgentInstallPlan {
   globalInstall?: DurableBinResult
 }
 
-export type DaemonInstallPlan = LaunchAgentInstallPlan | SystemdInstallPlan
+export interface SchtasksResult {
+  exitCode: number
+  stdout: string
+  stderr: string
+}
+
+/**
+ * The `schtasks.exe` verbs the Windows daemon backend drives, behind an
+ * injectable seam so tests never touch the host's real Task Scheduler (the
+ * LLP 0181 guard refuses the spawn under the test runner regardless).
+ */
+export interface SchtasksAdapter {
+  /** `schtasks /Create /TN <name> /XML <path> /F` */
+  create(taskName: string, xmlPath: string): Promise<SchtasksResult>
+  /** `schtasks /Delete /TN <name> /F` */
+  delete(taskName: string): Promise<SchtasksResult>
+  /** `schtasks /Run /TN <name>` */
+  run(taskName: string): Promise<SchtasksResult>
+  /** `schtasks /End /TN <name>` — the hard stop the graceful-stop timeout escalates to */
+  end(taskName: string): Promise<SchtasksResult>
+  /** `schtasks /Query /TN <name> /FO CSV /NH /V` */
+  query(taskName: string): Promise<SchtasksResult>
+}
+
+export interface BuildTaskXmlOptions {
+  nodePath: string
+  /** The resolved JavaScript entry node runs directly (never the .cmd shim). */
+  jsEntry: string
+  configPath: string
+  logDir: string
+  /** The user's SID, which the logon trigger and principal are bound to. */
+  sid: string
+  description?: string
+  env?: Record<string, string>
+  restart?: boolean
+  /** Restart-on-failure interval, ISO-8601 duration; Task Scheduler's floor is PT1M. */
+  restartIntervalIso?: string
+  runAtLoad?: boolean
+}
+
+export interface PlanTaskInstallOptions {
+  binPath: string
+  configPath: string
+  label?: string
+  description?: string
+  logDir?: string
+  nodePath?: string
+  homeDir?: string
+  env?: Record<string, string>
+  restart?: boolean
+  runAtLoad?: boolean
+  /** Test seam: the user's SID, so a test need not shell out to `whoami`. */
+  sid?: string
+  /** Test seam: the full task name, overriding the `\hypaware\<SID>` default. */
+  taskName?: string
+}
+
+export interface TaskInstallPlan {
+  platform: 'win32'
+  label: string
+  /** Full Task Scheduler path, `\hypaware\<SID>`. */
+  taskName: string
+  /** Where the task XML is written before `schtasks /Create /XML` reads it. */
+  targetPath: string
+  content: string
+  binPath: string
+  configPath: string
+  logDir: string
+  nodePath: string
+  manageCommands: string[][]
+  /** Result of the npx->durable global-bin upgrade installDaemon ran (if any). */
+  globalInstall?: DurableBinResult
+}
+
+export type DaemonInstallPlan = LaunchAgentInstallPlan | SystemdInstallPlan | TaskInstallPlan
 
 /**
  * CLI resolution context for installDaemon, before writing the service unit.
@@ -995,8 +1069,13 @@ export interface DaemonInstallOptions {
   description?: string
   launchctl?: LaunchctlAdapter
   systemctl?: SystemctlAdapter
+  schtasks?: SchtasksAdapter
   /** macOS: override the launchctl user domain (e.g. gui/501). */
   userDomain?: string
+  /** win32: the current user's SID (test seam; resolved from `whoami` otherwise). */
+  sid?: string
+  /** win32: override the full `\hypaware\<SID>` task name (test seam). */
+  taskName?: string
   /** Override the poll delay the installers use while waiting (tests only). */
   sleep?: (ms: number) => Promise<void>
 }
@@ -1009,7 +1088,10 @@ export interface DaemonUninstallOptions {
   platform?: NodeJS.Platform
   launchctl?: LaunchctlAdapter
   systemctl?: SystemctlAdapter
+  schtasks?: SchtasksAdapter
   userDomain?: string
+  sid?: string
+  taskName?: string
   /** Override the poll delay the uninstall waits out the unload with (tests only). */
   sleep?: (ms: number) => Promise<void>
 }
@@ -1022,7 +1104,10 @@ export interface DaemonServiceOptions {
   unitDir?: string
   launchctl?: LaunchctlAdapter
   systemctl?: SystemctlAdapter
+  schtasks?: SchtasksAdapter
   userDomain?: string
+  sid?: string
+  taskName?: string
 }
 
 export interface DaemonHandle {

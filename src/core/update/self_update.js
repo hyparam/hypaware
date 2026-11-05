@@ -94,6 +94,14 @@ const NPM_DETAIL_CHARS = 600
  * @returns {boolean}
  */
 export function detectSupervisor(env) {
+  // win32 has no manager-set signal to sniff (Task Scheduler sets no
+  // equivalent of XPC_SERVICE_NAME / INVOCATION_ID), so the installed task's
+  // own command line carries the marker: `daemon run --supervised` sets this
+  // on the daemon's env before any lane reads it (`runDaemonRun`). Authored by
+  // us, so unambiguous - unlike XPC_SERVICE_NAME, which macOS also sets in
+  // plain terminals (the false positive the two arms below guard against).
+  // @ref LLP 0584#supervision [implements]: the task marks the process it starts so detectSupervisor is true on win32
+  if (env.HYP_SUPERVISED === '1') return true
   const xpc = env.XPC_SERVICE_NAME
   if (typeof xpc === 'string' && (xpc === LAUNCH_LABEL || xpc.startsWith(LAUNCH_LABEL + '.'))) return true
   return typeof env.INVOCATION_ID === 'string' && env.INVOCATION_ID !== ''

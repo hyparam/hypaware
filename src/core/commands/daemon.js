@@ -35,6 +35,12 @@ export async function runDaemonRun(argv, ctx, deps = {}) {
     ctx.stderr.write(`hyp daemon run: ${parsed.error}\n`)
     return 2
   }
+  // The win32 scheduled task runs `daemon run --supervised`; bridge that to
+  // the env signal detectSupervisor reads, before any lane below reads it.
+  // Task Scheduler sets no env marker of its own (no XPC_SERVICE_NAME /
+  // INVOCATION_ID equivalent), so the command line is the one we author.
+  // @ref LLP 0584#supervision [implements]: the task's marker becomes the supervised signal on win32
+  if (parsed.supervised) ctx.env.HYP_SUPERVISED = '1'
   const gateway = await import('../daemon/gateway.js')
   const { waitBeforeBindRetry, BIND_RETRY_INTERVAL_MS } = gateway
   const runDaemon = deps.runDaemon ?? gateway.runGatewayDaemon
@@ -358,7 +364,14 @@ export async function runDaemonStop(argv, ctx, deps = {}) {
   const options = { homeDir: ctx.env.HOME, ...deps.service }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const status = await serviceDaemonStatus(options)
-  const supervised = status.platform === 'darwin' ? status.loaded : status.active === true
+  // win32 is deliberately never "supervised" for stop routing: its scheduled
+  // task relaunches only on a non-zero exit, so a graceful stop (exit 0) stays
+  // stopped without telling the task anything, and the stop always rides the
+  // file control channel below, escalating to a hard task End only on timeout
+  // (LLP 0584 #stop). launchd/systemd keep the per-manager supervision gate.
+  const supervised = status.platform === 'darwin' ? status.loaded
+    : status.platform === 'linux' ? status.active === true
+      : false
   if (supervised) {
     try {
       await stopServiceDaemon(options)
@@ -403,22 +416,32 @@ export async function runDaemonStop(argv, ctx, deps = {}) {
     return 0
   }
   if (outcome === 'timed_out') {
-    // `hyp daemon stop:`, not the bare `daemon:` the success lines use: this
-    // is a failure (exit 1), and the `hyp <cmd>:` shape is what every other
-    // daemon subcommand's errors already use - and what marks it as one.
-    // The transport differs per platform (win32 writes a stop.request file
-    // and deliberately leaves it for the daemon to consume), so the message
-    // names the one actually used.
-    //
     // The wait is rendered from `DAEMON_STOP_TIMEOUT_MS` rather than spelled
     // out again: that number stopped being an inline literal precisely so
     // tuning it cannot leave a user-facing message quoting the old one
     // (LLP 0343#stop-window).
     const waited = `${DAEMON_STOP_TIMEOUT_MS / 1_000}s`
-    const detail = process.platform === 'win32'
-      ? `stop request written but the daemon did not exit within ${waited}; the request file is left for it to consume`
-      : `stop signal sent but the daemon did not exit within ${waited}`
-    ctx.stderr.write(`hyp daemon stop: ${detail}\n`)
+    if (status.platform === 'win32') {
+      // The graceful file-channel request went unconsumed: the daemon is
+      // wedged. Escalate to the task's hard stop (schtasks /End, a
+      // TerminateProcess) so `stop` still stops it - losing only the in-flight
+      // flush of a process that was already ignoring the graceful path. Only
+      // ever reached in this pathological case, never the routine stop.
+      // @ref LLP 0584#stop [implements]: graceful first, hard-kill via the task on timeout
+      try {
+        await stopServiceDaemon(options)
+      } catch (err) {
+        ctx.stderr.write(`hyp daemon stop: ${err instanceof Error ? err.message : String(err)}\n`)
+        return 1
+      }
+      await clearStaleDaemonPidFiles(stateDir)
+      ctx.stderr.write(`hyp daemon stop: the daemon did not consume the stop request within ${waited}; force-stopped it through the scheduled task\n`)
+      return 0
+    }
+    // `hyp daemon stop:`, not the bare `daemon:` the success lines use: this
+    // is a failure (exit 1), and the `hyp <cmd>:` shape is what every other
+    // daemon subcommand's errors already use - and what marks it as one.
+    ctx.stderr.write(`hyp daemon stop: stop signal sent but the daemon did not exit within ${waited}\n`)
     return 1
   }
   ctx.stdout.write('daemon: stopped\n')
@@ -675,7 +698,7 @@ function parseDaemonInstallArgs(argv) {
       json: { type: 'boolean', default: false },
       config: { type: 'string' },
       bin: { type: 'string' },
-      platform: { type: 'string', enum: ['darwin', 'linux'] },
+      platform: { type: 'string', enum: ['darwin', 'linux', 'win32'] },
       force: { type: 'boolean', default: false },
     },
   })
@@ -688,7 +711,7 @@ function parseDaemonInstallArgs(argv) {
 
 /**
  * @param {string[]} argv
- * @returns {{ foreground: boolean, configPath?: string, error?: string }}
+ * @returns {{ foreground: boolean, configPath?: string, supervised?: boolean, error?: string }}
  */
 function parseDaemonRunArgs(argv) {
   const parsed = parseCommandArgv(argv, {
@@ -697,10 +720,12 @@ function parseDaemonRunArgs(argv) {
       // @ref LLP 0406#installed-services [implements]: older installed units still pass this unadvertised compatibility flag
       foreground: { type: 'boolean', default: true },
       config: { type: 'string' },
+      // @ref LLP 0584#supervision [implements]: the win32 scheduled task passes this so detectSupervisor is true on a platform with no manager-set env signal
+      supervised: { type: 'boolean', default: false },
     },
   }, { aliases: { '-f': '--foreground' } })
   if ('help' in parsed) return { foreground: false, error: 'usage: hyp daemon run [--config <path>]' }
   if (!parsed.ok) return { foreground: false, error: parsed.error }
-  const p = /** @type {{ foreground: boolean, config?: string }} */ (parsed.params)
-  return { foreground: p.foreground, configPath: p.config }
+  const p = /** @type {{ foreground: boolean, config?: string, supervised: boolean }} */ (parsed.params)
+  return { foreground: p.foreground, configPath: p.config, supervised: p.supervised }
 }
