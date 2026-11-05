@@ -48,7 +48,7 @@ time; a single larger message is still recorded whole. Each file has fixed
 limits:
 
 - one line of at most 16 MiB
-- at most 100,000 index entries and 8 MiB of turn identifiers
+- at most 100,000 turns in one session
 - an older single-document session file of at most 16 MiB
 
 A file over a limit, or one HypAware cannot read, is never skipped silently.

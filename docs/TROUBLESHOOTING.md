@@ -215,7 +215,7 @@ codex history import failed on its last run, so some history may be missing. Any
 
 Files that could be read were still imported. A file that failed is retried on
 every scheduled run, and the warning clears on its own once a run succeeds. To
-find the file and the error:
+see how many files failed and the first one with its error:
 
 ```sh
 hyp backfill codex --dry-run
@@ -225,7 +225,9 @@ If the error is a permission problem, fix it and the next run picks the file
 up. If the same file keeps failing, the file cannot be imported as it is, for
 example a Codex session file over its
 [size limits](integrations/codex.md#large-session-files). Moving that file out
-of the session directory also clears the warning on the next run.
+of the session directory clears the warning on the next run, but HypAware will
+not import it and Codex will no longer list that session, so keep the file
+somewhere safe.
 
 ## An export or team sync is missing
 
