@@ -33,7 +33,11 @@ expanding a quick request into substantial work.
 
 Answer briefly with the recommendation, supporting evidence, and material
 uncertainty. Do not create a file unless the user requests a saved or published
-artifact. For that artifact, read [reports.md](reports.md).
+artifact. A standalone artifact needs only `recommendation-<slug>.md`, with a
+scope, absolute dates and descriptive H1. Follow the
+[recommendation page format](../hypaware-report/references/report-contract.md#recommendation-pages)
+without starting the full-report workflow. Use [reports.md](reports.md) to save
+or publish it.
 
 When proposing a fix, name its target, the observed incident it addresses, and
 the query and period that would measure its effect. Offer deeper analysis only
@@ -42,8 +46,10 @@ Do not derive workflow fixes from errors encountered while querying this session
 
 ## Recommendation writing
 
-Use this opening for every recommendation: an individual chat answer, a report
-entry, or a standalone or full-report recommendation page. Open with two separate
+Use this opening for an individual chat recommendation or a standalone or
+full-report recommendation page. Main report entries instead use a linked action
+title and one sentence explaining the action and benefit. Open detail pages and
+chat recommendations with two separate
 paragraphs labeled **Problem:** and **Fix:**. The problem names the observed
 behavior and its consequence for someone unfamiliar with the work. The fix names
 the concrete change and its target; tests confirm the correction rather than
@@ -54,8 +60,7 @@ Keep the opening near 100 words or fewer without padding a shorter explanation.
 Preserve uncertainty that could change the decision. Put supporting measurements,
 locators, implementation details, and completion tests below the opening rather
 than compressing the full recommendation into it. On pages, place the opening
-immediately after the title; use the same opening in the report entry and its
-detail page. Review each opening for the required labels, a concrete consequence,
+immediately after the title. Review each opening for the required labels, a concrete consequence,
 and a usable change or investigation.
 
 ## Evidence and durable changes
