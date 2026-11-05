@@ -151,7 +151,9 @@ test('allocators in separate processes reserve disjoint runs with no gap and lea
     const leftovers = (await fs.readdir(cacheRoot)).filter((name) => name.includes('mutation-lock'))
     assert.deepEqual(leftovers, [])
   } finally {
-    await fs.rm(cacheRoot, { recursive: true, force: true })
+    // A just-exited child can still hold a brief handle on its spool file, so
+    // win32 rejects the recursive rmdir with ENOTEMPTY until it closes.
+    await fs.rm(cacheRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
 })
 

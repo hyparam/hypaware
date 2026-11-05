@@ -184,17 +184,18 @@ test('plugin doctor still treats a bare token as a directory', async () => {
   const hypHome = await makeHome('hyp-doctor-dir-bare-')
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-doctor-bare-cwd-'))
   try {
-    // The child resolves cwd symlinks, including macOS's /var -> /private/var.
-    const resolvedCwd = await fs.realpath(cwd)
     for (const token of ['nosuchdir', 'hypaware-plugin-widget']) {
       const out = runCli(hypHome, ['plugin', 'doctor', token], cwd)
       assert.equal(out.status, 1, `expected exit 1, got ${out.status}: ${out.stderr}`)
-      const joined = path.join(resolvedCwd, token)
-      assert.ok(
-        out.stdout.startsWith(`plugin doctor: ${joined}\n`),
-        `expected the report header to name ${joined}, got: ${out.stdout}`
-      )
-      assert.ok(out.stdout.includes(`manifest not found at ${path.join(joined, 'hypaware.plugin.json')}`))
+      // Assert the token's leaf shape, not the absolute prefix: on a win32 CI
+      // runner the cwd carries an 8.3 short name (C:\Users\RUNNER~1 vs
+      // ...\runneradmin) and the child's resolved form need not match the
+      // test's `realpath`. The leaf is what proves the bare token was treated
+      // as a directory resolved under cwd.
+      const header = out.stdout.split('\n')[0]
+      assert.match(header, /^plugin doctor: /, `expected a doctor header, got: ${out.stdout}`)
+      assert.ok(header.endsWith(`${path.sep}${token}`), `expected the header to name the ${token} directory, got: ${header}`)
+      assert.ok(out.stdout.includes(`manifest not found at `) && out.stdout.includes(path.join(token, 'hypaware.plugin.json')))
     }
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })

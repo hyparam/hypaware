@@ -393,15 +393,20 @@ await R.withClientActionLock({ stateRoot: args.stateRoot, kind: 'attach', reques
     const lockPath = keyLockPath(stateRoot, 'attach', 'claude')
     assert.ok(fs.existsSync(lockPath), 'the killed holder left its lock behind')
 
+    // Stale age wide enough that a loaded win32 CI runner's filesystem calls
+    // (stat, rm, the O_EXCL retry loop) fit inside the break-and-acquire
+    // budget: the break only fires once the lock is older than this, leaving
+    // `staleMs` of the `staleMs * 2` internal deadline for that overhead.
+    const staleMs = 1000
     let waited = 0
     const started = Date.now()
     const value = await withClientActionLock(
-      { stateRoot, kind: 'attach', requestKey: 'claude', staleMs: 300, onWait: () => { waited += 1 } },
+      { stateRoot, kind: 'attach', requestKey: 'claude', staleMs, onWait: () => { waited += 1 } },
       async () => 'acquired'
     )
     assert.equal(value, 'acquired')
     assert.equal(waited, 1, 'the caller reported the wait once')
-    assert.ok(Date.now() - started < 600, 'the wait stayed inside twice the stale age')
+    assert.ok(Date.now() - started < staleMs * 2, 'the wait stayed inside twice the stale age')
     assert.equal(fs.existsSync(lockPath), false, 'the new holder released')
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
