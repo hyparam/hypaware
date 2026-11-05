@@ -24,10 +24,39 @@ import { chooseLauncher, resolveLaunchers } from '../../../src/core/cli/wizard/f
 // `attached.length > 0` instead of branching on the try/catch itself.
 // @ref LLP 0198#path-probe [tests]: a successful zero-attached probe is a "no", not a fall-through
 
-// `hyp ask` does not yet launch a `.cmd` client on win32: spawning one needs
-// a shell, and the prompt carries untrusted text, so the cmd.exe-safe quoting
-// is deferred work. The launch-driving tests wait on it.
-const SKIP_CMD_LAUNCH = process.platform === 'win32' && 'launching a .cmd client on win32 is deferred (needs cmd.exe-safe quoting of untrusted prompt text)'
+/**
+ * A launchable stub that records either a fixed text (its client id) or its
+ * first argument to a file, so what started and what it was started on are
+ * file checks. POSIX writes a shell script; win32 writes the `.cmd` shim
+ * shape `launchClient` drives through cmd.exe, delegating the write to node
+ * (batch `echo` could not round-trip the framed prompt). The recorded text
+ * is embedded as \u escapes: a `.cmd` is read in the console codepage, so a
+ * non-ASCII byte (the `émile` fixture id) would arrive mojibake'd.
+ *
+ * @param {string} dir
+ * @param {string} name
+ * @param {{ file: string, arg?: boolean, text?: string }} capture
+ */
+async function writeLaunchStub(dir, name, capture) {
+  if (process.platform === 'win32') {
+    const literal = Array.from(capture.text ?? name, (ch) => {
+      const code = /** @type {number} */ (ch.codePointAt(0))
+      return code > 126 || ch === "'" || ch === '\\' ? `\\u${code.toString(16).padStart(4, '0')}` : ch
+    }).join('')
+    const js = capture.arg
+      ? "require('fs').writeFileSync(process.argv[1], String(process.argv[2] ?? ''))"
+      : `require('fs').writeFileSync(process.argv[1], '${literal}')`
+    await fs.writeFile(
+      path.join(dir, `${name}.cmd`),
+      `@ECHO OFF\r\n"${process.execPath}" -e "${js}" "${capture.file}"${capture.arg ? ' %1' : ''}\r\n`
+    )
+    return
+  }
+  const body = capture.arg
+    ? `#!/bin/sh\nprintf '%s' "$1" > '${capture.file}'\n`
+    : `#!/bin/sh\nprintf '%s' '${capture.text ?? name}' > '${capture.file}'\n`
+  await fs.writeFile(path.join(dir, name), body, { mode: 0o755 })
+}
 
 function makeBuf() {
   /** @type {string[]} */
@@ -386,7 +415,7 @@ test('runAsk: --list is no longer a flag', async () => {
 // alone on `PATH`, so the offer, the non-interactive pick, and the prompt
 // handed to the client are one assertion each.
 // @ref LLP 0429#status [tests]: a codex whose capture mode writes no marker is still a client `hyp ask` may start
-test('runAsk "<question>": starts the transcript-mode codex it offers, on the framed question', { skip: SKIP_CMD_LAUNCH }, async () => {
+test('runAsk "<question>": starts the transcript-mode codex it offers, on the framed question', async () => {
   const hypHome = await freshHome()
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
   const bin = path.join(home, 'bin')
@@ -394,7 +423,7 @@ test('runAsk "<question>": starts the transcript-mode codex it offers, on the fr
   const promptFile = path.join(home, 'prompt.txt')
   // `launchClient` spawns with `stdio: 'inherit'`, so the stub records its
   // argument to a file rather than to a stream the test runner also owns.
-  await fs.writeFile(path.join(bin, 'codex'), `#!/bin/sh\nprintf '%s' "$1" > '${promptFile}'\n`, { mode: 0o755 })
+  await writeLaunchStub(bin, 'codex', { file: promptFile, arg: true })
   // Codex enabled and in its default transcript mode: configured, attach n/a,
   // no marker anywhere under this `HOME`.
   await fs.writeFile(
@@ -406,7 +435,13 @@ test('runAsk "<question>": starts the transcript-mode codex it offers, on the fr
   const code = await runAsk([question], ctx)
   assert.equal(code, 0)
   assert.match(stdout.text(), /Starting Codex\.\.\./)
-  assert.equal(await fs.readFile(promptFile, 'utf8'), framedQuestion(question))
+  // Through a `.cmd` the prompt rides a cmd.exe line, which cannot carry a
+  // line break: `cmdFileSpawnPlan` collapses each run of them to a space,
+  // and the frame's words reach the client otherwise verbatim.
+  const expected = process.platform === 'win32'
+    ? framedQuestion(question).replace(/[\r\n]+/g, ' ')
+    : framedQuestion(question)
+  assert.equal(await fs.readFile(promptFile, 'utf8'), expected)
 })
 
 /* ------------------------- the client picker's deadline --------------------- */
@@ -433,7 +468,7 @@ async function twoLauncherFixture() {
   await fs.mkdir(bin, { recursive: true })
   const ran = path.join(home, 'ran.txt')
   for (const name of ['claude', 'codex']) {
-    await fs.writeFile(path.join(bin, name), `#!/bin/sh\nprintf '%s' '${name}' > '${ran}'\n`, { mode: 0o755 })
+    await writeLaunchStub(bin, name, { file: ran, text: name })
   }
   // claude's attach marker, so the status probe reports it recorded.
   await fs.mkdir(path.join(home, '.claude'), { recursive: true })
@@ -468,7 +503,7 @@ function makeSilentTtyIn() {
   })
 }
 
-test('runAsk "<question>": an allocated tty nobody answers starts a client instead of waiting for a keypress', { timeout: 5000, skip: SKIP_CMD_LAUNCH }, async () => {
+test('runAsk "<question>": an allocated tty nobody answers starts a client instead of waiting for a keypress', { timeout: 5000}, async () => {
   const fixture = await twoLauncherFixture()
   const stdout = makeTtyOut()
   const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
@@ -483,7 +518,7 @@ test('runAsk "<question>": an allocated tty nobody answers starts a client inste
   assert.equal(await fixture.started(), 'claude')
 })
 
-test('runAsk "<question>": a terminal someone answers still starts the client they picked', { timeout: 5000, skip: SKIP_CMD_LAUNCH }, async () => {
+test('runAsk "<question>": a terminal someone answers still starts the client they picked', { timeout: 5000}, async () => {
   const fixture = await twoLauncherFixture()
   const stdout = makeTtyOut()
   const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
@@ -504,7 +539,7 @@ test('runAsk "<question>": a terminal someone answers still starts the client th
   assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
 })
 
-test('runAsk "<question>": escaping the picker is "not now", not the deadline fallback', { timeout: 5000, skip: SKIP_CMD_LAUNCH }, async () => {
+test('runAsk "<question>": escaping the picker is "not now", not the deadline fallback', { timeout: 5000}, async () => {
   const fixture = await twoLauncherFixture()
   const stdout = makeTtyOut()
   const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
@@ -518,7 +553,7 @@ test('runAsk "<question>": escaping the picker is "not now", not the deadline fa
   assert.equal(await fixture.started(), '', 'an escape must start nothing')
 })
 
-test('runAsk "<question>": a piped run never reaches the picker at all', { skip: SKIP_CMD_LAUNCH }, async () => {
+test('runAsk "<question>": a piped run never reaches the picker at all', async () => {
   const fixture = await twoLauncherFixture()
   const { ctx } = makeCtx({ env: fixture.env })
   let asked = false
@@ -581,7 +616,7 @@ function makeKeyedTtyIn(events) {
   })
 }
 
-test('runAsk "<question>": a NUL byte off a pty at EOF does not lift the deadline', { timeout: 5000, skip: SKIP_CMD_LAUNCH }, async () => {
+test('runAsk "<question>": a NUL byte off a pty at EOF does not lift the deadline', { timeout: 5000}, async () => {
   const fixture = await twoLauncherFixture()
   const stdout = makeTtyOut()
   const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
@@ -596,7 +631,7 @@ test('runAsk "<question>": a NUL byte off a pty at EOF does not lift the deadlin
   assert.equal(await fixture.started(), 'claude')
 })
 
-test('runAsk "<question>": a real keypress still lifts the deadline, stray byte or not', { timeout: 5000, skip: SKIP_CMD_LAUNCH }, async () => {
+test('runAsk "<question>": a real keypress still lifts the deadline, stray byte or not', { timeout: 5000}, async () => {
   const fixture = await twoLauncherFixture()
   const stdout = makeTtyOut()
   // The NUL, then down, then enter well past a 50ms deadline: a reader who
@@ -642,18 +677,21 @@ async function mixedFixture() {
   const ran = path.join(home, 'ran.txt')
   const descriptors = new Map()
   for (const [i, id] of MIXED_IDS.entries()) {
-    await fs.writeFile(path.join(bin, `stub${i}`), `#!/bin/sh\nprintf '%s' '${id}' > '${ran}'\n`, { mode: 0o755 })
+    await writeLaunchStub(bin, `stub${i}`, { file: ran, text: id })
     descriptors.set(id, { plugin: `@test/${id}`, name: id, skillDir: `.${id}`, launch: { bin: `stub${i}`, args: ['{prompt}'], label: `Label ${id}` } })
   }
+  // The injected resolve answers with the path the stub was written at:
+  // on win32 that is the `.cmd`, the shape `launchClient` must route.
+  const stubExt = process.platform === 'win32' ? '.cmd' : ''
   return {
     env: { HOME: home, HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' },
     /** @type {typeof resolveLaunchers} */
-    resolveLaunchers: (args) => resolveLaunchers({ ...args, clients: MIXED_IDS, descriptors, resolve: async (b) => path.join(bin, b) }),
+    resolveLaunchers: (args) => resolveLaunchers({ ...args, clients: MIXED_IDS, descriptors, resolve: async (b) => path.join(bin, b + stubExt) }),
     async started() { return fs.readFile(ran, 'utf8').catch(() => '') },
   }
 }
 
-test('runAsk "<question>": the default and the picker share ascending client-id order', { timeout: 5000, skip: SKIP_CMD_LAUNCH }, async () => {
+test('runAsk "<question>": the default and the picker share ascending client-id order', { timeout: 5000}, async () => {
   const question = 'which sessions touched the auth module'
   // A run that cannot prompt takes the first.
   const piped = await mixedFixture()

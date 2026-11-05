@@ -24,6 +24,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { PromptCancelledError, select } from '../tui/index.js'
 import { isPromptBackError } from '../tui/runtime.js'
 import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_ask_evidence.js'
+import { cmdFileSpawnPlan, isCmdFile } from '../../util/cmd_file.js'
 import { compareStrings } from '../../util/compare_strings.js'
 
 /**
@@ -307,10 +308,11 @@ function promptListFooter(footer, hasRows) {
  *   cwd?: string,
  *   env: NodeJS.ProcessEnv,
  *   spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess,
+ *   platform?: string,
  * }} args
  * @returns {Promise<{ ok: boolean, code?: number | null, error?: string }>}
  */
-export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
+export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn, platform = process.platform }) {
   // A replacer function, not the string: a string replacement expands the
   // `$&`-family patterns, so a prompt carrying one substituted the matched
   // `{prompt}` back into itself. Harmless while every caller passed a
@@ -321,10 +323,18 @@ export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
     /** @param {{ ok: boolean, code?: number | null, error?: string }} r */
     const done = (r) => { if (!settled) { settled = true; resolve(r) } }
     try {
-      const child = spawnFn(launcher.binPath, args, {
+      // An npm-installed client on win32 resolves to a `.cmd` shim, which
+      // only cmd.exe can run - and the prompt is free text, so it rides an
+      // escaped command line rather than `shell: true`'s unescaped join.
+      // @ref LLP 0581#decision [implements]: a .cmd client launches through cmd.exe; an .exe spawns directly
+      const plan = platform === 'win32' && isCmdFile(launcher.binPath)
+        ? cmdFileSpawnPlan(launcher.binPath, args, env)
+        : { command: launcher.binPath, args, options: {} }
+      const child = spawnFn(plan.command, plan.args, {
         stdio: 'inherit',
         ...(cwd ? { cwd } : {}),
         env,
+        ...plan.options,
       })
       child.on('error', (err) => done({ ok: false, error: err instanceof Error ? err.message : 'spawn failed' }))
       child.on('close', (code) => done({ ok: true, code }))
