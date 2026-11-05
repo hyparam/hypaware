@@ -1,4 +1,4 @@
-# LLP 0586: Grok Build session capture
+# LLP 0588: Grok Build session capture
 
 **Type:** Decision
 **Status:** Draft

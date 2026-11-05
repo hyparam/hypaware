@@ -16,7 +16,7 @@ try {
   // Grok omits the path until the session has written updates.jsonl, which is
   // routine on SessionStart, so a missing path is nothing to report.
   if (typeof event.sessionId === 'string' && typeof event.transcriptPath === 'string') {
-    // @ref LLP 0586#capture: transmit only a change notification, never tool inputs or outputs
+    // @ref LLP 0588#capture: transmit only a change notification, never tool inputs or outputs
     const body = JSON.stringify({ session_id: event.sessionId, transcript_path: event.transcriptPath })
     if (Buffer.byteLength(body) > 16 * 1024) throw new Error('payload_limit')
     const ok = await new Promise(resolve => {

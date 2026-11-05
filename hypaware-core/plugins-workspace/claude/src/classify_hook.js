@@ -56,7 +56,7 @@ export async function runClaudeClassifyHook(argv, ctx, deps = {}) {
 
     // @ref LLP 0399#coexistence: Cursor can inherit Claude hooks; those
     // invocations must not inject Claude classification instructions.
-    // @ref LLP 0586#coexistence: Grok Build inherits them the same way.
+    // @ref LLP 0588#coexistence: Grok Build inherits them the same way.
     if (ctx.env.CURSOR_VERSION || ctx.env.GROK_HOOK_EVENT || typeof event.cursor_version === 'string') return 0
     const cwd = str(event.new_cwd) ?? str(event.cwd)
     if (!cwd) return 0

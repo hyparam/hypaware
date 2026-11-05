@@ -106,7 +106,7 @@ const subagentIndex = { parents: new Map(), at: 0 }
  *
  * @param {string} root
  * @param {string} id
- * @ref LLP 0586#lineage: subagents/<child>/meta.json is the only record
+ * @ref LLP 0588#lineage: subagents/<child>/meta.json is the only record
  */
 async function findSubagentParent(root, id) {
   if (subagentIndex.root === root) {
@@ -171,7 +171,7 @@ function gitOf(summary) {
  * @param {string} dir
  * @param {string} root
  * @returns {Promise<GrokSession>}
- * @ref LLP 0586#format: summary.json may lag the update stream
+ * @ref LLP 0588#format: summary.json may lag the update stream
  */
 export async function readGrokSession(dir, root) {
   const id = path.basename(dir)
@@ -195,7 +195,7 @@ export async function readGrokSession(dir, root) {
   if (startedAt !== undefined) session.started_at = new Date(startedAt).toISOString()
   const git = gitOf(summary)
   if (git) session.git = git
-  // @ref LLP 0586#lineage: exclusions follow a session into what it spawned
+  // @ref LLP 0588#lineage: exclusions follow a session into what it spawned
   let current = summary
   let currentId = id
   let copying = true
@@ -235,7 +235,7 @@ export async function readGrokSession(dir, root) {
  * @param {{ root: string, cursor?: GrokCursor, maxBytes?: number, sessionId?: string,
  *   policy: GrokPolicy, withheld?: GrokWithheldStore, signal?: AbortSignal,
  *   window?: { sinceMs?: number, untilMs?: number } }} opts
- * @ref LLP 0586#bounds: offset reads held before the earliest open item
+ * @ref LLP 0588#bounds: offset reads held before the earliest open item
  */
 export async function* readGrokTranscript(file, opts) {
   const realRoot = await fs.realpath(opts.root)
@@ -248,7 +248,7 @@ export async function* readGrokTranscript(file, opts) {
   try {
     const stat = await fd.stat()
     if (!stat.isFile() || stat.size > MAX_FILE_BYTES) throw new Error('file_budget')
-    // @ref LLP 0586#withheld: what was written while ignored stays out after unignore
+    // @ref LLP 0588#withheld: what was written while ignored stays out after unignore
     const drop = async () => {
       if (opts.withheld && opts.policy.sessionIgnored(session)) await opts.withheld.mark(session.id, (await fd.stat()).size)
       return { dropped: true }
@@ -257,7 +257,7 @@ export async function* readGrokTranscript(file, opts) {
       yield await drop()
       return
     }
-    // @ref LLP 0586#lineage: rows carry the folder whose class governs them, since export checks a row's cwd
+    // @ref LLP 0588#lineage: rows carry the folder whose class governs them, since export checks a row's cwd
     session.cwd = opts.policy.governingDir(session)
     const idle = Date.now() - stat.mtimeMs >= IDLE_FLUSH_MS
     // The summary and a child's link are written around the moment a session
@@ -341,7 +341,7 @@ export async function* readGrokTranscript(file, opts) {
         break
       }
     }
-    // @ref LLP 0586#folding: a quiet file has nothing left to settle what is
+    // @ref LLP 0588#folding: a quiet file has nothing left to settle what is
     // open, including when a crash left a torn last line behind it
     if (reachedEnd && idle) {
       for (const ready of add(folder.flush())) {

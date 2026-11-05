@@ -52,7 +52,7 @@ export function createStartGrokSource(deps) {
       }
       if (req.method !== 'POST' || url.pathname !== '/hook') return reject(req, res, 404, 'not_found')
       if ((req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') return reject(req, res, 415, 'content_type')
-      // @ref LLP 0586#bounds: one admitted scan, no unbounded notification queue
+      // @ref LLP 0588#bounds: one admitted scan, no unbounded notification queue
       if (busy) {
         state.rejected++
         return reject(req, res, 503, 'busy')
@@ -99,7 +99,7 @@ export function createStartGrokSource(deps) {
     /**
      * @param {string} file
      * @param {string} sessionId
-     * @ref LLP 0586#trailing-read: Stop fires before Grok writes turn_completed
+     * @ref LLP 0588#trailing-read: Stop fires before Grok writes turn_completed
      */
     function scheduleTrailing(file, sessionId) {
       if (!trailing.has(file) && trailing.size >= 64) return

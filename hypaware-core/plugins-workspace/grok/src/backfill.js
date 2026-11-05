@@ -18,7 +18,7 @@ const SCAN_BYTE_BUDGET = 256 * 1024 * 1024
  * @param {{ env?: NodeJS.ProcessEnv, config?: JsonObject, localOnlyListPath?: string, ignoredSessions?: Set<string>, withheld?: GrokWithheldStore }} [opts]
  * @returns {BackfillContribution}
  * @ref LLP 0359#sweep-context: use the runner's bounded effective time window
- * @ref LLP 0586#bounds: success-only cursors, finite discovery and byte budgets
+ * @ref LLP 0588#bounds: success-only cursors, finite discovery and byte budgets
  */
 export function createGrokBackfillProvider(opts = {}) {
   /** @type {Map<string, GrokCursor>} */

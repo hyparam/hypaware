@@ -24,7 +24,7 @@ export const configSection = { section: GROK_CONFIG_SECTION, validate: validateG
 
 /**
  * @param {PluginActivationContext} ctx
- * @ref LLP 0586#capture: hook notifications and native recovery share one projector
+ * @ref LLP 0588#capture: hook notifications and native recovery share one projector
  */
 export async function activate(ctx) {
   ctx.configRegistry.registerSection({
@@ -56,7 +56,7 @@ export async function activate(ctx) {
   registerSessionCommands(ctx)
   registerSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
 
-  // @ref LLP 0586#attachment [implements]: install native hook
+  // @ref LLP 0588#attachment [implements]: install native hook
   //   commands through the intrinsic registry, with no gateway endpoint
   ctx.clients.registerClient({
     name: CLIENT_NAME,

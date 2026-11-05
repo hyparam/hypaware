@@ -18,7 +18,7 @@ export function grokHooksPath(opts = {}) {
 
 /**
  * @param {{ endpoint: string, version: string, env?: NodeJS.ProcessEnv, homeDir?: string, dryRun?: boolean }} opts
- * @ref LLP 0586#attachment: one HypAware-owned file in Grok's hook directory
+ * @ref LLP 0588#attachment: one HypAware-owned file in Grok's hook directory
  */
 export async function attachGrokHooks(opts) {
   const settingsPath = grokHooksPath(opts)

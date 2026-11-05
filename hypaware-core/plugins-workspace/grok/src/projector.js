@@ -19,7 +19,7 @@ const COST_TICKS_PER_USD = 1e10
 /**
  * @param {string} sessionId
  * @param {number} line
- * @ref LLP 0586#identity: session and line, not event ids or cwd
+ * @ref LLP 0588#identity: session and line, not event ids or cwd
  */
 export function grokMessageId(sessionId, line) {
   return `grok:${createHash('sha256').update(JSON.stringify([sessionId, line])).digest('hex')}`
@@ -40,7 +40,7 @@ function timestampOf(entry, meta) {
  *
  * @param {GrokSession} session
  * @param {{ model?: string, previous?: string, prompts?: Map<number, string | undefined> }} [start] the model in force, last message built and prompt starts where this read begins
- * @ref LLP 0586#folding: runs and tool lifecycles settle at deterministic lines
+ * @ref LLP 0588#folding: runs and tool lifecycles settle at deterministic lines
  */
 export function createGrokFolder(session, start = {}) {
   /** @type {any} */
@@ -123,7 +123,7 @@ export function createGrokFolder(session, start = {}) {
         const out = closeRun()
         const id = stringValue(update.toolCallId)
         if (id) {
-          // @ref LLP 0586#folding: a call takes its chain position here, not when it
+          // @ref LLP 0588#folding: a call takes its chain position here, not when it
           // settles. Parallel calls settle in any order and a quiet file settles them
           // early, and the lanes must agree because the first row written wins.
           tools.set(id, { ...common, previous: lastId, placed: true, id, name: toolName(update), input: toolInput(update) })
@@ -159,7 +159,7 @@ export function createGrokFolder(session, start = {}) {
      */
     push(entry, at) {
       const out = fold(entry, at)
-      // @ref LLP 0586#bounds: a long tool must not make every hook reread the turn.
+      // @ref LLP 0588#bounds: a long tool must not make every hook reread the turn.
       // Insertion order, so only the oldest needs checking.
       for (const [id, tool] of tools) {
         if (at.line - tool.line < MAX_OPEN_TOOL_LINES) break
@@ -211,7 +211,7 @@ export function createGrokFolder(session, start = {}) {
    * The log keeps the abandoned turns, but what follows continues from before
    * the target prompt, and the chain should say so.
    * @param {unknown} target
-   * @ref LLP 0586#identity: dead branches stay recorded, off the live chain
+   * @ref LLP 0588#identity: dead branches stay recorded, off the live chain
    */
   function rewind(target) {
     const out = [...closeRun(), ...closeTools()]
