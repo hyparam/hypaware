@@ -153,14 +153,14 @@ export async function* readDroidTranscript(file, opts) {
 }
 
 /** @param {FileHandle} fd @param {number} offset */
-async function boundary(fd, offset) {
+export async function boundary(fd, offset) {
   const buffer = Buffer.alloc(Math.min(128, offset))
   const { bytesRead } = await fd.read(buffer, 0, buffer.length, offset - buffer.length)
   return buffer.subarray(0, bytesRead).toString('base64')
 }
 
-/** LF framing only: never parse an unfinished append. @param {FileHandle} fd @param {number} start @param {number} end */
-async function* lines(fd, start, end) {
+/** LF framing only: never parse an unfinished append. @param {FileHandle} fd @param {number} start @param {number} end @param {number} [maxLineBytes] */
+export async function* lines(fd, start, end, maxLineBytes = MAX_LINE_BYTES) {
   if (start >= end) return
   /** @type {Buffer[]} */
   let fragments = []
@@ -179,7 +179,7 @@ async function* lines(fd, start, end) {
       const stop = newline < 0 ? chunk.length : newline
       const fragment = chunk.subarray(index, stop)
       bytes += fragment.length
-      if (bytes > MAX_LINE_BYTES) throw new Error('line_budget')
+      if (bytes > maxLineBytes) throw new Error('line_budget')
       if (newline < 0) {
         fragments.push(fragment)
         break

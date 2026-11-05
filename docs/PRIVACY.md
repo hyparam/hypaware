@@ -18,6 +18,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
 | `pi` | Pi conversations from its managed extension and local session files |
 | `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory; no billed token usage or cost |
+| `grok` | Grok Build local sessions, including prompts, responses, reasoning summaries, tool arguments and results, and working directory; no token usage or cost |
 | `openclaw` | OpenClaw conversations from gateway traffic and local transcripts |
 | `hermes` | Hermes Agent conversations read from its local state database |
 | `goose` | Goose CLI and Desktop conversations read from its local session database, including tool calls and results, token usage, and working directory |

@@ -18,7 +18,7 @@ import { SHARED_SKILLS_DIR, SHARED_SKILL_NAMES } from '../../hypaware-core/skill
 
 const workspace = fileURLToPath(new URL('../../hypaware-core/plugins-workspace/', import.meta.url))
 
-const CLIENTS = ['claude', 'codex', 'pi', 'droid', 'opencode', 'cursor', 'openclaw', 'hermes']
+const CLIENTS = ['claude', 'codex', 'pi', 'droid', 'grok', 'opencode', 'cursor', 'openclaw', 'hermes']
 
 /**
  * Every file under `dir`, relative to it.
