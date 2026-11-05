@@ -8,6 +8,7 @@
 **Extends:** LLP 0257 (#status-and-health: a marker-less transcript-lane client
 gets a capture-health line, answered by one bounded cache read), LLP 0164
 (its non-goal of a cache read in `hyp status`, narrowed for this one line)
+**Extended-by:** LLP 0583 (surface failed scans even when other threads have captured rows)
 **Related:** LLP 0536, LLP 0474, issue #2069
 
 > [LLP 0257](./0257-claude-telemetry-listener-source.spec.md) and

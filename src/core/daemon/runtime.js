@@ -762,6 +762,18 @@ export async function runDaemon(opts = {}) {
     storage: boot.runtime.storage,
     query: boot.runtime.query,
     config: boot.config ?? undefined,
+    // @ref LLP 0583#failures [implements]: reuse the bounded status warning surface and log transitions only
+    onResult(identity, ok) {
+      const warning = `backfill_failed:${identity.name}`
+      const prior = status.warnings?.includes(warning) ?? false
+      if (prior === !ok) return
+      status.warnings = (status.warnings ?? []).filter(value => value !== warning)
+      if (!ok) status.warnings.push(warning)
+      fileLog[ok ? 'info' : 'warn'](ok ? 'daemon.backfill_recovered' : 'daemon.backfill_failed', {
+        provider: identity.name, status: ok ? 'ok' : 'failed',
+      })
+      requestBookkeeping()
+    },
   })
 
   // The destinations this boot's effective config still names. Their recovered

@@ -9,7 +9,7 @@ import path from 'node:path'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { openDaemonLog } from '../../src/core/daemon/logs.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
-import { secureOwnerRoot, secureStorageRoots } from '../../src/core/runtime/owner_only.js'
+import { resetCachedSidForTests, secureOwnerRoot, secureStorageRoots } from '../../src/core/runtime/owner_only.js'
 import { cacheRootOf, createPluginPaths, stateRootOf } from '../../src/core/runtime/paths.js'
 import { withLogRecords } from '../helpers/log_records.js'
 
@@ -289,16 +289,83 @@ test('a root that is a file, or already owner-only, is not changed', posixOnly, 
   assert.equal(await secureOwnerRoot(path.join(base, 'absent')), 'missing')
 })
 
-test('win32 is documented, not protected', async t => {
-  const base = await tempBase(t, 'win32')
+/**
+ * Run `fn` with `process.platform` reading 'win32' and the per-process SID
+ * cache cleared, so the injected runner is what answers `whoami`.
+ * @param {(calls: Array<{ cmd: string, args: string[] }>, execFileFn: any) => Promise<void>} fn
+ * @param {{ icaclsFails?: boolean }} [opts]
+ */
+async function onFakeWin32(fn, opts = {}) {
   const real = Object.getOwnPropertyDescriptor(process, 'platform')
   assert.ok(real)
   Object.defineProperty(process, 'platform', { ...real, value: 'win32' })
+  resetCachedSidForTests()
+  /** @type {Array<{ cmd: string, args: string[] }>} */
+  const calls = []
+  const execFileFn = /** @type {any} */ (async (/** @type {string} */ cmd, /** @type {string[]} */ args) => {
+    calls.push({ cmd, args })
+    if (cmd === 'whoami') return { stdout: '"host\\kenny","S-1-5-21-1111-2222-3333-1001"\r\n', stderr: '' }
+    if (opts.icaclsFails) throw Object.assign(new Error('Access is denied.'), { code: 5 })
+    return { stdout: '', stderr: '' }
+  })
   try {
-    assert.equal(await secureOwnerRoot(base), 'unsupported')
+    await fn(calls, execFileFn)
   } finally {
     Object.defineProperty(process, 'platform', real)
+    resetCachedSidForTests()
   }
+}
+
+// @ref LLP 0582#decision [tests]: one icacls per verified root, grants named by SID, never recursive
+test('win32 tightens a root with an inheritance-stripped owner-only DACL', async t => {
+  const base = await tempBase(t, 'win32')
+  await onFakeWin32(async (calls, execFileFn) => {
+    assert.equal(await secureOwnerRoot(base, { execFileFn }), 'secured')
+    assert.deepEqual(calls.map(c => c.cmd), ['whoami', 'icacls'])
+    const icacls = calls[1].args
+    assert.equal(icacls[0], await fs.realpath(base))
+    // Inheritance stripped, then exactly three full-control grants - the
+    // user by SID, SYSTEM, Administrators - all inheritable, no /t walk.
+    assert.deepEqual(icacls.slice(1), [
+      '/inheritance:r',
+      '/grant:r',
+      '*S-1-5-21-1111-2222-3333-1001:(OI)(CI)F',
+      '*S-1-5-18:(OI)(CI)F',
+      '*S-1-5-32-544:(OI)(CI)F',
+    ])
+  })
+})
+
+test('win32 still honors the dedicated-location gate, and a refused icacls leaves the root as found', async t => {
+  const shared = await tempBase(t, 'win32-shared')
+  await fs.writeFile(path.join(shared, 'somebody-elses.txt'), 'not ours')
+  await onFakeWin32(async (calls, execFileFn) => {
+    assert.equal(await secureOwnerRoot(shared, { execFileFn, knownEntries: () => false }), 'not_dedicated')
+    assert.deepEqual(calls.filter(c => c.cmd === 'icacls'), [], 'a shared root must never be re-ACLed')
+  })
+  const denied = await tempBase(t, 'win32-denied')
+  await onFakeWin32(async (calls, execFileFn) => {
+    assert.equal(await secureOwnerRoot(denied, { execFileFn }), 'error')
+  }, { icaclsFails: true })
+})
+
+test('win32 end to end: the real icacls leaves exactly the three grants, and a new child inherits them', {
+  skip: process.platform !== 'win32' && 'drives the real icacls, so win32 only',
+}, async t => {
+  const base = await tempBase(t, 'win32-real')
+  assert.equal(await secureOwnerRoot(base), 'secured')
+  // Language-independent probe: count ACE lines rather than parse localized
+  // account names. Three on the root, and three inherited on a child
+  // created afterwards - the inheritance is the whole point of the grant.
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const run = promisify(execFile)
+  /** @param {string} target */
+  const aces = async (target) => (await run('icacls', [target])).stdout.split(/\r?\n/).filter((line) => /:\(/.test(line)).length
+  assert.equal(await aces(await fs.realpath(base)), 3)
+  const child = path.join(base, 'secret.json')
+  await fs.writeFile(child, '{}')
+  assert.equal(await aces(child), 3)
 })
 
 test('bootKernel tightens the roots, and a preview boot leaves them as found', posixOnly, async t => {

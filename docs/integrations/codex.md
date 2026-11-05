@@ -40,6 +40,23 @@ The one-minute import is Codex's only capture lane by default, so
 `backfill.on_join: false` does not stop it. Use `hyp detach codex` to stop
 recording.
 
+### Large session files
+
+The import reads each session file in pieces, so a long session does not have
+to fit in memory. It records at most 128 messages or 4 MiB of session data at a
+time; a single larger message is still recorded whole. Each file has fixed
+limits:
+
+- one line of at most 16 MiB
+- at most 100,000 turns in one session
+- an older single-document session file of at most 16 MiB
+
+A file over a limit, or one HypAware cannot read, is never skipped silently.
+The rest of the import still finishes, the failed file is left for the next
+scheduled run to retry, and `hyp status` reports that the import failed (see
+[History import failed](../TROUBLESHOOTING.md#history-import-failed)). Messages
+Codex appends to a file while it is being read are picked up on the next run.
+
 ## Gateway capture
 
 To record Codex's model traffic as it happens instead of from session files,
