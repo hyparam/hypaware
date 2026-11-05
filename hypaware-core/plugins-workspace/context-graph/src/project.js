@@ -250,8 +250,8 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         // Settle pending rows through the normal dedup reads before maintenance.
         await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
         await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
-        await refreshGraphRows(storage, NODE_DATASET, nodeRows, signal)
-        await refreshGraphRows(storage, EDGE_DATASET, edgeRows, signal)
+        await refreshGraphRows({ storage, query, config, dataset: NODE_DATASET, rows: nodeRows, signal })
+        await refreshGraphRows({ storage, query, config, dataset: EDGE_DATASET, rows: edgeRows, signal })
       }
 
       const freshNodes = await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
@@ -262,7 +262,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         const skillUpdates = edgeRows.filter(row => row.edge_type === 'ran' && row.dst_type === 'Skill' && !freshIds.has(row.edge_id))
         if (skillUpdates.length) {
           const { refreshGraphRows } = await import('./maintenance.js')
-          await refreshGraphRows(storage, EDGE_DATASET, skillUpdates, signal, true)
+          await refreshGraphRows({ storage, query, config, dataset: EDGE_DATASET, rows: skillUpdates, signal, mergeEvidence: true })
         }
       }
 
