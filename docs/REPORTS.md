@@ -67,10 +67,10 @@ hyp report generate "Give me one recommendation about repeated test failures"
 ```
 
 If you have not named a period, the skill asks for one, suggesting the last 7
-days including today. It writes one
-`recommendation-<slug>.md` page in the current directory and does not save a
-report folder. Publish the page only if you want to share it, with
-[`hyp report recommend`](CLI_REFERENCE.md#hyp-report-recommend).
+days including today. It answers in the session. Ask it to save the
+recommendation and it writes one `recommendation-<slug>.md` page in the current
+directory; it does not save a report folder. Publish the page only if you want
+to share it, with [`hyp report recommend`](CLI_REFERENCE.md#hyp-report-recommend).
 
 You can also write a Markdown report yourself with your findings, query scope,
 and tables. The remote renders uploaded Markdown; no local render step is needed.
