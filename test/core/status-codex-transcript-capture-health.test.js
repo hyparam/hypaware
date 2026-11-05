@@ -216,7 +216,7 @@ test('a failed Codex scan is visible even with captured rows, and clears after r
     writeStatusFile(stateRoot, status)
     const failed = await collect({})
     assert.ok(failed.report.diagnostics.some((/** @type {any} */ d) => d.kind === 'backfill_failed' && d.severity === 'error'))
-    assert.match(failed.text, /codex transcript capture failed/)
+    assert.match(failed.text, /codex history import failed on its last run/)
     assert.equal(failed.report.overall, 'degraded')
     assert.equal(failed.report.captureHealth.find((/** @type {any} */ c) => c.client === 'codex').state, 'unknown')
     status.warnings = []

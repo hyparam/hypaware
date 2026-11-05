@@ -593,8 +593,11 @@ export async function collectHypAwareStatus(opts = {}) {
   for (const provider of failingBackfills) {
     diagnostics.push({
       severity: 'error', kind: 'backfill_failed',
-      message: `${provider} transcript capture failed: some history may be missing; failed files will be retried`,
-      repair: [`hyp backfill ${provider} --dry-run  # shows the failing import`],
+      message: `${provider} history import failed on its last run, so some history may be missing. Anything it could read was still imported. The next scheduled run retries, and this clears once a run succeeds.`,
+      repair: [
+        `hyp backfill ${provider} --dry-run  # names the failing file and the error`,
+        'If the error is a permission problem, fix it and the next run picks the file up. If the same file keeps failing, the file cannot be imported as it is.',
+      ],
     })
   }
   const heartbeatAgeMs = snapshotIsLive
