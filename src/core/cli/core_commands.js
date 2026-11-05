@@ -863,8 +863,9 @@ function buildCoreCommands(registry) {
       usage: coreUsage('report save'),
       help: [
         'The folder must hold report.md and only the pages publish accepts',
-        '(usage.md, work.md, health.md, recommendation-<slug>.md), so the store',
-        'never holds working notes, raw logs, or stray files; anything else is',
+        '(comparison.md, work.md, automation.md, repeated-work.md, usage.md,',
+        'health.md, recommendation-<slug>.md), so the store never holds',
+        'working notes, raw logs, or stray files; anything else is',
         'refused before a byte moves. The folder keeps its name, with -2, -3,',
         '... if the name is taken. By default the source folder is removed once',
         'its pages are copied (only those pages are removed, never a file that',
@@ -881,7 +882,8 @@ function buildCoreCommands(registry) {
       usage: coreUsage('report publish'),
       help: [
         'Upload a .md/.markdown file, or a folder containing report.md plus',
-        'usage.md, work.md, health.md, and recommendation-<slug>.md pages',
+        'comparison.md, work.md, automation.md, repeated-work.md, usage.md,',
+        'health.md, and recommendation-<slug>.md pages',
         '(the legacy change-<slug>.md spelling is also accepted). A slug is',
         'lowercase and matches [a-z0-9][a-z0-9-]*. Folders must contain only',
         'supported Markdown files. HTML, raw HTML inside Markdown, images,',

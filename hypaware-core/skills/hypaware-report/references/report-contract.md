@@ -112,8 +112,9 @@ proposal. Honor an explicitly requested narrower format.
 
 - **Overview (`report.md`):** A few short paragraphs on goals, outcomes and what
   deserves attention, followed by ranked recommendation links. Aim for 300 to
-  500 words, including summaries; keep it easy to scan. Link to the four analysis
-  pages with a brief takeaway rather than repeating their contents.
+  500 words, including the recommendation summaries; keep it easy to scan. Link
+  to the four analysis pages with a brief takeaway rather than repeating their
+  contents.
 - **Comparison (`comparison.md`):** Meaningful changes in outcomes and token usage
   against the previous comparable period. State both periods and coverage limits;
   timing alone does not establish the effects of an intervention.
@@ -191,7 +192,8 @@ the shared recommendation opening, use measured numbers where informative,
 never a numeric quota or invented cost/effect. Unknown impact stays unknown.
 Use sections What we saw, What it costs, The fix (or Next action for an
 investigation or decision), and Expected effect and the case against it,
-followed by Evidence, Query, and Check before applying. Keep the finding and
+followed by Evidence, Query, and Check before applying. What it costs means
+tokens, time or rework, not money. Keep the finding and
 latest state together, with essential evidence and a usable next action. Put
 artifacts under The fix and scope, dates, and accounting rules under Evidence.
 The opening supports a quick decision; the sections substantiate it.
