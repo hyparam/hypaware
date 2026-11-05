@@ -13,7 +13,7 @@ import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
  * @param {Set<string> | undefined} ignored
  * @param {{ resolve: (cwd: string) => { class: string } }} resolver
  * @returns {GrokPolicy}
- * @ref LLP 0585#lineage: an exclusion covers the forks and subagents a session spawned, wherever they run
+ * @ref LLP 0586#lineage: an exclusion covers the forks and subagents a session spawned, wherever they run
  */
 export function createGrokPolicy(ignored, resolver) {
   /** @param {GrokSession} session */
@@ -43,7 +43,7 @@ const floorName = id => `${createHash('sha256').update(id).digest('hex')}.json`
  *
  * @param {string} stateDir
  * @returns {GrokWithheldStore}
- * @ref LLP 0585#withheld: a byte floor per session
+ * @ref LLP 0586#withheld: a byte floor per session
  */
 export function createGrokWithheldStore(stateDir) {
   const dir = path.join(stateDir, 'grok-withheld')

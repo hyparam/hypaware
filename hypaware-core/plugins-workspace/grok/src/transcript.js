@@ -22,7 +22,7 @@ const MAX_BATCH_MESSAGES = 64
 const MAX_BATCH_BYTES = 1024 * 1024
 const MAX_DISCOVERY_ENTRIES = 100000
 const MAX_LINEAGE_DEPTH = 16
-const MAX_SUBAGENT_PARENTS = 1024
+const SUBAGENT_RESCAN_MS = 1000
 /** A file untouched this long will not settle anything that is still open. */
 export const IDLE_FLUSH_MS = 5 * 60 * 1000
 
@@ -96,32 +96,37 @@ async function findSessionDir(root, bucket, id) {
   return undefined
 }
 
-/** @type {Map<string, string>} */
-const subagentParents = new Map()
+/** @type {{ root?: string, parents: Map<string, string>, at: number }} */
+const subagentIndex = { parents: new Map(), at: 0 }
 
 /**
  * A child session names no parent. Only the parent's directory records the
- * link, so look for it there and remember what is found.
+ * link. One walk indexes every child, so a restart rereading many subagents
+ * walks once, and a child whose owner is gone cannot make each read walk again.
  *
  * @param {string} root
- * @param {string} bucket
  * @param {string} id
- * @ref LLP 0585#lineage: subagents/<child>/meta.json is the only record
+ * @ref LLP 0586#lineage: subagents/<child>/meta.json is the only record
  */
-async function findSubagentParent(root, bucket, id) {
-  const key = `${root}\0${id}`
-  const known = subagentParents.get(key)
-  if (known) return known
-  for await (const candidate of bucketsFrom(root, bucket)) {
-    for (const parent of await subdirs(candidate)) {
-      if (parent !== id && await exists(path.join(candidate, parent, 'subagents', id, 'meta.json'))) {
-        if (subagentParents.size >= MAX_SUBAGENT_PARENTS) subagentParents.delete(subagentParents.keys().next().value ?? '')
-        subagentParents.set(key, parent)
-        return parent
+async function findSubagentParent(root, id) {
+  if (subagentIndex.root === root) {
+    const known = subagentIndex.parents.get(id)
+    if (known || Date.now() - subagentIndex.at < SUBAGENT_RESCAN_MS) return known
+  }
+  /** @type {Map<string, string>} */
+  const parents = new Map()
+  for (const bucket of await subdirs(root)) {
+    for (const parent of await subdirs(path.join(root, bucket))) {
+      const dir = path.join(root, bucket, parent, 'subagents')
+      for (const child of await subdirs(dir)) {
+        if (child !== parent && await exists(path.join(dir, child, 'meta.json'))) parents.set(child, parent)
       }
     }
   }
-  return undefined
+  subagentIndex.root = root
+  subagentIndex.parents = parents
+  subagentIndex.at = Date.now()
+  return parents.get(id)
 }
 
 /** @param {unknown} value @returns {number | undefined} */
@@ -166,7 +171,7 @@ function gitOf(summary) {
  * @param {string} dir
  * @param {string} root
  * @returns {Promise<GrokSession>}
- * @ref LLP 0585#format: summary.json may lag the update stream
+ * @ref LLP 0586#format: summary.json may lag the update stream
  */
 export async function readGrokSession(dir, root) {
   const id = path.basename(dir)
@@ -182,19 +187,21 @@ export async function readGrokSession(dir, root) {
   if (!cwd || !path.isAbsolute(cwd)) throw new Error('unsupported_session')
   /** @type {GrokSession} */
   const session = { id, cwd, policy_dirs: workspaceDirs(summary, cwd), lineage: [id], fork_sources: [] }
+  // Only the summary says whose log a fork copied, so its exclusions are unknown until then.
+  if (!summary) session.parent_pending = true
   const model = stringValue(summary?.current_model_id)
   if (model) session.model = model
   const startedAt = timeOf(summary?.created_at)
   if (startedAt !== undefined) session.started_at = new Date(startedAt).toISOString()
   const git = gitOf(summary)
   if (git) session.git = git
-  // @ref LLP 0585#lineage: exclusions follow a session into what it spawned
+  // @ref LLP 0586#lineage: exclusions follow a session into what it spawned
   let current = summary
   let currentId = id
   let copying = true
   for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth++) {
     const isSubagent = String(current?.session_kind ?? '').startsWith('subagent')
-    const owner = isSubagent ? await findSubagentParent(root, bucket, currentId) : undefined
+    const owner = isSubagent ? await findSubagentParent(root, currentId) : undefined
     if (depth === 0 && isSubagent) {
       if (owner) session.parent_thread_id = owner
       else session.parent_pending = true
@@ -228,7 +235,7 @@ export async function readGrokSession(dir, root) {
  * @param {{ root: string, cursor?: GrokCursor, maxBytes?: number, sessionId?: string,
  *   policy: GrokPolicy, withheld?: GrokWithheldStore, signal?: AbortSignal,
  *   window?: { sinceMs?: number, untilMs?: number } }} opts
- * @ref LLP 0585#bounds: offset reads held before the earliest open item
+ * @ref LLP 0586#bounds: offset reads held before the earliest open item
  */
 export async function* readGrokTranscript(file, opts) {
   const realRoot = await fs.realpath(opts.root)
@@ -241,7 +248,7 @@ export async function* readGrokTranscript(file, opts) {
   try {
     const stat = await fd.stat()
     if (!stat.isFile() || stat.size > MAX_FILE_BYTES) throw new Error('file_budget')
-    // @ref LLP 0585#withheld: what was written while ignored stays out after unignore
+    // @ref LLP 0586#withheld: what was written while ignored stays out after unignore
     const drop = async () => {
       if (opts.withheld && opts.policy.sessionIgnored(session)) await opts.withheld.mark(session.id, (await fd.stat()).size)
       return { dropped: true }
@@ -250,11 +257,12 @@ export async function* readGrokTranscript(file, opts) {
       yield await drop()
       return
     }
-    // @ref LLP 0585#lineage: rows carry the folder whose class governs them, since export checks a row's cwd
+    // @ref LLP 0586#lineage: rows carry the folder whose class governs them, since export checks a row's cwd
     session.cwd = opts.policy.governingDir(session)
     const idle = Date.now() - stat.mtimeMs >= IDLE_FLUSH_MS
-    // The link is written around the moment a child starts. Rows are written
-    // once, so wait for it rather than record a subagent as a root session.
+    // The summary and a child's link are written around the moment a session
+    // starts. Rows are written once, so wait for them rather than record a
+    // subagent as a root session or a fork's copy past its parent's exclusions.
     if (session.parent_pending && !idle) return
     const floors = opts.withheld ? await opts.withheld.floors(session) : []
     const inode = `${stat.dev}:${stat.ino}`
@@ -333,7 +341,7 @@ export async function* readGrokTranscript(file, opts) {
         break
       }
     }
-    // @ref LLP 0585#folding: a quiet file has nothing left to settle what is
+    // @ref LLP 0586#folding: a quiet file has nothing left to settle what is
     // open, including when a crash left a torn last line behind it
     if (reachedEnd && idle) {
       for (const ready of add(folder.flush())) {

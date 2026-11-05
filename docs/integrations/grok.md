@@ -16,8 +16,8 @@ name `grok`, along with repo, branch and commit when the session has them. A
 subagent is its own session linked to its parent, and a fork is its own
 conversation that starts with a copy of its parent's history.
 
-Rewound turns stay in the recording, because they did happen. Token usage and
-cost are not recorded. Images and files in prompts and tool results keep a
+Rewound turns stay in the recording, because they did happen. Each turn's token
+usage and cost are on its last assistant message. Images and files in prompts and tool results keep a
 placeholder rather than their bytes.
 HypAware does not read Grok credentials.
 
@@ -31,8 +31,10 @@ hyp attach grok
 hyp client status grok
 ```
 
-Restart Grok Build to load the hook. Attach writes only
-`~/.grok/hooks/hypaware.json`, and `hyp detach grok` removes its entries from it.
+Restart Grok Build to load the hook. Attach writes
+`~/.grok/hooks/hypaware.json` and installs HypAware's skills under
+`~/.grok/skills`. `hyp detach grok` removes its entries from the hook file and
+leaves the skills in place.
 If you set `GROK_HOME`, use the same value for Grok Build, HypAware commands, and
 the daemon.
 

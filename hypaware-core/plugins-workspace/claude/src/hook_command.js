@@ -71,7 +71,7 @@ export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
   // must not write Claude context or run its body-spool maintenance. Below the
   // help branch, which the binary's own skip also spares, so `--help` still
   // answers in a Cursor environment.
-  // @ref LLP 0585#coexistence: Grok Build inherits them the same way.
+  // @ref LLP 0586#coexistence: Grok Build inherits them the same way.
   if (ctx.env.CURSOR_VERSION || ctx.env.GROK_HOOK_EVENT) return 0
 
   // The recording half is already internally fault-tolerant, but it is wrapped

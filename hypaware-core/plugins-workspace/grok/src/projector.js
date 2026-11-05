@@ -14,11 +14,12 @@ const TOOL_META_KEY = 'x.ai/tool'
 const MAX_OPEN_TOOL_LINES = 1024
 // How many recent prompts a rewind can return to and still chain correctly.
 const MAX_REWIND_PROMPTS = 256
+const COST_TICKS_PER_USD = 1e10
 
 /**
  * @param {string} sessionId
  * @param {number} line
- * @ref LLP 0585#identity: session and line, not event ids or cwd
+ * @ref LLP 0586#identity: session and line, not event ids or cwd
  */
 export function grokMessageId(sessionId, line) {
   return `grok:${createHash('sha256').update(JSON.stringify([sessionId, line])).digest('hex')}`
@@ -39,7 +40,7 @@ function timestampOf(entry, meta) {
  *
  * @param {GrokSession} session
  * @param {{ model?: string, previous?: string, prompts?: Map<number, string | undefined> }} [start] the model in force, last message built and prompt starts where this read begins
- * @ref LLP 0585#folding: runs and tool lifecycles settle at deterministic lines
+ * @ref LLP 0586#folding: runs and tool lifecycles settle at deterministic lines
  */
 export function createGrokFolder(session, start = {}) {
   /** @type {any} */
@@ -122,7 +123,7 @@ export function createGrokFolder(session, start = {}) {
         const out = closeRun()
         const id = stringValue(update.toolCallId)
         if (id) {
-          // @ref LLP 0585#folding: a call takes its chain position here, not when it
+          // @ref LLP 0586#folding: a call takes its chain position here, not when it
           // settles. Parallel calls settle in any order and a quiet file settles them
           // early, and the lanes must agree because the first row written wins.
           tools.set(id, { ...common, previous: lastId, placed: true, id, name: toolName(update), input: toolInput(update) })
@@ -146,7 +147,7 @@ export function createGrokFolder(session, start = {}) {
       }
       // A finished turn has no more chunks or lifecycle updates to wait for,
       // apart from a background tool, whose late result still links by id.
-      if (kind === 'turn_completed') return [...closeRun(), ...closeTools()]
+      if (kind === 'turn_completed') return completeTurn(update, common)
       if (kind === 'rewind_marker') return rewind(update.target_prompt_index)
       return []
   }
@@ -158,7 +159,7 @@ export function createGrokFolder(session, start = {}) {
      */
     push(entry, at) {
       const out = fold(entry, at)
-      // @ref LLP 0585#bounds: a long tool must not make every hook reread the turn.
+      // @ref LLP 0586#bounds: a long tool must not make every hook reread the turn.
       // Insertion order, so only the oldest needs checking.
       for (const [id, tool] of tools) {
         if (at.line - tool.line < MAX_OPEN_TOOL_LINES) break
@@ -182,10 +183,35 @@ export function createGrokFolder(session, start = {}) {
   }
 
   /**
+   * @param {any} update
+   * @param {any} common
+   * @ref LLP 0035#one-carrier [implements]: the last assistant row carries the turn's total
+   */
+  function completeTurn(update, common) {
+    const out = [...closeRun(), ...closeTools()]
+    // A fork's copy repeats turns its parent already recorded, and only forked_at
+    // says where the copy ends. A subagent's own turns are not in its parent's.
+    const copy = session.fork_sources[0]
+    const copied = copy && !(copy.before_ms !== undefined && common.at >= copy.before_ms)
+    const usage = copied ? undefined : grokUsage(update.usage)
+    if (!usage) return out
+    let carrier
+    for (const item of out) if (item.message.role === 'assistant' && hasTextOrToolUse(item.message)) carrier = item.message
+    if (carrier) {
+      carrier.attributes = { usage }
+      return out
+    }
+    // An interrupted turn can end on a result, and its calls were still billed.
+    const empty = message({ ...common, role: 'assistant', content: [{ type: 'text', text: '' }], placed: true, previous: lastId })
+    empty.message.attributes = { usage }
+    return [...out, empty]
+  }
+
+  /**
    * The log keeps the abandoned turns, but what follows continues from before
    * the target prompt, and the chain should say so.
    * @param {unknown} target
-   * @ref LLP 0585#identity: dead branches stay recorded, off the live chain
+   * @ref LLP 0586#identity: dead branches stay recorded, off the live chain
    */
   function rewind(target) {
     const out = [...closeRun(), ...closeTools()]
@@ -200,7 +226,9 @@ export function createGrokFolder(session, start = {}) {
   function pushChunk(kind, update, common) {
     const out = []
     const runKind = RUN_KINDS[kind]
-    const boundary = !run || run.kind !== runKind || run.promptId !== common.promptId || run.promptIndex !== common.promptIndex || run.bytes + common.bytes > MAX_RUN_BYTES
+    // User chunks have no prompt id, and prompts queued together can share an index.
+    // The chunks of one prompt share a timestamp.
+    const boundary = !run || run.kind !== runKind || run.promptId !== common.promptId || run.promptIndex !== common.promptIndex || (runKind === 'user' && run.at !== common.at) || run.bytes + common.bytes > MAX_RUN_BYTES
     if (boundary) out.push(...closeRun())
     // A new prompt ends the last turn. Older files have no turn_completed.
     if (runKind === 'user' && boundary) out.push(...closeTools())
@@ -239,6 +267,37 @@ export function createGrokFolder(session, start = {}) {
     const use = tool ? [useMessage(tool)] : []
     return [...use, message({ ...common, role: 'user', content: [block] })]
   }
+}
+
+/** @param {AiGatewayProjectedMessage} message */
+function hasTextOrToolUse(message) {
+  return Array.isArray(message.content) && message.content.some(block => isPlainObject(block) && (block.type === 'text' || block.type === 'tool_use'))
+}
+
+/**
+ * Grok's input count includes what the cache served.
+ * @param {unknown} value
+ * @returns {JsonObject | undefined}
+ * @ref LLP 0035#net-input [implements]: input is net of cache, and Grok's is gross
+ */
+function grokUsage(value) {
+  if (!isPlainObject(value)) return undefined
+  /** @param {unknown} n @returns {number | undefined} */
+  const count = n => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n : undefined
+  const input = count(value.inputTokens)
+  const output = count(value.outputTokens)
+  if (input === undefined || output === undefined) return undefined
+  const read = count(value.cachedReadTokens) ?? 0
+  const write = count(value.cacheCreationTokens) ?? 0
+  /** @type {JsonObject} */
+  const usage = { input_tokens: Math.max(0, input - read - write), output_tokens: output, cache_read_tokens: read, cache_write_tokens: write }
+  const reasoning = count(value.reasoningTokens)
+  if (reasoning !== undefined) usage.reasoning_tokens = reasoning
+  const total = count(value.totalTokens)
+  if (total !== undefined) usage.total_tokens = total
+  const ticks = count(value.costUsdTicks)
+  if (ticks !== undefined) usage.cost_usd = ticks / COST_TICKS_PER_USD
+  return usage
 }
 
 /** @param {any} update */

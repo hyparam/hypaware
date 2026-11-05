@@ -1,4 +1,4 @@
-# LLP 0585: Grok Build session capture
+# LLP 0586: Grok Build session capture
 
 **Type:** Decision
 **Status:** Draft
@@ -61,12 +61,20 @@ conversations.
 
 The file is append-only, including across rewinds and compaction, so dead
 branches remain recorded. A rewind marker points the chain back to what the target
-prompt followed, so the live thread skips them. Turn usage on `turn_completed` is not projected: the
-projected message has no usage field and the totals span several model calls.
+prompt followed, so the live thread skips them.
+
+Usage comes from `turn_completed`, a total for the whole turn, and rides the
+turn's last assistant row with text or a tool call (LLP 0035). A turn that ends
+with no such row still open, as an interrupted one can, gets an empty assistant
+row off the chain, so its billed tokens still count. A fork's copied turns carry
+none, since the parent recorded them: only a turn after `forked_at` counts. A
+parent's totals exclude its subagents, which report their own.
 
 ## Lineage {#lineage}
 
-A fork names its parent in `summary.json` and copies the parent's log. A subagent
+A fork names its parent in `summary.json` and copies the parent's log, and the
+summary can land just after the log starts. A session with no summary yet waits
+until it has one or goes idle, since rows are written once. A subagent
 names no parent at all: its `session_kind` starts with `subagent`, and only the
 parent's `subagents/<child>/meta.json` records the link, so the reader looks there,
 own bucket first, and remembers what it finds. A fresh subagent with no link yet

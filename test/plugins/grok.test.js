@@ -159,7 +159,7 @@ test('consecutive prompts stay separate messages', async t => {
 
 test('session identity survives a missing summary and refuses a mismatched one', async t => {
   const { dir, cwd, root } = await setup(t, { summary: null })
-  assert.deepEqual(await readGrokSession(dir, root), { id: SESSION, cwd, policy_dirs: [cwd], lineage: [SESSION], fork_sources: [] })
+  assert.deepEqual(await readGrokSession(dir, root), { id: SESSION, cwd, policy_dirs: [cwd], lineage: [SESSION], fork_sources: [], parent_pending: true })
   await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: 'other', cwd } }))
   await assert.rejects(readGrokSession(dir, root), /unsupported_session/)
   await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, parent_session_id: 'parent', head_branch: 'main', git_root_dir: '/repo/', git_remotes: ['https://user:token@example.com/o/r.git'], head_commit: 'a'.repeat(40) }))
@@ -171,6 +171,8 @@ test('session identity survives a missing summary and refuses a mismatched one',
 })
 
 test('a subagent finds its parent from the parent side, and waits until the link exists', async t => {
+  // The lookup walks at most once a second, so a miss is seen again until then.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
   const { dir, cwd, root, file } = await setup(t, { summary: null })
   await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, session_kind: 'subagent' }))
   assert.equal((await readGrokSession(dir, root)).parent_pending, true)
@@ -178,6 +180,7 @@ test('a subagent finds its parent from the parent side, and waits until the link
   const meta = path.join(path.dirname(dir), 'the-parent', 'subagents', SESSION)
   await fs.mkdir(meta, { recursive: true })
   await fs.writeFile(path.join(meta, 'meta.json'), '{}')
+  t.mock.timers.tick(1001)
   const child = await readGrokSession(dir, root)
   assert.equal(child.parent_thread_id, 'the-parent')
   assert.deepEqual(child.lineage, [SESSION, 'the-parent'])
@@ -342,6 +345,8 @@ test('rows from separate batches and reads keep one chain, tool names and start 
 
 test('without a summary the start time still comes from the session, not the write', async t => {
   const { root, file } = await setup(t, { summary: null })
+  const old = new Date(Date.now() - IDLE_FLUSH_MS - 1000)
+  await fs.utimes(file, old, old)
   const projections = []
   for await (const item of readGrokTranscript(file, { root, policy: allowAll })) if (item.projection) projections.push(item.projection)
   assert.equal(projections[0].conversation_started_at, new Date(1793000000100).toISOString())
@@ -359,6 +364,87 @@ test('a fork shorter than its parent keeps its own messages under the parent flo
   await withheld.mark('the-parent', 1024 * 1024)
   const { messages } = await read(file, { root, withheld })
   assert.deepEqual(messages.map(m => /** @type {any} */ (m.content)[0].text), ['the fork'])
+})
+
+test('a session with no summary yet waits, since a fork could copy an ignored parent', async t => {
+  const { root, file, dir, cwd } = await setup(t, { summary: null })
+  const policy = createGrokPolicy(new Set(['parent']), { resolve: () => ({ class: 'sync' }) })
+  const early = await read(file, { root, policy })
+  assert.deepEqual(early.messages, [])
+  assert.equal(early.cursor, undefined)
+  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, parent_session_id: 'parent' }))
+  const late = await read(file, { root, policy })
+  assert.deepEqual(late.messages, [])
+  assert.equal(late.dropped, true)
+})
+
+/** @param {string} text */
+const user = text => ({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text } })
+/** @param {string} text */
+const reply = text => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+const usage = { inputTokens: 1000, outputTokens: 50, totalTokens: 1050, cachedReadTokens: 800, cacheCreationTokens: 0, reasoningTokens: 20, modelCalls: 2, costUsdTicks: 147226800 }
+
+test('a turn\'s usage rides its last assistant row, net of cache, and sums once', async t => {
+  const { root, file } = await setup(t, { text: jsonl([
+    envelope(user('go')),
+    envelope(reply('thinking aloud')),
+    envelope({ sessionUpdate: 'tool_call', toolCallId: 'a', title: 'read_file' }),
+    envelope({ sessionUpdate: 'tool_call_update', toolCallId: 'a', status: 'completed', content: [] }),
+    envelope(reply('done')),
+    envelope({ sessionUpdate: 'turn_completed', usage }),
+  ]) })
+  const { messages } = await read(file, { root })
+  const carriers = messages.filter(m => m.attributes?.usage)
+  assert.equal(carriers.length, 1)
+  assert.equal(/** @type {any} */ (carriers[0].content)[0].text, 'done')
+  assert.deepEqual(carriers[0].attributes?.usage, { input_tokens: 200, output_tokens: 50, cache_read_tokens: 800, cache_write_tokens: 0, reasoning_tokens: 20, total_tokens: 1050, cost_usd: 0.01472268 })
+})
+
+test('a turn with no open assistant row still counts, off the chain', async t => {
+  const { root, file } = await setup(t, { text: jsonl([
+    envelope(user('go')),
+    envelope({ sessionUpdate: 'tool_call', toolCallId: 'a', title: 'read_file' }),
+    envelope({ sessionUpdate: 'tool_call_update', toolCallId: 'a', status: 'completed', content: [] }),
+    envelope({ sessionUpdate: 'turn_completed', stop_reason: 'cancelled', usage }),
+    envelope(user('again')),
+    envelope({ sessionUpdate: 'turn_completed' }),
+  ]) })
+  const { messages } = await read(file, { root })
+  const carrier = messages.find(m => m.attributes?.usage)
+  assert.equal(carrier?.role, 'assistant')
+  assert.deepEqual(carrier?.content, [{ type: 'text', text: '' }])
+  const result = messages.find(m => m.role === 'user' && /** @type {any} */ (m.content)[0].type === 'tool_result')
+  assert.deepEqual(carrier?.previous_message_id, [result?.message_id])
+  assert.deepEqual(messages.at(-1)?.previous_message_id, [result?.message_id])
+  assert.equal(messages.filter(m => m.attributes?.usage).length, 1)
+})
+
+test('a fork counts its own turns, not the ones it copied', async t => {
+  const forkedAt = 1793000500000
+  const at = (/** @type {any} */ update, /** @type {number} */ ms) => envelope(update, { agentTimestampMs: ms })
+  const { root, file } = await setup(t, {
+    text: jsonl([at(user('old'), forkedAt - 9), at(reply('old reply'), forkedAt - 8), at({ sessionUpdate: 'turn_completed', usage }, forkedAt - 7), at(user('new'), forkedAt + 1), at(reply('new reply'), forkedAt + 2), at({ sessionUpdate: 'turn_completed', usage }, forkedAt + 3)]),
+    summary: { info: { id: SESSION, cwd: path.join(os.tmpdir(), 'grok-fork') }, parent_session_id: 'parent', forked_at: new Date(forkedAt).toISOString() },
+  })
+  const { messages } = await read(file, { root })
+  assert.deepEqual(messages.filter(m => m.attributes?.usage).map(m => /** @type {any} */ (m.content)[0].text), ['new reply'])
+})
+
+test('a turn without usage numbers carries none', async t => {
+  const { root, file } = await setup(t, { text: jsonl([envelope(user('go')), envelope(reply('hi')), envelope({ sessionUpdate: 'turn_completed', usage: { inputTokens: 'many' } })]) })
+  const { messages } = await read(file, { root })
+  assert.equal(messages.some(m => m.attributes?.usage), false)
+})
+
+test('prompts queued together stay separate, and one prompt\'s chunks stay together', async t => {
+  const { root, file } = await setup(t, { text: jsonl([
+    envelope(user('text '), { agentTimestampMs: 1793000000100 }),
+    envelope(user('more'), { agentTimestampMs: 1793000000100 }),
+    envelope(user('queued'), { agentTimestampMs: 1793000000300 }),
+    envelope({ sessionUpdate: 'turn_completed' }),
+  ]) })
+  const { messages } = await read(file, { root })
+  assert.deepEqual(messages.map(m => /** @type {any} */ (m.content)[0].text), ['text more', 'queued'])
 })
 
 test('a resumed subagent keeps out what its source wrote while ignored', async t => {
