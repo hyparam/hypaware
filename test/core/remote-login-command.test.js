@@ -620,7 +620,7 @@ test('waitForCentralConverge: default probe converges on the active slot, never 
 
   await fs.writeFile(path.join(controlDir, 'config.a.json'), '{"version": 2}\n')
   // The pointer the apply engine writes on this host: a symlink on POSIX,
-  // a regular pointer file on win32 (LLP 0578).
+  // a regular pointer file on win32 (LLP 0580).
   if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
   else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
   const applied = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
@@ -644,7 +644,7 @@ test('waitForCentralConverge: an unreadable active pointer reaches the probe-err
 
   // An `active` that is not a symlink is a pointer this process cannot read
   // (readlink EINVAL), which the probe surfaces rather than swallows. On
-  // win32 a regular pointer file is the written representation (LLP 0578),
+  // win32 a regular pointer file is the written representation (LLP 0580),
   // so this POSIX-only tamper shape cannot be arranged there.
   if (process.platform !== 'win32') {
     await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
@@ -770,7 +770,7 @@ test('a central layer whose PATH cannot be resolved fails the D4 gate CLOSED too
   // damaged pointer makes an enrolled machine look like it never joined even
   // though the slot file still names the org's server verbatim. Repairing the
   // pointer brings that enrollment straight back, so the gate must refuse.
-  // On win32 a regular pointer file is the written representation (LLP 0578),
+  // On win32 a regular pointer file is the written representation (LLP 0580),
   // so the unresolvable shapes there are a file naming no slot; the symlink
   // shapes stay POSIX-only.
   const shapes = /** @type {[string, (dir: string) => Promise<unknown>][]} */ (process.platform === 'win32'

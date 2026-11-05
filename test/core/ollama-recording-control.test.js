@@ -34,7 +34,7 @@ test('fresh policy follows enrollment, slot flips and disabled central ownership
     assert.deepEqual(read(), { recording: false, reason: 'recording_disabled' })
     await fs.writeFile(path.join(f.control, 'config.a.json'), JSON.stringify({ plugins: [{ name: '@hypaware/ollama', enabled: false }] }))
     // The pointer the apply engine writes on this host: a symlink on POSIX,
-    // a regular pointer file on win32 (LLP 0578).
+    // a regular pointer file on win32 (LLP 0580).
     if (process.platform === 'win32') await fs.writeFile(path.join(f.control, 'active'), 'config.a.json\n')
     else await fs.symlink('config.a.json', path.join(f.control, 'active'))
     assert.deepEqual(read(), { recording: false, reason: 'owner_disabled' })

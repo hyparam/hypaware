@@ -31,7 +31,7 @@ function env(hypHome) {
 
 /**
  * Write the active-slot pointer the way the apply engine does on this host:
- * a relative symlink on POSIX, a regular pointer file on win32 (LLP 0578).
+ * a relative symlink on POSIX, a regular pointer file on win32 (LLP 0580).
  *
  * @param {string} controlDir
  * @param {string} slotName
@@ -314,7 +314,7 @@ test('an active pointer replaced by a regular file reports the central layer unr
   // The slot file still holds a central sink, but the pointer that would
   // name it cannot be followed: on POSIX a plain file where the symlink
   // belongs (any content), on win32 - where a plain pointer file is the
-  // written representation (LLP 0578) - one whose content names no slot.
+  // written representation (LLP 0580) - one whose content names no slot.
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({
     version: 2,
     plugins: [{ name: '@hypaware/central' }],
@@ -403,7 +403,7 @@ const UNREADABLE_CENTRAL_STATES = [
   }],
   ['an active pointer that is a regular file', async (controlDir) => {
     // On win32 a regular pointer file is the written representation
-    // (LLP 0578), so the unfollowable shape there is one naming no slot.
+    // (LLP 0580), so the unfollowable shape there is one naming no slot.
     await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2 }) + '\n')
     await fs.writeFile(path.join(controlDir, 'active'), process.platform === 'win32' ? 'not-a-slot' : 'config.a.json')
   }],

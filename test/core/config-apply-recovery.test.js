@@ -185,7 +185,7 @@ test('boot recovers a wedged active slot by falling back to the seed when one su
   fs.writeFileSync(path.join(controlDir, 'config.b.json'), JSON.stringify(REMOTE_CONFIG, null, 2) + '\n')
   fs.writeFileSync(path.join(controlDir, 'config.b.etag'), 'etag-1\n')
   // The pointer the apply engine writes on this host: a symlink on POSIX,
-  // a regular pointer file on win32 (LLP 0578).
+  // a regular pointer file on win32 (LLP 0580).
   if (process.platform === 'win32') {
     fs.writeFileSync(path.join(controlDir, 'active'), 'config.b.json\n')
   } else {

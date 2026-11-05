@@ -102,7 +102,7 @@ test('leave clears an applied central slot, not just the seed', async () => {
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(applied, null, 2) + '\n')
   await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1\n')
   // The pointer the apply engine writes on this host: a symlink on POSIX,
-  // a regular pointer file on win32 (LLP 0578).
+  // a regular pointer file on win32 (LLP 0580).
   if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
   else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
 
@@ -125,7 +125,7 @@ test('leave names the neutral destination when the central layer carries no sink
   }
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(applied, null, 2) + '\n')
   // The pointer the apply engine writes on this host: a symlink on POSIX,
-  // a regular pointer file on win32 (LLP 0578).
+  // a regular pointer file on win32 (LLP 0580).
   if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
   else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
 
@@ -283,7 +283,7 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
   // follow, so keying leave's "nothing to do" on the resolved path alone would
   // make that advice a dead end: the gate would refuse forever and leave would
   // claim there is nothing to disconnect.
-  // On win32 a regular pointer file is the written representation (LLP 0578),
+  // On win32 a regular pointer file is the written representation (LLP 0580),
   // so the unresolvable shape there is a file naming no slot; the symlink
   // shapes stay POSIX-only.
   const shapes = /** @type {[string, (dir: string) => Promise<unknown>][]} */ (process.platform === 'win32'

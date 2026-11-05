@@ -1,4 +1,4 @@
-# LLP 0578: win32 active-slot pointer is a regular file
+# LLP 0580: win32 active-slot pointer is a regular file
 
 **Type:** Decision
 **Status:** Draft

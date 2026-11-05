@@ -787,7 +787,7 @@ const UNREADABLE_CENTRAL_WITHOUT_PARSE = [
   }, process.platform === 'win32' && 'symlink creation needs Developer Mode on win32'],
   ['an active pointer that is a regular file', async (controlDir) => {
     await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2, plugins: [] }))
-    // On win32 a regular pointer file IS the normal pointer (LLP 0578), so
+    // On win32 a regular pointer file IS the normal pointer (LLP 0580), so
     // the tampered shape there is a pointer whose content names no slot.
     await fs.writeFile(path.join(controlDir, 'active'), process.platform === 'win32' ? 'not-a-slot' : 'config.a.json')
   }],

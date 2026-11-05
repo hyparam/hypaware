@@ -383,7 +383,7 @@ for (const applied of [false, true]) {
     if (applied) {
       fs.renameSync(remote.configPath, path.join(path.dirname(remote.configPath), 'config.a.json'))
       // The pointer the apply engine writes on this host: a symlink on POSIX,
-      // a regular pointer file on win32 (LLP 0578).
+      // a regular pointer file on win32 (LLP 0580).
       if (process.platform === 'win32') fs.writeFileSync(path.join(path.dirname(remote.configPath), 'active'), 'config.a.json\n')
       else fs.symlinkSync('config.a.json', path.join(path.dirname(remote.configPath), 'active'))
     }

@@ -321,7 +321,7 @@ export function createConfigControl(opts) {
       // An unprivileged win32 process cannot create a file symlink, so the
       // pointer is a regular file holding the slot's basename; the rename
       // still replaces atomically, keeping the old-or-new crash guarantee.
-      // @ref LLP 0578#decision [implements]: the win32 pointer is a regular file, POSIX keeps the symlink
+      // @ref LLP 0580#decision [implements]: the win32 pointer is a regular file, POSIX keeps the symlink
       fs.writeFileSync(tmp, `${path.basename(slotPath(slot))}\n`, { mode: 0o600 })
     } else {
       fs.symlinkSync(path.basename(slotPath(slot)), tmp)

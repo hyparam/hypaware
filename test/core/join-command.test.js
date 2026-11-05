@@ -136,7 +136,7 @@ test('join supersedes a stale active slot so the fresh token is honored (#139)',
   await fs.writeFile(path.join(controlDir, 'config.b.json'), JSON.stringify(staleSlot, null, 2) + '\n')
   await fs.writeFile(path.join(controlDir, 'config.b.etag'), 'stale-etag\n')
   // The pointer the apply engine writes on this host: a symlink on POSIX,
-  // a regular pointer file on win32 (LLP 0578).
+  // a regular pointer file on win32 (LLP 0580).
   if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.b.json\n')
   else await fs.symlink('config.b.json', path.join(controlDir, 'active'))
 
