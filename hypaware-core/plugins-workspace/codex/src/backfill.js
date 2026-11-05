@@ -20,6 +20,8 @@ import { detach } from './settings.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import {
   contentItemKinds,
+  compactedMessageFromPayload,
+  compactionSummaryFromMessage,
   copyNumberAlias,
   firstString,
   netInputUsage,
@@ -735,8 +737,10 @@ function isDeliveredAssistantEvidence(metadata, payload) {
  * usage and is captured as a synthetic turn-boundary marker (no message). An
  * `item_completed` `event_msg` carries a completed TurnItem, which is kept for
  * a turn that recorded no model response items of its own (see
- * `completedTurnItems`). All other `event_msg` / `compacted` and unknown line
- * types are skipped. A blank or truncated line never aborts the parse.
+ * `completedTurnItems`).
+ * `compacted` checkpoints carry local plaintext summaries; their retained
+ * history is not replayed as new messages. Other event/line types are skipped. A
+ * blank or truncated line never aborts the parse.
  *
  * @param {string} text
  * @param {string} filePath
@@ -796,6 +800,14 @@ function parseJsonlRollout(text, filePath) {
         }
       }
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
+    } else if (type === 'compacted' && payload) {
+      // Drop the potentially large replacement snapshot before accumulating the
+      // session's items. Keep even an opaque checkpoint as a usage boundary.
+      items.push({
+        payload: { type: 'compacted' },
+        projectedMessage: compactedMessageFromPayload(payload),
+        timestampMs: timestampToMs(row.timestamp),
+      })
     } else if (type === 'event_msg' && payload) {
       if (payload.type === 'task_started') {
         tracksLifecycle = true
@@ -1026,6 +1038,10 @@ function projectedExchangeFromSession(args) {
   // message and dedupe to one row. @ref LLP 0035#per-turn
   let turnStartIndex = 0
   for (const item of items) {
+    // A checkpoint closes the pre-compaction turn even when it is opaque.
+    // Subsequent token_count can repeat the last response's usage after Codex
+    // recomputes context size; it must not re-bill that response or the summary.
+    if (item.payload.type === 'compacted') turnStartIndex = messages.length
     if (item.usageAttributes) {
       stampUsageOnLastAssistant(messages, item.usageAttributes, turnStartIndex)
       turnStartIndex = messages.length
@@ -1130,7 +1146,10 @@ function projectedMessageFromItem(item) {
   let message
   switch (itemType) {
   case 'message':
-    message = messageItemToProjected(payload)
+    message = compactionSummaryFromMessage(payload) ?? messageItemToProjected(payload)
+    break
+  case 'compacted':
+    message = item.projectedMessage ?? compactedMessageFromPayload(payload)
     break
   case 'function_call':
   case 'custom_tool_call': {
@@ -1155,6 +1174,7 @@ function projectedMessageFromItem(item) {
   const nativeId = stringValue(payload.id)
   if (nativeId) message.message_id = nativeId
   if (item.timestampMs !== undefined) message.message_created_at = new Date(item.timestampMs).toISOString()
+  // The checkpoint helper recovers an id from its matching replacement item.
   // Carry the native item type as a provenance breadcrumb on the row.
   const providerType = item.turnItemType ?? itemType
   if (providerType) message.provider_type = providerType
