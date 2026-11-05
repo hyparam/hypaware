@@ -949,7 +949,11 @@ for (const flags of [[], ['--foreground'], ['-f']]) {
     } finally {
       clearTimeout(timeout)
       child.kill('SIGKILL')
-      await fs.rm(root, { recursive: true, force: true })
+      // The daemon forks a processor child that a parent SIGKILL does not
+      // reap on win32 (no process-group kill), so it can still hold a handle
+      // on dev-telemetry when the cleanup runs - rmdir then fails ENOTEMPTY
+      // until the handle releases. Retry over that brief window.
+      await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     }
   })
 }
