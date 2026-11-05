@@ -187,6 +187,10 @@ export function daemonIncompleteNote(platform, context) {
  */
 export function setupUnsupportedNote(platform) {
   if (setupPlatformIsSupported(platform)) return undefined
-  return `hyp setup: unsupported platform: ${platform} (only macOS and Linux are supported)\n`
+  const note = `hyp setup: unsupported platform: ${platform} (only macOS and Linux are supported)\n`
     + '  nothing was changed: no sign-in, enrollment or config write happened\n'
+  // @ref LLP 0584#gate: the daemon runs on win32 even though setup does not, so point at the manual path
+  return platform === 'win32'
+    ? note + "  on Windows, set up by hand: run 'hyp daemon install', then 'hyp client attach <client>'\n"
+    : note
 }

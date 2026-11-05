@@ -68,7 +68,7 @@ export function planDaemonInstall(options) {
   const platform = options.platform ?? process.platform
   if (!platformIsSupported(platform)) {
     throw new DaemonInstallError(
-      `unsupported platform: ${platform} (only darwin, linux and win32 are supported)`
+      `unsupported platform: ${platform} (only macOS, Linux and Windows are supported)`
     )
   }
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
@@ -196,7 +196,7 @@ export async function installDaemon(options) {
   const platform = options.platform ?? process.platform
   if (!platformIsSupported(platform)) {
     throw new DaemonInstallError(
-      `unsupported platform: ${platform} (only darwin, linux and win32 are supported)`
+      `unsupported platform: ${platform} (only macOS, Linux and Windows are supported)`
     )
   }
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
@@ -239,7 +239,7 @@ export async function uninstallDaemon(options) {
   const platform = options.platform ?? process.platform
   if (!platformIsSupported(platform)) {
     throw new DaemonInstallError(
-      `unsupported platform: ${platform} (only darwin, linux and win32 are supported)`
+      `unsupported platform: ${platform} (only macOS, Linux and Windows are supported)`
     )
   }
   await withDaemonOp(

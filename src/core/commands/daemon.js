@@ -421,12 +421,14 @@ export async function runDaemonStop(argv, ctx, deps = {}) {
     // tuning it cannot leave a user-facing message quoting the old one
     // (LLP 0343#stop-window).
     const waited = `${DAEMON_STOP_TIMEOUT_MS / 1_000}s`
-    if (status.platform === 'win32') {
+    if (status.platform === 'win32' && status.installed) {
       // The graceful file-channel request went unconsumed: the daemon is
       // wedged. Escalate to the task's hard stop (schtasks /End, a
       // TerminateProcess) so `stop` still stops it - losing only the in-flight
       // flush of a process that was already ignoring the graceful path. Only
-      // ever reached in this pathological case, never the routine stop.
+      // ever reached in this pathological case, never the routine stop. With
+      // no task installed (a foreground `hyp daemon run`) there is nothing to
+      // End, so that case reports the timeout like the POSIX path below.
       // @ref LLP 0584#stop [implements]: graceful first, hard-kill via the task on timeout
       try {
         await stopServiceDaemon(options)
@@ -435,7 +437,7 @@ export async function runDaemonStop(argv, ctx, deps = {}) {
         return 1
       }
       await clearStaleDaemonPidFiles(stateDir)
-      ctx.stderr.write(`hyp daemon stop: the daemon did not consume the stop request within ${waited}; force-stopped it through the scheduled task\n`)
+      ctx.stderr.write(`hyp daemon stop: the daemon did not stop within ${waited}, so it was force-stopped; anything it had not saved yet may be lost\n`)
       return 0
     }
     // `hyp daemon stop:`, not the bare `daemon:` the success lines use: this
@@ -567,7 +569,13 @@ export async function runDaemonInstall(argv, ctx, opts = {}) {
     ctx.stdout.write(`✓ Daemon installed (${daemonKindLabel(plan.platform)})\n`)
     ctx.stdout.write(`  target:  ${plan.targetPath}\n`)
     ctx.stdout.write(`  config:  ${plan.configPath}\n`)
-    ctx.stdout.write(`  logs:    ${plan.logDir}/daemon.out.log\n`)
+    // win32: the scheduled task redirects no output, so there is no
+    // daemon.out.log to point at.
+    if (plan.platform === 'win32') {
+      ctx.stdout.write('  if the daemon crashes, Windows restarts it within about a minute\n')
+    } else {
+      ctx.stdout.write(`  logs:    ${plan.logDir}/daemon.out.log\n`)
+    }
     return 0
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

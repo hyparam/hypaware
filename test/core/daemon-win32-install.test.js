@@ -4,6 +4,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
+/**
+ * @import { SchtasksAdapter } from '../../src/core/daemon/types.js'
+ */
+
 import {
   buildTaskXml,
   planTaskInstall,
@@ -30,13 +34,13 @@ const NODE = 'C:\\Program Files\\nodejs\\node.exe'
 /**
  * A recording fake Task Scheduler. `query` reports Running by default so the
  * install-means-running poll settles at once; override any verb per test.
- * @param {Partial<import('../../src/core/daemon/types.js').SchtasksAdapter>} [overrides]
+ * @param {Partial<SchtasksAdapter>} [overrides]
  */
 function fakeSchtasks(overrides = {}) {
   /** @type {Array<{ verb: string, taskName: string, xmlPath?: string, xmlBytes?: Buffer }>} */
   const calls = []
   const ok = { exitCode: 0, stdout: '', stderr: '' }
-  /** @type {import('../../src/core/daemon/types.js').SchtasksAdapter} */
+  /** @type {SchtasksAdapter} */
   const adapter = {
     async create(taskName, xmlPath) { calls.push({ verb: 'create', taskName, xmlPath, xmlBytes: fs.readFileSync(xmlPath) }); return ok },
     async delete(taskName) { calls.push({ verb: 'delete', taskName }); return ok },
