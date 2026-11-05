@@ -39,6 +39,23 @@ export function present(file) {
 export function fingerprint(stat) { return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}` }
 
 /**
+ * How long a file's timestamps must have stood before its fingerprint can
+ * vouch that nothing was rewritten in place. Filesystem timestamps move in
+ * ticks - roughly 16ms for the NTFS clock, a full second on HFS+ - so a
+ * same-size rewrite landing in the same tick as the write the fingerprint
+ * was taken from leaves every field of it unchanged. Until the stat has aged
+ * past the coarsest of those ticks a matching fingerprint is treated as
+ * unsettled and the file is read again, which replays rows that are harmless
+ * by native ID, rather than skipping a rewrite the stat cannot distinguish.
+ */
+const FINGERPRINT_SETTLE_MS = 2000
+
+/** @param {Stats} stat */
+export function fingerprintSettled(stat) {
+  return Date.now() - Math.max(stat.mtimeMs, stat.ctimeMs) >= FINGERPRINT_SETTLE_MS
+}
+
+/**
  * Snapshot one transcript, yielding bounded batches and a success-only cursor.
  * The consumer must finish writing a batch before requesting the next item.
  * @param {string} file
@@ -72,8 +89,10 @@ export async function* readDroidTranscript(file, opts) {
     let sequence = -1
     const cursor = opts.cursor
     if (cursor && cursor.inode === inode && cursor.header === header && cursor.offset <= stat.size &&
-        // A same-size edit is not an append. Replaying is harmless by native ID.
-        (cursor.offset < stat.size || cursor.fingerprint === currentFingerprint) &&
+        // A same-size edit is not an append, and a fingerprint can only rule
+        // one out once the stat has aged past the timestamp tick (see
+        // `fingerprintSettled`). Replaying is harmless by native ID.
+        (cursor.offset < stat.size || (cursor.fingerprint === currentFingerprint && fingerprintSettled(stat))) &&
         cursor.boundary === await boundary(fd, cursor.offset)) {
       offset = cursor.offset
       sequence = cursor.sequence

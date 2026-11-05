@@ -226,6 +226,47 @@ test('launchClient: an explicit cwd is honoured, so the low-level seam stays par
   assert.deepEqual(spawner.calls[0].args, [FIRST.prompt])
 })
 
+test('launchClient: a .cmd client on win32 rides an escaped cmd.exe line, not a bare spawn', async () => {
+  // Node refuses to spawn a `.cmd` directly (the CVE-2024-27980 fix), and
+  // the prompt is free text, so the launch goes through `ComSpec /d /s /c`
+  // with the line escaped by `cmdFileSpawnPlan` and Node's own quoting off.
+  const spawner = recordingSpawn()
+  await launchClient({
+    launcher: { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: 'C:\\apps\\claude.CMD', args: ['{prompt}'] },
+    prompt: 'pct %PATH% & echo pwned',
+    env: { ComSpec: 'C:\\WINDOWS\\system32\\cmd.exe' },
+    spawnFn: spawner.fn,
+    platform: 'win32',
+  })
+  assert.equal(spawner.calls.length, 1)
+  assert.equal(spawner.calls[0].cmd, 'C:\\WINDOWS\\system32\\cmd.exe')
+  assert.deepEqual(spawner.calls[0].args.slice(0, 3), ['/d', '/s', '/c'])
+  // The one line carries the script and the escaped prompt; the raw
+  // metacharacters never appear unescaped.
+  assert.match(spawner.calls[0].args[3], /claude\.CMD/)
+  assert.doesNotMatch(spawner.calls[0].args[3], /[^^]&/)
+  assert.equal(spawner.calls[0].opts.windowsVerbatimArguments, true)
+  assert.equal(spawner.calls[0].opts.stdio, 'inherit')
+})
+
+test('launchClient: a resolved .exe on win32, and any client elsewhere, spawns directly', async () => {
+  // Only a command script needs cmd.exe; an .exe (the native Claude Code
+  // install) takes real argv, and POSIX is untouched whatever the name.
+  for (const [platform, binPath] of [['win32', 'C:\\apps\\claude.EXE'], ['linux', '/opt/claude.cmd']]) {
+    const spawner = recordingSpawn()
+    await launchClient({
+      launcher: { client: 'claude', label: 'Claude Code', bin: 'claude', binPath, args: ['{prompt}'] },
+      prompt: 'plain question',
+      env: {},
+      spawnFn: spawner.fn,
+      platform,
+    })
+    assert.equal(spawner.calls[0].cmd, binPath)
+    assert.deepEqual(spawner.calls[0].args, ['plain question'])
+    assert.equal(spawner.calls[0].opts.windowsVerbatimArguments, undefined)
+  }
+})
+
 test('launchClient: a prompt is substituted literally, not read as a replacement pattern', () => {
   // `hyp report fix` builds its prompt from a fetched page's title, so the
   // prompt is no longer always a constant this file wrote.

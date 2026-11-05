@@ -340,11 +340,19 @@ test('OpenCode backfill still fails when the list command runs and errors', asyn
  */
 async function hangingOpenCodeOnPath() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-opencode-hang-'))
-  const bin = path.join(root, 'opencode')
-  // `exec` so the signal reaches the sleep itself, leaving no orphan holding
-  // the stdout pipe open past the kill.
-  await fs.writeFile(bin, '#!/bin/sh\nexec sleep 30\n', 'utf8')
-  await fs.chmod(bin, 0o755)
+  if (process.platform === 'win32') {
+    // A pure-batch spin: the runner drives this through cmd.exe, whose kill
+    // reaches only cmd itself, and anything cmd spawned (sleep, ping) would
+    // be a grandchild holding the stdout pipe open past the kill - execFile
+    // settles only once every stdio stream closes.
+    await fs.writeFile(path.join(root, 'opencode.cmd'), '@ECHO OFF\r\n:loop\r\ngoto loop\r\n')
+  } else {
+    const bin = path.join(root, 'opencode')
+    // `exec` so the signal reaches the sleep itself, leaving no orphan holding
+    // the stdout pipe open past the kill.
+    await fs.writeFile(bin, '#!/bin/sh\nexec sleep 30\n', 'utf8')
+    await fs.chmod(bin, 0o755)
+  }
   const priorPath = process.env.PATH
   process.env.PATH = `${root}${path.delimiter}${priorPath ?? ''}`
   return async () => {
@@ -358,7 +366,7 @@ async function hangingOpenCodeOnPath() {
 // read between sessions, so the abort was not observed either. Both tests run
 // the real runner against a real hung child and shorten only the wait, then
 // assert the budget the call site chose alongside.
-test('a hung OpenCode session listing is killed on its budget and fails the run', { skip: process.platform === 'win32' && 'launching a .cmd client on win32 is deferred (needs cmd.exe-safe quoting of untrusted prompt text)' }, async () => {
+test('a hung OpenCode session listing is killed on its budget and fails the run', async () => {
   const restore = await hangingOpenCodeOnPath()
   /** @type {number[]} */
   const budgets = []
@@ -379,7 +387,7 @@ test('a hung OpenCode session listing is killed on its budget and fails the run'
   }
 })
 
-test('a hung OpenCode export is killed on its budget and warns past the session', { skip: process.platform === 'win32' && 'launching a .cmd client on win32 is deferred (needs cmd.exe-safe quoting of untrusted prompt text)' }, async () => {
+test('a hung OpenCode export is killed on its budget and warns past the session', async () => {
   const restore = await hangingOpenCodeOnPath()
   /** @type {number[]} */
   const budgets = []

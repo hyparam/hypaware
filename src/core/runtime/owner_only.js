@@ -1,11 +1,15 @@
 // @ts-check
 
+import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { promisify } from 'node:util'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { cacheRootOf } from './paths.js'
+
+const execFileAsync = promisify(execFile)
 
 /**
  * @import { FileHandle } from 'node:fs/promises'
@@ -46,11 +50,11 @@ const CACHE_ROOT_ENTRIES = new Set(['datasets', 'plugins', 'session-purges', '.p
  *
  * @ref LLP 0569#verified-root [implements]: owner, type and mode all go through one descriptor, never a path re-check
  * @param {string} dir
- * @param {{ knownEntries?: (name: string) => boolean }} [opts]
+ * @param {{ knownEntries?: (name: string) => boolean, execFileFn?: typeof execFileAsync }} [opts]
  * @returns {Promise<OwnerRootOutcome>}
  */
 export async function secureOwnerRoot(dir, opts = {}) {
-  if (process.platform === 'win32') return 'unsupported'
+  if (process.platform === 'win32') return secureOwnerRootWin32(dir, opts)
   /** @type {string} */
   let real
   /** @type {FileHandle | undefined} */
@@ -88,6 +92,76 @@ export async function secureOwnerRoot(dir, opts = {}) {
   } finally {
     await handle.close().catch(() => undefined)
   }
+}
+
+/**
+ * The win32 half: the same verified roots, tightened with an
+ * inheritance-stripped DACL instead of a mode, because POSIX modes toggle
+ * nothing on Windows. Full control to the current user (by SID, read once
+ * per process from `whoami /user`, so localization and renames cannot
+ * misdirect the grant), SYSTEM, and Administrators - the OpenSSH
+ * private-key convention - all `(OI)(CI)`, so everything created under the
+ * root afterwards inherits owner-only. `icacls` takes a path, so the
+ * descriptor discipline of the POSIX half does not transfer; the change
+ * only ever narrows access to principals that could already reach the
+ * data. `unchanged` is never reported: reading a DACL back means parsing
+ * localized output, and re-applying is idempotent. A root the user cannot
+ * re-ACL fails the `icacls` and is left as found (`'error'`, one warning
+ * at the caller).
+ *
+ * @ref LLP 0582#decision [implements]: one icacls per verified root, grants named by SID, never recursive
+ * @param {string} dir
+ * @param {{ knownEntries?: (name: string) => boolean, execFileFn?: typeof execFileAsync }} opts
+ * @returns {Promise<OwnerRootOutcome>}
+ */
+async function secureOwnerRootWin32(dir, opts) {
+  const run = opts.execFileFn ?? execFileAsync
+  /** @type {string} */
+  let real
+  try {
+    real = await fs.realpath(dir)
+  } catch (err) {
+    return openFailure(err)
+  }
+  try {
+    if (!(await fs.lstat(real)).isDirectory()) return 'not_directory'
+    if (opts.knownEntries && !await onlyKnownEntries(real, opts.knownEntries)) return 'not_dedicated'
+    const sid = await currentUserSid(run)
+    if (!sid) return 'error'
+    await run('icacls', [
+      real,
+      '/inheritance:r',
+      '/grant:r',
+      `*${sid}:(OI)(CI)F`,
+      '*S-1-5-18:(OI)(CI)F',
+      '*S-1-5-32-544:(OI)(CI)F',
+    ], { windowsHide: true })
+    return 'secured'
+  } catch (err) {
+    return openFailure(err)
+  }
+}
+
+/** @type {Promise<string | undefined> | undefined} */
+let cachedSid
+
+/**
+ * The current user's SID, once per process. `whoami /user /fo csv /nh`
+ * prints one line, `"domain\user","S-1-...-..."`; the SID is the part that
+ * cannot be spoofed by an account name an attacker chose to resemble ours.
+ *
+ * @param {typeof execFileAsync} run
+ */
+function currentUserSid(run) {
+  cachedSid ??= run('whoami', ['/user', '/fo', 'csv', '/nh'], { windowsHide: true })
+    .then(({ stdout }) => /"(S-1-[0-9-]+)"\s*$/.exec(String(stdout).trim())?.[1])
+    .catch(() => undefined)
+  return cachedSid
+}
+
+/** Test-only: forget the per-process SID, so an injected runner is consulted. */
+export function resetCachedSidForTests() {
+  cachedSid = undefined
 }
 
 /**
