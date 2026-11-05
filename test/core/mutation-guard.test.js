@@ -109,3 +109,54 @@ test('claimPartitionMutation reclaims a dead owner and takes the guard', async (
   release()
   assert.equal(fs.existsSync(lockDir), false)
 })
+
+/**
+ * Fail the guard's own claim `mkdir` of the lock directory with `code`, leaving
+ * the recursive parent mkdir alone, with `process.platform` set to `platform`.
+ *
+ * @param {TestContext} t
+ * @param {string} code
+ * @param {NodeJS.Platform} platform
+ */
+async function failedClaimMkdir(t, code, platform) {
+  const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'hyp-mutation-guard-'))
+  t.after(() => fs.promises.rm(base, { recursive: true, force: true, maxRetries: 10 }))
+  const partitionDir = path.join(base, 'datasets', 'ds', 'source=a')
+  const real = Object.getOwnPropertyDescriptor(process, 'platform')
+  assert.ok(real)
+  Object.defineProperty(process, 'platform', { ...real, value: platform })
+  t.after(() => Object.defineProperty(process, 'platform', real))
+  const mkdirSync = fs.mkdirSync
+  t.mock.method(fs, 'mkdirSync', (/** @type {fs.PathLike} */ dir, /** @type {any} */ options) => {
+    if (options?.recursive) return mkdirSync(dir, options)
+    throw Object.assign(new Error(`${code}: injected`), { code })
+  })
+  return partitionDir
+}
+
+// On win32, the claim mkdir of a lock directory another process is removing
+// fails EPERM (delete-pending) or ENOENT rather than EEXIST. That is the same
+// lost race as the recovery path, so it must surface as busy for the caller's
+// bounded retry, not a raw throw that exits a cross-process allocator child
+// (the second sighting on #2886).
+for (const code of ['EPERM', 'ENOENT', 'EBUSY']) {
+  test(`claimPartitionMutation treats a win32 ${code} from the claim mkdir as busy`, async (t) => {
+    const partitionDir = await failedClaimMkdir(t, code, 'win32')
+    assert.throws(
+      () => claimPartitionMutation(partitionDir),
+      (err) => isPartitionMutationBusy(err),
+      `${code} from the claim mkdir should surface as a busy refusal on win32`,
+    )
+  })
+}
+
+// POSIX has no delete-pending state, so EPERM from the claim mkdir is a real
+// permission fault and stays raw rather than reading as retryable contention.
+test('claimPartitionMutation rethrows a POSIX EPERM from the claim mkdir raw', async (t) => {
+  const partitionDir = await failedClaimMkdir(t, 'EPERM', 'linux')
+  assert.throws(
+    () => claimPartitionMutation(partitionDir),
+    (err) => !isPartitionMutationBusy(err) && /** @type {NodeJS.ErrnoException} */ (err).code === 'EPERM',
+    'a POSIX permission fault must not be folded into busy',
+  )
+})
