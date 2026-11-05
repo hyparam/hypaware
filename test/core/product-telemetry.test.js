@@ -382,7 +382,10 @@ for (const applied of [false, true]) {
     const initial = effectivePolicy(root)
     if (applied) {
       fs.renameSync(remote.configPath, path.join(path.dirname(remote.configPath), 'config.a.json'))
-      fs.symlinkSync('config.a.json', path.join(path.dirname(remote.configPath), 'active'))
+      // The pointer the apply engine writes on this host: a symlink on POSIX,
+      // a regular pointer file on win32 (LLP 0578).
+      if (process.platform === 'win32') fs.writeFileSync(path.join(path.dirname(remote.configPath), 'active'), 'config.a.json\n')
+      else fs.symlinkSync('config.a.json', path.join(path.dirname(remote.configPath), 'active'))
     }
     assert.equal(productStatus(env).policy, 'enrolled_organization')
     assert.equal(effectivePolicy(root).binding, initial.binding)
@@ -428,7 +431,9 @@ test('automatic reporting honors off, local and malformed saved preferences', as
 // really survived it.
 for (const enrolled of [true, false]) {
   test(`an opt-out whose preference write fails reports collection ${enrolled ? 'is still enabled' : 'is off'}`, {
-    skip: process.getuid?.() === 0 && 'root writes through a mode-500 directory anyway'
+    skip: process.platform === 'win32'
+      ? 'chmod 0o500 does not make a directory unwritable on win32'
+      : process.getuid?.() === 0 && 'root writes through a mode-500 directory anyway'
   }, async (t) => {
     const home = temp(t)
     const env = { HYP_HOME: home }
@@ -872,6 +877,8 @@ test('canonical aliases, nested setup commands and cancellation count only the o
       registry,
       kernel,
       env,
+      // Keeps the setup gate (#975) from refusing on a win32 host.
+      platform: 'linux',
       stdout: { write() {} },
       stderr: { write() {} }
     }),
@@ -962,7 +969,10 @@ test('sender lock survives a live owner and recovers a dead owner after restart'
   assert(release)
   assert.equal(createOutbox(root).claim(), null)
   release()
-  fs.symlinkSync('2147483647-dead', path.join(root, 'sender.lock'))
+  // The lock's dead-owner shape, in this host's representation: a symlink
+  // whose target is the token on POSIX, a wx-file holding it on win32.
+  if (process.platform === 'win32') fs.writeFileSync(path.join(root, 'sender.lock'), '2147483647-dead')
+  else fs.symlinkSync('2147483647-dead', path.join(root, 'sender.lock'))
   const recovered = createOutbox(root).claim()
   assert(recovered)
   recovered()
