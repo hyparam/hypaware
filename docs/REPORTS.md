@@ -1,16 +1,24 @@
 # Generate and share reports
 
-Reports review your recorded AI work over a chosen period. Your agent examines
+Reports review recorded AI work over a chosen period, from this machine's
+recordings or from your team's on a configured remote. Your agent examines
 sessions, identifies recurring patterns, and proposes changes supported by the
 recordings.
 
 A report includes:
 
-- **Usage:** token use, models, and activity over time.
-- **Work:** recurring tasks, delegation, and opportunities to automate workflows.
-- **Health:** tool failures, retries, and how sessions recovered.
-- **Recommendations:** specific changes to skills, instructions, or configuration,
-  with evidence from the sessions that motivated them.
+- **Overview (`report.md`):** goals, outcomes, what deserves attention, and the
+  ranked recommendations.
+- **Comparison:** changes in outcomes and token use against the preceding period
+  of the same length.
+- **Work:** which projects and objectives used tokens, and what they produced.
+- **Automation:** usage from interactive work, unattended agents, recurring jobs,
+  and reviews.
+- **Repeated work:** where retries, rework, and repeated context loading used
+  tokens, and whether that repetition was necessary.
+- **Recommendations (`recommendation-<slug>.md`):** one page per proposed change
+  to skills, instructions, workflows, or configuration, with evidence from the
+  sessions that motivated it.
 
 The report is saved as Markdown for you to read and review. You can keep it
 locally or publish it to HypAware Cloud to share with your organization.
@@ -21,14 +29,20 @@ We recommend Fable or Astra for the best report quality.
 
 `hyp report generate` opens a recorded AI client that has the
 `hypaware-report` skill installed, which means Claude Code or Codex, to analyze
-your local recordings. Tell it which period to cover and what to investigate:
+this machine's recordings or your team's. Tell it which period to cover and what
+to investigate:
 
 <!-- agent: Use the hypaware-report skill to cover last week and focus on repeated debugging work. -->
 ```sh
 hyp report generate "Cover last week and focus on repeated debugging work"
 ```
 
-Without additional instructions, it reviews the previous calendar month.
+Before it starts, the skill asks for whatever your instructions leave open: the
+scope (this machine or the team), the period, and the focus. It suggests the
+last 7 days including today but waits for your answer. "Last week" means the
+last 7 days including today; ask for a calendar week or month to get those
+boundaries. Today's recordings are included and labeled partial, and the report
+compares the period with the preceding period of the same length.
 
 The report skill drafts `./hypaware-report-<from>-to-<to>/`, adding a numbered
 suffix if needed, and when the report is reviewed runs `hyp report save` on it,
@@ -37,7 +51,9 @@ finished report is in that one place, and `hyp report list` shows them beside
 the published ones (`hyp report list --local` shows them alone; in JSON, only
 `--local --json` lists them, and `--json` alone lists published reports). The agent
 never writes under your home directory itself; the CLI does the move, and
-only a folder that would publish is admitted. The session follows the current
+only a folder that would publish is admitted: `report.md` plus
+`comparison.md`, `work.md`, `automation.md`, `repeated-work.md`, `usage.md`,
+`health.md`, and `recommendation-<slug>.md` pages. The session follows the current
 directory's recording and sync policy, excerpts it quotes from `local-only`
 history included ([PRIVACY.md](PRIVACY.md#marking-directories)). Publishing
 remains a separate action, using `hyp report publish <name> ...`.
@@ -50,7 +66,8 @@ To get one recommendation instead of a full report, ask for it:
 hyp report generate "Give me one recommendation about repeated test failures"
 ```
 
-Unless you name a period, the skill uses the 14 days ending yesterday. It writes one
+If you have not named a period, the skill asks for one, suggesting the last 7
+days including today. It writes one
 `recommendation-<slug>.md` page in the current directory and does not save a
 report folder. Publish the page only if you want to share it, with
 [`hyp report recommend`](CLI_REFERENCE.md#hyp-report-recommend).

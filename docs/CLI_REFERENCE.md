@@ -403,8 +403,10 @@ the caller's current working directory. Recorded means what it does for
 `hyp ask`: attached, or configured with no attach marker to write (Codex in
 its transcript mode). Its CLI must also be on `PATH`, and the
 `hypaware-report` skill must already be installed for it. Optional quoted
-instructions set the period or focus; otherwise the skill uses the previous
-calendar month. If more than one such client could be started, it asks which;
+instructions set the scope (this machine or the team), the period, or the
+focus; the skill asks for any it still needs, suggesting the last 7 days
+including today, and compares the period with the preceding period of the same
+length. If more than one such client could be started, it asks which;
 a run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
 takes the first client of the offered set rather than failing. The set is in
 the order `hyp ask` uses: ascending client id. That pick is

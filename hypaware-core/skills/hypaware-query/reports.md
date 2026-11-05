@@ -67,8 +67,9 @@ to a report folder. An explicitly requested calendar month may use `YYYY-MM`. Up
 report Markdown, without the ledger, raw logs, images, HTML, or assets. The server renders it;
 no local render step is needed. Links may use http(s), mailto, page fragments,
 or another page in the report. Supported report filenames are `report.md`,
-`usage.md`, `work.md`, `health.md`, and `recommendation-<slug>.md`, with slugs
-matching `[a-z0-9][a-z0-9-]*`.
+`comparison.md`, `work.md`, `automation.md`, `repeated-work.md`, `usage.md`,
+`health.md`, and `recommendation-<slug>.md`, with slugs matching
+`[a-z0-9][a-z0-9-]*`.
 
 When the analysis yields one recommendation rather than a report, publish that
 page on its own with `hyp report recommend <recommendation-page>.md --remote
