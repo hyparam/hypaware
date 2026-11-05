@@ -20,6 +20,8 @@ import { detach } from './settings.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import {
   contentItemKinds,
+  compactedMessageFromPayload,
+  compactionSummaryFromMessage,
   copyNumberAlias,
   firstString,
   hasTextOrToolUse,
@@ -841,6 +843,9 @@ async function* parseRolloutFile(filePath, window, ctx) {
         continue
       }
       if (filterByWindow([item], window).length === 0) continue
+      // A checkpoint closes the pre-compaction turn even when it is opaque, so
+      // a later token_count cannot re-bill the response before it.
+      if (item.payload.type === 'compacted') lastAssistant = -1
       if (item.usageAttributes) {
         if (lastAssistant >= 0) {
           if (usageByLine.size >= MAX_ROLLOUT_INDEX_ENTRIES) throw new Error('Codex rollout usage index exceeds limit')
@@ -850,7 +855,7 @@ async function* parseRolloutFile(filePath, window, ctx) {
       } else {
         const message = projectedMessageFromItem(item)
         if (message?.message_id) hasNative = true
-        if (message?.role === 'assistant' && hasTextOrToolUse(message)) lastAssistant = index
+        if (message?.role === 'assistant' && !message.is_compact_summary && hasTextOrToolUse(message)) lastAssistant = index
       }
     }
     const identitySource = hasNative ? 'native' : 'gateway_fallback'
@@ -888,6 +893,10 @@ async function* parseRolloutFile(filePath, window, ctx) {
         let item
         if (row.type === 'response_item' && !isDeliveredAssistantEvidence(row.metadata, payload)) {
           item = { payload, timestampMs: timestampToMs(row.timestamp) }
+        } else if (row.type === 'compacted') {
+          // Drop the potentially large replacement snapshot here. Keep even an
+          // opaque checkpoint as a usage boundary for the carrier pass.
+          item = { payload: { type: 'compacted' }, projectedMessage: compactedMessageFromPayload(payload), timestampMs: timestampToMs(row.timestamp) }
         } else if (row.type === 'event_msg') {
           if (payload.type === 'task_started') activeTurn = stringValue(payload.turn_id)
           if (payload.type === 'item_completed' && isPlainObject(payload.item)) {
@@ -1126,6 +1135,10 @@ function projectedExchangeFromSession(args) {
   // message and dedupe to one row. @ref LLP 0035#per-turn
   let turnStartIndex = 0
   for (const item of items) {
+    // A checkpoint closes the pre-compaction turn even when it is opaque.
+    // Subsequent token_count can repeat the last response's usage after Codex
+    // recomputes context size; it must not re-bill that response or the summary.
+    if (item.payload.type === 'compacted') turnStartIndex = messages.length
     if (item.usageAttributes) {
       stampUsageOnLastAssistant(messages, item.usageAttributes, turnStartIndex)
       turnStartIndex = messages.length
@@ -1231,7 +1244,10 @@ function projectedMessageFromItem(item) {
   let message
   switch (itemType) {
   case 'message':
-    message = messageItemToProjected(payload)
+    message = compactionSummaryFromMessage(payload) ?? messageItemToProjected(payload)
+    break
+  case 'compacted':
+    message = item.projectedMessage ?? compactedMessageFromPayload(payload)
     break
   case 'function_call':
   case 'custom_tool_call': {
@@ -1256,6 +1272,7 @@ function projectedMessageFromItem(item) {
   const nativeId = stringValue(payload.id)
   if (nativeId) message.message_id = nativeId
   if (item.timestampMs !== undefined) message.message_created_at = new Date(item.timestampMs).toISOString()
+  // The checkpoint helper recovers an id from its matching replacement item.
   // Carry the native item type as a provenance breadcrumb on the row.
   const providerType = item.turnItemType ?? itemType
   if (providerType) message.provider_type = providerType

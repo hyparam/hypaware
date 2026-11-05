@@ -14,6 +14,8 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspace/codex/src/backfill.js'
 import { prepareAttach } from '../../hypaware-core/plugins-workspace/codex/src/toml-config.js'
+import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
+import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
 
 /**
@@ -1324,6 +1326,150 @@ test('encrypted reasoning is never projected; only plaintext summary is kept', a
     assert.ok(reasoningRow, 'reasoning summary became a reasoning part')
     assert.equal(reasoningRow.content_text, 'Considering the options')
     assert.ok(!JSON.stringify(rows).includes(secret), 'encrypted_content absent from rows')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('compacted checkpoints preserve summary identity, chronology and usage across imports', async () => {
+  const env = await stageEnv()
+  try {
+    const summary = {
+      type: 'message', id: 'msg-summary', role: 'user',
+      content: [{ type: 'input_text', text: 'Decision changed: use the local cache.' }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'], create_time: 1779667203 },
+    }
+    const tokenCount = { type: 'token_count', info: { last_token_usage: { input_tokens: 100, cached_input_tokens: 60, output_tokens: 10 } } }
+    await writeModernRollout(env, 'rollout-compact.jsonl', {
+      meta: { id: 'thread-compact', session_id: 'session-compact', cwd: '/work/repo', timestamp: '2026-05-25T00:00:00.000Z' },
+      items: [
+        { timestamp: '2026-05-25T00:00:01.000Z', payload: { type: 'message', id: 'before', role: 'assistant', content: 'Earlier decision' } },
+        { type: 'event_msg', payload: tokenCount },
+        {
+          type: 'compacted', timestamp: '2026-05-25T00:00:03.000Z',
+          payload: {
+            message: summary.content[0].text,
+            replacement_history: [{ type: 'message', role: 'user', content: 'Retained prompt, not a summary' }, summary],
+            compaction_response_id: 'resp-compact', window_number: 2, window_id: 'window-2',
+            latest_token_usage_record: { last_token_usage: { output_tokens: 9999 } },
+          },
+        },
+        // Recomputed usage after compaction must not re-bill the previous turn.
+        { type: 'event_msg', payload: tokenCount },
+        { timestamp: '2026-05-25T00:00:04.000Z', payload: summary },
+        { timestamp: '2026-05-25T00:00:05.000Z', payload: { type: 'message', id: 'after-user', role: 'user', content: 'Continue' } },
+        { timestamp: '2026-05-25T00:00:06.000Z', payload: { type: 'message', id: 'after', role: 'assistant', content: 'Using the local cache' } },
+        { type: 'event_msg', payload: tokenCount },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const first = await collect(provider.run(runContext().ctx))
+    const second = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(first.items[0])
+    assert.deepEqual(await materialize(second.items[0]), rows)
+    assert.deepEqual(rows.map((r) => r.message_id), ['before', 'msg-summary', 'after-user', 'after'])
+    const compact = rows[1]
+    assert.equal(compact.content_text, summary.content[0].text)
+    assert.equal(compact.is_compact_summary, true)
+    assert.equal(compact.provider_type, 'compacted')
+    assert.equal(compact.provider_subtype, 'compaction.summary')
+    assert.equal(compact.session_id, 'session-compact')
+    assert.equal(compact.conversation_id, 'thread-compact')
+    assert.equal(compact.message_created_at, '2026-05-25T00:00:03.000Z')
+    assert.deepEqual(compact.compact_metadata, { compaction_response_id: 'resp-compact', window_number: 2, window_id: 'window-2' })
+    assert.deepEqual(/** @type {any} */ (compact.attributes).codex.content_item_kinds, ['compaction.summary'])
+    assert.deepEqual(rows[2].previous_message_id, ['msg-summary'])
+    assert.equal(/** @type {any} */ (compact.attributes)?.usage, undefined)
+    assert.equal(rows.filter((r) => /** @type {any} */ (r.attributes)?.usage).length, 2)
+    assert.equal(/** @type {any} */ (rows[3].attributes).usage.input_tokens, 40)
+    assert.ok(!JSON.stringify(rows).includes('Retained prompt'))
+
+    const projector = createCodexExchangeProjector({ resolver: createUsagePolicyResolver({ existsSync: () => false }) })
+    const live = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+    const liveRows = await live.projectExchange(/** @type {any} */ ({
+      path: '/v1/responses', provider: 'openai',
+      request_headers: JSON.stringify({ 'x-codex-turn-metadata': JSON.stringify({ session_id: 'session-compact', thread_id: 'thread-compact' }) }),
+      request_body: JSON.stringify({ input: [summary] }),
+    }))
+    assert.equal(liveRows[0].part_id, compact.part_id, 'live and backfill converge on the native summary part')
+    assert.equal(liveRows[0].session_id, compact.session_id)
+    assert.equal(liveRows[0].conversation_id, compact.conversation_id)
+    assert.deepEqual(/** @type {any} */ (liveRows[0].attributes).codex.content_item_kinds, ['compaction.summary'])
+
+    const ignored = createCodexBackfillProvider({ homeDir: env.homeDir, resolver: ignoringResolver('/work/repo') })
+    assert.equal((await collect(ignored.run(runContext().ctx))).items.length, 0)
+    const windowed = await collect(provider.run(runContext({ since: '2026-05-25T00:00:03.000Z', until: '2026-05-25T00:00:03.000Z' }).ctx))
+    assert.equal((await materialize(windowed.items[0]))[0].message_id, 'msg-summary')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a checkpoint inside a turn closes it, so a later token_count bills nothing before it', async () => {
+  const env = await stageEnv()
+  try {
+    const tokenCount = { type: 'token_count', info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }
+    await writeModernRollout(env, 'rollout-midturn-compact.jsonl', {
+      meta: { id: 'thread-midturn-compact' },
+      items: [
+        { timestamp: '2026-05-25T00:00:01.000Z', payload: { type: 'message', id: 'before', role: 'assistant', content: 'Earlier answer' } },
+        { type: 'compacted', timestamp: '2026-05-25T00:00:02.000Z', payload: { message: '' } },
+        { type: 'event_msg', payload: tokenCount },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const rows = await materialize((await collect(provider.run(runContext().ctx))).items[0])
+    assert.deepEqual(rows.map((r) => r.message_id), ['before'])
+    assert.equal(/** @type {any} */ (rows[0].attributes)?.usage, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('legacy compacted plaintext and its later input replay share fallback identity', async () => {
+  const env = await stageEnv()
+  try {
+    // Codex's compact/summary_prefix.md, also used before content_item_kinds.
+    const text = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\nUse the revised decision.'
+    await writeModernRollout(env, 'rollout-legacy-compact.jsonl', {
+      meta: { id: 'legacy-compact' },
+      items: [
+        { type: 'compacted', timestamp: '2026-05-25T00:00:01.000Z', payload: { message: text } },
+        { timestamp: '2026-05-25T00:00:02.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } },
+      ],
+    })
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].content_text, text)
+    assert.equal(rows[0].is_compact_summary, true)
+    assert.equal(rows[0].message_created_at, '2026-05-25T00:00:01.000Z')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('empty and opaque compaction checkpoints do not import retained history or reasoning as summaries', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-opaque-compact.jsonl', {
+      meta: { id: 'opaque-compact' },
+      items: [
+        { type: 'compacted', payload: { message: '', replacement_history: [{ type: 'message', role: 'user', content: 'Old summary', internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'] } }, { type: 'compaction', id: 'cmp-1', encrypted_content: 'opaque-state' }] } },
+        { type: 'compacted', payload: { message: '   ' } },
+        { type: 'compacted', payload: { message: { text: 'Unsupported wrapper' } } },
+        { payload: { type: 'compaction', id: 'cmp-2', encrypted_content: 'opaque-state', content: 'Unsupported plaintext' } },
+        { payload: { type: 'compaction_summary', encrypted_content: 'opaque-state' } },
+        { payload: { type: 'context_compaction', encrypted_content: 'opaque-state' } },
+        { payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Reasoning summary' }] } },
+      ],
+    })
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].part_type, 'reasoning')
+    assert.equal(rows[0].is_compact_summary, undefined)
+    assert.ok(!JSON.stringify(rows).includes('opaque-state'))
   } finally {
     await env.cleanup()
   }

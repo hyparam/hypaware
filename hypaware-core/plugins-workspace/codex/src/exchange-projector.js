@@ -6,6 +6,7 @@ import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.
 import { createUsagePolicyResolver, isEqualOrDescendant, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import {
+  compactionSummaryFromMessage,
   copyNumberAlias,
   firstString,
   mergeJsonObjects,
@@ -242,10 +243,9 @@ export function createCodexExchangeProjector(opts = {}) {
           exchange_id: input.exchange_id,
         })
       }
-      // The projector never supplies message_id today, so every row
-      // takes the gateway's fallback identity. Stamp the codex-side
-      // signal for symmetry with the @hypaware/claude adapter.
-      codexAttributes.identity_source = 'gateway_fallback'
+      // Summary replays retain native ids; ordinary messages keep their
+      // established fallback identity.
+      codexAttributes.identity_source = messages.some((message) => message.message_id) ? 'native' : 'gateway_fallback'
       const projectionAttributes = Object.keys(codexAttributes).length > 0
         ? { codex: codexAttributes }
         : undefined
@@ -431,6 +431,12 @@ function messagesForTransport(ctx) {
   if (isOpenAiChatPath(ctx.path) || Array.isArray(ctx.reqBody.messages)) {
     return openAiChatMessages(ctx.reqBody, ctx.responseBody)
   }
+  if (ctx.path.endsWith('/responses/compact')) {
+    // /compact returns retained context, not a new billed assistant response.
+    // Preserve roles and summary identity, and never stamp its usage on history.
+    const output = isPlainObject(ctx.responseBody) ? ctx.responseBody.output : undefined
+    return [...responsesInputMessages(ctx.reqBody.input, ctx.skipInputIndex), ...responsesInputMessages(output)]
+  }
   return openAiResponsesMessages(ctx.reqBody, ctx.responseBody, ctx.streamEvents, ctx.skipInputIndex)
 }
 
@@ -550,6 +556,14 @@ function responsesInputMessages(input, skipInputIndex = -1) {
     const item = input[index]
     if (!isPlainObject(item)) continue
     const itemType = stringValue(item.type)
+    if (itemType === 'compaction' || itemType === 'compaction_summary' || itemType === 'context_compaction') continue
+    if (itemType === 'message' || itemType === undefined) {
+      const summary = compactionSummaryFromMessage(item)
+      if (summary) {
+        out.push(summary)
+        continue
+      }
+    }
     if (itemType === 'function_call' || itemType === 'custom_tool_call') {
       const block = toolUseBlockFromPayload(item)
       if (block) out.push({ role: 'assistant', content: [block] })
@@ -600,7 +614,12 @@ function responsesAssistantMessagesFromBody(responseBody) {
   for (const item of output) {
     if (!isPlainObject(item)) continue
     const itemType = stringValue(item.type)
-    if (itemType === 'function_call' || itemType === 'custom_tool_call') {
+    if (itemType === 'compaction' || itemType === 'compaction_summary' || itemType === 'context_compaction') continue
+    const summary = itemType === 'message' ? compactionSummaryFromMessage(item) : undefined
+    if (summary) {
+      out.push(summary)
+      sawMessage = true
+    } else if (itemType === 'function_call' || itemType === 'custom_tool_call') {
       const block = toolUseBlockFromPayload(item)
       if (block) out.push({ role: 'assistant', content: [block] })
     } else if (itemType === 'message' || item.role === 'assistant') {

@@ -2735,6 +2735,96 @@ test('part_id and message_id stay byte-identical for the turn-metadata shape alr
   )
 })
 
+// Compaction fixtures use native content_item_kinds, not reasoning.summary.
+test('Responses summary replays retain native identity and creation time without usage', async () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const gateway = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+  const summary = {
+    type: 'message', id: 'msg-compact', role: 'assistant',
+    content: [{ type: 'input_text', text: 'Use the revised decision.' }],
+    internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'], create_time: 1779667203 },
+  }
+  const input = exchange({
+    path: '/v1/responses',
+    request_body: JSON.stringify({ metadata: { session_id: 'compact-session' }, input: [] }),
+    response_body: JSON.stringify({ output: [summary], usage: { input_tokens: 100, output_tokens: 10 } }),
+  })
+  const rows = await gateway.projectExchange(input)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].message_id, 'msg-compact')
+  assert.equal(rows[0].is_compact_summary, true)
+  assert.equal(rows[0].provider_subtype, 'compaction.summary')
+  assert.equal(rows[0].message_created_at, '2026-05-25T00:00:03.000Z')
+  assert.equal(/** @type {any} */ (rows[0].attributes)?.usage, undefined)
+  assert.deepEqual(await gateway.projectExchange(input), [])
+  const replay = await gateway.projectExchange(exchange({
+    ...input,
+    request_body: JSON.stringify({ metadata: { session_id: 'compact-session' }, input: [summary] }),
+    response_body: JSON.stringify({ output_text: 'Continued', usage: { input_tokens: 100, output_tokens: 10 } }),
+  }))
+  assert.equal(replay.length, 1, 'the historical summary is already seen')
+  assert.equal(replay[0].content_text, 'Continued')
+  assert.equal(/** @type {any} */ (replay[0].attributes).usage.output_tokens, 10)
+})
+
+test('Responses SSE keeps usage on the genuine reply when a summary follows it', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    request_body: JSON.stringify({ input: [] }),
+    stream_events: [{ event: 'response.completed', data: JSON.stringify({
+      type: 'response.completed', response: {
+        output: [
+          { type: 'message', role: 'assistant', content: 'Genuine reply' },
+          { type: 'message', id: 'msg-summary-sse', role: 'assistant', content: [{ type: 'input_text', text: 'Historical summary' }], internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'] } },
+        ],
+        usage: { input_tokens: 100, output_tokens: 10 },
+      },
+    }) }],
+  }), context()))
+  assert.equal(projection.messages[0].attributes.usage.output_tokens, 10)
+  assert.equal(projection.messages[1].message_id, 'msg-summary-sse')
+  assert.equal(projection.messages[1].is_compact_summary, true)
+  assert.equal(projection.messages[1].attributes.usage, undefined)
+})
+
+test('compact endpoint output is historical context, including retained user messages', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses/compact',
+    request_body: JSON.stringify({ input: [] }),
+    response_body: JSON.stringify({
+      object: 'response.compaction',
+      output: [
+        { type: 'message', role: 'user', content: 'Retained question' },
+        { type: 'message', role: 'assistant', content: 'Retained answer' },
+        { type: 'compaction', id: 'cmp-1', encrypted_content: 'opaque-state', content: 'Unsupported plaintext' },
+      ],
+      usage: { input_tokens: 100, output_tokens: 10 },
+    }),
+  }), context()))
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant'])
+  assert.ok(projection.messages.every((/** @type {any} */ m) => m.attributes?.usage === undefined))
+  assert.ok(!JSON.stringify(projection).includes('opaque-state'))
+})
+
+test('Responses input omits opaque compaction variants and never marks reasoning as compaction', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    request_body: JSON.stringify({ input: [
+      { type: 'compaction', encrypted_content: 'opaque-state', content: 'Unsupported plaintext' },
+      { type: 'compaction_summary', encrypted_content: 'opaque-state' },
+      { type: 'context_compaction', encrypted_content: 'opaque-state' },
+      { type: 'message', role: 'user', content: [], internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'] } },
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Reasoning summary' }] },
+    ] }),
+  }), context()))
+  assert.equal(projection.messages.length, 1)
+  assert.equal(projection.messages[0].content[0].type, 'thinking')
+  assert.equal(projection.messages[0].is_compact_summary, undefined)
+})
+
 // ---------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------

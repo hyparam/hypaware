@@ -25,7 +25,8 @@ import { prepareAttach } from '../../plugins-workspace/codex/src/toml-config.js'
  * asserts the bead-6 contract end to end:
  *
  *  - **User-visible query result**: `ai_gateway_messages` holds the two
- *    projected rows (`provider = openai`, `conversation_source = codex`)
+ *    projected rows, including a native compaction summary and a later reply
+ *    (`provider = openai`, `conversation_source = codex`)
  *    with the exact rollout content.
  *  - **Internal telemetry**: a `backfill.provider_finish` span and a
  *    `backfill.finish` log carrying the run's `dev_run_id`, `provider`,
@@ -33,7 +34,7 @@ import { prepareAttach } from '../../plugins-workspace/codex/src/toml-config.js'
  *    `ai_gateway_messages`.
  *  - **Idempotency (phase 8)**: a second `hyp backfill codex` (a fresh
  *    run id, so the materializer re-scans committed partitions) writes
- *    ZERO new rows and the query still returns exactly two rows.
+ *    ZERO new rows and the query still returns exactly four rows.
  *
  * @param {{ harness: any, expect: any, largeRollout?: boolean }} args
  */
@@ -59,7 +60,7 @@ export async function run({ harness, expect, largeRollout = false }) {
   // The Codex provider captures its sessions root from `ctx.env.HOME`
   // (→ `<HOME>/.codex/sessions`) at activation, so stage the rollout and
   // point HOME at it BEFORE activating plugins. One modern rollout file
-  // with a user message and an assistant message.
+  // with a user message, assistant message, compaction, and later reply.
   const fakeHome = path.join(harness.tmpDir, 'home')
   const sessionsDir = path.join(fakeHome, '.codex', 'sessions', '2026', '05', '20')
   await fs.mkdir(sessionsDir, { recursive: true })
@@ -87,6 +88,22 @@ export async function run({ harness, expect, largeRollout = false }) {
         type: 'response_item',
         timestamp: '2026-05-20T10:00:02.000Z',
         payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'here they are' }] },
+      }),
+      JSON.stringify({
+        type: 'compacted',
+        timestamp: '2026-05-20T10:00:03.000Z',
+        payload: {
+          message: 'The files were listed. Continue with the revised decision.',
+          replacement_history: [{
+            type: 'message', id: `compact-${harness.devRunId}`, role: 'user',
+            content: [{ type: 'input_text', text: 'The files were listed. Continue with the revised decision.' }],
+          }],
+        },
+      }),
+      JSON.stringify({
+        type: 'response_item',
+        timestamp: '2026-05-20T10:00:04.000Z',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'continued after compaction' }] },
       }),
     ].join('\n') + '\n',
     'utf8'
@@ -174,9 +191,9 @@ export async function run({ harness, expect, largeRollout = false }) {
     const run1 = JSON.parse(bf1out.text())
     const codex1 = run1.providers.find((/** @type {any} */ p) => p.provider === 'codex')
     expect.that(
-      'backfill run 1: codex provider ok and wrote both rows',
+      'backfill run 1: codex provider ok and wrote all rows',
       codex1,
-      (v) => v !== undefined && v.status === 'ok' && v.rows_written >= 2,
+      (v) => v !== undefined && v.status === 'ok' && v.rows_written === 4,
     )
     expect.that(
       'backfill run 1: at least one session scanned',
@@ -186,17 +203,30 @@ export async function run({ harness, expect, largeRollout = false }) {
 
     // ----- 2. Query the projected rows -----
     const sql = `
-      select role, content_text, provider, conversation_source, client_name
+      select role, content_text, provider, conversation_source, client_name,
+             message_id, message_created_at, is_compact_summary
       from ai_gateway_messages
       where session_id = '${sessionId}'
       order by message_index, part_index
     `.trim().replace(/\s+/g, ' ')
 
     const rows1 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 1' })
-    expect.that('query: two rows for the backfilled session', rows1, (v) => Array.isArray(v) && v.length === 2)
+    expect.that('query: four rows for the backfilled session', rows1, (v) => Array.isArray(v) && v.length === 4)
 
     const user = rows1.find((/** @type {any} */ r) => r.role === 'user')
     const assistant = rows1.find((/** @type {any} */ r) => r.role === 'assistant')
+    expect.that(
+      'query: summary keeps its native identity and checkpoint time',
+      rows1.find((/** @type {any} */ r) => r.is_compact_summary),
+      (v) => v !== undefined && v.message_id === `compact-${harness.devRunId}` &&
+        v.content_text === 'The files were listed. Continue with the revised decision.' &&
+        v.message_created_at === '2026-05-20T10:00:03.000Z',
+    )
+    expect.that(
+      'query: later reply follows the summary',
+      rows1[3],
+      (v) => v !== undefined && v.content_text === 'continued after compaction',
+    )
     expect.that(
       'query: user row carries the rollout content',
       user,
@@ -230,7 +260,7 @@ export async function run({ harness, expect, largeRollout = false }) {
     )
 
     const rows2 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 2' })
-    expect.that('query: rerun did not duplicate rows (still exactly two)', rows2, (v) => Array.isArray(v) && v.length === 2)
+    expect.that('query: rerun did not duplicate rows (still exactly four)', rows2, (v) => Array.isArray(v) && v.length === 4)
 
     // Exercise default ongoing capture through the real daemon scheduler,
     // with no inference listener or client request in the loop.
@@ -244,6 +274,10 @@ export async function run({ harness, expect, largeRollout = false }) {
         { type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'developer instructions' }] } },
         { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'scheduled answer' }] } },
         { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } } } },
+        { type: 'compacted', payload: {
+          message: 'Scheduled compaction summary',
+          replacement_history: [{ type: 'message', id: `${id}-summary`, role: 'user', content: 'Scheduled compaction summary' }],
+        } },
         { type: 'event_msg', payload: { type: 'task_complete' } },
       ]
       await fs.writeFile(path.join(sessionsDir, `rollout-${originator}.jsonl`), records.map((r) => JSON.stringify(r)).join('\n') + '\n')
@@ -278,7 +312,7 @@ export async function run({ harness, expect, largeRollout = false }) {
     const now = new Date()
     await sweep.tick({ now })
     const firstSweep = await Promise.all(pending)
-    expect.that('sweep: both client surfaces and the resumed thread imported', firstSweep[0], (v) => v?.ok && v.rowsWritten === 6)
+    expect.that('sweep: both client surfaces, summaries and the resumed thread imported', firstSweep[0], (v) => v?.ok && v.rowsWritten === 8)
     expect.that('sweep: previous provider restored', await fs.readFile(configPath, 'utf8'), (v) => v.startsWith('model_provider = "custom"\n') && v.includes('[model_providers.hypaware]') && !v.includes('127.0.0.1'))
     const nativeRows = await queryRows({
       dispatch, kernel, registry, env, expect, label: 'scheduled capture',
@@ -287,6 +321,12 @@ export async function run({ harness, expect, largeRollout = false }) {
     expect.that('sweep: CLI and Desktop attribution and base instructions', nativeRows, (v) =>
       v.length === 2 && new Set(v.map((r) => r.entrypoint)).size === 2 &&
       v.every((r) => r.system_text === 'native instructions' && r.tools == null))
+    const summaryRows = await queryRows({
+      dispatch, kernel, registry, env, expect, label: 'scheduled compaction',
+      sql: "select message_id, is_compact_summary, attributes from ai_gateway_messages where content_text = 'Scheduled compaction summary'",
+    })
+    expect.that('sweep: native summaries are captured once without billed usage', summaryRows, (v) =>
+      v.length === 2 && v.every((r) => r.is_compact_summary && r.message_id.endsWith('-summary') && r.attributes?.usage == null))
     const resumedRows = await queryRows({
       dispatch, kernel, registry, env, expect, label: 'resumed paginated thread',
       sql: `select role, content_text, message_id, entrypoint from ai_gateway_messages where conversation_id = '${resumedId}' and part_type <> 'session_metadata' order by message_index, part_index`,
@@ -382,9 +422,9 @@ export async function run({ harness, expect, largeRollout = false }) {
         t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
     )
     expect.that(
-      'traces: backfill.provider_finish for codex under the run dev_run_id with rows_written>=2',
+      'traces: backfill.provider_finish for codex under the run dev_run_id with rows_written=4',
       providerFinish[0]?.attributes,
-      (v) => v !== undefined && v.status === 'ok' && Number(v.rows_written) >= 2,
+      (v) => v !== undefined && v.status === 'ok' && Number(v.rows_written) === 4,
     )
 
     const writeSpans = traces.filter(
@@ -395,9 +435,9 @@ export async function run({ harness, expect, largeRollout = false }) {
         t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
     )
     expect.that(
-      'traces: backfill.write span for ai_gateway_messages with row_count>=2',
+      'traces: backfill.write span for ai_gateway_messages with row_count=4',
       writeSpans[0]?.attributes,
-      (v) => v !== undefined && Number(v.row_count) >= 2,
+      (v) => v !== undefined && Number(v.row_count) === 4,
     )
 
     const logs = await expect.logs()
@@ -406,16 +446,16 @@ export async function run({ harness, expect, largeRollout = false }) {
     expect.that('logs: scheduled unchanged-file skip', logs, (v) => v.some((l) =>
       l.body === 'codex.backfill.scan_complete' && l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 4))
     expect.that('logs: scheduled capture completed', logs, (v) => v.some((l) =>
-      l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'codex' && l.attributes?.rows_written === 6))
+      l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'codex' && l.attributes?.rows_written === 8))
     if (largeRollout) expect.that('logs: failed file marks the scan failed', logs, v => v.some(l =>
       l.body === 'codex.backfill.scan_complete' && l.attributes?.status === 'failed' && l.attributes?.files_read_failing === 1))
     const finishLogs = logs.filter(
       (/** @type {any} */ l) => l.body === 'backfill.finish' && l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
     )
     expect.that(
-      'logs: backfill.finish carries the run dev_run_id and total_rows_written>=2',
+      'logs: backfill.finish carries the run dev_run_id and total_rows_written=4',
       finishLogs[0]?.attributes,
-      (v) => v !== undefined && Number(v.total_rows_written) >= 2,
+      (v) => v !== undefined && Number(v.total_rows_written) === 4,
     )
   } finally {
     if (previousHome === undefined) delete process.env.HOME
