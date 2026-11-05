@@ -183,6 +183,8 @@ test('delayed success uses completion time and ordinary logs show failure then f
   await until(async () => (await read(home, 'held-z-local')).length > held, 'a z-local export is held before the completion boundary')
   const completionBoundary = new Date().toISOString()
   await fs.writeFile(path.join(home, 'hold-next'), '1')
+  // A fast filesystem can otherwise release and complete within the boundary's clock tick.
+  await until(() => Date.now() > Date.parse(completionBoundary), 'clock advances past the completion boundary')
   await fs.rm(path.join(home, 'partial'))
   await fs.rm(path.join(home, 'hold-export'))
   await until(() => statusAt(stateRoot).sinks.some(row => row.instance === 'z-local' && (row.lastSuccessAt ?? '') > completionBoundary))
