@@ -237,7 +237,10 @@ test('delayed append outside deadline remains unconfirmed and live collector can
   assert.ok(result.reads === undefined || result.reads <= 6)
   release.resolve()
   await new Promise(resolve => setTimeout(resolve, 30))
-  assert.equal((await awaitPersistedOllamaCheck({ ...args, timeoutMs: 2000 })).reason, 'persisted')
+  // The live check forks and boots a query process inside this bound, so it
+  // gets room a loaded win32 runner needs (#2908); it returns at the first
+  // read that finds the row, and stays under the 30 s production clamp.
+  assert.equal((await awaitPersistedOllamaCheck({ ...args, timeoutMs: 20000 })).reason, 'persisted')
   assert.equal(f.inference(), 1)
 })
 
