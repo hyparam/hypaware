@@ -20,7 +20,10 @@ for (const mode of ['capture', 'privacy', 'concurrent', 'failure', 'timeout', 'b
       return
     }
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-python-callback-'))
-    t.after(() => fs.rm(home, { recursive: true, force: true }))
+    // On win32 the bridge helper the failure mode kills (or a scan of the
+    // files it wrote) can still hold a handle in home when the cleanup runs,
+    // so rmdir fails EBUSY until it releases. Retry over that brief window.
+    t.after(() => fs.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
     const env = { ...process.env, HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_CONFIG: path.join(home, 'config.json'),
       PYTHONDONTWRITEBYTECODE: '1' }
     await fs.writeFile(env.HYP_CONFIG, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/langgraph', recording: mode !== 'privacy' }] }))
