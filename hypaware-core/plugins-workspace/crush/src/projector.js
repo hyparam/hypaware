@@ -66,18 +66,19 @@ export function mintCrushPartId(sessionId, messageId, index, suffix) {
 }
 
 /**
- * The trailing `<cwd>...</cwd>` element Crush appends to tool output.
+ * Remove Crush's last `<cwd>...</cwd>` element, preserving any hook text
+ * appended after it. Earlier elements belong to the command's output.
  *
  * @ref LLP 0573#owner-decisions [implements]: D5, the working directory is stripped before a row is built.
- */
-const TRAILING_CWD = /\s*<cwd>(?:(?!<cwd>)[\s\S])*<\/cwd>\s*$/
-
-/**
  * @param {string} text
  * @returns {string}
  */
 export function stripCwd(text) {
-  return text.replace(TRAILING_CWD, '')
+  const end = text.lastIndexOf('</cwd>')
+  if (end === -1) return text
+  const start = text.lastIndexOf('<cwd>', end)
+  if (start === -1) return text
+  return `${text.slice(0, start).trimEnd()}${text.slice(end + 6)}`.trimEnd()
 }
 
 /**
@@ -107,8 +108,9 @@ function roleOf(role) {
  *
  * D5: a tool result's `metadata` (which holds `working_directory`, and for
  * file tools the file path) is never carried, and its `content` loses the
- * trailing `<cwd>` element. Image and binary parts become placeholders that
- * name the type and MIME type, never the bytes, URL or file path.
+ * last `<cwd>` element, even before hook text. Image and binary parts become
+ * placeholders that name the type and MIME type, never the bytes, URL or file
+ * path.
  *
  * @param {CrushMessageRow} row
  * @param {'user' | 'assistant' | 'tool'} role
