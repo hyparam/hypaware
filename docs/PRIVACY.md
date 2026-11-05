@@ -299,9 +299,16 @@ any of them.
 It only tightens a directory it can tell is its own. A custom `HYP_HOME` or
 cache location that holds other files, or that another user owns, is left as
 it is, and HypAware logs a `storage.root_not_secured` warning and keeps
-running; files written there before this release keep their old modes. Parent directories are never changed. On Windows HypAware does not
-set permissions; your data is protected by your user profile's own access
-rules.
+running; files written there before this release keep their old modes. Parent directories are never changed.
+
+On Windows, where POSIX modes do not apply, each start sets the same roots
+to an access list naming only your account, SYSTEM, and Administrators, and
+everything HypAware creates under them inherits it. The same care applies:
+a shared or foreign directory is left as found with the warning above.
+Files that already existed under a custom location outside your user
+profile keep their old access until they are rewritten; the default
+location under your profile was already covered by the profile's own
+access rules.
 
 ## Redaction when content is recorded
 

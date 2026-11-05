@@ -58,7 +58,6 @@ export type OwnerRootOutcome =
   | 'not_directory'
   | 'replaced'
   | 'error'
-  | 'unsupported'
 
 export interface BootKernelOptions {
   /** Override HYP_HOME (defaults from env). */

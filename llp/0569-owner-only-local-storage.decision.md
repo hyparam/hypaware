@@ -4,6 +4,7 @@
 **Status:** Accepted
 **Systems:** Cache, Runtime, Privacy
 **Date:** 2026-11-02
+**Extended-by:** LLP 0582 (#windows: the `unsupported` report is replaced by an inheritance-stripped owner-only DACL on each verified root)
 **Related:** LLP 0253, LLP 0326, LLP 0525
 
 The local cache, its spool and the state under `HYP_HOME` hold recorded
