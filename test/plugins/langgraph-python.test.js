@@ -20,9 +20,10 @@ for (const mode of ['capture', 'privacy', 'concurrent', 'failure', 'timeout', 'b
       return
     }
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-python-callback-'))
-    // The Python helper subprocess can still hold a handle on the temp dir
-    // when this cleanup runs, so win32 rejects the rmdir with EBUSY/ENOTEMPTY
-    // until it releases. Retry over that window.
+    // The failure mode kills the bridge helper while the git probes it ran
+    // with -C home for the session context can still be running. They outlive
+    // the kill, and on win32 a process whose cwd is home makes rmdir fail
+    // EBUSY until it exits. Retry over that window (about 5.5s at most).
     t.after(() => fs.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
     const env = { ...process.env, HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_CONFIG: path.join(home, 'config.json'),
       PYTHONDONTWRITEBYTECODE: '1' }
