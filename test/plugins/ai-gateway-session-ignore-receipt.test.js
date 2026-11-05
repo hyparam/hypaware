@@ -298,7 +298,9 @@ function receiptVerifier(rel) {
   return m[1]
 }
 
-const CAVEAT = /^caveat: the responder on that port is not authenticated, and this is a membership receipt, not proof that recording stopped$/m
+// win32 Python prints in text mode, so its newlines arrive as `\r\n`; match
+// the line without pinning the terminator either way.
+const CAVEAT = /^caveat: the responder on that port is not authenticated, and this is a membership receipt, not proof that recording stopped\r?$/m
 
 for (const rel of SKILLS) {
   test(`${rel} verifier confirms a valid reply with the responder caveat, and refuses the rest without it`, { skip: !hasPython && 'python3 is not on PATH' }, () => {
@@ -309,7 +311,7 @@ for (const rel of SKILLS) {
 
     const valid = verify(JSON.stringify({ session_id: sent, ignored: true, total: 3 }))
     assert.equal(valid.status, 0, valid.stderr)
-    assert.match(valid.stdout, /^opt-out confirmed for session sess-A \(total ignored: 3\)\n/, 'the success phrase leads, unchanged')
+    assert.match(valid.stdout, /^opt-out confirmed for session sess-A \(total ignored: 3\)\r?\n/, 'the success phrase leads, unchanged')
     assert.match(valid.stdout, CAVEAT, 'and the caveat travels with it in the same output')
 
     const refusals = {

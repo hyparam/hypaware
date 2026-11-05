@@ -314,9 +314,15 @@ test('findInstalledHypawareBin only accepts a durable, runnable entry', async (t
   )
 
   // A relative entry resolves against the cwd the caller happened to run in,
-  // which is not a path anything can record.
-  const relative = path.relative(process.cwd(), globalBinDir)
-  assert.notEqual(relative, path.resolve(relative), 'the rig did not build a relative entry')
+  // which is not a path anything can record. Built from `path.relative(cwd,
+  // globalBinDir)` so the entry reaches a real, runnable bin and only the
+  // `isAbsolute` check can reject it. On win32 a checkout and a temp dir can
+  // sit on different drives, where no relative path exists and
+  // `path.relative` returns an absolute one; there it falls back to a literal
+  // that still exercises the relative branch, just without a bin behind it.
+  const fromCwd = path.relative(process.cwd(), globalBinDir)
+  const relative = path.isAbsolute(fromCwd) ? path.join('rel-npm-global', 'bin') : fromCwd
+  assert.ok(!path.isAbsolute(relative), 'the rig did not build a relative entry')
   assert.equal(
     findInstalledHypawareBin({ npm_config_cache: npmCache, PATH: relative }),
     undefined
