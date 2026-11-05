@@ -951,7 +951,7 @@ export interface SchtasksAdapter {
   delete(taskName: string): Promise<SchtasksResult>
   /** `schtasks /Run /TN <name>` */
   run(taskName: string): Promise<SchtasksResult>
-  /** `schtasks /End /TN <name>` — the hard stop the graceful-stop timeout escalates to */
+  /** `schtasks /End /TN <name>` - the hard stop the graceful-stop timeout escalates to */
   end(taskName: string): Promise<SchtasksResult>
   /** `schtasks /Query /TN <name> /FO CSV /NH /V` */
   query(taskName: string): Promise<SchtasksResult>

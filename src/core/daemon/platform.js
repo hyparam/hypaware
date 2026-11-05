@@ -133,8 +133,8 @@ export function platformIsSupported(platform = process.platform) {
 /**
  * Whether the guided `hyp setup` onboarding wizard runs on `platform`. Still
  * macOS/Linux only: LLP 0584 opened the daemon service family on win32 but
- * deliberately left the wizard — first-look, the attach cascade, skills,
- * backfill, the finale — gated for its own pass, since that interactive
+ * deliberately left the wizard - first-look, the attach cascade, skills,
+ * backfill, the finale - gated for its own pass, since that interactive
  * surface has never run end-to-end on Windows. A Windows user onboards with
  * `hyp daemon install` and `hyp client attach <x>` until that follow-up.
  *
