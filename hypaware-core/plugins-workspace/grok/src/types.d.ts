@@ -4,6 +4,8 @@ export interface GrokCursor {
   model?: string
   /** The last message built before this offset, so a resumed read keeps the chain. */
   previous?: string
+  /** What each recent prompt followed, by prompt index, for a later rewind. */
+  prompts?: Map<number, string | undefined>
   boundary: string
   fingerprint: string
   inode: string
@@ -23,6 +25,8 @@ export interface GrokFloor {
 export interface GrokSession {
   id: string
   cwd: string
+  /** Every folder that governs this session: its own, a worktree's source, and each ancestor's. */
+  policy_dirs: string[]
   model?: string
   started_at?: string
   parent_thread_id?: string
@@ -44,4 +48,6 @@ export interface GrokWithheldStore {
 export interface GrokPolicy {
   allowed(session: GrokSession): boolean
   sessionIgnored(session: GrokSession): boolean
+  /** The folder with the strictest usage class, or the session's own on a tie. */
+  governingDir(session: GrokSession): string
 }

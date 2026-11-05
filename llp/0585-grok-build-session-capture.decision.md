@@ -58,7 +58,8 @@ epochs. The cwd is left out because a session can relocate. Forks are separate
 conversations.
 
 The file is append-only, including across rewinds and compaction, so dead
-branches remain recorded. Turn usage on `turn_completed` is not projected: the
+branches remain recorded. A rewind marker points the chain back to what the target
+prompt followed, so the live thread skips them. Turn usage on `turn_completed` is not projected: the
 projected message has no usage field and the totals span several model calls.
 
 ## Lineage {#lineage}
@@ -69,7 +70,11 @@ parent's `subagents/<child>/meta.json` records the link, so the reader looks the
 own bucket first, and remembers what it finds. A fresh subagent with no link yet
 waits, because rows are written once; after five idle minutes it is recorded
 without one. Exclusions check the whole lineage, unlike other clients, because a
-Grok fork carries its parent's content. `hyp session ignore` reads
+Grok fork carries its parent's content. The same goes for folders: a session is
+governed by its own, a worktree's `source_workspace_dir` (Grok worktrees are separate
+clones under `GROK_HOME`, so the ancestor walk cannot reach the repo), and each
+ancestor's. Rows carry the strictest of these as `cwd`, because export classifies by
+a row's `cwd`. `hyp session ignore` reads
 `GROK_SESSION_ID`, which Grok gives its tools. Grok's git fields fill the existing
 git columns, with remote userinfo stripped.
 

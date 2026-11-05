@@ -12,6 +12,8 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'error'])
 const TOOL_META_KEY = 'x.ai/tool'
 // A tool still running after this many lines stops holding the cursor back.
 const MAX_OPEN_TOOL_LINES = 1024
+// How many recent prompts a rewind can return to and still chain correctly.
+const MAX_REWIND_PROMPTS = 256
 
 /**
  * @param {string} sessionId
@@ -36,7 +38,7 @@ function timestampOf(entry, meta) {
  * open line and a re-read always rebuilds the same messages.
  *
  * @param {GrokSession} session
- * @param {{ model?: string, previous?: string }} [start] the model in force and last message built where this read begins
+ * @param {{ model?: string, previous?: string, prompts?: Map<number, string | undefined> }} [start] the model in force, last message built and prompt starts where this read begins
  * @ref LLP 0585#folding: runs and tool lifecycles settle at deterministic lines
  */
 export function createGrokFolder(session, start = {}) {
@@ -47,6 +49,8 @@ export function createGrokFolder(session, start = {}) {
   // Written explicitly because reads are split into batches, each with its own
   // writer state, and the chain has to come out the same however they fall.
   let lastId = start.previous
+  // What each prompt followed, which is where a rewind to that prompt continues.
+  const prompts = new Map(start.prompts)
   /** @type {Map<string, any>} */
   const tools = new Map()
 
@@ -73,7 +77,7 @@ export function createGrokFolder(session, start = {}) {
     const content = []
     if (closed.kind === 'thinking') content.push({ type: 'thinking', thinking: closed.text })
     else if (closed.text) content.push({ type: 'text', text: closed.text })
-    content.push(...closed.images)
+    content.push(...closed.attachments)
     if (!content.length) return []
     return [message({ ...closed, role: closed.kind === 'user' ? 'user' : 'assistant', content })]
   }
@@ -127,7 +131,8 @@ export function createGrokFolder(session, start = {}) {
         if (!id) return []
         const tool = tools.get(id)
         if (tool) {
-          tool.name = toolName(update) || tool.name
+          // A later title describes the call, such as a shell command line.
+          tool.name = metaToolName(update) || tool.name || stringValue(update.title)
           tool.input = toolInput(update) ?? tool.input
           tool.bytes += at.bytes
         }
@@ -137,6 +142,7 @@ export function createGrokFolder(session, start = {}) {
       // A finished turn has no more chunks or lifecycle updates to wait for,
       // apart from a background tool, whose late result still links by id.
       if (kind === 'turn_completed') return [...closeRun(), ...closeTools()]
+      if (kind === 'rewind_marker') return rewind(update.target_prompt_index)
       return []
   }
 
@@ -165,8 +171,24 @@ export function createGrokFolder(session, start = {}) {
     },
     model() { return currentModel },
     previous() { return lastId },
+    prompts() { return prompts },
     /** Settle everything left open, for a session that has gone quiet. */
     flush() { return [...closeRun(), ...closeTools()] },
+  }
+
+  /**
+   * The log keeps the abandoned turns, but what follows continues from before
+   * the target prompt, and the chain should say so.
+   * @param {unknown} target
+   * @ref LLP 0585#identity: dead branches stay recorded, off the live chain
+   */
+  function rewind(target) {
+    const out = [...closeRun(), ...closeTools()]
+    if (typeof target === 'number' && prompts.has(target)) {
+      lastId = prompts.get(target)
+      for (const index of prompts.keys()) if (index >= target) prompts.delete(index)
+    }
+    return out
   }
 
   /** @param {string} kind @param {any} update @param {any} common */
@@ -177,13 +199,25 @@ export function createGrokFolder(session, start = {}) {
     if (boundary) out.push(...closeRun())
     // A new prompt ends the last turn. Older files have no turn_completed.
     if (runKind === 'user' && boundary) out.push(...closeTools())
-    if (!run) run = { ...common, previous: lastId, kind: runKind, text: '', images: [], bytes: 0 }
+    if (!run) {
+      run = { ...common, previous: lastId, kind: runKind, text: '', attachments: [], bytes: 0 }
+      if (runKind === 'user' && typeof common.promptIndex === 'number' && !prompts.has(common.promptIndex)) {
+        if (prompts.size >= MAX_REWIND_PROMPTS) prompts.delete(prompts.keys().next().value ?? 0)
+        prompts.set(common.promptIndex, lastId)
+      }
+    }
     run.bytes += common.bytes
     const content = update.content
     if (isPlainObject(content)) {
       if (content.type === 'text' && typeof content.text === 'string') run.text += content.text
       // Never copy image bytes into rows.
-      else if (content.type === 'image') run.images.push({ type: 'image', mime_type: String(content.mimeType ?? '') })
+      else if (content.type === 'image') run.attachments.push({ type: 'image', mime_type: String(content.mimeType ?? '') })
+      else if (content.type === 'resource_link') run.attachments.push({ type: 'text', text: resourceLabel(content) })
+      // Embedded text is part of the prompt the model saw. A blob stays out.
+      else if (content.type === 'resource') {
+        const body = isPlainObject(content.resource) ? content.resource.text : undefined
+        run.attachments.push({ type: 'text', text: typeof body === 'string' ? `${resourceLabel(content)}\n${body}` : resourceLabel(content) })
+      }
     }
     return out
   }
@@ -203,9 +237,19 @@ export function createGrokFolder(session, start = {}) {
 }
 
 /** @param {any} update */
-function toolName(update) {
+function metaToolName(update) {
   const tool = isPlainObject(update._meta) ? update._meta[TOOL_META_KEY] : undefined
-  return (isPlainObject(tool) ? stringValue(tool.name) : undefined) ?? stringValue(update.title)
+  return isPlainObject(tool) ? stringValue(tool.name) : undefined
+}
+
+/** @param {any} update */
+function toolName(update) {
+  return metaToolName(update) ?? stringValue(update.title)
+}
+
+/** @param {any} block */
+function resourceLabel(block) {
+  return `[resource ${String(block.resource?.uri ?? block.uri ?? '')}]`.replace(' ]', ']')
 }
 
 /** @param {any} update @returns {JsonObject | undefined} */
@@ -233,7 +277,7 @@ function blockText(block) {
   const inner = block.content
   if (inner?.type === 'text') return String(inner.text ?? '')
   if (inner?.type === 'image' || inner?.type === 'audio') return `[${inner.type} ${String(inner.mimeType ?? '')}]`.replace(' ]', ']')
-  if (inner?.type === 'resource' || inner?.type === 'resource_link') return `[resource ${String(inner.resource?.uri ?? inner.uri ?? '')}]`.replace(' ]', ']')
+  if (inner?.type === 'resource' || inner?.type === 'resource_link') return resourceLabel(inner)
   return `[${String(inner?.type ?? 'unknown')}]`
 }
 

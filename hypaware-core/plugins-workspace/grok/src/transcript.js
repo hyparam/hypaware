@@ -130,6 +130,19 @@ function timeOf(value) {
   return Number.isFinite(ms) ? ms : undefined
 }
 
+/**
+ * Where a session's work belongs. A Grok worktree is a separate clone under
+ * GROK_HOME, so only the summary leads back to the folder it came from.
+ * @param {any} summary
+ * @param {string} [cwd]
+ * @returns {string[]}
+ */
+function workspaceDirs(summary, cwd = isPlainObject(summary?.info) ? stringValue(summary.info.cwd) : undefined) {
+  const dirs = new Set()
+  for (const dir of [cwd, stringValue(summary?.source_workspace_dir)]) if (dir && path.isAbsolute(dir)) dirs.add(dir)
+  return [...dirs]
+}
+
 /** @param {any} summary */
 function gitOf(summary) {
   /** @type {NonNullable<GrokSession['git']>} */
@@ -168,7 +181,7 @@ export async function readGrokSession(dir, root) {
   }
   if (!cwd || !path.isAbsolute(cwd)) throw new Error('unsupported_session')
   /** @type {GrokSession} */
-  const session = { id, cwd, lineage: [id], fork_sources: [] }
+  const session = { id, cwd, policy_dirs: workspaceDirs(summary, cwd), lineage: [id], fork_sources: [] }
   const model = stringValue(summary?.current_model_id)
   if (model) session.model = model
   const startedAt = timeOf(summary?.created_at)
@@ -198,6 +211,7 @@ export async function readGrokSession(dir, root) {
     if (!parentDir) break
     current = await readSummary(parentDir)
     currentId = parent
+    for (const dir of workspaceDirs(current)) if (!session.policy_dirs.includes(dir)) session.policy_dirs.push(dir)
   }
   return session
 }
@@ -233,6 +247,8 @@ export async function* readGrokTranscript(file, opts) {
       yield await drop()
       return
     }
+    // @ref LLP 0585#lineage: rows carry the folder whose class governs them, since export checks a row's cwd
+    session.cwd = opts.policy.governingDir(session)
     const idle = Date.now() - stat.mtimeMs >= IDLE_FLUSH_MS
     // The link is written around the moment a child starts. Rows are written
     // once, so wait for it rather than record a subagent as a root session.
@@ -241,14 +257,14 @@ export async function* readGrokTranscript(file, opts) {
     const inode = `${stat.dev}:${stat.ino}`
     let offset = 0
     let lineNumber = 0
-    /** @type {{ model?: string, previous?: string }} */
+    /** @type {{ model?: string, previous?: string, prompts?: Map<number, string | undefined> }} */
     let startAt = {}
     const cursor = opts.cursor
     // The log is append-only, so an intact boundary vouches for what is below it.
     if (cursor && cursor.inode === inode && cursor.offset <= stat.size && cursor.boundary === await boundary(fd, cursor.offset)) {
       offset = cursor.offset
       lineNumber = cursor.line
-      startAt = { model: cursor.model, previous: cursor.previous }
+      startAt = { model: cursor.model, previous: cursor.previous, prompts: cursor.prompts }
     }
     const budget = opts.maxBytes ?? stat.size
     const folder = createGrokFolder(session, startAt)
@@ -341,6 +357,7 @@ export async function* readGrokTranscript(file, opts) {
     const next = { offset: settledOffset, line: settledLine, inode, fingerprint: fingerprint(stat), boundary: await boundary(fd, settledOffset) }
     if (settledModel) next.model = settledModel
     if (settledPrevious) next.previous = settledPrevious
+    if (folder.prompts().size) next.prompts = folder.prompts()
     yield { cursor: next, oversized }
   } finally { await fd.close() }
 }

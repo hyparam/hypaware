@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
+import { CLASS_RANK } from '../../../../src/core/usage-policy/index.js'
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 
 /** @import { GrokFloor, GrokPolicy, GrokSession, GrokWithheldStore } from '../../../../hypaware-core/plugins-workspace/grok/src/types.js' */
@@ -12,14 +13,23 @@ import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
  * @param {Set<string> | undefined} ignored
  * @param {{ resolve: (cwd: string) => { class: string } }} resolver
  * @returns {GrokPolicy}
- * @ref LLP 0585#lineage: an exclusion covers the forks and subagents a session spawned
+ * @ref LLP 0585#lineage: an exclusion covers the forks and subagents a session spawned, wherever they run
  */
 export function createGrokPolicy(ignored, resolver) {
   /** @param {GrokSession} session */
   const sessionIgnored = session => session.lineage.some(id => ignored?.has(id))
+  /** @param {string} dir */
+  const rank = dir => /** @type {Record<string, number>} */ (CLASS_RANK)[resolver.resolve(dir).class] ?? 0
+  /** @param {GrokSession} session */
+  const governingDir = session => {
+    let best = session.cwd
+    for (const dir of session.policy_dirs) if (rank(dir) > rank(best)) best = dir
+    return best
+  }
   return {
     sessionIgnored,
-    allowed: session => !sessionIgnoreLoadError(ignored) && !sessionIgnored(session) && resolver.resolve(session.cwd).class !== 'ignore',
+    governingDir,
+    allowed: session => !sessionIgnoreLoadError(ignored) && !sessionIgnored(session) && resolver.resolve(governingDir(session)).class !== 'ignore',
   }
 }
 
