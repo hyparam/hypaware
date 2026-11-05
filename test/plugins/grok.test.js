@@ -188,6 +188,35 @@ test('a subagent finds its parent from the parent side, and waits until the link
   assert.equal(out[0].is_sidechain, true)
 })
 
+test('a resumed subagent answers to the subagent it copied as well as its owner', async t => {
+  const { dir, cwd, root } = await setup(t, { summary: null })
+  const bucket = path.dirname(dir)
+  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, session_kind: 'subagent_resume', parent_session_id: 'the-source', forked_at: '2026-11-05T00:00:00Z' }))
+  await fs.mkdir(path.join(bucket, 'the-source'))
+  await fs.writeFile(path.join(bucket, 'the-source', 'summary.json'), JSON.stringify({ info: { id: 'the-source', cwd: '/elsewhere' }, session_kind: 'subagent' }))
+  for (const child of [SESSION, 'the-source']) {
+    await fs.mkdir(path.join(bucket, 'the-owner', 'subagents', child), { recursive: true })
+    await fs.writeFile(path.join(bucket, 'the-owner', 'subagents', child, 'meta.json'), '{}')
+  }
+  const session = await readGrokSession(dir, root)
+  assert.equal(session.parent_thread_id, 'the-owner')
+  assert.deepEqual(session.lineage, [SESSION, 'the-source', 'the-owner'])
+  assert.deepEqual(session.fork_sources, [{ id: 'the-source', before_ms: Date.parse('2026-11-05T00:00:00Z') }])
+  assert.deepEqual(session.policy_dirs, [cwd, '/elsewhere'])
+})
+
+test('an MCP call records the tool it reached and the text it returned', async t => {
+  const name = { 'x.ai/tool': { name: 'use_tool' } }
+  const call = (id, tool) => ({ sessionUpdate: 'tool_call', toolCallId: id, title: 'use_tool', status: 'pending', rawInput: { tool_name: tool, tool_input: {} }, _meta: name })
+  const named = (id, tool) => ({ sessionUpdate: 'tool_call_update', toolCallId: id, title: tool, rawInput: { tool_name: tool }, _meta: name })
+  const end = (id, status, output) => ({ sessionUpdate: 'tool_call_update', toolCallId: id, status, rawOutput: { type: 'MCP', output } })
+  const { file, root } = await setup(t, { text: jsonl([call('a', 'probe__ok'), named('a', 'probe__ok'), end('a', 'completed', { OkayOutput: 'fine' }), call('b', 'probe__bad'), end('b', 'failed', { Error: 'broke' }), { sessionUpdate: 'turn_completed' }].map(update => envelope(update))) })
+  const { messages } = await read(file, { root })
+  const parts = messages.flatMap(m => m.content)
+  assert.deepEqual(parts.filter(p => p.type === 'tool_use').map(p => p.name), ['mcp__probe__ok', 'mcp__probe__bad'])
+  assert.deepEqual(parts.filter(p => p.type === 'tool_result').map(p => [p.name, p.content, p.is_error]), [['mcp__probe__ok', 'fine', false], ['mcp__probe__bad', 'broke', true]])
+})
+
 test('ignoring a session covers what it spawned, and stays out after unignore', async t => {
   const { root, file, dir, cwd, home } = await setup(t, { summary: null })
   const ignored = new Set(['the-parent'])
@@ -330,6 +359,21 @@ test('a fork shorter than its parent keeps its own messages under the parent flo
   await withheld.mark('the-parent', 1024 * 1024)
   const { messages } = await read(file, { root, withheld })
   assert.deepEqual(messages.map(m => /** @type {any} */ (m.content)[0].text), ['the fork'])
+})
+
+test('a resumed subagent keeps out what its source wrote while ignored', async t => {
+  const forkedAt = 1793000500000
+  const chunk = (/** @type {string} */ text, /** @type {number} */ seconds) => ({ ...envelope({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text } }), timestamp: seconds })
+  const done = { timestamp: 1793000600, params: { update: { sessionUpdate: 'turn_completed' } } }
+  const { root, file, dir, cwd, home } = await setup(t, { text: jsonl([chunk('withheld copy', 1793000000), done, chunk('resumed', 1793000600), done]), summary: null })
+  await fs.writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id: SESSION, cwd }, session_kind: 'subagent_resume', parent_session_id: 'the-source', forked_at: new Date(forkedAt).toISOString() }))
+  const link = path.join(path.dirname(dir), 'the-owner', 'subagents', SESSION)
+  await fs.mkdir(link, { recursive: true })
+  await fs.writeFile(path.join(link, 'meta.json'), '{}')
+  const withheld = createGrokWithheldStore(path.join(home, 'state'))
+  await withheld.mark('the-source', 1024 * 1024)
+  const { messages } = await read(file, { root, withheld })
+  assert.deepEqual(messages.map(m => /** @type {any} */ (m.content)[0].text), ['resumed'])
 })
 
 test('a tool that runs for many lines stops holding the cursor back', async t => {

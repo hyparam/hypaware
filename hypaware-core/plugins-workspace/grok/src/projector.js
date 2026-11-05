@@ -244,7 +244,11 @@ export function createGrokFolder(session, start = {}) {
 /** @param {any} update */
 function metaToolName(update) {
   const tool = isPlainObject(update._meta) ? update._meta[TOOL_META_KEY] : undefined
-  return isPlainObject(tool) ? stringValue(tool.name) : undefined
+  const name = isPlainObject(tool) ? stringValue(tool.name) : undefined
+  // Every MCP call runs through use_tool, and only its input says which tool.
+  if (name !== 'use_tool') return name
+  const target = isPlainObject(update.rawInput) ? stringValue(update.rawInput.tool_name) : undefined
+  return target ? `mcp__${target}` : undefined
 }
 
 /** @param {any} update */
@@ -272,6 +276,11 @@ function toolOutput(update) {
   if (typeof update.rawOutput === 'string') return update.rawOutput
   // A user's own shell command has no rendered text, and its output field is bytes.
   if (typeof update.rawOutput?.output_for_prompt === 'string') return update.rawOutput.output_for_prompt
+  // Nor does an MCP result, which wraps its text by outcome.
+  if (update.rawOutput?.type === 'MCP') {
+    const text = update.rawOutput.output?.OkayOutput ?? update.rawOutput.output?.Error
+    if (typeof text === 'string') return text
+  }
   return update.rawOutput === undefined || update.rawOutput === null ? '' : JSON.stringify(update.rawOutput)
 }
 

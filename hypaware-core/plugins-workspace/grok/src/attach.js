@@ -9,7 +9,7 @@ import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_se
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 import { isPlainObject } from '../../../../src/core/util/json_util.js'
 
-export const GROK_EVENTS = Object.freeze(['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'SubagentStop', 'PreCompact', 'SessionEnd'])
+export const GROK_EVENTS = Object.freeze(['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'StopCancelled', 'SubagentStop', 'PreCompact', 'SessionEnd'])
 
 /** @param {{ env?: NodeJS.ProcessEnv, homeDir?: string }} [opts] */
 export function grokHooksPath(opts = {}) {

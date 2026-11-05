@@ -46,7 +46,8 @@ user chunks name a model, so replies inherit the one in force, carried in the
 cursor. Each message names its predecessor itself, also carried in the cursor,
 because reads are split into batches with separate writer state. A tool call takes its
 place in that chain when it starts, so a late or early settle cannot change it. A tool result names
-its tool for the same reason. A shell command that exits non-zero is `completed` to Grok and an error
+its tool for the same reason. Every MCP call runs through `use_tool`, so it is named
+`mcp__<server>__<tool>` from its input, the form queries already read. A shell command that exits non-zero is `completed` to Grok and an error
 here; grep's exit 1 only means no matches. Tool results keep placeholders for binary content. Output with `hostTurn` is
 display-only slash-command text and is dropped.
 
@@ -70,7 +71,9 @@ names no parent at all: its `session_kind` starts with `subagent`, and only the
 parent's `subagents/<child>/meta.json` records the link, so the reader looks there,
 own bucket first, and remembers what it finds. A fresh subagent with no link yet
 waits, because rows are written once; after five idle minutes it is recorded
-without one. Exclusions check the whole lineage, unlike other clients, because a
+without one. A resumed subagent (`subagent_resume`) has both links: the parent's
+`meta.json` names its owner, and its own `parent_session_id` names the subagent whose
+log it copied, so it inherits that source's exclusions and floors like a fork. Exclusions check the whole lineage, unlike other clients, because a
 Grok fork carries its parent's content. The same goes for folders: a session is
 governed by its own, a worktree's `source_workspace_dir` (Grok worktrees are separate
 clones under `GROK_HOME`, so the ancestor walk cannot reach the repo), and each
@@ -108,8 +111,11 @@ session ignores apply before projection and fail closed (LLP 0403).
 
 Attach owns `.grok/hooks/hypaware.json` in Grok's hook directory, recording exact
 entries under `_hypaware`, and keeps anything a user adds there. `GROK_HOME`
-relocates it through the generic `<CLIENT>_HOME` rule. `PreToolUse`, the only
-blocking event, is not registered.
+relocates it through the generic `<CLIENT>_HOME` rule. `PreToolUse` is not registered,
+and no registered hook writes a reply, so none can block. `StopCancelled` is, because an
+interrupt or `--max-turns` fires it instead of `Stop`. Grok holds a user's hooks back
+in a folder it does not trust and asks about trust in every folder while any such hook
+exists, so attaching can add that prompt; a headless run counts as trusted.
 
 ## Coexistence {#coexistence}
 
@@ -141,4 +147,5 @@ only on SessionStart, and with `GROK_HOOK_EVENT` set. Fixtures keep that shape
 with synthetic text. 
 A second pass drove real sessions through a live daemon and installed hooks,
 including an interactive session, fork, subagent, rewind, compaction, kill, image,
-parallel runs and session ignore, comparing rows against `updates.jsonl`.
+parallel runs and session ignore, comparing rows against `updates.jsonl`. A later pass
+on 1.0.77 added MCP tools, background wakes, an interrupted turn and a resumed subagent.

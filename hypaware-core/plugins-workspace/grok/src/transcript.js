@@ -194,15 +194,18 @@ export async function readGrokSession(dir, root) {
   let copying = true
   for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth++) {
     const isSubagent = String(current?.session_kind ?? '').startsWith('subagent')
-    const parent = isSubagent ? await findSubagentParent(root, bucket, currentId) : stringValue(current?.parent_session_id)
+    const owner = isSubagent ? await findSubagentParent(root, bucket, currentId) : undefined
     if (depth === 0 && isSubagent) {
-      if (parent) session.parent_thread_id = parent
+      if (owner) session.parent_thread_id = owner
       else session.parent_pending = true
     }
+    // A fork or a resumed subagent names the session whose log it copied. A plain
+    // subagent starts its own log, and a resumed one reaches its owner through its source.
+    const source = stringValue(current?.parent_session_id)
+    const parent = source ?? owner
     if (!parent || session.lineage.includes(parent)) break
     session.lineage.push(parent)
-    // A subagent starts its own log. A fork copies its parent's.
-    copying = copying && !isSubagent
+    copying = copying && source !== undefined
     if (copying) {
       const beforeMs = timeOf(current?.forked_at)
       session.fork_sources.push({ id: parent, ...(beforeMs === undefined ? {} : { before_ms: beforeMs }) })
