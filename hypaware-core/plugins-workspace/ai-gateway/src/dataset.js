@@ -6,7 +6,7 @@ import path from 'node:path'
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
 import { alignRows, canPushWhere, emptySource, scanColumnOrNulls, unionSources, whereColumns } from 'hypaware/core/query'
-import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
+import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange, createAiGatewayConversationState } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
@@ -853,8 +853,9 @@ function safeParseJson(value) {
  * (the exact expansion the live gateway recorder uses) so backfilled
  * and live-captured rows are byte-identical for the same projection.
  * Row expansion is pure with respect to `item.value`: it allocates a
- * fresh conversation state per call, so reruns and out-of-order items
- * produce identical row identity (`part_id = <message_id>#<part_index>`).
+ * fresh conversation state per call, except explicitly indexed Codex batches
+ * in one run which share their current file's chain and tool lookup. Reruns
+ * restart at index zero and produce identical row identity (`part_id = <message_id>#<part_index>`).
  *
  * On top of that pure expansion the materializer applies a narrow
  * PRE-WRITE dedupe: before a batch is handed back to the runner for
@@ -875,6 +876,9 @@ export function aiGatewayBackfillMaterializer() {
   // for every invocation. The dedupe state is isolated by the runner's opaque
   // run token and becomes collectible with that token.
   const dedupe = createBackfillDedupe()
+  // @ref LLP 0583#bounded-projection [implements]: one active Codex file per run, released with its opaque token
+  /** @type {WeakMap<object, { thread: string, state: ReturnType<typeof createAiGatewayConversationState> }>} */
+  const codexRuns = new WeakMap()
   return {
     kind: AI_GATEWAY_PROJECTED_EXCHANGE_KIND,
     dataset: DATASET_NAME,
@@ -887,8 +891,21 @@ export function aiGatewayBackfillMaterializer() {
     async materialize(item, ctx) {
       const projection = asProjectedExchange(item.value)
       if (!projection) return []
+      let state
+      if (ctx?.runToken && projection.client_name === 'codex') {
+        const thread = JSON.stringify([projection.session_id, projection.conversation_id])
+        const previous = codexRuns.get(ctx.runToken)
+        // Explicit zero starts a new file or replay. Unindexed exchanges keep
+        // the pure expansion contract used by the other backfill providers.
+        if (projection.messages[0]?.message_index !== undefined) {
+          state = previous?.thread === thread && projection.messages[0].message_index > 0
+            ? previous.state : createAiGatewayConversationState()
+          codexRuns.set(ctx.runToken, { thread, state })
+        }
+      }
       const rows = aiGatewayRowsFromProjectedExchange(projection, {
         gatewayAttributes: backfillGatewayAttributes(item),
+        state,
       })
       // @ref LLP 0449#reconciliation [implements]: a mutable snapshot must reach
       // storage whole, including old identities whose payload or position changed.
