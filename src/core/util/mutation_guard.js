@@ -67,6 +67,11 @@ export function claimPartitionMutation(partitionDir) {
       fs.mkdirSync(directory, { mode: 0o700 })
       break
     } catch (error) {
+      // On win32 a mkdir of a lock directory another process is removing
+      // fails EPERM (delete-pending) or ENOENT rather than EEXIST: the same
+      // lost race as the recovery path below, so report it as busy. POSIX
+      // keeps the raw error, where EPERM here is a real permission problem.
+      if (process.platform === 'win32' && isLockContention(error)) throw busy()
       if (errCode(error) !== 'EEXIST') throw error
       if (attempt) throw busy()
       /** @type {string[]} */
