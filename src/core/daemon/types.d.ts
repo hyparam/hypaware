@@ -289,6 +289,7 @@ export type StatusDiagnosticKind =
   | 'client_sync_list_unreadable'
   | 'maintenance_partitions_skipped'
   | 'capture_gap'
+  | 'backfill_failed'
   | 'cache_flush_failing'
   | 'installed_plugin_shadowed'
   | 'source_name_unregistered'
@@ -1166,6 +1167,8 @@ export interface BackfillSweepDriverOptions {
   config?: HypAwareV2Config
   /** Test seam: defaults to `runBackfillProvider`. */
   runBackfill?: BackfillSweepRunner
+  /** Latest settled outcome (or queue timeout), for bounded daemon status. */
+  onResult?: (identity: BackfillSweepProviderIdentity, ok: boolean) => void
   /**
    * How long one queued run may hold the shared background queue before the
    * driver stops waiting on it. Test seam: defaults to 30 minutes, which no

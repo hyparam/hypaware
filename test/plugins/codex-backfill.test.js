@@ -379,7 +379,7 @@ test('an unreadable rollout warns once across an hour of sweeps, then imports wh
     const failed = () => entries.filter((e) => e.message === 'codex.backfill.rollout_read_failed')
     const scans = () => entries.filter((e) => e.message === 'codex.backfill.scan_complete')
     for (let minute = 0; minute < 60; minute++) {
-      assert.equal((await collect(provider.run(ctx))).items.length, 0)
+      await assert.rejects(collect(provider.run(ctx)), /1 Codex rollout file/)
     }
     assert.equal(failed().length, 1, 'one warn for an hour of the same failure')
     assert.equal(failed()[0].level, 'warn')
@@ -396,17 +396,17 @@ test('an unreadable rollout warns once across an hour of sweeps, then imports wh
     // read, so it has to grow before it can fail again.
     await fs.appendFile(file, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'new turn' }] } }) + '\n')
     await fs.chmod(file, 0o000)
-    await collect(provider.run(ctx))
+    await assert.rejects(collect(provider.run(ctx)), /1 Codex rollout file/)
     assert.equal(failed().length, 2, 'a file that fails again after recovering warns again')
     await fs.rm(file)
     await collect(provider.run(ctx))
     await writeModernRollout(env, 'rollout-locked.jsonl', modernConversation('locked'))
     await fs.chmod(file, 0o000)
-    await collect(provider.run(ctx))
+    await assert.rejects(collect(provider.run(ctx)), /1 Codex rollout file/)
     assert.equal(failed().length, 3, 'a departed file drops from the remembered failures')
 
     ctx.sweep = false
-    await collect(provider.run(ctx))
+    await assert.rejects(collect(provider.run(ctx)), /1 Codex rollout file/)
     assert.equal(failed().length, 4, 'a manual import still warns on every run')
   } finally {
     await fs.chmod(file, 0o644).catch(() => {})
@@ -427,7 +427,7 @@ test('the remembered read failures are capped, so many unreadable rollouts still
     const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
     const { ctx, entries } = runContext()
     ctx.sweep = true
-    for (let minute = 0; minute < 3; minute++) await collect(provider.run(ctx))
+    for (let minute = 0; minute < 3; minute++) await assert.rejects(collect(provider.run(ctx)), /300 Codex rollout file/)
     assert.equal(entries.filter((e) => e.message === 'codex.backfill.rollout_read_failed').length, 256)
     const scans = entries.filter((e) => e.message === 'codex.backfill.scan_complete')
     assert.ok(scans.every((e) => e.fields?.files_read_failing === 300), 'files past the cap are still counted')
@@ -1849,4 +1849,137 @@ test('only a turn\'s own prompt or model output decides it: harness context, a p
   } finally {
     await env.cleanup()
   }
+})
+
+
+// @ref LLP 0583#bounded-projection [tests]: batching must retain a late usage carrier and stable positions
+test('streamed rollout batches preserve usage, indices, and tool links across batch boundaries', async () => {
+  const env = await stageEnv()
+  try {
+    /** @type {Array<{ type?: string, timestamp: string, payload: Record<string, unknown> }>} */
+    const items = Array.from({ length: 300 }, (_, i) => ({
+      timestamp: '2026-11-04T15:00:00.000Z',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `prompt-${i}` }] },
+    }))
+    items.splice(100, 0, { timestamp: '2026-11-04T15:00:00.000Z', payload: {
+      type: 'function_call', call_id: 'cross-batch', name: 'echo', arguments: '{}' },
+    })
+    items.push({ timestamp: '2026-11-04T15:00:00.000Z', payload: {
+      type: 'function_call_output', call_id: 'cross-batch', output: 'done' },
+    })
+    items.push({ type: 'event_msg', timestamp: '2026-11-04T15:00:01.000Z', payload: {
+      type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 7 } } },
+    })
+    await writeModernRollout(env, 'rollout-batches.jsonl', { meta: { id: 'batched' }, items })
+    const { ctx, entries } = runContext()
+    const result = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    assert.ok(result.items.length > 1, 'a long conversation is emitted in bounded batches')
+    const messages = result.items.flatMap(item => value(item).messages)
+    assert.equal(messages.length, 302)
+    assert.ok(result.items.every(item => value(item).messages.length <= 128))
+    assert.deepEqual(messages.map(message => message.message_index), Array.from({ length: 302 }, (_, i) => i))
+    assert.equal(messages[100].attributes.usage.output_tokens, 7, 'usage reaches the earlier tool call before its batch is written')
+    assert.equal(messages.filter(message => message.attributes?.usage).length, 1)
+    const materializer = aiGatewayBackfillMaterializer()
+    const materializerCtx = /** @type {any} */ ({ log: captureLog().log, env: {}, storage: {}, runToken: {} })
+    const rows = []
+    for (const item of result.items) rows.push(...await materializer.materialize(item, materializerCtx))
+    assert.deepEqual(rows[128].previous_message_id, [rows[127].message_id])
+    assert.equal(rows.at(-1)?.tool_call_id, rows[100].tool_call_id)
+    assert.equal(entries.at(-1).fields.sessions_projected, 1)
+  } finally { await env.cleanup() }
+})
+
+// @ref LLP 0583#failures [tests]: a budget failure cannot masquerade as a successful empty scan
+test('an oversized record fails visibly while healthy rollouts still import', async () => {
+  const env = await stageEnv()
+  try {
+    await fs.mkdir(env.sessionsDir, { recursive: true })
+    await fs.writeFile(path.join(env.sessionsDir, 'rollout-a-large.jsonl'), JSON.stringify({
+      type: 'event_msg', payload: { type: 'padding', text: 'x'.repeat(16 * 1024 * 1024) },
+    }) + '\n')
+    await writeModernRollout(env, 'rollout-z-healthy.jsonl', modernConversation('healthy'))
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const yielded = []
+    await assert.rejects(async () => {
+      for await (const item of createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx)) {
+        if (item.type !== 'event') yielded.push(item)
+      }
+    }, /1 Codex rollout file/)
+    assert.equal(yielded.length, 1)
+    assert.equal(value(yielded[0]).conversation_id, 'healthy')
+    assert.equal(entries.at(-1).fields.status, 'failed')
+    assert.equal(entries.at(-1).fields.files_read_failing, 1)
+    assert.match(entries.find(entry => entry.message === 'codex.backfill.rollout_read_failed').fields.error, /record.*limit/i)
+  } finally { await env.cleanup() }
+})
+
+
+// @ref LLP 0583#bounded-projection [tests]: framing decodes complete UTF-8 lines and tolerates an incomplete live suffix
+test('streamed records preserve UTF-8 across chunk boundaries and ignore a truncated tail', async () => {
+  const env = await stageEnv()
+  try {
+    const text = 'x'.repeat(65_490) + '🙂漢字'.repeat(30)
+    const file = await writeModernRollout(env, 'rollout-utf8.jsonl', { meta: { id: 'utf8' }, items: [
+      { payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } },
+    ] })
+    const content = await fs.readFile(file, 'utf8')
+    await fs.writeFile(file, content.replaceAll('\n', '\r\n') + '{"type":"response_item","payload":')
+    const { ctx } = runContext()
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    assert.equal((await materialize(items[0]))[0].content_text, text)
+  } finally { await env.cleanup() }
+})
+
+test('a wholly unparsable nonempty rollout fails rather than reporting an empty successful scan', async () => {
+  const env = await stageEnv()
+  try {
+    await fs.mkdir(env.sessionsDir, { recursive: true })
+    await fs.writeFile(path.join(env.sessionsDir, 'rollout-invalid.jsonl'), 'not json\n')
+    const { ctx } = runContext()
+    await assert.rejects(collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx)), /no readable JSON records/)
+  } finally { await env.cleanup() }
+})
+
+
+test('a partial first JSONL record does not hide the complete records after it', async () => {
+  const env = await stageEnv()
+  try {
+    const file = await writeModernRollout(env, 'rollout-leading-partial.jsonl', modernConversation('leading-partial'))
+    await fs.writeFile(file, '{\n' + await fs.readFile(file, 'utf8'))
+    const { ctx } = runContext()
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    assert.equal(value(items[0]).messages.length, 4)
+  } finally { await env.cleanup() }
+})
+
+test('legacy parsing reads only the initial file extent when a writer appends during the read', async (t) => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeLegacyRollout(env, 'rollout-legacy-growing.json', {
+      session: { id: 'legacy-growing' }, items: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'initial snapshot' }] }],
+    })
+    const open = fs.open.bind(fs)
+    let appended = false
+    t.mock.method(fs, 'open', async (...args) => {
+      const handle = await open(...args)
+      if (args[0] === filePath) {
+        const read = handle.read.bind(handle)
+        t.mock.method(handle, 'read', async (...readArgs) => {
+          const result = await read(...readArgs)
+          if (!appended) {
+            appended = true
+            await fs.appendFile(filePath, 'concurrent append outside the initial extent')
+          }
+          return result
+        })
+      }
+      return handle
+    })
+    const { ctx } = runContext()
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    assert.equal((await materialize(items[0]))[0].content_text, 'initial snapshot')
+    assert.equal(appended, true)
+  } finally { await env.cleanup() }
 })

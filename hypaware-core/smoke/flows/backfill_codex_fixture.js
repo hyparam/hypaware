@@ -35,9 +35,9 @@ import { prepareAttach } from '../../plugins-workspace/codex/src/toml-config.js'
  *    run id, so the materializer re-scans committed partitions) writes
  *    ZERO new rows and the query still returns exactly two rows.
  *
- * @param {{ harness: any, expect: any }} args
+ * @param {{ harness: any, expect: any, largeRollout?: boolean }} args
  */
-export async function run({ harness, expect }) {
+export async function run({ harness, expect, largeRollout = false }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
@@ -91,6 +91,28 @@ export async function run({ harness, expect }) {
     ].join('\n') + '\n',
     'utf8'
   )
+
+  if (largeRollout) {
+    // @ref LLP 0583#verification [tests]: exceed V8's string limit without constructing the file in memory
+    await runRoot('smoke.large_rollout_fixture', {
+      [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'large_rollout_fixture',
+      [Attr.DEV_RUN_ID]: harness.devRunId, status: 'ok',
+    }, async () => {
+      const filePath = path.join(sessionsDir, `rollout-2026-05-20T10-00-00-${sessionId}.jsonl`)
+      const original = await fs.readFile(filePath, 'utf8')
+      const split = original.indexOf('\n') + 1
+      const padding = Buffer.from(JSON.stringify({ type: 'event_msg', payload: { type: 'synthetic_padding', text: 'x'.repeat(28_800) } }) + '\n')
+      const file = await fs.open(filePath, 'w')
+      try {
+        await file.writeFile(original.slice(0, split))
+        for (let bytes = 0; bytes < 742 * 1024 * 1024;) {
+          bytes += (await file.writev(Array(64).fill(padding))).bytesWritten
+        }
+        await file.writeFile(original.slice(split))
+      } finally { await file.close() }
+      expect.that('fixture exceeds the single-string limit', (await fs.stat(filePath)).size, v => v > 742 * 1024 * 1024)
+    })
+  }
 
   const previousHome = process.env.HOME
   const previousCodexHome = process.env.CODEX_HOME
@@ -299,6 +321,56 @@ export async function run({ harness, expect }) {
       })
     }
 
+    if (largeRollout) {
+      await runRoot('smoke.batched_rollout', {
+        [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'batched_rollout',
+        [Attr.DEV_RUN_ID]: harness.devRunId, status: 'ok',
+      }, async () => {
+        const id = `${sessionId}-batched`
+        const file = await fs.open(path.join(sessionsDir, 'rollout-batched.jsonl'), 'w')
+        const at = new Date().toISOString()
+        try {
+          await file.writeFile(JSON.stringify({ type: 'session_meta', payload: { id, timestamp: at } }) + '\n')
+          for (let i = 0; i < 300; i++) {
+            await file.writeFile(JSON.stringify({ type: 'response_item', timestamp: at, payload: {
+              type: 'message', role: 'user', content: [{ type: 'input_text', text: `${i}:` + 'x'.repeat(64 * 1024) }],
+            } }) + '\n')
+          }
+        } finally { await file.close() }
+        const args = { provider: 'codex', dryRun: false, ctx: {
+          env, storage: kernel.storage, query: kernel.query, config: { version: /** @type {const} */ (2) },
+          backfills: kernel.backfills, backfillMaterializers: kernel.backfillMaterializers,
+        } }
+        const first = await runBackfillProvider(args)
+        expect.that('batched import writes all 300 rows', first, v => v.ok && v.rowsWritten === 300)
+        const second = await runBackfillProvider(args)
+        expect.that('batched rerun writes no duplicate rows', second, v => v.ok && v.rowsWritten === 0)
+        const rows = await queryRows({ dispatch, kernel, registry, env, expect, label: 'durable batched rows',
+          sql: `select count(*) as n, max(message_index) as last_index from ai_gateway_messages where session_id = '${id}'`,
+        })
+        expect.that('durable batched positions cover the whole conversation', rows[0], v => Number(v?.n) === 300 && Number(v?.last_index) === 299)
+        const invalid = path.join(sessionsDir, 'rollout-invalid.jsonl')
+        await fs.writeFile(invalid, 'synthetic unreadable JSON record\n')
+        const recoveredId = `${sessionId}-partial-recovery`
+        await fs.writeFile(path.join(sessionsDir, 'rollout-healthy-recovery.jsonl'), [
+          JSON.stringify({ type: 'session_meta', payload: { id: recoveredId, timestamp: at } }),
+          JSON.stringify({ type: 'response_item', timestamp: at, payload: {
+            type: 'message', role: 'user', content: [{ type: 'input_text', text: 'healthy file survives another file failure' }],
+          } }),
+        ].join('\n') + '\n')
+        const failed = await runBackfillProvider(args)
+        expect.that('unreadable file fails the run while healthy rows are committed', failed, v => !v.ok && v.rowsWritten === 1)
+        const partial = await queryRows({ dispatch, kernel, registry, env, expect, label: 'partial capture flush',
+          sql: `select count(*) as n from ai_gateway_messages where session_id = '${recoveredId}'`,
+        })
+        expect.that('partial capture is queryable after the failed run', partial[0], v => Number(v?.n) === 1)
+        await fs.rm(invalid)
+        const recovered = await runBackfillProvider(args)
+        expect.that('removing the failed input recovers without duplicate rows', recovered, v => v.ok && v.rowsWritten === 0)
+
+      })
+    }
+
     // ----- 4. Internal telemetry: dev_run_id + provider + row counts -----
     await obs.shutdown()
     const traces = await expect.traces()
@@ -335,6 +407,8 @@ export async function run({ harness, expect }) {
       l.body === 'codex.backfill.scan_complete' && l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 4))
     expect.that('logs: scheduled capture completed', logs, (v) => v.some((l) =>
       l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'codex' && l.attributes?.rows_written === 6))
+    if (largeRollout) expect.that('logs: failed file marks the scan failed', logs, v => v.some(l =>
+      l.body === 'codex.backfill.scan_complete' && l.attributes?.status === 'failed' && l.attributes?.files_read_failing === 1))
     const finishLogs = logs.filter(
       (/** @type {any} */ l) => l.body === 'backfill.finish' && l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
     )

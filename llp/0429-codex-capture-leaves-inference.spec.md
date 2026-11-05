@@ -6,7 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-22
 **Related:** LLP 0141, LLP 0313, LLP 0359, LLP 0045
-**Extended-by:** LLP 0432 (saved Codex provider compatibility and key-scoped TOML undo), LLP 0466 (`on_join` no longer gates the capture sweep; detach is the off switch), LLP 0567 (completed TurnItems are captured; raw items win per turn)
+**Extended-by:** LLP 0432 (saved Codex provider compatibility and key-scoped TOML undo), LLP 0466 (`on_join` no longer gates the capture sweep; detach is the off switch), LLP 0567 (completed TurnItems are captured; raw items win per turn), LLP 0583 (bounded rollout capture and visible scan failures)
 
 ## Default {#default}
 

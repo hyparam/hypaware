@@ -6,6 +6,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { writePidFile } from '../../src/core/daemon/pid.js'
+import { writeStatusFile } from '../../src/core/daemon/status/file.js'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
@@ -199,5 +201,28 @@ test('committed deletes in the newest partition are enforced', async () => {
     const after = second.report.captureHealth.find((/** @type {any} */ c) => c.client === 'codex')
     assert.equal(after.state, 'unknown', 'deleted rows never confirm capture')
     assert.equal(after.lastEventAt, null)
+  })
+})
+
+
+// @ref LLP 0583#failures [tests]: a captured row cannot conceal another file's failed scan
+test('a failed Codex scan is visible even with captured rows, and clears after recovery', async () => {
+  await withHome(async ({ hypHome, cacheRoot, collect }) => {
+    await appendCodexRows(cacheRoot, [{ session_id: 'healthy-other-thread', client_name: 'codex', message_created_at: '2026-11-04T15:00:00Z', date: '2026-11-04' }])
+    const stateRoot = path.join(hypHome, 'hypaware')
+    writePidFile(stateRoot, { pid: process.pid, runId: 'scan-health', mode: 'foreground', startedAt: new Date().toISOString() })
+    const status = { pid: process.pid, runId: 'scan-health', mode: 'foreground', state: /** @type {const} */ ('healthy'),
+      startedAt: new Date().toISOString(), healthyAt: new Date().toISOString(), uptimeMs: 0, sources: [], sinks: [], warnings: ['backfill_failed:codex'] }
+    writeStatusFile(stateRoot, status)
+    const failed = await collect({})
+    assert.ok(failed.report.diagnostics.some((/** @type {any} */ d) => d.kind === 'backfill_failed' && d.severity === 'error'))
+    assert.match(failed.text, /codex transcript capture failed/)
+    assert.equal(failed.report.overall, 'degraded')
+    assert.equal(failed.report.captureHealth.find((/** @type {any} */ c) => c.client === 'codex').state, 'unknown')
+    status.warnings = []
+    writeStatusFile(stateRoot, status)
+    const recovered = await collect({})
+    assert.ok(!recovered.report.diagnostics.some((/** @type {any} */ d) => d.kind === 'backfill_failed'))
+    assert.equal(recovered.report.captureHealth.find((/** @type {any} */ c) => c.client === 'codex').state, 'ok')
   })
 })

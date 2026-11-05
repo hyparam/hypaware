@@ -584,6 +584,19 @@ export async function collectHypAwareStatus(opts = {}) {
   // Is the snapshot a live daemon's own, and so readable in the present tense
   // at all? Every reader below that makes a claim about *now* is gated on it.
   const snapshotIsLive = daemon.running && snapshotIsThisProcess
+  // @ref LLP 0583#failures [implements]: a good row from another thread cannot hide a failed transcript scan
+  const failingBackfills = new Set((snapshotIsLive && Array.isArray(daemonStatusFile?.warnings)
+    ? daemonStatusFile.warnings : []).flatMap(value => {
+      const match = typeof value === 'string' ? /^backfill_failed:([a-zA-Z0-9_.-]{1,96})$/.exec(value) : null
+      return match ? [match[1]] : []
+    }))
+  for (const provider of failingBackfills) {
+    diagnostics.push({
+      severity: 'error', kind: 'backfill_failed',
+      message: `${provider} transcript capture failed: some history may be missing; failed files will be retried`,
+      repair: [`hyp backfill ${provider} --dry-run  # shows the failing import`],
+    })
+  }
   const heartbeatAgeMs = snapshotIsLive
     ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
     : null
@@ -1707,7 +1720,7 @@ export async function collectHypAwareStatus(opts = {}) {
         attachedAt: null,
         listenerStartedAt: null,
         gapMs: 0,
-        state: newestRowAt === null ? 'unknown' : 'ok',
+        state: newestRowAt === null || failingBackfills.has(clientName) ? 'unknown' : 'ok',
       })
     }
   }
