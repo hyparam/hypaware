@@ -28,8 +28,8 @@
 > budgeted batch.
 > `@ref LLP 0359#sweep-context [constrained-by]`: `backfill.window_days`
 > bounds the join-time import and the scheduled sweep.
-> `@ref LLP 0035#per-turn [constrained-by]`: Mastra Code stores a thread
-> gauge, not per-turn usage, so no row carries LLP 0035 usage unless T3
+> `@ref LLP 0035#per-turn [constrained-by]`: Mastra Code stores a
+> per-process gauge, not per-turn usage, so no row carries LLP 0035 usage unless T3
 > proves differencing deterministic.
 
 ## Context
@@ -162,15 +162,18 @@ design decisions; D4 is the one Design narrows, with the reason given.
   negative, or can cover a turn the daemon never saw. Design therefore
   ships the Crush answer (LLP 0573 D2) by default: the thread's
   `tokenUsage` (the five counters, never `raw`) is carried as
-  `attributes.mastracode.thread_token_usage` on the last part of the latest
+  `attributes.mastracode.process_token_usage` on the last part of the latest
   assistant message, and no row carries LLP 0035 usage, so no query that
-  sums usage counts it. T3 (LLP 0587) tries the proof against the pinned
+  sums usage counts it. The attribute is the counter Mastra Code keeps for
+  the latest process on this thread; it resets when a thread is continued
+  and is not a thread total. T3 (LLP 0587) tries the proof against the pinned
   `@mastra/core` source and the probe samples. Differencing ships only if
   T3 shows the gauge is written once per turn, in the same transaction as
   that turn's assistant row, and accumulates from zero for exactly that
   turn; then the turn's usage is the gauge read with that row, under LLP
   0035 `#net-input` and `#one-carrier`. Otherwise the docs state that
-  Mastra Code usage is thread-level only. This is guardian question Q5.
+  Mastra Code rows carry no per-turn usage, only the latest process's
+  counter, which is not a thread total. This is guardian question Q5.
 - **D5. Detect with a stat gate, a rowid cursor and per-thread state, and
   reconcile a whole thread on any change** (LLP 0449). #reconciliation gives
   the rules.
@@ -186,7 +189,10 @@ design decisions; D4 is the one Design narrows, with the reason given.
   product analytics are on by default and `MASTRA_TELEMETRY_DISABLED=1`
   turns them off (one factual sentence); `--permission-mode deny` does not
   stop tools from running; remote Turso and Postgres stores are not
-  supported; and thread titles are recorded as content.
+  supported; and thread titles are recorded as content. The retention
+  disclosure also says what HypAware keeps (#prune):
+  HypAware keeps a thread Mastra Code deletes, but drops messages Mastra
+  Code prunes from a thread still in use.
 
 ### Plugin and manifest {#manifest}
 
@@ -204,8 +210,7 @@ The manifest copies the goose manifest field for field, with these values:
   "Records your Mastra Code conversations and imports recent history. Makes
   no changes to Mastra Code.", `detect { settings_file:
   ".local/share/mastracode/mastra.db" }`, `compose { plugin { name },
-  requires_gateway: true }`. Gate G-A confirms the macOS default before
-  Build relies on it (#open-questions).
+  requires_gateway: true }`, and no `platforms` field, as goose.
 - `node_engine` stays `">=22.12"`, as goose. The runtime check in #sqlite
   covers the JSONB minimum.
 - `config_sections`: one, `mastracode`. `sources`: one, `mastracode`, plus a
@@ -224,6 +229,27 @@ Detection checks that the database's directory exists, so it reads no rows
 and never runs Mastra Code. A moved data directory lives in the user's shell
 and is not seen by the picker; those users set `db_path`.
 
+**Detection is one HOME-relative probe {#detect-platforms}.** The kernel's
+`detect.settings_file` is a single path under HOME with no per-platform
+variant, so `detect` names the Linux default only. The per-platform default
+lives in the config resolver (#config step 5), which is code. The outcomes:
+
+- **Linux:** the probe matches the default, so the picker pre-checks Mastra
+  Code when its database exists.
+- **macOS:** the probe misses `~/Library/Application Support/mastracode/`,
+  so the picker offers Mastra Code unchecked. Picking it works, because the
+  resolver finds the macOS default. This gap is accepted and recorded in
+  #open-questions and the T8 docs. A per-platform `detect` would be a
+  separate kernel design. G-A has two outcomes: if it confirms the
+  documented macOS path, nothing here changes and the gap stays; if it shows
+  a different path, the resolver default is amended before T2 lands.
+- **Windows:** the row sets no `platforms` gate. LLP 0368 `#platform-gate`
+  reserves the gate for an operating system with no capture path at all,
+  and Windows has a documented one (`%APPDATA%\mastracode\`, #context), so
+  Mastra Code is offered unchecked as on macOS and the resolver uses that
+  default. No run validates Windows; the T8 docs say so and #open-questions
+  records it.
+
 ### Config {#config}
 
 ```toml
@@ -235,7 +261,7 @@ poll_interval = "60s"
 
 | Key | Goose precedent | Rule |
 | --- | --- | --- |
-| `enabled` | `goose.enabled` | boolean |
+| `enabled` | `goose.enabled`, default true (`resolveGooseEnabled`) | boolean, default true: absent means on and only `false` turns capture off |
 | `db_path` | `goose.sessions_db` | non-empty string; a leading `~` is expanded when the path is resolved, not by the validator |
 | `poll_interval` | `goose.poll_interval`, default 60 s | positive ms or a duration string |
 
@@ -302,8 +328,16 @@ order. Key: `(session_id, part_id)`.
   text parts. Other `signal` types are skipped and counted, never projected
   as prompts.
 - An assistant message gives, in content order: an assistant part per
-  `text` part, and a tool-call part (tool name, parsed args) followed by a
-  tool-result part (result, error flag) per `tool-invocation` part.
+  `text` part, and per `tool-invocation` part a tool-call part (tool name,
+  parsed args) followed by a tool-result part (result) when the invocation's
+  `state` is `result`. An invocation in any other state gives only its
+  tool-call part, and the open-thread rule (#reconciliation step 5) reads it
+  again when it completes.
+- **No error flag.** Mastra Code's `tool-invocation` part carries no error
+  field, so a tool-result part sets none. The one error signal in the probe,
+  `data-sandbox-exit`, is a separate part and stays skipped and counted;
+  joining it to its invocation by `toolCallId` is a later change
+  (#open-questions).
   `step-start` gives no part; its model rides on the parts of its step.
   `data-workspace-metadata` gives no part (D6). Any other part type,
   `reasoning` included, is skipped and counted (#open-questions).
@@ -393,6 +427,21 @@ the greatest `updatedAt` observed, and the signature recorded, so the poll
 neither walks nor hashes history; history is the backfill's job
 (#backfill).
 
+**Mastra Code's 90-day prune** {#prune}. Mastra Code deletes old chat
+data (D8), and the two ways it can do so give two outcomes:
+
+- **Messages pruned from a thread that still exists** are removed from the
+  cache on that thread's next reconcile, because the reconcile is a full
+  snapshot of the thread (LLP 0449 `#reconciliation`). The poll sees it when
+  the thread next changes; otherwise the sweep does.
+- **A thread pruned whole** keeps its cached rows. The sweep prunes only its
+  watermark entry and raises the `floor`; whole-session deletion is outside
+  the reconcile protocol (LLP 0449 Boundaries).
+
+Whether the prune removes whole threads, single messages or both is not
+known from the probe (#open-questions); T3 reads it from the pinned source
+and the docs state the outcome either way.
+
 **Watermark scope and bound.** Entries exist only for threads in the sweep's
 scope; each sweep prunes deleted and out-of-scope threads. The sidecar is
 capped at 10,000 thread entries; past the cap the entry with the oldest
@@ -423,7 +472,7 @@ The backfill provider reuses the reader and projector. Its scope, for the
 join-time import and the scheduled sweep (LLP 0359 `#sweep-context`), is
 every thread whose `updatedAt` falls inside `backfill.window_days` when it
 is set, and every thread when it is unset. Mastra Code's own 90-day chat
-retention bounds what exists (D8). It reads one thread at a time on one
+retention bounds what exists (D8), and its prune follows #prune. It reads one thread at a time on one
 connection. A re-run reconciles and does not append. It waits a bounded
 time on a held scope guard, then fails that thread with
 `cache_partition_mutation_busy`, as goose does.
@@ -445,7 +494,9 @@ time on a held scope guard, then fails that thread with
   Mastra-Code-only install it exits status-unknown, as on a Goose-only
   install (#2860), and directory markings are the working control.
 - **Workspace paths (D6):** the `data-workspace-metadata` part is dropped in
-  the projector before a row is built.
+  the projector before a row is built, so no value from it (its
+  `filesystem` and `sandbox` objects) appears in any row. `cwd`
+  (`projectPath`) and `source_path` are the only path-bearing columns.
 - **What HypAware does not read (D7):** `settings.json`, `auth.json`,
   `mastra-vectors.db`, the observability store, `~/.mastracode`, project
   `.mastracode` directories, and every table other than the two named.
@@ -527,8 +578,8 @@ honors them, and names the files HypAware never reads.
 - Mastra Code rows look like goose and crush rows: same table, same
   reconcile behavior, same privacy seams. Query and export need no change.
 - Unless T3 proves differencing, Mastra Code rows carry no LLP 0035 usage; a
-  usage report shows Mastra Code turns with null usage and a thread gauge
-  attribute.
+  usage report shows Mastra Code turns with null usage and the latest
+  process's token counter attribute, which is not a thread total.
 - Idle cost is two stats per poll.
 - Remote stores and the gateway lane are not covered; the docs say so.
 - A schema change that removes a needed column degrades the source with a
@@ -541,7 +592,8 @@ For the guardian design review:
 - **Q5, differencing proof.** Can T3 show from the pinned `@mastra/core`
   1.82.0 source and the probe samples that `tokenUsage` is written once per
   turn with that turn's assistant row and starts from zero for it (D4)? If
-  not, thread-level usage is documented and no row carries LLP 0035 usage.
+  not, the docs describe the latest process's counter, not a thread total
+  (D4), and no row carries LLP 0035 usage.
   If it is proven, is the cache mapping right: input = `promptTokens` minus
   `cachedInputTokens` floored at 0 (LLP 0035 `#net-input`), cache read =
   `cachedInputTokens`, cache write = `cacheCreationInputTokens`, output =
@@ -563,8 +615,21 @@ For the guardian design review:
   macOS; fallback as #reconciliation step 1.
 - **macOS path and read side effects.** G-A confirms the macOS default
   directory, the JSONB read on the Mac's node, and which `-wal` and `-shm`
-  files a read-only open creates. If the default differs, T2 changes
-  `detect` and the resolver, and this design is amended before T2 lands.
+  files a read-only open creates. If G-A confirms the documented path,
+  nothing changes and the macOS picker gap (#detect-platforms) stays; if it
+  shows a different path, the resolver default and this design are amended
+  before T2 lands. `detect` keeps the Linux probe either way.
+- **Windows.** Mastra Code is offered on Windows with the documented
+  `%APPDATA%\mastracode\` default and no `platforms` gate
+  (#detect-platforms), but no run validates it. Is a Windows probe wanted
+  before release, or is the docs disclosure enough?
+- **Prune granularity.** Does Mastra Code's 90-day retention delete whole
+  threads, single messages, or both? T3 reads it from the pinned source;
+  #prune states the outcome for each.
+- **Tool errors.** The `tool-invocation` part has no error field
+  (#projection). Should a later change join `data-sandbox-exit` to its
+  invocation by `toolCallId` to set an error flag, or does it stay
+  skipped and counted?
 - **SQLite minimum.** Is a runtime `sqlite_unsupported` check enough, or
   should `node_engine` rise to the first node whose bundled SQLite is 3.45
   or newer?
