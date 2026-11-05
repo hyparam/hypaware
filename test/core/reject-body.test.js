@@ -194,7 +194,13 @@ test('drainRequestBody stops reading a refused body at MAX_REJECTED_DRAIN_BYTES'
     // hypothetical at this body size either - under load 163705 turned up in
     // 2 of 64 samples of this very upload, so the bound has to sit under it
     // rather than merely under the whole body.
-    const maxBoundedRead = 2 * CAP_BYTES + 16 * 1024
+    //
+    // On win32 the pause-without-reset shape IS the teardown: the reset is
+    // held behind `WIN32_ANSWER_GRACE_MS` so Winsock cannot discard the
+    // answer this test reads back above, and the read settles at the
+    // backpressure figure, 196608. The bound there sits a cap higher, which
+    // still fails an unbounded read of this 262144-byte body.
+    const maxBoundedRead = (process.platform === 'win32' ? 3 : 2) * CAP_BYTES + 16 * 1024
     assert.ok(
       socket.bytesRead < maxBoundedRead,
       `drainRequestBody read ${socket.bytesRead} bytes of the ${body.length} it refused, past the ` +

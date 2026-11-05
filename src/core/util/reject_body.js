@@ -21,7 +21,9 @@
  * crossed, and the read settles at about twice this. While the answer is
  * still pending nothing is torn down, the pause reaches the socket only
  * through the request stream's own backpressure, and the read settles at
- * about three and a half times this. Both regimes are measured in
+ * about three and a half times this. On win32 the answered teardown holds
+ * its reset behind a grace (see `winsockSoftClose`), so both regimes settle
+ * at the backpressure figure. All of it is measured in
  * `test/core/reject-body.test.js`.
  *
  * A body the server refuses still has to be read for the answer to reach a
@@ -35,6 +37,18 @@
 const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
 
 /**
+ * How long a refused win32 connection may outlive its flushed answer, for the
+ * caller to read that answer before the socket is reclaimed. Winsock discards
+ * data on both sides of an abortive close - the server's unsent queue when
+ * the socket is destroyed, and the caller's received-but-unread bytes when
+ * the reset lands - so on win32 the teardown below ends the socket (the
+ * answer and a FIN flush in order) and destroys it only after this grace, a
+ * backstop for a caller that neither reads nor closes. A caller that does
+ * read closes the connection itself and the backstop is cancelled.
+ */
+const WIN32_ANSWER_GRACE_MS = 1000
+
+/**
  * Discard a request body under a hard byte bound.
  *
  * Past the cap the request is paused, which is what bounds the read, and the
@@ -43,7 +57,10 @@ const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
  * the status it needs. The answer is written before a byte is drained, so a
  * caller reading its socket while it uploads has the refusal in hand long
  * before the cut; one that reads nothing until its upload finishes loses the
- * answer to the reset, which is the price of the bound.
+ * answer to the reset, which is the price of the bound. On win32 even the
+ * reading caller would lose it - Winsock discards a received answer the
+ * caller has not read yet when the reset lands - so there the reset waits
+ * out a grace behind the flushed answer (see `winsockSoftClose`).
  *
  * Call this BEFORE writing the response head: a body that is not known to fit
  * under the cap is answered `connection: close`, because past the cap the
@@ -75,8 +92,9 @@ const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
 export function drainRequestBody(req, res) {
   let drained = 0
   let overCap = false
+  const close = process.platform === 'win32' ? winsockSoftClose(req.socket) : () => req.destroy()
   function closeIfAnswered() {
-    if (overCap && res.writableFinished) req.destroy()
+    if (overCap && res.writableFinished) close()
   }
   req.on('data', (chunk) => {
     drained += chunk.length
@@ -96,7 +114,43 @@ export function drainRequestBody(req, res) {
   // this line is the only thing that drains the body, so it is not removable.
   req.resume()
   res.on('finish', closeIfAnswered)
-  if (!fitsUnderCap(req)) res.setHeader('connection', 'close')
+  if (!fitsUnderCap(req)) {
+    res.setHeader('connection', 'close')
+    // Node ends a `connection: close` socket itself, with `destroySoon` the
+    // moment the answer is flushed, and its `finish` listener runs before the
+    // one above. On win32 that teardown discards the answer exactly the way
+    // the close above would, so it is redirected at the same soft close.
+    if (process.platform === 'win32') /** @type {any} */ (req.socket).destroySoon = close
+  }
+}
+
+/**
+ * The win32 shape of closing a refused connection behind its answer.
+ *
+ * `destroy` is an abortive close, and Winsock makes one lose the answer twice
+ * over: the server's kernel drops whatever it has not sent yet, and the
+ * caller's kernel drops what it received but the caller has not read once the
+ * reset lands. So the socket is ended (the answer and a FIN flush in order,
+ * which is what a caller mid-read survives) and destroyed only behind
+ * `WIN32_ANSWER_GRACE_MS`, so a caller that neither reads nor closes still
+ * cannot keep the socket. Without the destroy's hard stop the read is bounded
+ * by the request stream's backpressure alone, the same regime as a pending
+ * answer, so on win32 the answered read settles at the pending figure rather
+ * than the destroyed one. POSIX keeps the plain destroy: its reset does not
+ * cost a reading caller the flushed answer, and the grace would hold every
+ * refused socket open for nothing.
+ *
+ * @param {import('node:net').Socket | null} socket
+ */
+function winsockSoftClose(socket) {
+  let cut = /** @type {NodeJS.Timeout | null} */ (null)
+  return function softClose() {
+    if (!socket || socket.destroyed || cut) return
+    socket.end()
+    cut = setTimeout(() => socket.destroy(), WIN32_ANSWER_GRACE_MS)
+    cut.unref()
+    socket.once('close', () => clearTimeout(/** @type {NodeJS.Timeout} */ (cut)))
+  }
 }
 
 /**
