@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-21
 **Related:** LLP 0017, LLP 0067, LLP 0166
+**Extended-by:** LLP 0584 (the Windows service installer this groundwork was for: the file control channel is how its Scheduled Task stops the daemon, and its stop escalates to a hard kill on timeout — the open question this doc left)
 
 ## Summary
 
