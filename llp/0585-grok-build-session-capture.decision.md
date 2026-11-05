@@ -44,9 +44,10 @@ new prompt or `turn_completed` closes what is open, and a file quiet for five
 minutes settles the rest, torn last line included, which covers crashes. Only
 user chunks name a model, so replies inherit the one in force, carried in the
 cursor. Each message names its predecessor itself, also carried in the cursor,
-because reads are split into batches with separate writer state. A tool result names
+because reads are split into batches with separate writer state. A tool call takes its
+place in that chain when it starts, so a late or early settle cannot change it. A tool result names
 its tool for the same reason. A shell command that exits non-zero is `completed` to Grok and an error
-here. Tool results keep placeholders for binary content. Output with `hostTurn` is
+here; grep's exit 1 only means no matches. Tool results keep placeholders for binary content. Output with `hostTurn` is
 display-only slash-command text and is dropped.
 
 ## Identity {#identity}

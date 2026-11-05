@@ -61,8 +61,9 @@ export function createGrokFolder(session, start = {}) {
     if (partial.at !== undefined) out.message_created_at = new Date(partial.at).toISOString()
     if (partial.eventId) out.provider_uuid = partial.eventId
     if (partial.promptId) out.prompt_id = partial.promptId
-    out.previous_message_id = lastId ? [lastId] : []
-    lastId = out.message_id
+    const previous = partial.placed ? partial.previous : lastId
+    out.previous_message_id = previous ? [previous] : []
+    if (!partial.placed) lastId = out.message_id
     if (partial.role === 'assistant') {
       const model = partial.model ?? partial.currentModel ?? session.model
       if (model) out.model = model
@@ -121,7 +122,11 @@ export function createGrokFolder(session, start = {}) {
         const out = closeRun()
         const id = stringValue(update.toolCallId)
         if (id) {
-          tools.set(id, { ...common, previous: lastId, id, name: toolName(update), input: toolInput(update) })
+          // @ref LLP 0585#folding: a call takes its chain position here, not when it
+          // settles. Parallel calls settle in any order and a quiet file settles them
+          // early, and the lanes must agree because the first row written wins.
+          tools.set(id, { ...common, previous: lastId, placed: true, id, name: toolName(update), input: toolInput(update) })
+          lastId = grokMessageId(session.id, common.line)
           if (TERMINAL.has(update.status)) out.push(...settleTool(id, update, common))
         }
         return out
@@ -265,6 +270,8 @@ function toolOutput(update) {
   // several concise and absolute-path variants, often at triple the size.
   if (Array.isArray(update.content) && update.content.length) return update.content.map(blockText).join('\n')
   if (typeof update.rawOutput === 'string') return update.rawOutput
+  // A user's own shell command has no rendered text, and its output field is bytes.
+  if (typeof update.rawOutput?.output_for_prompt === 'string') return update.rawOutput.output_for_prompt
   return update.rawOutput === undefined || update.rawOutput === null ? '' : JSON.stringify(update.rawOutput)
 }
 
@@ -282,12 +289,13 @@ function blockText(block) {
 }
 
 /**
- * Grok marks a shell command that ran and exited non-zero as `completed`.
+ * Grok marks a shell command that ran and exited non-zero as `completed`. Only
+ * shell: grep also reports an exit code, and its 1 just means no matches.
  * @param {any} update
  */
 function nonZeroExit(update) {
   const code = update.rawOutput?.exit_code
-  return typeof code === 'number' && code !== 0
+  return update.rawOutput?.type === 'Bash' && typeof code === 'number' && code !== 0
 }
 
 /**

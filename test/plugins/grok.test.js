@@ -427,6 +427,40 @@ test('a worktree or subagent answers to the folders it came from', async t => {
   assert.deepEqual(await cwds(), [])
 })
 
+test('parallel tools chain the same way however and whenever they settle', async t => {
+  const call = (/** @type {string} */ id) => envelope({ sessionUpdate: 'tool_call', toolCallId: id, title: 'run_terminal_command', rawInput: {} })
+  const end = (/** @type {string} */ id) => envelope({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: id } }] })
+  const start = jsonl([envelope({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'go' }, _meta: { promptIndex: 0 } }), call('a'), call('b')])
+  const rest = jsonl([end('b'), end('a'), envelope({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } }), envelope({ sessionUpdate: 'turn_completed' })])
+  const { root, file } = await setup(t, { text: start })
+  const old = new Date(Date.now() - IDLE_FLUSH_MS - 1000)
+  await fs.utimes(file, old, old)
+  const swept = await read(file, { root })
+  await fs.appendFile(file, rest)
+  const whole = (await read(file, { root })).messages
+  const chain = (/** @type {any[]} */ messages) => new Map(messages.map(m => [m.message_id, m.previous_message_id]))
+  assert.deepEqual(chain(swept.messages), new Map([...chain(whole)].filter(([id]) => swept.messages.some(m => m.message_id === id))))
+  const continued = await read(file, { root, cursor: swept.cursor })
+  assert.deepEqual(chain(continued.messages), new Map([...chain(whole)].filter(([id]) => continued.messages.some(m => m.message_id === id))))
+  // Walking back from the reply reaches every message.
+  const links = chain(whole)
+  const seen = []
+  for (let id = whole.at(-1)?.message_id; id; id = /** @type {any} */ (links.get(id))?.[0]) seen.push(id)
+  assert.equal(seen.length, whole.length)
+})
+
+test('a user shell command stores its text, and an empty grep is not an error', async t => {
+  const { root, file } = await setup(t, { text: jsonl([
+    envelope({ sessionUpdate: 'tool_call', toolCallId: 'sh', title: 'x', rawInput: {} }),
+    envelope({ sessionUpdate: 'tool_call_update', toolCallId: 'sh', status: 'completed', rawOutput: { type: 'Bash', output: [104, 105], output_for_prompt: 'hi', exit_code: 0 } }),
+    envelope({ sessionUpdate: 'tool_call', toolCallId: 'gr', title: 'grep', rawInput: {} }),
+    envelope({ sessionUpdate: 'tool_call_update', toolCallId: 'gr', status: 'completed', rawOutput: { type: 'GrepSearch', exit_code: 1 }, content: [{ type: 'content', content: { type: 'text', text: 'found 0 matches' } }] }),
+    envelope({ sessionUpdate: 'turn_completed' }),
+  ]) })
+  const results = (await read(file, { root })).messages.map(m => /** @type {any} */ (m.content)[0]).filter(b => b.type === 'tool_result')
+  assert.deepEqual(results.map(b => [b.content, b.is_error]), [['hi', false], ['found 0 matches', false]])
+})
+
 test('the session id Grok hands its tools resolves to that session', () => {
   assert.deepEqual(resolveSessionIdForCli({ env: { GROK_SESSION_ID: 'g1', HOME: '/none' }, cwd: '/x' }), { ok: true, sessionId: 'g1', source: 'grok_env' })
   const both = resolveSessionIdForCli({ env: { GROK_SESSION_ID: 'g1', CLAUDE_CODE_SESSION_ID: 'c1', HOME: '/none' }, cwd: '/x' })
