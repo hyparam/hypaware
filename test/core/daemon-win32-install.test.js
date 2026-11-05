@@ -3,9 +3,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 /**
  * @import { SchtasksAdapter } from '../../src/core/daemon/types.js'
+ * @import { TestContext } from 'node:test'
+ * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
 import {
@@ -24,6 +28,7 @@ import {
 import { planDaemonInstall, renderDaemonInstall, serviceDaemonStatus } from '../../src/core/daemon/install.js'
 import { platformIsSupported, setupPlatformIsSupported, daemonKindLabel } from '../../src/core/daemon/platform.js'
 import { detectSupervisor } from '../../src/core/update/self_update.js'
+import { runDaemonStop } from '../../src/core/commands/daemon.js'
 
 const SID = 'S-1-5-21-1111-2222-3333-1001'
 const BIN = 'C:\\Users\\kenny\\AppData\\Roaming\\npm\\hypaware.cmd'
@@ -134,13 +139,107 @@ test('uninstallTask deletes the task and tolerates one already gone', async () =
   await uninstallTask({ sid: SID, schtasks: missing.adapter }) // does not throw
 })
 
-test('start/stop/restart map to run, end, and end-then-run', async () => {
+test('start/stop map to run and end', async () => {
   const s = fakeSchtasks(); await startTask({ sid: SID, schtasks: s.adapter })
   assert.deepEqual(s.calls.map(c => c.verb), ['run'])
   const e = fakeSchtasks(); await stopTask({ sid: SID, schtasks: e.adapter })
   assert.deepEqual(e.calls.map(c => c.verb), ['end'])
-  const r = fakeSchtasks(); await restartTask({ sid: SID, schtasks: r.adapter })
-  assert.deepEqual(r.calls.map(c => c.verb), ['end', 'run'])
+})
+
+const RUNNING = { exitCode: 0, stdout: '"HOST","\\hypaware\\sid","N/A","Running",...', stderr: '' }
+const READY = { exitCode: 0, stdout: '"HOST","\\hypaware\\sid","N/A","Ready",...', stderr: '' }
+const noSleep = async () => {}
+
+/**
+ * A fake Task Scheduler whose recorded `query` answers from `answer(n)`, n
+ * counting from 1.
+ * @param {(n: number) => { exitCode: number, stdout: string, stderr: string }} answer
+ */
+function fakeQuerying(answer) {
+  const fake = fakeSchtasks()
+  let n = 0
+  fake.adapter.query = async function(taskName) { n += 1; fake.calls.push({ verb: 'query', taskName }); return answer(n) }
+  return fake
+}
+
+// @ref LLP 0584#stop [tests]: restart stops through the file channel and never Ends a daemon that stopped gracefully
+test('restartTask: a graceful stop is followed by Run, with no End', async () => {
+  const r = fakeQuerying(() => READY)
+  /** @type {string[]} */
+  const order = []
+  await restartTask({ sid: SID, schtasks: r.adapter, sleep: noSleep, requestStop: async () => { order.push('requestStop'); return 'stopped' } })
+  assert.deepEqual(order, ['requestStop'])
+  assert.deepEqual(r.calls.map(c => c.verb), ['query', 'run'])
+})
+
+// @ref LLP 0584#stop [tests]: /End is the escalation when the graceful request goes unconsumed
+test('restartTask: a timed-out stop escalates to End, then Run', async () => {
+  const r = fakeQuerying(() => READY)
+  await restartTask({ sid: SID, schtasks: r.adapter, sleep: noSleep, requestStop: async () => 'timed_out' })
+  assert.deepEqual(r.calls.map(c => c.verb), ['end', 'query', 'run'])
+})
+
+test('restartTask: with no live daemon to ask, End clears the task instance before Run', async () => {
+  const r = fakeQuerying(() => READY)
+  await restartTask({ sid: SID, schtasks: r.adapter, sleep: noSleep, requestStop: async () => 'not_running' })
+  assert.deepEqual(r.calls.map(c => c.verb), ['end', 'query', 'run'])
+})
+
+test('restartTask: Run waits (bounded) for the task to leave Running, so IgnoreNew cannot drop it', async () => {
+  const r = fakeQuerying(n => n < 3 ? RUNNING : READY)
+  await restartTask({ sid: SID, schtasks: r.adapter, sleep: noSleep, requestStop: async () => 'stopped' })
+  assert.deepEqual(r.calls.map(c => c.verb), ['query', 'query', 'query', 'run'])
+
+  // A task stuck reading Running still gets its Run after the bound.
+  const stuck = fakeSchtasks()
+  await restartTask({ sid: SID, schtasks: stuck.adapter, sleep: noSleep, requestStop: async () => 'stopped' })
+  assert.equal(stuck.calls.filter(c => c.verb === 'query').length, 20)
+  assert.equal(stuck.calls.at(-1)?.verb, 'run')
+})
+
+/**
+ * A staged HOME and the context `hyp daemon stop` runs against it with.
+ * @param {TestContext} t
+ */
+function stageStopCtx(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-stop-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  let out = ''
+  let err = ''
+  const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
+    stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
+    stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
+    env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+  }))
+  return { ctx, out: () => out, err: () => err }
+}
+
+// @ref LLP 0584#stop [tests]: an unconsumed stop request force-stops an installed task and says so
+test('hyp daemon stop on win32: a timed-out stop of an installed task Ends it and prints the forced-stop line', async (t) => {
+  const staged = stageStopCtx(t)
+  const s = fakeSchtasks()
+  const code = await runDaemonStop([], staged.ctx, { service: { platform: 'win32', sid: SID, schtasks: s.adapter }, requestStop: async () => 'timed_out' })
+  assert.equal(code, 0)
+  assert.deepEqual(s.calls.filter(c => c.verb !== 'query').map(c => c.verb), ['end'])
+  assert.match(staged.err(), /^hyp daemon stop: the daemon did not stop within 10s, so it was force-stopped; anything it had not saved yet may be lost\n$/)
+})
+
+test('hyp daemon stop on win32: with no task installed a timeout is reported and nothing is Ended', async (t) => {
+  const staged = stageStopCtx(t)
+  const s = fakeSchtasks({ async query() { return { exitCode: 1, stdout: '', stderr: 'ERROR: The system cannot find the file specified.' } } })
+  const code = await runDaemonStop([], staged.ctx, { service: { platform: 'win32', sid: SID, schtasks: s.adapter }, requestStop: async () => 'timed_out' })
+  assert.equal(code, 1)
+  assert.equal(s.calls.filter(c => c.verb === 'end').length, 0)
+  assert.match(staged.err(), /stop signal sent but the daemon did not exit within 10s/)
+})
+
+test('hyp daemon stop on win32: a graceful stop never touches the task', async (t) => {
+  const staged = stageStopCtx(t)
+  const s = fakeSchtasks()
+  const code = await runDaemonStop([], staged.ctx, { service: { platform: 'win32', sid: SID, schtasks: s.adapter }, requestStop: async () => 'stopped' })
+  assert.equal(code, 0)
+  assert.equal(s.calls.filter(c => c.verb !== 'query').length, 0)
+  assert.equal(staged.out(), 'daemon: stopped\n')
 })
 
 test('taskStatus reads Running as active, Ready as loaded-not-active, and a missing task as not loaded', async () => {

@@ -324,7 +324,7 @@ async function clearStaleDaemonPidFiles(stateRoot) {
 /**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ service?: DaemonServiceOptions }} [deps] test seam for the service manager
+ * @param {{ service?: DaemonServiceOptions, requestStop?: (options: { stateRoot: string, log?: unknown }) => Promise<'stopped'|'not_running'|'timed_out'> }} [deps] test seams for the service manager and the graceful stop request
  */
 export async function runDaemonStop(argv, ctx, deps = {}) {
   const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
@@ -402,7 +402,7 @@ export async function runDaemonStop(argv, ctx, deps = {}) {
   const { requestDaemonStop, DAEMON_STOP_TIMEOUT_MS } = await import('../daemon/runtime.js')
   // The requester-side control-dir warnings (a chmod it could not apply)
   // land on stderr; they do not change the exit code.
-  const outcome = await requestDaemonStop({
+  const outcome = await (deps.requestStop ?? requestDaemonStop)({
     stateRoot: stateDir,
     log: {
       warn: (event, fields) => {

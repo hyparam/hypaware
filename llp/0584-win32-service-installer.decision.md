@@ -5,6 +5,7 @@
 **Systems:** Daemon, Windows, Onboarding
 **Author:** Kenny / Claude
 **Date:** 2026-11-05
+**Extends:** LLP 0430 (#validation: one real-Windows re-check for this backend, without reviving the procedures tier)
 **Related:** LLP 0017 (#install-global-package-then-service-manager, #staged-restart-for-config-replacement, #status-queries-never-raise: the installer contract and the platform gate this falls), LLP 0300 (#file-channel, #posix-keeps-signals, #home-resolution: the win32 groundwork this consumes), LLP 0317 (install means running), LLP 0206 (uninstall detaches its clients), LLP 0181 (tests never drive the real service manager), LLP 0545 (unreachable status), LLP 0529 (unsupervised self-relaunch), LLP 0365 (self-update needs a supervisor), LLP 0521 (supervised port-conflict pacing), LLP 0582 (the SID this reads also keys the owner-only ACLs), LLP 0002 (V1 platform scope)
 
 ## Summary
@@ -69,6 +70,19 @@ Task Scheduler has no per-user domain - its library is machine-wide - so two use
 - The standing `TODO(win32)` at `runtime.js` (arm the control watcher early so a boot-time stop is honored) comes into scope: a Scheduled Task's stop rides the same LLP 0300 channel, so the watcher must be armed next to the pid write, not only at the tail of `runDaemon`.
 - Crash-recovery latency on win32 is coarser (~1 min) than systemd (~5s); documented.
 - `hyp setup` still refuses on win32 (friendly note) until its own follow-up LLP.
+
+## Validation {#validation}
+
+The tests drive `schtasks` through a fake adapter (LLP 0181), so they prove the calls the backend makes, not what Task Scheduler does with them. The first landing rests on the author's run on a real Windows machine. LLP 0430 retired the procedures doc, so this one re-check lives here instead: a release that changes `src/core/daemon/win32.js`, the task XML, or the win32 arms of `install.js` and `commands/daemon.js` repeats it on a real Windows host, as a normal user in a throwaway `HYP_HOME`.
+
+1. `hyp daemon install`; `hyp daemon status` reports the task and a live daemon.
+2. `hyp daemon stop`: the daemon exits 0 and the task stays down (no relaunch after 2 minutes).
+3. `hyp daemon start`, then `hyp daemon restart`: the old pid exits through the stop request (its log shows an orderly shutdown, not a kill) and a new pid comes up.
+4. Kill the daemon process (`taskkill /F /PID <pid>`): the task relaunches it.
+5. Make the daemon exit 75 (a staged restart, e.g. `hyp update` or a config replace): the task relaunches it.
+6. `hyp daemon uninstall`: the task is gone from `schtasks /Query /TN \hypaware\<SID>`.
+
+The release notes record the `schtasks /Query /V /FO LIST` output after step 1, the `<Principals>` block of `schtasks /Query /XML`, and the observed relaunch delay in steps 4 and 5 (D3 expects up to about a minute).
 
 ## Open questions
 

@@ -262,8 +262,9 @@ const SPAWN_POLL_ATTEMPTS = 20 // ~2s ceiling at 100ms each
 const SPAWN_POLL_INTERVAL_MS = 100
 
 /**
- * Poll `schtasks /Query` until the task reports a running state, or the bound
- * elapses. Best-effort: the status string is localized, so a confirmed
+ * Poll `schtasks /Query` until the task's running state is `running`, or the
+ * bound elapses: install waits for up, restart for down. Best-effort: the
+ * status string is localized, so a confirmed
  * "Running" means up, but an unconfirmed poll is not treated as a failed
  * install - `schtasks /Run` returning 0 means Task Scheduler started it, and
  * the daemon's own heartbeat (LLP 0348), read by `hyp daemon status`, is the
@@ -274,12 +275,13 @@ const SPAWN_POLL_INTERVAL_MS = 100
  * @param {SchtasksAdapter} schtasks
  * @param {string} taskName
  * @param {(ms: number) => Promise<void>} sleep
- * @returns {Promise<boolean>} whether a running state was observed
+ * @param {boolean} running
+ * @returns {Promise<boolean>} whether the wanted state was observed
  */
-async function waitForTaskRunning(schtasks, taskName, sleep) {
+async function waitForTaskState(schtasks, taskName, sleep, running) {
   for (let i = 0; i < SPAWN_POLL_ATTEMPTS; i += 1) {
     const res = await schtasks.query(taskName)
-    if (res.exitCode === 0 && /\bRunning\b/i.test(res.stdout)) return true
+    if (res.exitCode === 0 && /\bRunning\b/i.test(res.stdout) === running) return true
     await sleep(SPAWN_POLL_INTERVAL_MS)
   }
   return false
@@ -293,7 +295,7 @@ async function waitForTaskRunning(schtasks, taskName, sleep) {
  *
  * @param {PlanTaskInstallOptions & { schtasks?: SchtasksAdapter, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<TaskInstallPlan>}
- * @ref LLP 0317#install-means-running [implements]: the task is run and confirmed before the install returns (best-effort on win32; see waitForTaskRunning)
+ * @ref LLP 0317#install-means-running [implements]: the task is run and confirmed before the install returns (best-effort on win32; see waitForTaskState)
  */
 export async function installTask(options) {
   const plan = planTaskInstall(options)
@@ -317,7 +319,7 @@ export async function installTask(options) {
 
   if (options.runAtLoad !== false) {
     ensure(await schtasks.run(plan.taskName), `run scheduled task ${plan.taskName}`)
-    await waitForTaskRunning(schtasks, plan.taskName, sleep)
+    await waitForTaskState(schtasks, plan.taskName, sleep, true)
   }
 
   return plan
@@ -367,15 +369,50 @@ export async function stopTask(options) {
 }
 
 /**
- * Restart the task: end it, then run it.
- * @param {{ label?: string, sid?: string, taskName?: string, schtasks?: SchtasksAdapter }} options
+ * Restart the task: stop the daemon gracefully, then run the task again.
+ *
+ * The stop is the same file-channel request `hyp daemon stop` sends, so the
+ * daemon flushes and exits 0 and the task, which relaunches only on a failure
+ * exit, stays down until the `/Run` below. `schtasks /End` (a
+ * `TerminateProcess`) is reached only when that request is not consumed in
+ * time, or when no pid file names a live daemon: then there is nothing a
+ * graceful request could reach, and the `/End` clears any task instance the
+ * single-instance policy (`IgnoreNew`) would otherwise let swallow the
+ * `/Run`.
+ *
+ * `requestStop` is a seam; the default resolves the state root the way
+ * `hyp daemon stop` does (`HYP_HOME`, else `<home>/.hyp`) and loads the
+ * runtime only on this path.
+ *
+ * @param {{ label?: string, sid?: string, taskName?: string, homeDir?: string, schtasks?: SchtasksAdapter, sleep?: (ms: number) => Promise<void>, requestStop?: () => Promise<'stopped'|'not_running'|'timed_out'> }} options
  * @returns {Promise<void>}
+ * @ref LLP 0584#stop [implements]: restart is a graceful stop followed by /Run; /End only when the graceful request cannot land
  */
 export async function restartTask(options) {
   const schtasks = options.schtasks ?? realSchtasks
+  const sleep = options.sleep ?? defaultSleep
   const taskName = resolveTaskName(options)
-  await schtasks.end(taskName).catch(function() { /* best-effort; it may not be running */ })
+  const requestStop = options.requestStop ?? await defaultRequestStop(options.homeDir)
+  const outcome = await requestStop()
+  if (outcome !== 'stopped') {
+    await schtasks.end(taskName).catch(function() { /* best-effort; it may not be running */ })
+  }
+  // The daemon process is gone once the stop returns, but the task can read
+  // Running for a moment longer, and `IgnoreNew` drops a `/Run` that lands
+  // in that window. Bounded like the install poll.
+  await waitForTaskState(schtasks, taskName, sleep, false)
   ensure(await schtasks.run(taskName), `run scheduled task ${taskName}`)
+}
+
+/**
+ * @param {string | undefined} homeDir
+ * @returns {Promise<() => Promise<'stopped'|'not_running'|'timed_out'>>}
+ */
+async function defaultRequestStop(homeDir) {
+  const { requestDaemonStop } = await import('./runtime.js')
+  const { stateRootFromEnv } = await import('../runtime/paths.js')
+  const stateRoot = stateRootFromEnv(process.env, homeDir)
+  return function() { return requestDaemonStop({ stateRoot, platform: 'win32' }) }
 }
 
 /**
