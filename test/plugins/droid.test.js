@@ -65,6 +65,12 @@ test('Droid native format projects stable IDs, sequence, models and tools withou
 
 test('Droid incremental reader handles append, partial UTF-8 lines, header rewrites and same-size edits', async t => {
   const { file, root, records } = await setup(t)
+  // A fingerprint vouches for an unchanged file only once the stat has aged
+  // past the filesystem timestamp tick (`fingerprintSettled`), and this
+  // fixture is always freshly written. Reading the clock a minute ahead
+  // makes the fixture settled, so the cursor-reuse paths below exercise the
+  // fingerprint comparison rather than the freshness replay.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 60_000 })
   const opts = { root, allowed: () => true }
   const first = await collect(readDroidTranscript(file, opts))
   assert.equal(rows(first).length, 5)
@@ -85,13 +91,16 @@ test('Droid incremental reader handles append, partial UTF-8 lines, header rewri
   assert.equal(rows(rewrite).length, 5)
   records[1].message.content[0].text = 'Read different!!'
   await fs.writeFile(file, records.map(e => JSON.stringify(e)).join('\n') + '\n')
-  if (process.platform === 'win32') {
-    // NTFS leaves mtime and ctime untouched for a rewrite inside the same
-    // timestamp tick, so a back-to-back same-size edit fingerprints as
-    // unchanged; a real later edit carries a later mtime, stamped here.
-    const later = new Date(Date.now() + 10)
-    await fs.utimes(file, later, later)
-  }
+  // Any filesystem can leave mtime and ctime untouched for a rewrite inside
+  // the same timestamp tick, so a back-to-back same-size edit can fingerprint
+  // as unchanged; a real later edit carries a different mtime, stamped here
+  // so the assertion below exercises the fingerprint mismatch
+  // deterministically. Stamped settled relative to the mocked clock (30s
+  // behind it, well past the tick), or the freshness replay would fire first
+  // and the mismatch path would go untested. (An unstamped same-tick rewrite
+  // is covered regardless: its stat is not settled, which replays too.)
+  const edited = new Date(Date.now() - 30_000)
+  await fs.utimes(file, edited, edited)
   assert.equal(rows(await collect(readDroidTranscript(file, { ...opts, cursor: rewrite.at(-1).cursor }))).length, 5)
 })
 
@@ -143,6 +152,9 @@ test('Droid refuses outside-root files, unsupported headers and budgets, and lea
 
 test('Droid recovery fingerprints only completed writes, retries failure and honors exclusions', async t => {
   const { home, file, records } = await setup(t)
+  // Settle the freshly written fixture (see the incremental reader test):
+  // the sweep's unchanged-skip trusts a fingerprint only past the tick.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 60_000 })
   const ignored = new Set()
   const provider = createDroidBackfillProvider({ env: { HOME: home }, ignoredSessions: ignored })
   const ctx = /** @type {any} */ ({ env: {}, log: silent, dryRun: true, sweep: true, itemsFailed: 0 })
@@ -162,6 +174,29 @@ test('Droid recovery fingerprints only completed writes, retries failure and hon
   assert.equal(createDroidBackfillProvider({ config: { backfill: { on_join: false } } }).sweep, undefined)
   assert.equal(validateDroidConfig({ backfill: { window_days: 7 }, listen_port: 4324 }).ok, true)
   assert.equal(validateDroidConfig({ unexpected: true }).ok, false)
+})
+
+test('Droid cursor does not vouch for a same-size file before its stat settles', async t => {
+  const { file, root } = await setup(t)
+  const opts = { root, allowed: () => true }
+  const first = await collect(readDroidTranscript(file, opts))
+  assert.equal(rows(first).length, 5)
+  // The file is freshly written, so its fingerprint sits inside the
+  // filesystem timestamp tick, where a same-size rewrite can leave every
+  // stat field unchanged. The reader must replay (harmless by native ID)
+  // rather than let that fingerprint vouch for the file.
+  assert.equal(rows(await collect(readDroidTranscript(file, { ...opts, cursor: first.at(-1).cursor }))).length, 5)
+})
+
+test('Droid sweep re-reads a file whose fingerprint has not settled', async t => {
+  const { home } = await setup(t)
+  const provider = createDroidBackfillProvider({ env: { HOME: home }, ignoredSessions: new Set() })
+  const ctx = /** @type {any} */ ({ env: {}, log: silent, dryRun: false, sweep: true, itemsFailed: 0 })
+  assert.ok((await collect(provider.run(ctx))).some(i => i.value))
+  // The committed fingerprint was taken from a freshly written file, inside
+  // the tick: the recovery lane is what catches an in-place rewrite the
+  // live lane missed, so the next sweep reads again instead of skipping.
+  assert.ok((await collect(provider.run(ctx))).some(i => i.value))
 })
 
 test('Droid attach preserves existing hooks and settings fallbacks, is idempotent and detaches from disk', async t => {
