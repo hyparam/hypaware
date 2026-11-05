@@ -10,8 +10,10 @@ up anything the hooks missed.
 ## What is recorded
 
 Prompts, responses, tool calls, and the file contents and command output
-Cursor's tools see, with each session's working directory. Token usage and cost
-are not available from Cursor's store.
+Cursor's tools see, with each session's working directory. While the hooks are
+attached, each turn's token usage (input, output, cache read, and cache write)
+is recorded from Cursor's stop hook. Imported history has no token usage, because
+Cursor's store does not keep it, and cost is not recorded.
 
 ## Set it up
 
