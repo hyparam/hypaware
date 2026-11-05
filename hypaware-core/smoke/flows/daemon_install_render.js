@@ -198,7 +198,7 @@ export async function run({ harness, expect }) {
   let unsupportedError
   try {
     renderDaemonInstall({
-      platform: 'win32',
+      platform: 'freebsd',
       binPath,
       configPath,
       nodePath,
