@@ -291,7 +291,7 @@ export function createCacheSpool(args) {
             // `writeFile` can fail with a prefix of the line already in the
             // file; that remnant has no trailing newline, so leaving it
             // would also swallow the NEXT record into one malformed line.
-            const retained = await discardTail(handle, startSize, line)
+            const retained = await discardTail(handle, path.join(dir, ACTIVE_FILE), startSize, line)
             // The rollback can find the whole line already written and be
             // refused the truncate that would take it back: an fsync and an
             // ftruncate can fail on the same device. The record is complete
@@ -541,13 +541,14 @@ function* rowsFromSpoolLine(line) {
  * costing its own rows and costing the next record as well.
  *
  * @param {FileHandle} handle
+ * @param {string} activePath
  * @param {number} startSize
  * @param {string} line
  * @returns {Promise<boolean>} true when the rollback left the whole record
  *   in the spool intact, so a later flush will commit it and the append
  *   must not be reported as failed
  */
-async function discardTail(handle, startSize, line) {
+async function discardTail(handle, activePath, startSize, line) {
   try {
     const { size } = await handle.stat()
     const written = size - startSize
@@ -556,19 +557,30 @@ async function discardTail(handle, startSize, line) {
     const tail = Buffer.alloc(written)
     const { bytesRead } = await handle.read(tail, 0, written, startSize)
     if (bytesRead !== written || !tail.equals(expected.subarray(0, written))) return false
+    // win32 refuses ftruncate through an append-mode handle (EPERM, always),
+    // so there the trim goes through a fresh write handle on the same path.
+    // The per-table write lock and the byte compare above hold either way;
+    // the fresh handle carries only the truncate and the sync behind it. An
+    // open the device refuses leaves the append handle to take the truncate
+    // refusal below, the branch that path was already on.
+    const trimmer = process.platform === 'win32' ? await fs.open(activePath, 'r+').catch(() => null) : null
     try {
-      await handle.truncate(startSize)
-    } catch {
-      // A whole line is already terminated and already committable: there
-      // is nothing to repair, and nothing for the caller to replay.
-      if (written === expected.length) return true
-      // Terminate the remnant so the flush reader drops that line alone
-      // instead of concatenating it with whatever is appended next.
-      await handle.writeFile('\n', 'utf8')
+      try {
+        await (trimmer ?? handle).truncate(startSize)
+      } catch {
+        // A whole line is already terminated and already committable: there
+        // is nothing to repair, and nothing for the caller to replay.
+        if (written === expected.length) return true
+        // Terminate the remnant so the flush reader drops that line alone
+        // instead of concatenating it with whatever is appended next.
+        await handle.writeFile('\n', 'utf8')
+        return false
+      }
+      await (trimmer ?? handle).sync()
       return false
+    } finally {
+      await trimmer?.close().catch(() => undefined)
     }
-    await handle.sync()
-    return false
   } catch {
     /* the write path is already failing; the tail stays as it is */
     return false
