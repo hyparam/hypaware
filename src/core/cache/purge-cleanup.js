@@ -3,7 +3,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { atomicWriteJson } from '../util/fs_atomic.js'
+import { atomicWriteJson, fsyncDirectory } from '../util/fs_atomic.js'
 import { tryReadCursorSync, withPartitionMutationLock } from './partition.js'
 
 /** @import { CachePurgeCleanupJob } from '../../../src/core/cache/types.js' */
@@ -85,8 +85,7 @@ export async function queueCacheCleanup(cacheRoot, partitionDir) {
   // The `.purge-cleanup` directory entry itself must be durable before delete
   // commits, mirroring what createSessionPurgeStore().add does in
   // session-purges.js for its own directory.
-  const handle = await fs.open(cacheRoot, 'r')
-  try { await handle.sync() } finally { await handle.close() }
+  await fsyncDirectory(cacheRoot)
   return id
 }
 

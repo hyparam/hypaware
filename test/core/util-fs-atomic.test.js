@@ -19,6 +19,8 @@ import {
   readJsonIfExistsSync,
 } from '../../src/core/util/fs_atomic.js'
 
+/** @import { TestContext } from 'node:test' */
+
 async function makeTmpDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fs-atomic-'))
 }
@@ -212,6 +214,13 @@ test('durable publication syncs file before rename and the immediate parent dire
     },
   }
   const options = { fsync: true, fs: /** @type {typeof fs} */ (io) }
+  if (process.platform === 'win32') {
+    // Windows has no directory fsync, so the parent sync is skipped there:
+    // the injected failure never fires and the file sync still happens.
+    await atomicWriteJson(target, { admitted: true }, options)
+    assert.deepEqual(events, ['file-sync', 'rename'])
+    return
+  }
   await assert.rejects(atomicWriteJson(target, { admitted: true }, options), /directory sync failure/)
   assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
   assert.deepEqual(await fs.readdir(path.dirname(target)), ['journal.json'])
@@ -221,3 +230,144 @@ test('durable publication syncs file before rename and the immediate parent dire
   // Exactly one directory sync, of the immediate parent only, not every ancestor.
   assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
 })
+
+/**
+ * Report `platform` as `process.platform` for the rest of the test.
+ *
+ * @param {TestContext} t
+ * @param {NodeJS.Platform} platform
+ */
+function forcePlatform(t, platform) {
+  const real = Object.getOwnPropertyDescriptor(process, 'platform')
+  assert.ok(real)
+  Object.defineProperty(process, 'platform', { ...real, value: platform })
+  t.after(() => Object.defineProperty(process, 'platform', real))
+}
+
+/**
+ * A rename that throws `code` for its first `failures` calls, then renames.
+ *
+ * @param {string} code
+ * @param {number} failures
+ * @param {(from: string, to: string) => unknown} rename
+ */
+function flakyRename(code, failures, rename) {
+  const calls = { count: 0 }
+  /** @param {string} from @param {string} to */
+  const fn = (from, to) => {
+    calls.count++
+    if (calls.count <= failures) throw Object.assign(new Error(`${code}: injected`), { code })
+    return rename(from, to)
+  }
+  return { calls, fn }
+}
+
+/**
+ * The async write with its rename failing `code` for the first `failures` calls.
+ *
+ * @param {string} target
+ * @param {string} code
+ * @param {number} failures
+ */
+async function writeWithFlakyRename(target, code, failures) {
+  const { calls, fn } = flakyRename(code, failures, (from, to) => fs.rename(from, to))
+  const io = { ...fs, async rename(/** @type {string} */ from, /** @type {string} */ to) { return fn(from, to) } }
+  try {
+    await atomicWriteFile(target, 'after', { fs: /** @type {typeof fs} */ (io) })
+    return { calls: calls.count, error: undefined }
+  } catch (error) {
+    return { calls: calls.count, error }
+  }
+}
+
+// On win32 the rename over a destination another handle still holds (the
+// delete-pending cursor a compaction rename just replaced, or an AV scan)
+// fails EPERM, EBUSY or EACCES until that handle closes. The write retries
+// rather than failing the flush (#2899).
+for (const code of ['EPERM', 'EBUSY', 'EACCES']) {
+  test(`atomicWriteFile retries a win32 ${code} rename until the holder lets go`, async (t) => {
+    forcePlatform(t, 'win32')
+    const dir = await makeTmpDir()
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    const target = path.join(dir, 'cursor.json')
+    await fs.writeFile(target, 'before')
+    const result = await writeWithFlakyRename(target, code, 2)
+    assert.equal(result.error, undefined)
+    assert.equal(result.calls, 3)
+    assert.equal(await fs.readFile(target, 'utf8'), 'after')
+    assert.deepEqual(await fs.readdir(dir), ['cursor.json'])
+  })
+
+  test(`atomicWriteFileSync retries a win32 ${code} rename until the holder lets go`, async (t) => {
+    forcePlatform(t, 'win32')
+    const dir = await makeTmpDir()
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    const target = path.join(dir, 'cursor.json')
+    fsSync.writeFileSync(target, 'before')
+    const { calls, fn } = flakyRename(code, 2, fsSync.renameSync.bind(fsSync))
+    t.mock.method(fsSync, 'renameSync', fn)
+    atomicWriteFileSync(target, 'after')
+    t.mock.restoreAll()
+    assert.equal(calls.count, 3)
+    assert.equal(fsSync.readFileSync(target, 'utf8'), 'after')
+    assert.deepEqual(fsSync.readdirSync(dir), ['cursor.json'])
+  })
+}
+
+// The retry is bounded: a holder that never lets go still fails the write,
+// after the first attempt plus 10 retries, and the temp file is removed.
+test('atomicWriteFile gives up on a win32 rename that stays EPERM', async (t) => {
+  forcePlatform(t, 'win32')
+  const dir = await makeTmpDir()
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const target = path.join(dir, 'cursor.json')
+  await fs.writeFile(target, 'before')
+  const result = await writeWithFlakyRename(target, 'EPERM', Infinity)
+  assert.equal(/** @type {NodeJS.ErrnoException} */ (result.error)?.code, 'EPERM')
+  assert.equal(result.calls, 11)
+  assert.equal(await fs.readFile(target, 'utf8'), 'before')
+  assert.deepEqual(await fs.readdir(dir), ['cursor.json'])
+})
+
+test('atomicWriteFileSync gives up on a win32 rename that stays EPERM', async (t) => {
+  forcePlatform(t, 'win32')
+  const dir = await makeTmpDir()
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const target = path.join(dir, 'cursor.json')
+  fsSync.writeFileSync(target, 'before')
+  const { calls, fn } = flakyRename('EPERM', Infinity, fsSync.renameSync.bind(fsSync))
+  t.mock.method(fsSync, 'renameSync', fn)
+  assert.throws(() => atomicWriteFileSync(target, 'after'), { code: 'EPERM' })
+  t.mock.restoreAll()
+  assert.equal(calls.count, 11)
+  assert.equal(fsSync.readFileSync(target, 'utf8'), 'before')
+  assert.deepEqual(fsSync.readdirSync(dir), ['cursor.json'])
+})
+
+// Only the holder codes retry, and only on win32: a different fault on win32,
+// or EPERM on POSIX (a real permission problem there), fails on the first call.
+for (const [platform, code] of /** @type {const} */ ([['win32', 'EIO'], ['linux', 'EPERM'], ['darwin', 'EBUSY']])) {
+  test(`atomicWriteFile does not retry a ${platform} ${code} rename`, async (t) => {
+    forcePlatform(t, platform)
+    const dir = await makeTmpDir()
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    const target = path.join(dir, 'cursor.json')
+    const result = await writeWithFlakyRename(target, code, 1)
+    assert.equal(/** @type {NodeJS.ErrnoException} */ (result.error)?.code, code)
+    assert.equal(result.calls, 1)
+    assert.deepEqual(await fs.readdir(dir), [])
+  })
+
+  test(`atomicWriteFileSync does not retry a ${platform} ${code} rename`, async (t) => {
+    forcePlatform(t, platform)
+    const dir = await makeTmpDir()
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    const target = path.join(dir, 'cursor.json')
+    const { calls, fn } = flakyRename(code, 1, fsSync.renameSync.bind(fsSync))
+    t.mock.method(fsSync, 'renameSync', fn)
+    assert.throws(() => atomicWriteFileSync(target, 'after'), { code })
+    t.mock.restoreAll()
+    assert.equal(calls.count, 1)
+    assert.deepEqual(fsSync.readdirSync(dir), [])
+  })
+}

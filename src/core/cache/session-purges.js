@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { readBatchColumn, selectedRowCount, selectBatch, valueAt } from 'squirreling'
-import { atomicWriteFileSync } from '../util/fs_atomic.js'
+import { atomicWriteFileSync, fsyncDirectorySync } from '../util/fs_atomic.js'
 
 const graphIdentifiers = ['node_id', 'src_id', 'dst_id']
 
@@ -101,10 +101,11 @@ export function createSessionPurgeStore(cacheRoot) {
       }
       atomicWriteFileSync(path.join(directory, marker(key)), payload, { mode: 0o600, dirMode: 0o700 })
       // The marker must survive before a deletion can remove its evidence.
-      for (const file of [path.join(directory, marker(key)), directory, cacheRoot]) {
-        const fd = fs.openSync(file, 'r')
-        try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
-      }
+      // 'r+', not 'r': Windows refuses fsync on a read-only handle (EPERM).
+      const fd = fs.openSync(path.join(directory, marker(key)), 'r+')
+      try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+      fsyncDirectorySync(directory)
+      fsyncDirectorySync(cacheRoot)
       fingerprint = ''
       refresh()
     },

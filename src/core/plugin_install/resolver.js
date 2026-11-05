@@ -149,6 +149,10 @@ function looksLikeLocalPath(raw) {
   if (raw === '.' || raw === '..') return true
   if (raw.startsWith('./') || raw.startsWith('../') || raw.startsWith('/')) return true
   if (raw.startsWith('~/')) return true
+  // The win32 spellings of the same shapes: a drive-letter or UNC absolute
+  // path, and any backslash-joined token - a backslash is never part of a
+  // plugin name or a git URL, both of which the branches above already took.
+  if (process.platform === 'win32' && (path.isAbsolute(raw) || raw.includes('\\'))) return true
   // A token that contains a slash but no git prefix and isn't a scoped
   // npm name (which would have matched the explicit scope branches).
   if (raw.includes('/') && !raw.startsWith('@')) return true

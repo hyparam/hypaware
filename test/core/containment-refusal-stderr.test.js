@@ -89,7 +89,7 @@ async function makeHome({ planted }) {
   if (planted) {
     const outside = path.join(root, 'outside')
     await fs.mkdir(outside, { recursive: true })
-    await fs.symlink(outside, path.join(partition, 'table'), 'dir')
+    await fs.symlink(outside, path.join(partition, 'table'), process.platform === 'win32' ? 'junction' : 'dir')
   } else {
     await fs.mkdir(path.join(partition, 'table'), { recursive: true })
   }
@@ -144,7 +144,7 @@ test('the flush\'s refusal of a symlinked spool directory reaches process stderr
     const outside = path.join(root, 'outside')
     await fs.mkdir(tablePath, { recursive: true })
     await fs.mkdir(outside, { recursive: true })
-    await fs.symlink(outside, path.join(tablePath, SPOOL_DIR), 'dir')
+    await fs.symlink(outside, path.join(tablePath, SPOOL_DIR), process.platform === 'win32' ? 'junction' : 'dir')
 
     const spool = createCacheSpool({
       cacheRoot,
@@ -189,7 +189,7 @@ test('the sweep\'s refusal of a symlinked component reaches process stderr', asy
     )
     const generation = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude', 'table')
     await fs.rm(path.join(generation, 'data'), { recursive: true, force: true })
-    await fs.symlink(path.join(outside, 'data'), path.join(generation, 'data'), 'dir')
+    await fs.symlink(path.join(outside, 'data'), path.join(generation, 'data'), process.platform === 'win32' ? 'junction' : 'dir')
 
     const stderr = await captureProcessStderr(async () => {
       await maintainCache({ cacheRoot })
@@ -223,7 +223,7 @@ test('the capture-spool sweep\'s refusal reaches process stderr', async () => {
     await fs.mkdir(spoolRoot, { recursive: true })
     await fs.mkdir(outside, { recursive: true })
     await fs.writeFile(path.join(outside, 'keep.txt'), 'not ours')
-    await fs.symlink(outside, dir, 'dir')
+    await fs.symlink(outside, dir, process.platform === 'win32' ? 'junction' : 'dir')
 
     // A holder rather than a `let`: the assignment happens inside the
     // stderr-capturing closure, and control-flow narrowing does not cross that
@@ -408,7 +408,7 @@ test('a real containment guard still names its refusal with a throwing exporter 
     const dir = path.join(home, 'spool', 'claude-bodies')
     await fs.mkdir(path.join(home, 'spool'), { recursive: true })
     await fs.mkdir(outside, { recursive: true })
-    await fs.symlink(outside, dir, 'dir')
+    await fs.symlink(outside, dir, process.platform === 'win32' ? 'junction' : 'dir')
 
     /** @type {{ swept: { filesRemoved: number, bytesRemoved: number, failed: number } | null }} */
     const out = { swept: null }

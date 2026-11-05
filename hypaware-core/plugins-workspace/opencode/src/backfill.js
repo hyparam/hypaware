@@ -6,6 +6,7 @@ import { refreshSessionIgnores } from '../../../../src/core/control/session_igno
 
 import { AI_GATEWAY_MESSAGES_DATASET, errMessage, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import { cmdFileSpawnPlan } from '../../../../src/core/util/cmd_file.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 import { openCodeSessionCwd, projectOpenCodeSnapshot } from './projector.js'
 
@@ -256,7 +257,12 @@ export function createOpenCodeCommandRunner(runCommand = runOpenCode) {
  * @returns {boolean}
  */
 function isMissingBinary(err) {
-  return err instanceof Error && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT'
+  if (!(err instanceof Error)) return false
+  const code = /** @type {NodeJS.ErrnoException} */ (err).code
+  // Through cmd.exe (the win32 spawn below) a missing binary is not a spawn
+  // failure: cmd itself starts fine and exits 9009, its "not recognized as
+  // an internal or external command" code.
+  return code === 'ENOENT' || /** @type {unknown} */ (code) === 9009
 }
 
 /**
@@ -288,11 +294,22 @@ function isTimeoutKill(err) {
  * @param {number} timeoutMs
  */
 export async function runOpenCode(args, timeoutMs) {
+  // On win32 `opencode` is an npm `.cmd` shim, which only cmd.exe can run
+  // (Node refuses the direct spawn), so the command rides an escaped cmd
+  // line - the args here carry session ids and SQL, not fixed bare tokens.
+  // @ref LLP 0581#decision [implements]: the escaped cmd.exe transport, with the bare name left to cmd's PATH walk
+  // cmd.exe resolves the bare name over PATH and PATHEXT as a typed command
+  // would. A timeout still kills only cmd.exe itself; the deadline and its
+  // classification above are unchanged.
+  const plan = process.platform === 'win32'
+    ? cmdFileSpawnPlan('opencode', args)
+    : { command: 'opencode', args, options: {} }
   try {
-    const result = await execFileAsync('opencode', args, {
+    const result = await execFileAsync(plan.command, plan.args, {
       encoding: 'utf8',
       maxBuffer: 32 * 1024 * 1024,
       timeout: timeoutMs,
+      ...plan.options,
     })
     return result.stdout
   } catch (err) {

@@ -473,10 +473,12 @@ test('daemonIncompleteNote: names the retry on a supported platform and never cl
 })
 
 test('daemonIncompleteNote: a platform with no service manager is not told to retry the install', () => {
-  const note = daemonIncompleteNote('win32', 'enrolled')
+  // win32 is a supported daemon platform since LLP 0584; `aix` is the
+  // still-unsupported stand-in for a host with no background service.
+  const note = daemonIncompleteNote('aix', 'enrolled')
   assert.match(note, /^note: enrolled, but /)
   assert.doesNotMatch(note, /hyp daemon install/)
-  assert.match(note, /win32 has no background service to install\n$/)
+  assert.match(note, /aix has no background service to install\n$/)
   assert.doesNotMatch(note, /nothing is captured/, 'foreground capture still works there, so no absolute')
 })
 
@@ -619,7 +621,10 @@ test('waitForCentralConverge: default probe converges on the active slot, never 
   assert.deepEqual(seedOnly, { ok: false })
 
   await fs.writeFile(path.join(controlDir, 'config.a.json'), '{"version": 2}\n')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  // The pointer the apply engine writes on this host: a symlink on POSIX,
+  // a regular pointer file on win32 (LLP 0580).
+  if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
+  else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
   const applied = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
   assert.deepEqual(applied, { ok: true })
 })
@@ -640,9 +645,13 @@ test('waitForCentralConverge: an unreadable active pointer reaches the probe-err
   assert.equal(hasAppliedCentralConfig({ stateRoot }), false)
 
   // An `active` that is not a symlink is a pointer this process cannot read
-  // (readlink EINVAL), which the probe surfaces rather than swallows.
-  await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
-  assert.throws(() => hasAppliedCentralConfig({ stateRoot }))
+  // (readlink EINVAL), which the probe surfaces rather than swallows. On
+  // win32 a regular pointer file is the written representation (LLP 0580),
+  // so this POSIX-only tamper shape cannot be arranged there.
+  if (process.platform !== 'win32') {
+    await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+    assert.throws(() => hasAppliedCentralConfig({ stateRoot }))
+  }
 
   // The wait still degrades to the unlocked-picker fallback, never an error.
   const verdict = await waitForCentralConverge({ env }, { timeoutMs: 0, intervalMs: 1 })
@@ -745,7 +754,8 @@ test('an active-slot pointer naming a file that is gone is unreadable, not absen
   // `hyp leave` calls it connected and tears it down; the gate must agree.
   const control = path.join(hypHome, 'hypaware', 'config-control')
   await fs.mkdir(control, { recursive: true })
-  await fs.symlink('config.a.json', path.join(control, 'active'))
+  if (process.platform === 'win32') await fs.writeFile(path.join(control, 'active'), 'config.a.json\n')
+  else await fs.symlink('config.a.json', path.join(control, 'active'))
   let called = false
   const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
 
@@ -762,11 +772,17 @@ test('a central layer whose PATH cannot be resolved fails the D4 gate CLOSED too
   // damaged pointer makes an enrolled machine look like it never joined even
   // though the slot file still names the org's server verbatim. Repairing the
   // pointer brings that enrollment straight back, so the gate must refuse.
-  for (const [name, writePointer] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
-    ['pointer replaced by a regular file', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
-    ['pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
-    ['pointer symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
-  ])) {
+  // On win32 a regular pointer file is the written representation (LLP 0580),
+  // so the unresolvable shapes there are a file naming no slot; the symlink
+  // shapes stay POSIX-only.
+  const shapes = /** @type {[string, (dir: string) => Promise<unknown>][]} */ (process.platform === 'win32'
+    ? [['pointer file naming neither slot', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.c.json\n')]]
+    : [
+      ['pointer replaced by a regular file', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
+      ['pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
+      ['pointer symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
+    ])
+  for (const [name, writePointer] of shapes) {
     const hypHome = await tmpHome()
     const { ctx, err } = await makeCtx({
       hypHome,
@@ -790,7 +806,7 @@ test('a central layer whose PATH cannot be resolved fails the D4 gate CLOSED too
   }
 })
 
-test('a central layer directory that cannot be listed fails the D4 gate CLOSED (LLP 0063 D4)', async () => {
+test('a central layer directory that cannot be listed fails the D4 gate CLOSED (LLP 0063 D4)', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a directory unlistable on win32' }, async () => {
   // `existsSync` reports EACCES as "not there", so an enrolled machine whose
   // state directory this process cannot read resolved to null and read as free.
   const hypHome = await tmpHome()

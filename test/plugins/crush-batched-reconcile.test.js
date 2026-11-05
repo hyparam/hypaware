@@ -173,7 +173,12 @@ function scopeIds(sessionOf, paths) {
 // The open budget and the round-robin cycle
 // ---------------------------------------------------------------------------
 
-test('40 changed databases open 16 a tick in real-path order and all open within three ticks', async () => {
+// Opening 40 sqlite databases across several poll ticks is throughput-bound,
+// not latency-bound, and on a loaded win32 CI runner (per-file AV scanning on
+// each open) it can run past the suite's 120s per-test default. Give it a
+// generous budget; the assertions are about the 16-per-tick open cycle, not
+// speed.
+test('40 changed databases open 16 a tick in real-path order and all open within three ticks', { timeout: 300000 }, async () => {
   const h = await fortyBaselined()
   assert.deepEqual(h.baselineOpens, [16, 16, 8], 'baselines spend the same open budget')
   assert.equal(h.runner.dbsPending, 0)

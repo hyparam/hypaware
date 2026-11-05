@@ -489,7 +489,7 @@ assert.equal(typeof registerCoreCommands, 'function')
 
 
 // @ref LLP 0403#hook-identity [tests]: real shell loads hook exports into the CLI resolver.
-test('session hook exports exact IDs to Bash tools, preserving other hooks and resumed IDs', async () => {
+test('session hook exports exact IDs to Bash tools, preserving other hooks and resumed IDs', { skip: process.platform === 'win32' && 'the exported env file is sourced through /bin/sh, a POSIX-shell surface win32 does not have' }, async () => {
   const staged = await stageEnv()
   try {
     const envFile = path.join(staged.homeDir, 'session-env.sh')

@@ -49,6 +49,26 @@ jobs:
       - run: npm i
       - run: npm test
 
+  # One Windows leg, newest Node only: the matrix above already guards the
+  # Node versions, so this job guards the platform. Deliberately not in the
+  # required gate yet - a few daemon-spawn-heavy tests are load-flaky on
+  # win32 (disjoint sets across runs, each green in isolation; see #2880 and
+  # #2881) - promote it into `required` once it has soaked. The explicit
+  # per-test timeout is load-bearing: without it one product-telemetry child
+  # hangs the run on win32.
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: package.json
+      - run: npm i
+      - run: npm test -- --test-timeout=120000
+
   langgraph:
     runs-on: ubuntu-latest
     timeout-minutes: 10

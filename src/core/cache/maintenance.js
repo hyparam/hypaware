@@ -22,6 +22,7 @@ import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
 import { datasetsRoot, isConfirmedSymlink } from './paths.js'
 import { reportPlantedSweepPath } from './sweep_guard.js'
+import { fsyncDirectory } from '../util/fs_atomic.js'
 import { createLocalIcebergIO, isStagedWriteName, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, listLiveDataFiles, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
@@ -721,10 +722,10 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
               const rewritten = await compactGeneration(r.path, cleanupLayout, cfg, null, lockedTableInfo, undefined, false)
               // Flush the atomic cursor publication before the old generation
               // can become eligible for physical reclamation on a later tick.
-              const cursorFile = await fsPromises.open(path.join(r.path, 'cursor.json'), 'r')
+              // 'r+', not 'r': Windows refuses fsync on a read-only handle (EPERM).
+              const cursorFile = await fsPromises.open(path.join(r.path, 'cursor.json'), 'r+')
               try { await cursorFile.sync() } finally { await cursorFile.close() }
-              const directory = await fsPromises.open(r.path, 'r')
-              try { await directory.sync() } finally { await directory.close() }
+              await fsyncDirectory(r.path)
               return rewritten
             }
             // Re-derive dueness from the metadata read under the lock, for

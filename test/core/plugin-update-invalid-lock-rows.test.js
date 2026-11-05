@@ -236,7 +236,7 @@ test('plugin update leaves an unparseable lock alone and exits 1', async () => {
   }
 })
 
-test('plugin update leaves an unreadable lock alone and exits 1', { skip: process.getuid?.() === 0 && 'root reads a mode-000 file' }, async () => {
+test('plugin update leaves an unreadable lock alone and exits 1', { skip: (process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32') || (process.getuid?.() === 0 && 'root reads a mode-000 file') }, async () => {
   const text = JSON.stringify({ schema_version: 1, plugins: { '@third-party/echo': healthy('@third-party/echo', '/x') } }, null, 2) + '\n'
   const run = await runOnLockText('hyp-plugin-update-eacces-', text, 0o000)
   try {

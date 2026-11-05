@@ -355,12 +355,16 @@ test('a plugin the dependency resolver eliminated is named by hyp status, which 
  * @returns {string}
  */
 function scrubSnapshot(snapshot, hypHome) {
+  // JSON escapes the win32 home's backslashes, so the replacement has to
+  // match the escaped spelling; the path values that remain then normalize
+  // to the recorded POSIX shape.
   const json = JSON.stringify(snapshot)
-    .split(hypHome).join('<HOME>')
+    .split(JSON.stringify(hypHome).slice(1, -1)).join('<HOME>')
   return JSON.stringify(JSON.parse(json, (key, value) => {
     if (key === 'pid' || key === 'uptimeMs') return '<VOLATILE>'
     if (key === 'runId' || key === 'startedAt' || key === 'stoppedAt') return '<VOLATILE>'
     if (key === 'healthyAt' || key === 'lastHeartbeatAt') return '<VOLATILE>'
+    if (typeof value === 'string' && value.startsWith('<HOME>')) return value.replaceAll('\\', '/')
     return value
   }))
 }

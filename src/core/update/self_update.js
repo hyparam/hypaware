@@ -94,6 +94,14 @@ const NPM_DETAIL_CHARS = 600
  * @returns {boolean}
  */
 export function detectSupervisor(env) {
+  // win32 has no manager-set signal to sniff (Task Scheduler sets no
+  // equivalent of XPC_SERVICE_NAME / INVOCATION_ID), so the installed task's
+  // own command line carries the marker: `daemon run --supervised` sets this
+  // on the daemon's env before any lane reads it (`runDaemonRun`). Authored by
+  // us, so unambiguous - unlike XPC_SERVICE_NAME, which macOS also sets in
+  // plain terminals (the false positive the two arms below guard against).
+  // @ref LLP 0584#supervision [implements]: the task marks the process it starts so detectSupervisor is true on win32
+  if (env.HYP_SUPERVISED === '1') return true
   const xpc = env.XPC_SERVICE_NAME
   if (typeof xpc === 'string' && (xpc === LAUNCH_LABEL || xpc.startsWith(LAUNCH_LABEL + '.'))) return true
   return typeof env.INVOCATION_ID === 'string' && env.INVOCATION_ID !== ''
@@ -498,7 +506,10 @@ export async function fetchLatestVersion(opts) {
     if (!res.ok) throw new Error(`registry responded ${res.status}`)
     const body = /** @type {{ version?: unknown } | null} */ (await res.json())
     const version = body && typeof body === 'object' ? body.version : undefined
-    if (typeof version !== 'string' || !parseSemver(version)) {
+    // parseSemver matches a prefix; the allowlist pins the whole string,
+    // because this value is later interpolated into `npm install -g
+    // name@version`, which runs through a shell on win32.
+    if (typeof version !== 'string' || !parseSemver(version) || !/^[0-9A-Za-z.+-]+$/.test(version)) {
       throw new Error('registry response had no parseable version')
     }
     return version
@@ -1480,10 +1491,18 @@ function probeFailureIsEntrenched(state, nowMs) {
 function runCommand(cmd, args, opts) {
   const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : NPM_TIMEOUT_MS
   return new Promise((resolve) => {
+    // On Windows npm is npm.cmd, and spawn without a shell refuses `.cmd`
+    // targets with EINVAL (Node's CVE-2024-27980 fix). A shell means the
+    // arguments are not escaped, so callers may pass only fixed, bare
+    // tokens (fetchLatestVersion pins the version to one). Only npm gets
+    // the shell: the node preflight and skills runs pass process.execPath,
+    // which the shell would split at the space in C:\Program Files.
     const child = spawn(cmd, args, {
       env: opts.env,
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32' && cmd === 'npm',
+      windowsHide: true,
     })
     // Keep only a bounded tail: skill installation loads plugins, whose
     // diagnostics must not grow the updater's memory for the child's lifetime.

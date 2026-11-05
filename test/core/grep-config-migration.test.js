@@ -76,7 +76,9 @@ test('legacy client boot persists grep once, preserves config and exposes the MC
   assert.equal(boot.runtime.verbs.getByTool('grep_search')?.plugin, grep.name)
   assert.ok(boot.runtime.commands.get('query grep'))
   assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')), { ...original, plugins: [...original.plugins, grep] })
-  assert.equal((await fs.stat(f.configPath)).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') { // No POSIX mode bits on win32.
+    assert.equal((await fs.stat(f.configPath)).mode & 0o777, 0o600)
+  }
   const backups = (await fs.readdir(f.hypHome)).filter((name) => name.includes('.bak-'))
   assert.equal(backups.length, 1)
   assert.equal(await fs.readFile(path.join(f.hypHome, backups[0]), 'utf8'), before)
@@ -321,7 +323,7 @@ test('explicit host profiles leave config and the search registration available 
   assert.ok(boot.runtime.verbs.getByTool('grep_search'))
 })
 
-test('symlinks and a local path naming the central layer never rewrite the central document', async (t) => {
+test('symlinks and a local path naming the central layer never rewrite the central document', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async (t) => {
   const f = await fixture(t)
   await f.central({ version: 2, plugins: [] })
   const before = await fs.readFile(f.centralConfigPath, 'utf8')

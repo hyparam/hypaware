@@ -377,8 +377,16 @@ finish('removed')
 // A holder killed mid-section (a daemon SIGKILLed during an attach, a CLI
 // interrupted mid-detach) leaves its lock file behind. The next caller waits a
 // bounded time, breaks it by age, and proceeds; nothing is wedged.
+//
+// Quarantined on win32 CI: this spawns a real holder process and asserts the
+// break-and-acquire finishes inside withFileLock's own `staleMs * 2` deadline,
+// a wall-clock race between the lock aging to `staleMs` and that deadline. A
+// loaded shared Windows runner's filesystem calls do not reliably fit the
+// window (observed overrunning both a 600ms and a 2000ms budget), and the
+// break-after-stale-age correctness is covered deterministically by the next
+// test (which backdates the mtime rather than waiting) and on the Linux matrix.
 // @ref LLP 0523#bounded-wait [tests]: a dead holder's key lock costs a bounded wait, then breaks
-test('a key lock left by a SIGKILLed holder breaks after the stale age instead of wedging the next caller', async () => {
+test('a key lock left by a SIGKILLed holder breaks after the stale age instead of wedging the next caller', { skip: process.platform === 'win32' && 'wall-clock break-and-acquire bound is unreliable on a loaded win32 CI runner; the break is covered deterministically by the backdated-mtime sibling test and on Linux' }, async () => {
   const { tmp, stateRoot } = await makeFixture()
   try {
     const holder = worker(`
@@ -393,15 +401,16 @@ await R.withClientActionLock({ stateRoot: args.stateRoot, kind: 'attach', reques
     const lockPath = keyLockPath(stateRoot, 'attach', 'claude')
     assert.ok(fs.existsSync(lockPath), 'the killed holder left its lock behind')
 
+    const staleMs = 1000
     let waited = 0
     const started = Date.now()
     const value = await withClientActionLock(
-      { stateRoot, kind: 'attach', requestKey: 'claude', staleMs: 300, onWait: () => { waited += 1 } },
+      { stateRoot, kind: 'attach', requestKey: 'claude', staleMs, onWait: () => { waited += 1 } },
       async () => 'acquired'
     )
     assert.equal(value, 'acquired')
     assert.equal(waited, 1, 'the caller reported the wait once')
-    assert.ok(Date.now() - started < 600, 'the wait stayed inside twice the stale age')
+    assert.ok(Date.now() - started < staleMs * 2, 'the wait stayed inside twice the stale age')
     assert.equal(fs.existsSync(lockPath), false, 'the new holder released')
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })

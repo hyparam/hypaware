@@ -226,6 +226,9 @@ function drivenOpts(home, over = {}) {
     stdout: makeBuf(),
     stderr: makeBuf(),
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1' },
+    // The lanes under test are platform-independent; the injected platform
+    // keeps the wizard's setup gate (#975) from refusing on a win32 host.
+    platform: 'linux',
     ctx: { commands: { run: async () => 0 } },
     capabilities: { has: () => false },
     catalog: catalogWith([claude]),

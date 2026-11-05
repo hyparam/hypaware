@@ -401,6 +401,26 @@ function spawnIdleChild(t) {
   return child.pid
 }
 
+/**
+ * A stand-in for the gateway pid `requestDaemonStop` must confirm dead. On
+ * POSIX the stop is a SIGTERM the idle child dies from; on win32 the stop is
+ * the control request file, so the stand-in exits when it appears, as a real
+ * daemon would.
+ *
+ * @param {TestContext} t
+ * @param {string} stateRoot
+ */
+function spawnStoppableChild(t, stateRoot) {
+  if (process.platform !== 'win32') return spawnIdleChild(t)
+  const stopPath = controlRequestPath(stateRoot, 'stop')
+  const child = spawn(process.execPath, ['-e',
+    `const fs = require('node:fs'); setInterval(() => { if (fs.existsSync(${JSON.stringify(stopPath)})) process.exit(0) }, 20); setTimeout(() => {}, 60_000)`,
+  ], { stdio: 'ignore' })
+  t.after(() => child.kill('SIGKILL'))
+  assert.ok(child.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+  return child.pid
+}
+
 // Issue #2288 on the control-channel transport. The supervised processing
 // child keeps its own pid file below `processing/`, and the kill that ends the
 // gateway ends it too without a shutdown. `requestDaemonStop` reconciled only
@@ -409,7 +429,7 @@ function spawnIdleChild(t) {
 test('requestDaemonStop clears a stale processing pid file on a confirmed exit', async (t) => {
   const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-stale-processing-'))
   try {
-    stageAbandonedPidFile(stateRoot, spawnIdleChild(t))
+    stageAbandonedPidFile(stateRoot, spawnStoppableChild(t, stateRoot))
     const processingRoot = processingStateRoot(stateRoot)
     const deadPid = 999999
     assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
@@ -431,7 +451,7 @@ test('requestDaemonStop clears a stale processing pid file on a confirmed exit',
 test('requestDaemonStop leaves a live processing pid file byte-identical', async (t) => {
   const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-live-processing-'))
   try {
-    stageAbandonedPidFile(stateRoot, spawnIdleChild(t))
+    stageAbandonedPidFile(stateRoot, spawnStoppableChild(t, stateRoot))
     const processingRoot = processingStateRoot(stateRoot)
     stageAbandonedPidFile(processingRoot, spawnIdleChild(t))
     const before = fsSync.readFileSync(pidFilePath(processingRoot), 'utf8')

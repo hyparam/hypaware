@@ -84,6 +84,20 @@ function stubServer(t, respond) {
   return { calls }
 }
 
+/** Escape a literal (possibly a win32 path with backslashes) for a RegExp. @param {string} s */
+function reEsc(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Mirror of `shellWord` in report_commands.js: the receipt quotes a pasteable
+ * argument that is not plain (a win32 path's backslashes, say).
+ * @param {string} s
+ */
+function shellWordForTest(s) {
+  return /^[A-Za-z0-9_.:@%+=/-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`
+}
+
 /** @param {Record<string, string | undefined>} [env] */
 function ctxWith(env = {}) {
   /** @type {string[]} */ const out = []
@@ -236,7 +250,7 @@ for (const extension of ['html', 'htm', 'HTML', 'pdf', 'css']) {
 
 // Use work.MD so the case fixture cannot overwrite report.md on case-insensitive filesystems.
 for (const entry of ['report.html', 'style.css', 'image.png', 'notes.md', 'assets', 'usage.md', '.DS_Store', 'work.MD']) {
-  test(`publish rejects unsupported bundle entry ${entry} before any upload`, async (t) => {
+  test(`publish rejects unsupported bundle entry ${entry} before any upload`, { skip: entry === 'usage.md' && process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-invalid-entry-'))
     t.after(() => fs.rm(dir, { recursive: true, force: true }))
     await fs.writeFile(path.join(dir, 'report.md'), '# Brief')
@@ -2504,7 +2518,7 @@ test('save moves a validated report folder into the store and removes the draft'
   assert.equal(await fs.readFile(path.join(saved, 'report.md'), 'utf8'), '# Brief\n')
   await assert.rejects(fs.stat(draft), { code: 'ENOENT' })
   const text = out.join('')
-  assert.match(text, new RegExp(`^saved ${name} to ${saved.replaceAll('.', '\\.')}\n`))
+  assert.match(text, new RegExp(`^saved ${name} to ${reEsc(saved)}\n`))
   assert.match(text, /list: hyp report list --local/)
   // The period hint is the range the generator encoded in the name, never today.
   assert.match(text, new RegExp(`publish: hyp report publish ${name} --kind usage-review --period 2026-08-01-to-2026-08-31\n`))
@@ -2522,7 +2536,7 @@ test('save --keep copies and leaves the draft where it was', async (t) => {
   assert.equal(await runReportSave([draft, '--keep'], ctx), 0)
   assert.deepEqual((await fs.readdir(draft)).sort(), ['report.md', 'usage.md'])
   assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
-  assert.match(out.join(''), new RegExp(`kept: ${draft.replaceAll('.', '\\.')}`))
+  assert.match(out.join(''), new RegExp(`kept: ${reEsc(draft)}`))
 })
 
 // @ref LLP 0465#save [tests]: the publish allow-list gates the store, so working notes never reach it
@@ -2577,13 +2591,13 @@ test('the save receipt names the slot by path when its bare name would publish s
   await fs.mkdir(path.join(cwd, `${name}-2`))
   out.length = 0
   assert.equal(await runReportSave([draft], ctx), 0)
-  assert.match(out.join(''), new RegExp(`publish: hyp report publish ${path.join(store, `${name}-2`).replaceAll('.', '\\.')} --kind`))
+  assert.match(out.join(''), new RegExp(`publish: hyp report publish ${reEsc(shellWordForTest(path.join(store, `${name}-2`)))} --kind`))
   // A suffix that outgrows the name grammar is printed by path too.
   const long = 'r'.repeat(128)
   const { ctx: ctx2, out: out2, draft: draft2, store: store2 } = await storeFixture(t, { name: long })
   assert.equal(await runReportSave([draft2, '--keep'], ctx2), 0)
   assert.equal(await runReportSave([draft2], ctx2), 0)
-  assert.match(out2.join(''), new RegExp(`publish: hyp report publish ${path.join(store2, `${long}-2`).replaceAll('.', '\\.')} --kind`))
+  assert.match(out2.join(''), new RegExp(`publish: hyp report publish ${reEsc(shellWordForTest(path.join(store2, `${long}-2`)))} --kind`))
 })
 
 test('save refuses a folder that is already in the store', async (t) => {
@@ -2595,7 +2609,7 @@ test('save refuses a folder that is already in the store', async (t) => {
 })
 
 // @ref LLP 0518#refusals [tests]: a link is refused, so its target's pages are never unlinked
-test('save refuses a symlinked folder and leaves the link, its target, and the store untouched', async (t) => {
+test('save refuses a symlinked folder and leaves the link, its target, and the store untouched', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async (t) => {
   const { ctx, err, draft, cwd, hypHome } = await storeFixture(t)
   const link = path.join(cwd, 'hypaware-report-linked')
   await fs.symlink(draft, link)
@@ -2618,7 +2632,7 @@ test('save refuses . and any folder holding the cwd, and leaves the draft and st
     ctx.cwd = where
     err.length = 0
     assert.equal(await runReportSave([source], ctx), 2)
-    assert.match(err.join(''), new RegExp(`holds the current directory; .*Run it from the folder's parent: hyp report save ${name.replaceAll('.', '\\.')}\n`))
+    assert.match(err.join(''), new RegExp(`holds the current directory; .*Run it from the folder's parent: hyp report save ${reEsc(name)}\n`))
   }
   assert.deepEqual((await fs.readdir(draft)).sort(), ['notes', 'report.md', 'usage.md'])
   await assert.rejects(fs.stat(path.join(hypHome, 'reports')), { code: 'ENOENT' })
@@ -2684,7 +2698,7 @@ test('save names a hidden partial copy it could not remove', async (t) => {
   assert.equal(await runReportSave([draft], ctx), 1)
   const [left] = await fs.readdir(store)
   assert.match(left, /^\.saving-/)
-  assert.match(err.join(''), new RegExp(`nothing was saved; a hidden partial copy is left at ${path.join(store, left).replaceAll('.', '\\.')} \\(EBUSY`))
+  assert.match(err.join(''), new RegExp(`nothing was saved; a hidden partial copy is left at ${reEsc(path.join(store, left))} \\(EBUSY`))
   assert.deepEqual(await fs.readdir(path.join(store, left)), [])
 })
 
@@ -2768,9 +2782,13 @@ test('list --local lists saved reports newest first without a remote read', asyn
   await savedReport(store, '.hidden', new Date('2026-09-03T10:00:00Z'))
   await fs.mkdir(path.join(store, 'no-brief'))
   await fs.writeFile(path.join(store, 'stray.md'), '# not a folder\n')
-  await fs.symlink(path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31'), path.join(store, 'linked'))
-  await fs.mkdir(path.join(store, 'linked-brief'))
-  await fs.symlink(path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31', 'report.md'), path.join(store, 'linked-brief', 'report.md'))
+  // Symlinked noise entries only where an unprivileged process can create
+  // them; the ignores they exercise are extra coverage, not the listing rule.
+  if (process.platform !== 'win32') {
+    await fs.symlink(path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31'), path.join(store, 'linked'))
+    await fs.mkdir(path.join(store, 'linked-brief'))
+    await fs.symlink(path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31', 'report.md'), path.join(store, 'linked-brief', 'report.md'))
+  }
   assert.equal(await runReportList(['--local'], ctx), 0)
   assert.equal(calls.length, 0)
   const lines = out.join('').split('\n').filter(Boolean)
@@ -2794,7 +2812,7 @@ test('list --local --json prints the saved rows as an array marked local', async
 test('list --local with no store says where saves go', async (t) => {
   const { ctx, out, store } = await storeFixture(t)
   assert.equal(await runReportList(['--local'], ctx), 0)
-  assert.match(out.join(''), new RegExp(`^no saved reports in ${store.replaceAll('.', '\\.')} - 'hyp report save <dir>'`))
+  assert.match(out.join(''), new RegExp(`^no saved reports in ${reEsc(store)} - 'hyp report save <dir>'`))
 })
 
 test('list --local refuses the remote\'s selectors and filters', async (t) => {
@@ -2922,7 +2940,7 @@ test('list degrades an implicit remote failure to the saved section, but not an 
   assert.doesNotMatch(err.join(''), /listing saved reports only/)
 })
 
-test('list with an unreadable store warns and still lists the remote', async (t) => {
+test('list with an unreadable store warns and still lists the remote', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a directory unreadable on win32' }, async (t) => {
   const { ctx, out, err, store } = await storeFixture(t)
   stubServer(t, () => ({ status: 200, json: { reports: [{ id: 'rpt-b', kind: 'k', period: 'p', bytes: 1, publishedAt: 'x' }] } }))
   await fs.mkdir(store, { recursive: true })
@@ -2972,7 +2990,7 @@ test('publish names the store when a bare name is neither a path nor saved', asy
   const { calls } = stubServer(t, () => ({ status: 201, json: {} }))
   assert.equal(await runReportPublish(['hypaware-report-2025-01-01-to-2025-01-31', '--kind', 'k', '--period', 'p'], ctx), 2)
   assert.equal(calls.length, 0)
-  assert.match(err.join(''), new RegExp(`no such file or directory: hypaware-report-2025-01-01-to-2025-01-31, and no saved report of that name in ${store.replaceAll('.', '\\.')}`))
+  assert.match(err.join(''), new RegExp(`no such file or directory: hypaware-report-2025-01-01-to-2025-01-31, and no saved report of that name in ${reEsc(store)}`))
   err.length = 0
   assert.equal(await runReportPublish(['./missing/dir', '--kind', 'k', '--period', 'p'], ctx), 2)
   assert.match(err.join(''), /no such file or directory: \.\/missing\/dir\n/)

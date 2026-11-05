@@ -204,6 +204,31 @@ by dates, hit count, searchable columns, privacy, or local retention.
 
 See [querying](QUERYING.md) for searches, session drill-downs, and bounded SQL.
 
+## History import failed
+
+`hyp status` shows this problem when a provider's scheduled history import
+could not read one or more files on its last run:
+
+```output
+codex history import failed on its last run, so some history may be missing. Anything it could read was still imported. The next scheduled run retries, and this clears once a run succeeds.
+```
+
+Files that could be read were still imported. A file that failed is retried on
+every scheduled run, and the warning clears on its own once a run succeeds. To
+see how many files failed and the first one with its error:
+
+```sh
+hyp backfill codex --dry-run
+```
+
+If the error is a permission problem, fix it and the next run picks the file
+up. If the same file keeps failing, the file cannot be imported as it is, for
+example a Codex session file over its
+[size limits](integrations/codex.md#large-session-files). Moving that file out
+of the session directory clears the warning on the next run, but HypAware will
+not import it and Codex will no longer list that session, so keep the file
+somewhere safe.
+
 ## An export or team sync is missing
 
 <!-- agent: Run hyp status, hyp sync --dry-run, and hyp remote list, and tell me why my recordings are not reaching HypAware Cloud. -->

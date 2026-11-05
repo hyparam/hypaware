@@ -1071,7 +1071,7 @@ test('a foreign sorted replace re-baselines the cursor instead of being rewritte
 // has actually landed, or a tick that lost this partition would still print
 // "rebaselined" and count it in `totalRebaselined` for a cursor that never
 // changed (round-1 review finding 2).
-test('a rebaseline that fails to persist is not reported as rebaselined, and is not counted', async () => {
+test('a rebaseline that fails to persist is not reported as rebaselined, and is not counted', { skip: process.platform === 'win32' && 'chmod 0o555 does not make a directory unwritable on win32' }, async () => {
   const cacheRoot = await makeTmpDir('maint-foreign-replace-write-fail')
   try {
     const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
@@ -1461,7 +1461,7 @@ test('a symlink at datasets/ refuses the whole pass rather than deleting through
 
     const cacheRoot = path.join(home, 'cache')
     await fs.mkdir(cacheRoot, { recursive: true })
-    await fs.symlink(path.join(real, 'datasets'), path.join(cacheRoot, 'datasets'), 'dir')
+    await fs.symlink(path.join(real, 'datasets'), path.join(cacheRoot, 'datasets'), process.platform === 'win32' ? 'junction' : 'dir')
 
     const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } })
       .tick({ now: new Date('2100-01-01T00:00:00.000Z') })
@@ -1488,7 +1488,7 @@ test('an ordinary cache root is not refused for the shape of the path it lives a
     await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
       { id: 1, value: 'old', timestamp: isoDateDaysAgo(120) },
     ])
-    await fs.symlink(realHome, path.join(home, 'link'), 'dir')
+    await fs.symlink(realHome, path.join(home, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
 
     const result = await createRetentionEnforcer({
       cacheRoot: path.join(home, 'link', 'cache'),

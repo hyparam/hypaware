@@ -379,6 +379,7 @@ export function createBackfillSweepDriver(opts) {
    * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string }} result
    */
   function logSettled(identity, devRunId, result) {
+    reportOutcome(identity, result.ok)
     log.info('backfill.sweep_finished', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
@@ -402,6 +403,7 @@ export function createBackfillSweepDriver(opts) {
    * @param {string} devRunId
    */
   function logAbandoned(identity, devRunId) {
+    reportOutcome(identity, false)
     log.warn('backfill.sweep_queue_abandoned', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
@@ -420,6 +422,7 @@ export function createBackfillSweepDriver(opts) {
    * @param {unknown} err
    */
   function logFailed(identity, devRunId, err) {
+    reportOutcome(identity, false)
     log.error('backfill.sweep_failed', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
@@ -430,6 +433,21 @@ export function createBackfillSweepDriver(opts) {
       status: 'failed',
       error: describeThrown(err),
     })
+  }
+
+  /**
+   * Bookkeeping must not turn a handled run into an unhandled rejection.
+   * @ref LLP 0583#failures [implements]: publish only the latest provider outcome
+   * @param {BackfillSweepProviderIdentity} identity
+   * @param {boolean} ok
+   */
+  function reportOutcome(identity, ok) {
+    try { opts.onResult?.(identity, ok) } catch {
+      log.warn('backfill.sweep_status_failed', {
+        [Attr.COMPONENT]: SWEEP_COMPONENT, [Attr.OPERATION]: SWEEP_OPERATION,
+        provider: identity.name, status: 'failed', [Attr.ERROR_KIND]: 'status_update_failed',
+      })
+    }
   }
 
   return { tick }

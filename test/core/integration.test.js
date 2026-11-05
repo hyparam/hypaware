@@ -300,7 +300,9 @@ test('join writes the central seed and returns success', async () => {
   assert.equal(result.code, 0)
   const seedPath = centralSeedPath(path.join(hypHome, 'hypaware'))
   const stat = await fs.stat(seedPath)
-  assert.equal(stat.mode & 0o777, 0o600)
+  if (process.platform !== 'win32') { // No POSIX mode bits on win32.
+    assert.equal(stat.mode & 0o777, 0o600)
+  }
   const seed = JSON.parse(await fs.readFile(seedPath, 'utf8'))
   assert.equal(seed.version, 2)
 })

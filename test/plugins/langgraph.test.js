@@ -13,7 +13,7 @@ import { createHypAwareCallback } from '../../hypaware-core/plugins-workspace/la
 import { attachLangGraph, LANGGRAPH_MARKER } from '../../hypaware-core/plugins-workspace/langgraph/src/attach.js'
 import { createPolicy } from '../../hypaware-core/plugins-workspace/langgraph/src/policy.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
-import { publish, pendingSlots, readSlot, journalPath, encodeEvent, SLOT_COUNT } from '../../hypaware-core/plugins-workspace/langgraph/src/journal.js'
+import { publish, pendingSlots, readSlot, journalPath, encodeEvent, MAX_EVENT_BYTES, SLOT_COUNT } from '../../hypaware-core/plugins-workspace/langgraph/src/journal.js'
 import { startLangGraphSource } from '../../hypaware-core/plugins-workspace/langgraph/src/listener.js'
 import { SessionProjection } from '../../hypaware-core/plugins-workspace/langgraph/src/projection.js'
 import { validateLangGraphConfig } from '../../hypaware-core/plugins-workspace/langgraph/src/config.js'
@@ -168,7 +168,8 @@ test('journal bounds bytes and capacity across concurrent producers; published e
   assert.deepEqual(await readSlot(directory, slots[0]), event.projection)
   for (let i = 0; i < SLOT_COUNT; i++) await fs.mkdir(path.join(directory, String(i).padStart(3, '0')), { recursive: true })
   await assert.rejects(publish(directory, event), /queue_full/)
-  assert.throws(() => encodeEvent({ value: 'x'.repeat(512 * 1024) }), /event_limit/)
+  assert.equal(encodeEvent({ value: 'x'.repeat(4 * 1024 * 1024) }).length, 4 * 1024 * 1024 + 12)
+  assert.throws(() => encodeEvent({ value: 'x'.repeat(MAX_EVENT_BYTES) }), /event_limit/)
   const circular = {}; circular.self = circular
   assert.throws(() => encodeEvent(circular), /event_limit/)
 })
@@ -189,7 +190,7 @@ test('callback failures never fail an agent, and active memory stays bounded', a
   for (let i = 0; i < 65; i++) await callback.handleToolStart({ id: ['tool'] }, '{}', String(i), undefined, undefined, {}, 'tool', String(i))
   assert.equal(callback.status().active_callbacks, 64)
   assert.equal(callback.status().lastError, 'active_limit')
-  await callback.handleToolEnd('x'.repeat(600 * 1024), '0')
+  await callback.handleToolEnd('x'.repeat(6 * 1024 * 1024), '0')
   assert.equal(callback.status().lastError, 'event_limit')
   callback.handleChainStart({}, {}, 'root', undefined)
   await callback.handleChainEnd({}, 'root')

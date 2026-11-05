@@ -67,7 +67,9 @@ test('a service record round-trips as kind: service, and a malformed secret is n
   const dir = await tmpState()
   await writeServiceRecord(dir, 'prod', { secret: SECRET, accessJwt: 'jwt', expiresAt: FUTURE, org: 'acme' })
   assert.deepEqual((await readCredentials(dir)).prod, { kind: 'service', secret: SECRET, accessJwt: 'jwt', expiresAt: FUTURE, org: 'acme' })
-  assert.equal((await fs.stat(remoteCredentialsPath(dir))).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') { // No POSIX mode bits on win32.
+    assert.equal((await fs.stat(remoteCredentialsPath(dir))).mode & 0o777, 0o600)
+  }
 
   // A clipped secret is dropped, and is never read as a static `token`.
   await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ prod: { kind: 'service', secret: 'hsa_clipped', token: 'hsa_clipped' } }))

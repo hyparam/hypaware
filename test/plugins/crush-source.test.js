@@ -536,7 +536,7 @@ test('status names a missing install, an empty index, stale entries and recordin
   assert.equal(status.details?.sessions_tracked, 1)
 })
 
-test('an unreadable crush.db degrades with permission_denied and keeps the path out of logs and spans', async () => {
+test('an unreadable crush.db degrades with permission_denied and keeps the path out of logs and spans', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' }, async () => {
   const harness = await createCrushHarness({ projects: ['p1'] })
   const dbPath = harness.dbPaths[0]
   await fs.chmod(dbPath, 0o000)

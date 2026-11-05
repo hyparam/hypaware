@@ -67,7 +67,7 @@ function show(run) {
   return `exit ${run.code}\n${run.stdout}\n${run.stderr}`
 }
 
-test('a setup preview in a fresh HOME leaves it empty, in every form', { timeout: 180_000 }, async () => {
+test('a setup preview in a fresh HOME leaves it empty, in every form', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 180_000 }, async () => {
   /** @type {Array<[string, string[]]>} */
   const forms = [
     ['--yes', ['setup', '--yes', '--dry-run']],
@@ -88,7 +88,7 @@ test('a setup preview in a fresh HOME leaves it empty, in every form', { timeout
   }
 })
 
-test('a setup preview with HYP_HOME outside HOME leaves both empty', { timeout: 60_000 }, async () => {
+test('a setup preview with HYP_HOME outside HOME leaves both empty', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 60_000 }, async () => {
   const home = temporaryDirectory('hyp-setup-preview-home-')
   const hypHome = temporaryDirectory('hyp-setup-preview-state-')
   const run = await runCli(home, ['setup', '--yes', '--dry-run'], { HYP_HOME: hypHome })
@@ -97,7 +97,7 @@ test('a setup preview with HYP_HOME outside HOME leaves both empty', { timeout: 
   assert.deepEqual([...(await snapshot(hypHome)).keys()], [], 'HYP_HOME')
 })
 
-test('a real setup in the same harness still creates the plugin and export dirs', { timeout: 60_000 }, async () => {
+test('a real setup in the same harness still creates the plugin and export dirs', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 60_000 }, async () => {
   const home = temporaryDirectory('hyp-setup-real-')
   const run = await runCli(home, ['setup', '--yes', '--no-daemon'])
   assert.equal(run.code, 0, show(run))
@@ -110,7 +110,7 @@ test('a real setup in the same harness still creates the plugin and export dirs'
   assert.notEqual(tree.get('.hyp/hypaware-config.json'), undefined, 'config written')
 })
 
-test('a setup preview over an existing install with custom destinations changes nothing', { timeout: 60_000 }, async () => {
+test('a setup preview over an existing install with custom destinations changes nothing', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 60_000 }, async () => {
   const home = temporaryDirectory('hyp-setup-preview-existing-')
   const outside = temporaryDirectory('hyp-setup-preview-outside-')
   const hypHome = path.join(home, '.hyp')
@@ -140,7 +140,7 @@ test('a setup preview over an existing install with custom destinations changes 
   assert.deepEqual(await snapshot(outside), beforeOutside, 'custom destinations not created')
 })
 
-test('the legacy proxy preflight refuses a preview the same way and changes nothing', { timeout: 60_000 }, async () => {
+test('the legacy proxy preflight refuses a preview the same way and changes nothing', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 60_000 }, async () => {
   const home = temporaryDirectory('hyp-setup-preview-proxy-')
   await fs.mkdir(path.join(home, '.hyp'))
   await fs.writeFile(path.join(home, '.hyp', 'hypaware-config.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n')

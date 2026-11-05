@@ -118,10 +118,16 @@ test('stage applies a document: slot persisted, pointer flipped, etag staged, pr
   assert.deepEqual(restarts, ['config_applied'])
 
   // The active-slot pointer (inside config-control/, not the user config)
-  // is now a symlink resolving to the new doc.
+  // now resolves to the new doc: a symlink on POSIX, a pointer file holding
+  // the slot basename on win32 (where file symlinks need privilege).
   const pointer = path.join(stateRoot, 'config-control', 'active')
   const stat = await fsp.lstat(pointer)
-  assert.ok(stat.isSymbolicLink())
+  if (process.platform === 'win32') {
+    assert.ok(stat.isFile())
+    assert.equal((await fsp.readFile(pointer, 'utf8')).trim(), 'config.b.json')
+  } else {
+    assert.ok(stat.isSymbolicLink())
+  }
   assert.deepEqual(readCentralLayer(stateRoot).plugins, REMOTE_CONFIG.plugins)
 
   // The seed was preserved as the rollback target, and retired from its

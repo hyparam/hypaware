@@ -74,6 +74,8 @@ function wizardOpts(home, over = {}) {
     stdout,
     stderr,
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1' },
+    // Keeps the wizard's setup gate (#975) from refusing on a win32 host.
+    platform: 'linux',
     ctx: /** @type {any} */ ({ commands: { run: async () => 0 } }),
     capabilities: /** @type {any} */ ({ has: () => false }),
     catalog: emptyCatalog(),

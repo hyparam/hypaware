@@ -221,7 +221,7 @@ test('cross-process purge refuses an active rewrite, then reclaims its output on
   // Run the CLI while old rows are buffered, immediately before the first
   // output directory exists. A journal taken here cannot name that output.
   sync.mkdirSync = /** @type {typeof sync.mkdirSync} */ (function (directory, options) {
-    if (!attempted && String(directory).startsWith(`${partition}/table-`)) {
+    if (!attempted && String(directory).startsWith(path.join(partition, 'table-'))) {
       attempted = true
       const result = runChild()
       assert.equal(result.status, 'incomplete')
@@ -479,7 +479,7 @@ test('a corrupt cleanup journal is re-admitted by the next purge instead of fail
   await assert.rejects(fs.stat(original), { code: 'ENOENT' }, 'the recovered journal reclaims like any other')
 })
 
-test('a journal that cannot be read at all fails admission closed instead of being discarded', { skip: process.getuid?.() === 0 && 'root reads through mode 000' }, async t => {
+test('a journal that cannot be read at all fails admission closed instead of being discarded', { skip: process.platform === 'win32' ? 'chmod 0o000 does not make a file unreadable on win32' : process.getuid?.() === 0 && 'root reads through mode 000' }, async t => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-unreadable-'))
   t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
   const storage = createQueryStorageService({ cacheRoot })
@@ -613,7 +613,7 @@ test('the sweep keeps a journal it cannot read, the one unlink that never proves
   assert.ok(await fs.stat(journal), 'a shape the reader refuses keeps the journal')
 })
 
-test('an unreadable journal store does not take the maintenance tick with it', async t => {
+test('an unreadable journal store does not take the maintenance tick with it', { skip: process.platform === 'win32' && 'win32 reads a path through a file as ENOENT (no journals), so the ENOTDIR failure cannot be arranged' }, async t => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-unreadable-'))
   t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
   const storage = createQueryStorageService({ cacheRoot })

@@ -113,6 +113,7 @@ test('every setup form refuses an unsupported platform before any sign-in, enrol
     }))
     assert.equal(code, 1, `${label}: exit`)
     assert.match(stderr.text(), /hyp setup: unsupported platform: win32 \(only macOS and Linux are supported\)/, `${label}: message`)
+    assert.match(stderr.text(), /on Windows, set up by hand: run 'hyp daemon install', then 'hyp client attach <client>'/, `${label}: manual path`)
     assert.deepEqual(fetches, [], `${label}: no network call`)
     assert.deepEqual(await snapshot(home), before, `${label}: no file written under HOME`)
     assert.equal(stdout.text(), '', `${label}: no wizard or guide output`)

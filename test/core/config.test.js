@@ -2,6 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 
 import {
   configRecordsPickAnswer,
@@ -23,7 +24,9 @@ import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
  */
 
 test('defaultConfigPath resolves the v2 config basename under HYP_HOME', () => {
-  assert.equal(defaultConfigPath('/tmp/hyp-home'), '/tmp/hyp-home/hypaware-config.json')
+  // path.join, not a literal: the resolver joins with the host separator,
+  // which on win32 is a backslash.
+  assert.equal(defaultConfigPath('/tmp/hyp-home'), path.join('/tmp/hyp-home', 'hypaware-config.json'))
 })
 
 test('parseConfigShape accepts the supported v2 config shape', () => {

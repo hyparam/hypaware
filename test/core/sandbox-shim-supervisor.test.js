@@ -28,7 +28,7 @@ import {
  * these seconds-long waits do not sit on one file's critical path.
  */
 
-test('launchctl mock: kickstart bounces the job only when -k asks it to', async (t) => {
+test('launchctl mock: kickstart bounces the job only when -k asks it to', { skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have' }, async (t) => {
   const { root, label, target } = sandboxRoot(t)
   const env = { HYP_SANDBOX_SPAWN: '1' }
   const plist = writePlist(root, label, ['/bin/sh', '-c', 'exec sleep 30'])
@@ -54,7 +54,7 @@ test('launchctl mock: kickstart bounces the job only when -k asks it to', async 
   assert.notEqual(second, first)
 })
 
-test('launchctl mock: bootout does not return until the job has exited', async (t) => {
+test('launchctl mock: bootout does not return until the job has exited', { skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have' }, async (t) => {
   const { root, label, target } = sandboxRoot(t)
   const env = { HYP_SANDBOX_SPAWN: '1' }
   // A real HypAware daemon drains before it exits, so the program here does
@@ -77,7 +77,7 @@ test('launchctl mock: bootout does not return until the job has exited', async (
   assert.equal(isAlive(/** @type {number} */ (pid)), false, 'the job is gone, not merely signalled')
 })
 
-test('launchctl mock: a setenv after bootstrap reaches the next launch', async (t) => {
+test('launchctl mock: a setenv after bootstrap reaches the next launch', { skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have' }, async (t) => {
   const { root, label } = sandboxRoot(t)
   const env = { HYP_SANDBOX_SPAWN: '1', SANDBOX_PROBE: '' }
   const seen = path.join(root, 'probe.txt')
@@ -98,7 +98,7 @@ test('launchctl mock: a setenv after bootstrap reaches the next launch', async (
   assert.match(body, /\[on\]/, 'a restart after the setenv carries the domain value')
 })
 
-test('launchctl mock: a program that cannot be started is recorded, not swallowed', async (t) => {
+test('launchctl mock: a program that cannot be started is recorded, not swallowed', { skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have' }, async (t) => {
   const { root, label, target } = sandboxRoot(t)
   const env = { HYP_SANDBOX_SPAWN: '1' }
   // `spawn` reports an unlaunchable program as an `error` event and no
@@ -125,7 +125,7 @@ test('launchctl mock: a program that cannot be started is recorded, not swallowe
   assert.equal(shim(root, 'launchctl', ['print', target], env).stdout.includes('state = running'), false)
 })
 
-test('launchctl mock: a setenv during a bootout survives the bootout', async (t) => {
+test('launchctl mock: a setenv during a bootout survives the bootout', { skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have' }, async (t) => {
   const { root, label, target } = sandboxRoot(t)
   const env = { HYP_SANDBOX_SPAWN: '1' }
   // `bootout` blocks until the job it signalled has actually drained. The
@@ -219,7 +219,7 @@ test('hyp-sandbox: stopping does not wait on, or warn about, an unreaped pid', a
   assert.equal(fs.existsSync(root), false, 'the root is deleted once nothing is running')
 })
 
-test('launchctl mock: a bootout leaves alone a supervisor started while it waited', async (t) => {
+test('launchctl mock: a bootout leaves alone a supervisor started while it waited', { skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have' }, async (t) => {
   const { root, label, target } = sandboxRoot(t)
   const env = { HYP_SANDBOX_SPAWN: '1' }
   // The supervisor dies on the first SIGTERM while its program is still

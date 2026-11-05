@@ -232,7 +232,13 @@ test('config validate reports the same kind as status for an installed plugin wh
     // The sibling caller of the same catalog build, which validates an
     // operator-supplied file and had the identical defect.
     const setupErr = makeBuf()
-    await dispatch(['setup', '--from-file', configPath], { stdout: makeBuf(), stderr: setupErr, env })
+    await dispatch(['setup', '--from-file', configPath], {
+      stdout: makeBuf(),
+      stderr: setupErr,
+      env,
+      // Keeps the setup gate (#975) from refusing on a win32 host.
+      platform: /** @type {const} */ ('linux'),
+    })
     assert.equal(errorKindIn(setupErr.text()), statusKind)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })

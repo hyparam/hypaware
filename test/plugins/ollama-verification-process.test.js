@@ -157,11 +157,13 @@ process.send?.('ready')
       throw new Error(`processor ${survivors.join(', ')} outlived its daemon (daemon ended by ${ended}); killed during teardown`)
     }
   })
+  // Daemon boot gets a wider bound than in-test conditions: a loaded shared
+  // win32 runner can take longer than 8 s to report healthy (#2895).
   const status = await waitFor(() => {
     const snapshot = readStatusFile(state)
     const details = /** @type {any} */ (snapshot?.sources.find(s => s.name === 'ai-gateway')?.details)
     return snapshot?.state === 'healthy' && details?.capture_ready ? snapshot : undefined
-  })
+  }, 30000)
   processor = status.processes?.processing?.pid
   const details = /** @type {any} */ (status.sources.find(s => s.name === 'ai-gateway')?.details)
   const root = `http://${details.host}:${details.port}`
@@ -258,7 +260,7 @@ async function command(f, argv) {
 }
 
 // @ref LLP 0474#recording [tests]: processing-only source reload retains the live generation after explicit detach and reattach
-test('actual split processing SIGHUP keeps resumed fresh capture and recording generations', async t => {
+test('actual split processing SIGHUP keeps resumed fresh capture and recording generations', { skip: process.platform === 'win32' && 'SIGHUP delivery to the processor is a POSIX surface' }, async t => {
   const f = await service(t, true, false, 25)
   const verify = () => command(f, ['ollama', 'verify', '--model', 'tiny:local', '--json'])
   assert.equal((await verify()).code, 0)
@@ -291,7 +293,12 @@ test('actual split processing SIGHUP keeps resumed fresh capture and recording g
 })
 
 // @ref LLP 0474#recording [tests]: an unauthorized recording control cannot change a live gate or prevent fresh persistence
-test('actual split recording control refuses browser Origin without mutating capture', async t => {
+// Quarantined on win32 CI for the same reason as the persistence-recovery test
+// below: its verify needs a full round-trip inside the 30s production
+// OLLAMA_PERSISTENCE_MS, which a loaded Windows runner can exceed (#2896). The
+// Origin refusal itself is also covered on every platform by
+// ollama-recording-lifecycle.test.js.
+test('actual split recording control refuses browser Origin without mutating capture', { skip: process.platform === 'win32' && 'end-to-end persistence can exceed the 30s production deadline on a loaded win32 CI runner; covered on Linux' }, async t => {
   const f = await service(t, true)
   const verify = () => command(f, ['ollama', 'verify', '--model', 'tiny:local', '--json'])
   assert.equal((await verify()).code, 0)
@@ -320,7 +327,13 @@ test('actual split recording control refuses browser Origin without mutating cap
 })
 
 // @ref LLP 0474#diagnostics [tests]: actual split status retains actionable failure while off, recovers only on new persistence and resets current evidence on service restart
-test('actual split failure survives benign control and off, with persistence recovery and fresh restart evidence', async t => {
+// Quarantined on win32 CI: this drives a full client request -> daemon spool
+// -> flush -> query round-trip and asserts `hyp ollama verify` sees it persist
+// inside OLLAMA_PERSISTENCE_MS (30s). That deadline is a production constant
+// (awaitPersistedOllamaCheck caps even an override at it), so it is not to be
+// widened for a test, and a loaded shared Windows runner can exceed the
+// round-trip. The persistence contract itself is covered on the Linux matrix.
+test('actual split failure survives benign control and off, with persistence recovery and fresh restart evidence', { skip: process.platform === 'win32' && 'end-to-end persistence can exceed the 30s production deadline on a loaded win32 CI runner; covered on Linux' }, async t => {
   const f = await service(t, true, false, 25)
   const capture = async fixture => ollamaCaptureFromSnapshot(JSON.parse(await fs.readFile(fixture.env.HYP_CONFIG, 'utf8')), readStatusFile(fixture.state), readPidFile(fixture.state))
   async function request(route, body) {

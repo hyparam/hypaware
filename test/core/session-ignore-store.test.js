@@ -50,7 +50,7 @@ test('independent writers retain other IDs and refresh removals', () => {
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
-test('failed saves and removals preserve the last in-memory membership', () => {
+test('failed saves and removals preserve the last in-memory membership', { skip: process.platform === 'win32' && 'a file planted where the store directory belongs reads as ENOENT, not ENOTDIR, on win32, so the removal is swallowed as already-gone' }, () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-store-'))
   try {
     const set = new SessionIgnoreSet(root)

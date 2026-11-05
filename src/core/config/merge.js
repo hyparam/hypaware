@@ -36,7 +36,9 @@ export function mergeConfigLayers(central, local) {
   // No central layer: the local file *is* the effective config. Nothing
   // is authoritative, nothing can collide, query stays where it is.
   if (!central) {
-    return { effective: local ?? { version: 2 }, drops, centralQueryIgnored: false }
+    // @ref LLP 0578#org-owned [implements]: with no org config, nothing can turn the review hold off
+    const { first_sync_hold: _orgOnly, ...effective } = local ?? { version: 2 }
+    return { effective, drops, centralQueryIgnored: false }
   }
 
   /** @type {HypAwareV2Config} */
@@ -90,6 +92,9 @@ export function mergeConfigLayers(central, local) {
   // @ref LLP 0309#config-key: central layer gets fleet on/off control for free via layering
   if (central.auto_update !== undefined) effective.auto_update = central.auto_update
   else if (local?.auto_update !== undefined) effective.auto_update = local.auto_update
+
+  // @ref LLP 0578#org-owned [implements]: only the org turns the review hold off, so a local value never counts here
+  if (central.first_sync_hold !== undefined) effective.first_sync_hold = central.first_sync_hold
 
   // @ref LLP 0503#config [implements]: local custom patterns can strengthen central redaction but cannot remove its rules
   if (central.redaction !== undefined || local?.redaction !== undefined) {
@@ -153,6 +158,7 @@ export function resolveLayeredConfig({ central, local, validate }) {
   if (Object.keys(central.disambiguate ?? {}).length > 0) current.disambiguate = { ...central.disambiguate }
   if (base.effective.query !== undefined) current.query = base.effective.query
   if (base.effective.auto_update !== undefined) current.auto_update = base.effective.auto_update
+  if (base.effective.first_sync_hold !== undefined) current.first_sync_hold = base.effective.first_sync_hold
   if (base.effective.redaction !== undefined) current.redaction = base.effective.redaction
 
   /** @type {ConfigLayerDrop[]} */
@@ -223,6 +229,7 @@ function cloneShallow(cfg) {
   if (cfg.disambiguate) out.disambiguate = { ...cfg.disambiguate }
   if (cfg.query !== undefined) out.query = cfg.query
   if (cfg.auto_update !== undefined) out.auto_update = cfg.auto_update
+  if (cfg.first_sync_hold !== undefined) out.first_sync_hold = cfg.first_sync_hold
   if (cfg.redaction !== undefined) out.redaction = cfg.redaction
   return out
 }

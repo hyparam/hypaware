@@ -322,18 +322,35 @@ export function createOutbox(root, { now = Date.now } = {}) {
       at: head.at
     }
   }
+  /**
+   * Publish `owner` at the lock path atomically, or throw EEXIST. A symlink
+   * whose target is the owner token on POSIX; on win32, where an unprivileged
+   * process cannot create a symlink, a `wx` file holding the token - creation
+   * is equally atomic (O_CREAT|O_EXCL), and the token still travels with the
+   * lock rather than beside it.
+   * @param {string} owner
+   */
+  function publishOwner(owner) {
+    if (process.platform === 'win32') fs.writeFileSync(lock, owner, { flag: 'wx', mode: 0o600 })
+    else fs.symlinkSync(owner, lock)
+  }
+  /** @returns {string} the published owner token */
+  function readOwner() {
+    return process.platform === 'win32' ? fs.readFileSync(lock, 'utf8') : fs.readlinkSync(lock)
+  }
   function claim() {
     try {
       mkdir()
-      // Symlink creation is an atomic owner publication, unlike mkdir followed
-      // by a pid write. A live owner is never evicted by a wall-clock timeout.
+      // The owner publication is atomic (symlink / wx-file creation), unlike
+      // mkdir followed by a pid write. A live owner is never evicted by a
+      // wall-clock timeout.
       const owner = `${process.pid}-${randomUUID()}`
       try {
-        fs.symlinkSync(owner, lock)
+        publishOwner(owner)
       } catch (error) {
         if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'EEXIST')
           return null
-        const old = fs.readlinkSync(lock)
+        const old = readOwner()
         const pid = Number(old.split('-')[0])
         if (!Number.isSafeInteger(pid) || pid < 1) return null
         try {
@@ -343,17 +360,17 @@ export function createOutbox(root, { now = Date.now } = {}) {
           if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'ESRCH')
             return null
         }
-        if (fs.readlinkSync(lock) !== old) return null
+        if (readOwner() !== old) return null
         fs.unlinkSync(lock)
         try {
-          fs.symlinkSync(owner, lock)
+          publishOwner(owner)
         } catch {
           return null
         }
       }
       return () => {
         try {
-          if (fs.readlinkSync(lock) === owner) fs.unlinkSync(lock)
+          if (readOwner() === owner) fs.unlinkSync(lock)
         } catch {}
       }
     } catch {

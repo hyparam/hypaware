@@ -6,7 +6,7 @@ import path from 'node:path'
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
 import { alignRows, canPushWhere, emptySource, scanColumnOrNulls, unionSources, whereColumns } from 'hypaware/core/query'
-import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
+import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange, createAiGatewayConversationState } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
@@ -321,11 +321,15 @@ export function aiGatewayDatasetRegistration(state) {
  *     (filling it, or marking the row for removal when it resolves to a
  *     `.hypignore` `ignore`, LLP 0085), re-points the links of the rows whose
  *     predecessors it just renamed (LLP 0440), and returns the rest unchanged.
- *  3. Dedupe the whole batch by `part_id` against already-committed
- *     partitions and within-batch, so an upgraded row collapses onto the
- *     uuid twin a later replay already wrote. The committed row wins (the
- *     flush path has no row-delete; dropping the in-flight duplicate is
- *     the only achievable collapse).
+ *  3. Dedupe by `part_id` against already-committed partitions and
+ *     within-batch. The committed row wins (the flush path has no
+ *     row-delete; dropping the in-flight duplicate is the only achievable
+ *     collapse). A fallback-carrying batch dedupes whole, so an upgraded row
+ *     collapses onto the uuid twin a later replay already wrote. Any other
+ *     batch dedupes only its Claude sweep-lane rows (`isClaudeSweepRow`),
+ *     against committed rows and the other lanes' rows in the same batch, so
+ *     a sweep row whose OTEL or proxy twin landed first never commits beside
+ *     it; a batch with no sweep rows reads nothing.
  *  4. Keep one usage carrier per Claude response across partial transcript
  *     reads, even when no identity upgrade was needed.
  *
@@ -336,7 +340,7 @@ function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
     const plan = planSettleSelection(rows, state?.enrichers)
-    if (!plan) return retainClaudeUsageCarriers(rows, ctx.storage)
+    if (!plan) return retainClaudeUsageCarriers(await dedupeSweepRows(rows, ctx), ctx.storage)
     // @ref LLP 0085 [implements]: the settle pass may now REMOVE a row (a
     // late-resolved `.hypignore` ignore), not only upgrade its identity - the
     // filtered batch is what gets committed, so the dropped row never reaches a
@@ -345,13 +349,58 @@ function createSettleBatch(state) {
       select: (row) => plan.selected.has(row),
       allowDrop: true,
     })
-    // Dedupe only matters for a fallback->native upgrade that can twin a
-    // committed uuid row; a pure cwd-enrich/drop pass creates no new twins, so
-    // preserve the original dedupe trigger and leave non-fallback batches
-    // byte-for-byte as before.
-    const fresh = plan.hasFallback ? await dedupeByPartId(settled, ctx) : settled
+    // A fallback->native upgrade can twin any committed row, so a
+    // fallback-carrying batch dedupes whole. A pure cwd-enrich/drop pass
+    // creates no new twins; such a batch, like the no-plan case, dedupes only
+    // its sweep-lane rows.
+    const fresh = plan.hasFallback
+      ? await dedupeByPartId(settled, ctx)
+      : await dedupeSweepRows(settled, ctx)
     return retainClaudeUsageCarriers(fresh, ctx.storage)
   }
+}
+
+/**
+ * Drop the Claude sweep-lane rows of a non-fallback batch whose `part_id` a
+ * committed row, or another lane's row in this batch, already holds. The
+ * Claude backfill sweep and the OTEL telemetry listener each name a turn's
+ * parts with the same native ids, and each checks for the other only before
+ * its own write: a turn both lanes reach between those checks spools twice.
+ * Spool appends drain in order and every batch commits before the next is
+ * settled, so whichever copy was appended second meets its twin here, in this
+ * batch or already committed. A late OTEL fallback is caught by the
+ * whole-batch dedupe; this catches a late sweep row. The sweep copy is the
+ * one dropped, which keeps the live row's lane and provenance.
+ *
+ * Returns the batch unchanged, with no storage read, when it holds no sweep
+ * row: live OTEL and proxy flushes, including the wanted-only batches
+ * LLP 0560 keeps off the scan, stay on the fast path.
+ *
+ * @ref LLP 0252#projection-unchanged [implements]: the producers' overlap
+ *   collapses on `part_id`, here for the race the pre-write checks leave open
+ * @ref LLP 0560#wants [constrained-by]: a wanted-only batch must not pay a
+ *   committed scan, so the trigger is a sweep row, never the client
+ * @param {Record<string, unknown>[]} rows
+ * @param {DatasetSettleContext} ctx
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function dedupeSweepRows(rows, ctx) {
+  if (!rows.some(isClaudeSweepRow)) return rows
+  return dedupeByPartId(rows, ctx, isClaudeSweepRow)
+}
+
+/**
+ * A row the Claude backfill sweep wrote. The materializer stamps
+ * `conversation_source` with the client name (`claude` or
+ * `claude-desktop`); the proxy and OTEL lanes stamp `claude_code`. Reads two
+ * plain columns, so it costs no attributes parse.
+ *
+ * @param {Record<string, unknown>} row
+ */
+function isClaudeSweepRow(row) {
+  const client = row.client_name
+  return (client === 'claude' || client === 'claude-desktop') &&
+    row.conversation_source === client
 }
 
 /**
@@ -675,23 +724,38 @@ async function upgradeFallbackRows(rows, state, ctx, opts = {}) {
  * (millions of entries, hundreds of MB) on every fallback-carrying
  * flush tick, a main driver of daemon GC thrash (LLP 0204#fix).
  *
+ * `select` narrows the dedupe to the rows it accepts: only their keys and
+ * sessions are scanned, the other rows pass through untouched, and a selected
+ * row also drops when an unselected row in the batch holds its key, wherever
+ * that row sits, so the unselected copy is the one kept.
+ *
  * @param {Record<string, unknown>[]} rows
  * @param {DatasetSettleContext} ctx
+ * @param {(row: Record<string, unknown>) => boolean} [select]
  * @returns {Promise<Record<string, unknown>[]>}
  */
-async function dedupeByPartId(rows, ctx) {
+async function dedupeByPartId(rows, ctx, select) {
   const storage = ctx?.storage
   if (rows.length === 0 || !canScanExistingRows(storage)) return rows
+  const targets = select ? rows.filter(select) : rows
   /** @type {Set<string>} */
   const batchKeys = new Set()
-  for (const row of rows) {
+  for (const row of targets) {
     const key = partIdKey(row)
     if (key !== undefined) batchKeys.add(key)
   }
-  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(targets))
+  if (select) {
+    for (const row of rows) {
+      if (select(row)) continue
+      const key = partIdKey(row)
+      if (key !== undefined && batchKeys.has(key)) seen.add(key)
+    }
+  }
   /** @type {Record<string, unknown>[]} */
   const fresh = []
   for (const row of rows) {
+    if (select && !select(row)) { fresh.push(row); continue }
     const key = partIdKey(row)
     if (key === undefined) { fresh.push(row); continue }
     if (seen.has(key)) continue
@@ -789,8 +853,9 @@ function safeParseJson(value) {
  * (the exact expansion the live gateway recorder uses) so backfilled
  * and live-captured rows are byte-identical for the same projection.
  * Row expansion is pure with respect to `item.value`: it allocates a
- * fresh conversation state per call, so reruns and out-of-order items
- * produce identical row identity (`part_id = <message_id>#<part_index>`).
+ * fresh conversation state per call, except explicitly indexed Codex batches
+ * in one run which share their current file's chain and tool lookup. Reruns
+ * restart at index zero and produce identical row identity (`part_id = <message_id>#<part_index>`).
  *
  * On top of that pure expansion the materializer applies a narrow
  * PRE-WRITE dedupe: before a batch is handed back to the runner for
@@ -811,6 +876,9 @@ export function aiGatewayBackfillMaterializer() {
   // for every invocation. The dedupe state is isolated by the runner's opaque
   // run token and becomes collectible with that token.
   const dedupe = createBackfillDedupe()
+  // @ref LLP 0583#bounded-projection [implements]: one active Codex file per run, released with its opaque token
+  /** @type {WeakMap<object, { thread: string, state: ReturnType<typeof createAiGatewayConversationState> }>} */
+  const codexRuns = new WeakMap()
   return {
     kind: AI_GATEWAY_PROJECTED_EXCHANGE_KIND,
     dataset: DATASET_NAME,
@@ -823,8 +891,21 @@ export function aiGatewayBackfillMaterializer() {
     async materialize(item, ctx) {
       const projection = asProjectedExchange(item.value)
       if (!projection) return []
+      let state
+      if (ctx?.runToken && projection.client_name === 'codex') {
+        const thread = JSON.stringify([projection.session_id, projection.conversation_id])
+        const previous = codexRuns.get(ctx.runToken)
+        // Explicit zero starts a new file or replay. Unindexed exchanges keep
+        // the pure expansion contract used by the other backfill providers.
+        if (projection.messages[0]?.message_index !== undefined) {
+          state = previous?.thread === thread && projection.messages[0].message_index > 0
+            ? previous.state : createAiGatewayConversationState()
+          codexRuns.set(ctx.runToken, { thread, state })
+        }
+      }
       const rows = aiGatewayRowsFromProjectedExchange(projection, {
         gatewayAttributes: backfillGatewayAttributes(item),
+        state,
       })
       // @ref LLP 0449#reconciliation [implements]: a mutable snapshot must reach
       // storage whole, including old identities whose payload or position changed.

@@ -170,6 +170,8 @@ async function wizard(r, clients, opts = {}) {
     stdout,
     stderr: recordingStderr,
     env: r.env,
+    // Keeps the wizard's setup gate (#975) from refusing on a win32 host.
+    platform: 'linux',
     ctx: { commands: { run: async () => 0 } },
     capabilities: r.capabilities,
     catalog: {

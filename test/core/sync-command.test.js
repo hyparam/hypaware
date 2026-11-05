@@ -961,7 +961,7 @@ test('--yes cannot release the hold: #no-release licenses an attended confirmati
   assert.deepEqual(sink.exported, [])
 })
 
-test('a hold that cannot be cleared fails loudly instead of exiting 0 with nothing sent', async () => {
+test('a hold that cannot be cleared fails loudly instead of exiting 0 with nothing sent', { skip: process.platform === 'win32' && 'chmod 0o500 does not make a directory unwritable on win32' }, async () => {
   const hypHome = await makeHome('clear-fails')
   await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
   const policyDir = path.dirname(firstSyncHoldMarkerPath(stateDir(hypHome)))

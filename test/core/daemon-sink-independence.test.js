@@ -12,6 +12,7 @@ import { readStatusFile, collectHypAwareStatus } from '../../src/core/daemon/sta
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
+import { batchIdTime } from '../../src/core/sinks/diagnostic_history.js'
 
 function statusAt(stateRoot) {
   const status = readStatusFile(stateRoot)
@@ -182,6 +183,8 @@ test('delayed success uses completion time and ordinary logs show failure then f
   await until(async () => (await read(home, 'held-z-local')).length > held, 'a z-local export is held before the completion boundary')
   const completionBoundary = new Date().toISOString()
   await fs.writeFile(path.join(home, 'hold-next'), '1')
+  // A fast filesystem can otherwise release and complete within the boundary's clock tick.
+  await until(() => Date.now() > Date.parse(completionBoundary), 'clock advances past the completion boundary')
   await fs.rm(path.join(home, 'partial'))
   await fs.rm(path.join(home, 'hold-export'))
   await until(() => statusAt(stateRoot).sinks.some(row => row.instance === 'z-local' && (row.lastSuccessAt ?? '') > completionBoundary))
@@ -310,7 +313,8 @@ test('disposable runtime retries denied diagnostic cleanup without changing expo
   const { home, stateRoot } = await stage(t, endpoint(server), { maintenance: true, beforeBoot: async home => {
     outbox = path.join(home, 'hypaware', 'sinks', 'z-local', 'outbox')
     await fs.mkdir(outbox, { recursive: true })
-    const at = new Date(Date.now() - 60000).toISOString()
+    // The host's batch-id spelling: win32 ids drop the colons NTFS forbids.
+    const at = batchIdTime(new Date(Date.now() - 60000))
     for (let i = 1; i <= 120; i++) await fs.writeFile(path.join(outbox, `z-local-${at}-${i}.json`), '{}')
     await fs.writeFile(path.join(home, 'fail'), '1')
   } })

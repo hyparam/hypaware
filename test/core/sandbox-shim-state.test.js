@@ -133,7 +133,9 @@ test('state lock: proceeding unlocked after losing the retake is recorded in cal
   )
 })
 
-test('state lock: an eviction is recorded from the removal, not from an age it could not read', (t) => {
+test('state lock: an eviction is recorded from the removal, not from an age it could not read', {
+  skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32',
+}, (t) => {
   const { root } = sandboxRoot(t)
   const lockPath = lockPathFor(root, 'launchd.json')
   fs.mkdirSync(path.dirname(lockPath), { recursive: true })
@@ -160,7 +162,8 @@ test('state lock: an eviction is recorded from the removal, not from an age it c
 // Root reads through mode 000 (CAP_DAC_OVERRIDE), so the EACCES this case is
 // built on does not happen there and the shim would legitimately succeed.
 test('state lock: an unreadable state file is not committed as an empty domain', {
-  skip: process.getuid?.() === 0 && 'chmod does not deny root the read this case needs',
+  skip: (process.getuid?.() === 0 && 'chmod does not deny root the read this case needs')
+    || (process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32'),
 }, (t) => {
   const { root, plist, target } = sandboxRoot(t)
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist]).code, 0)

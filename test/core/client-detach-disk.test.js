@@ -49,6 +49,19 @@ async function stageHome() {
 }
 
 /**
+ * Removes `p` from `text` both as written and as JSON.stringify spells it.
+ * On win32 the two differ, since JSON escapes each backslash in the path, so a
+ * strip of the raw form alone leaves the path in JSON output.
+ *
+ * @param {string} text
+ * @param {string} p
+ * @returns {string}
+ */
+function stripPath(text, p) {
+  return text.replaceAll(p, '').replaceAll(JSON.stringify(p).slice(1, -1), '')
+}
+
+/**
  * @param {string} home
  * @param {string} content
  * @returns {Promise<string>}
@@ -1014,7 +1027,7 @@ test('#500 finding 3: a restored malformed-block backup is reported by path, not
     // always present and never sensitive, and its random suffix can coincidentally
     // start with 'x' right after the fixed "...disk-" prefix, spelling "sk-x" with
     // no secret involved.
-    assert.equal(JSON.stringify(result).replaceAll(settingsPath, '').includes('sk-x'), false)
+    assert.equal(stripPath(JSON.stringify(result), settingsPath).includes('sk-x'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -1094,7 +1107,7 @@ test('#500 finding 1: the legacy branch reports a prev_malformed backup it canno
     // See the sibling assertion above: `settingsPath` is stripped before the
     // leak check because its random mkdtemp suffix can coincidentally spell
     // "sk-x" against the fixed "...disk-" prefix.
-    assert.equal(JSON.stringify(result).replaceAll(settingsPath, '').includes('sk-x'), false)
+    assert.equal(stripPath(JSON.stringify(result), settingsPath).includes('sk-x'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -1202,8 +1215,9 @@ test('#500 finding 3: `hyp detach --json` echoes restored_paths, and never the c
     assert.equal(payload.changed, true)
     assert.deepEqual(payload.restored_paths, ['env'])
     // Same leak check as the prose assertion above, and the same reason for
-    // stripping `settings_path` first.
-    assert.equal(out.replaceAll(settingsPath, '').includes('sk-x'), false)
+    // stripping `settings_path` first. `out` is JSON, so on win32 the path in
+    // it is escaped and only stripPath's second form matches.
+    assert.equal(stripPath(out, settingsPath).includes('sk-x'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }

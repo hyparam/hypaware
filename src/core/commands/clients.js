@@ -2718,7 +2718,9 @@ async function resolveCheckScopeDir({ result, base, stateDir, listPath }) {
  */
 async function countResidualCachedRows(scopeDir, ctx) {
   const lit = scopeDir.replace(/'/g, "''")
-  const likePrefix = `${scopeDir}/`.replace(/'/g, "''")
+  // Cached rows record host-native paths, so the under-scope prefix uses the
+  // host separator ('\' on win32), not a literal '/'.
+  const likePrefix = `${scopeDir}${path.sep}`.replace(/'/g, "''")
   const sql =
     `SELECT cwd, repo_root FROM ai_gateway_messages ` +
     `WHERE cwd = '${lit}' OR cwd LIKE '${likePrefix}%' ` +
@@ -2758,7 +2760,7 @@ async function countResidualCachedRows(scopeDir, ctx) {
 function isUnderDir(p, dir) {
   if (p === '') return false
   if (p === dir) return true
-  const prefix = dir.endsWith('/') ? dir : `${dir}/`
+  const prefix = dir.endsWith(path.sep) ? dir : `${dir}${path.sep}`
   return p.startsWith(prefix)
 }
 

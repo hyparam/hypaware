@@ -80,7 +80,6 @@ async function countMetadataReads(fn) {
 
 test('a tick over a full batch of sessions loads partition metadata as often as a tick over one', async t => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hermes-batch-'))
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const dbPath = path.join(dir, 'state.db')
   const db = createStore(dbPath)
   t.after(() => db.close())
@@ -109,6 +108,9 @@ test('a tick over a full batch of sessions loads partition metadata as often as 
   })
   const runner = createHermesPollRunner(ctx)
   t.after(() => runner.db?.close())
+  // Close before the rm (hooks run in registration order): win32 cannot
+  // unlink a database an open handle still maps (EBUSY).
+  t.after(() => fsp.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
 
   // The hermes partition exists before either measured tick, so both visit
   // the same set of tables.

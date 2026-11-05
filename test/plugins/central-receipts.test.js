@@ -15,7 +15,8 @@ test('receipts isolate destinations and ignore torn records without losing later
   const id = first.key('batch-one')
   await first.record(id)
   const file = path.join(root, (await fs.readdir(root))[0])
-  assert.equal((await fs.stat(file)).mode & 0o777, 0o600)
+  // No POSIX mode bits on win32.
+  if (process.platform !== 'win32') assert.equal((await fs.stat(file)).mode & 0o777, 0o600)
   await fs.appendFile(file, 'partial-record')
   const restarted = await openReceipts(root, scope)
   assert.equal(restarted.has(id), true)

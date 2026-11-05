@@ -90,7 +90,9 @@ test('file-content observations respect file policy, workspace boundaries and na
     await fs.writeFile(path.join(privateDir, 'notes.txt'), 'private')
     const outside = path.join(f.root, 'outside.txt')
     await fs.writeFile(outside, 'outside')
-    await fs.symlink(outside, path.join(workspace, 'link.txt'))
+    // File symlink creation needs Developer Mode on win32; there link.txt is
+    // simply absent, and its post below is refused as a missing file instead.
+    if (process.platform !== 'win32') await fs.symlink(outside, path.join(workspace, 'link.txt'))
     const body = envelope(workspace, { hook_event_name: 'beforeReadFile', file_path: file, content: 'probe contents' })
     assert.equal((await f.post(body)).status, 200)
     await f.post(body)

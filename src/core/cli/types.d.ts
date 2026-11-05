@@ -364,6 +364,13 @@ export interface DispatchOptions {
   workspaceDir?: string
   /** Override OS temp root (tests); reaches `createPluginPaths` through `bootKernel`. */
   tmpRoot?: string
+  /**
+   * Act as if on this platform at the setup preflight (#975) and in the
+   * wizard lanes it guards, the same seam `runInitWizard` takes directly.
+   * Tests exercising setup behavior that is not platform-gated inject a
+   * supported platform here; everything else still reads `process.platform`.
+   */
+  platform?: NodeJS.Platform
   registry?: ReturnType<typeof createCommandRegistry>
   kernel?: KernelRuntime
 }

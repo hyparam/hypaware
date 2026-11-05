@@ -9,16 +9,31 @@ import { compareStrings } from '../util/compare_strings.js'
 
 const HISTORY_LIMIT = 100
 const METADATA_BYTES = 4096
-const BATCH_SUFFIX = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-(\d+)\.json$/
+// The time's colons are optional: win32 ids drop them (see `batchIdTime`),
+// POSIX ids keep them.
+const BATCH_SUFFIX = /^(\d{4}-\d{2}-\d{2}T\d{2}):?(\d{2}):?(\d{2}\.\d{3}Z)-(\d+)\.json$/
+
+/**
+ * The time part of a batch id, which doubles as the outbox filename
+ * (`persistOutbox` in driver.js): ISO-8601, with the colons dropped on win32
+ * because Windows forbids ':' in file names. `batchName` below reads both
+ * spellings.
+ *
+ * @param {Date} date
+ */
+export function batchIdTime(date) {
+  const iso = date.toISOString()
+  return process.platform === 'win32' ? iso.replace(/:/g, '') : iso
+}
 
 /** @param {string} name @param {string} instance */
 function batchName(name, instance) {
   if (!name.startsWith(`${instance}-`)) return null
   const match = BATCH_SUFFIX.exec(name.slice(instance.length + 1))
   if (!match) return null
-  const at = Date.parse(match[1])
+  const at = Date.parse(`${match[1]}:${match[2]}:${match[3]}`)
   if (!Number.isFinite(at)) return null
-  return { name, at, sequence: BigInt(match[2]) }
+  return { name, at, sequence: BigInt(match[4]) }
 }
 
 // @ref LLP 0471#diagnostic-history [implements]: stream only recognized ordinary files, preserving unknown names and symlinks

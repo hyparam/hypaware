@@ -9,7 +9,7 @@ import { setImmediate as turn, setTimeout as pause } from 'node:timers/promises'
 import { MeterProvider, metrics } from '../../src/core/observability/runtime.js'
 import { resetKernelInstruments } from '../../src/core/observability/meter.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
-import { writeFirstSyncHoldMarker } from '../../src/core/usage-policy/first_sync_hold.js'
+import { readFirstSyncDeadline, writeFirstSyncHoldMarker } from '../../src/core/usage-policy/first_sync_hold.js'
 import { createSinkDriver } from '../../src/core/sinks/driver.js'
 
 async function stage(t) {
@@ -371,3 +371,27 @@ test('shared scheduled rerun switches driver context without allocating per-fire
   assert.equal(s.calls.length, 5, 'manual receipt consumes the one scheduled rerun opportunity')
   assert.equal(s.peak(), 1)
 })
+
+// @ref LLP 0578#marker-cleared [tests]: the org's setting ends the hold for every reader of the marker
+test('an org that turns the first-sync hold off clears the marker and uploads', async t => {
+  const s = await stage(t)
+  s.add('local', false)
+  await writeFirstSyncHoldMarker({ stateDir: s.stateRoot, now: Date.now() })
+  const d = s.driver({ config: { version: 2, first_sync_hold: false } })
+  const result = await d.tick({ force: true })
+  assert.equal(result.held, undefined)
+  assert.equal(result.sinks.length, 1)
+  assert.equal(await readFirstSyncDeadline({ stateDir: s.stateRoot }), null)
+})
+
+for (const config of [{ version: 2, first_sync_hold: true }, { version: 2 }, undefined]) {
+  test(`the first-sync hold stays on with config ${JSON.stringify(config)}`, async t => {
+    const s = await stage(t)
+    s.add('local', false)
+    await writeFirstSyncHoldMarker({ stateDir: s.stateRoot, now: Date.now() })
+    const d = s.driver({ config })
+    assert.deepEqual(await d.tick({ force: true }), { sinks: [], held: 'first_sync_hold' })
+    assert.equal(s.calls.length, 0)
+    assert.equal(typeof (await readFirstSyncDeadline({ stateDir: s.stateRoot })), 'number')
+  })
+}

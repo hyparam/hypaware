@@ -528,5 +528,5 @@ test('Step 1 still resolves one fresh, complete header to its container', { skip
     { cwd: '/elsewhere', session_id: 'C9' },
   ], cwd)
   assert.equal(result.status, 0, result.stderr)
-  assert.match(result.stdout, /^C1 rollout-\S+\.jsonl\n$/, 'the container, never the thread id, is what the shell reads')
+  assert.match(result.stdout, /^C1 rollout-\S+\.jsonl\r?\n$/, 'the container, never the thread id, is what the shell reads')
 })

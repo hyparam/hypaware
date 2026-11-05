@@ -14,7 +14,7 @@ import weakref
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-_MAX_BYTES = 512 * 1024
+_MAX_BYTES = 5 * 1024 * 1024
 _TIMEOUT = 10
 
 
