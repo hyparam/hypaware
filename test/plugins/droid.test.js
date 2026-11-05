@@ -85,6 +85,13 @@ test('Droid incremental reader handles append, partial UTF-8 lines, header rewri
   assert.equal(rows(rewrite).length, 5)
   records[1].message.content[0].text = 'Read different!!'
   await fs.writeFile(file, records.map(e => JSON.stringify(e)).join('\n') + '\n')
+  if (process.platform === 'win32') {
+    // NTFS leaves mtime and ctime untouched for a rewrite inside the same
+    // timestamp tick, so a back-to-back same-size edit fingerprints as
+    // unchanged; a real later edit carries a later mtime, stamped here.
+    const later = new Date(Date.now() + 10)
+    await fs.utimes(file, later, later)
+  }
   assert.equal(rows(await collect(readDroidTranscript(file, { ...opts, cursor: rewrite.at(-1).cursor }))).length, 5)
 })
 
@@ -112,9 +119,13 @@ test('Droid refuses outside-root files, unsupported headers and budgets, and lea
   const opts = { root, allowed: () => true }
   const outside = path.join(home, 'outside.jsonl')
   await fs.copyFile(file, outside)
-  const link = path.join(root, 'link.jsonl')
-  await fs.symlink(outside, link)
-  await assert.rejects(collect(readDroidTranscript(link, opts)), /outside_root/)
+  // File symlink creation needs Developer Mode on win32, so the
+  // symlink-escape arrangement stays POSIX-only.
+  if (process.platform !== 'win32') {
+    const link = path.join(root, 'link.jsonl')
+    await fs.symlink(outside, link)
+    await assert.rejects(collect(readDroidTranscript(link, opts)), /outside_root/)
+  }
   await assert.rejects(collect(readDroidTranscript(file, { ...opts, sessionId: 'other' })), /unsupported_session/)
   assert.ok((await collect(readDroidTranscript(file, { ...opts, allowed: () => false })))[0].dropped)
   await fs.appendFile(file, 'x'.repeat(MAX_LINE_BYTES + 1))

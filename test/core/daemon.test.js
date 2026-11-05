@@ -914,8 +914,9 @@ for (const flags of [[], ['--foreground'], ['-f']]) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-daemon-run-argv-'))
     const configPath = path.join(root, 'config.json')
     await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    const env = { ...process.env, HOME: root, HYP_HOME: root, HYP_DEV_TELEMETRY: '1' }
     const child = spawn(process.execPath, [path.resolve('bin/hypaware.js'), 'daemon', 'run', ...flags, '--config', configPath], {
-      env: { ...process.env, HOME: root, HYP_HOME: root, HYP_DEV_TELEMETRY: '1' },
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -926,7 +927,14 @@ for (const flags of [[], ['--foreground'], ['-f']]) {
       stdout += chunk
       if (!stopped && stdout.includes('daemon: running')) {
         stopped = true
-        child.kill('SIGTERM')
+        // win32 has no graceful SIGTERM delivery (kill is TerminateProcess),
+        // so stop through the LLP 0300 file control channel, the way a real
+        // stop reaches the daemon there.
+        if (process.platform === 'win32') {
+          spawn(process.execPath, [path.resolve('bin/hypaware.js'), 'daemon', 'stop'], { env, stdio: 'ignore' })
+        } else {
+          child.kill('SIGTERM')
+        }
       }
     })
     child.stderr.on('data', chunk => { stderr += chunk })

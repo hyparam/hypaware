@@ -40,6 +40,34 @@ function tmpPathFor(filePath) {
 }
 
 /**
+ * Flush a directory's entries to disk, so a rename or create inside it
+ * survives power loss before dependent work commits. A no-op on win32:
+ * Windows has no directory fsync (the sync on a directory handle reports
+ * EPERM, which failed every caller there), and NTFS journals directory
+ * metadata on its own.
+ *
+ * @param {string} directory
+ * @param {typeof fsp} [fs]
+ * @returns {Promise<void>}
+ */
+export async function fsyncDirectory(directory, fs = fsp) {
+  if (process.platform === 'win32') return
+  const handle = await fs.open(directory, 'r')
+  try { await handle.sync() } finally { await handle.close() }
+}
+
+/**
+ * Synchronous {@link fsyncDirectory}.
+ *
+ * @param {string} directory
+ */
+export function fsyncDirectorySync(directory) {
+  if (process.platform === 'win32') return
+  const fd = fsSync.openSync(directory, 'r')
+  try { fsSync.fsyncSync(fd) } finally { fsSync.closeSync(fd) }
+}
+
+/**
  * Write `data` to `filePath` atomically: temp file in the same
  * directory (same filesystem, so the rename is atomic), then rename
  * over the target. A given `mode` is the file's exact mode, whatever the
@@ -105,15 +133,8 @@ export async function atomicWriteFile(filePath, data, options = {}) {
     if (mode !== undefined) await fs.chmod(tmpPath, mode)
     await fs.rename(tmpPath, filePath)
     renamed = true
-    if (fsync && process.platform !== 'win32') {
-      // win32 is excluded because Windows has no directory fsync: the sync
-      // on a directory handle reports EPERM, which failed every fsync'd
-      // write there. NTFS journals the rename's metadata on its own.
-      // @ref LLP 0417#cache-reclamation [implements]: journal admission must survive before delete commits
-      const directory = path.dirname(filePath)
-      const handle = await fs.open(directory, 'r')
-      try { await handle.sync() } finally { await handle.close() }
-    }
+    // @ref LLP 0417#cache-reclamation [implements]: journal admission must survive before delete commits
+    if (fsync) await fsyncDirectory(path.dirname(filePath), fs)
   } finally {
     if (!renamed) {
       try {

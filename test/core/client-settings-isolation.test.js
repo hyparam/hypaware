@@ -5,7 +5,6 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
 test('test and smoke client environments discard inherited settings and history paths', () => {
@@ -26,9 +25,11 @@ test('test and smoke client environments discard inherited settings and history 
 test('smoke harness replaces inherited Codex home before importing the flow', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-smoke-isolation-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
-  const harnessPath = fileURLToPath(new URL('../../hypaware-core/smoke/lib/harness.js', import.meta.url))
+  // A file URL, not the bare path: the ESM loader refuses a win32
+  // drive-lettered absolute path as an import specifier.
+  const harnessUrl = new URL('../../hypaware-core/smoke/lib/harness.js', import.meta.url).href
   const script = `
-    import { runFlow } from ${JSON.stringify(harnessPath)}
+    import { runFlow } from ${JSON.stringify(harnessUrl)}
     import os from 'node:os'
     const result = await runFlow('core_boot_noop')
     console.log(JSON.stringify({ tmpDir: result.tmpDir, home: os.homedir(), codex: process.env.CODEX_HOME }))

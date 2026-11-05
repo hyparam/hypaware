@@ -25,9 +25,11 @@ import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
  * @param {string} ignoredDir
  */
 function ignoringResolver(ignoredDir) {
-  const hypignore = path.join(ignoredDir, '.hypignore')
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over a POSIX-written fixture.
+  const hypignore = path.resolve(path.join(ignoredDir, '.hypignore'))
   return createUsagePolicyResolver({
-    existsSync: (p) => p === hypignore,
+    existsSync: (p) => path.resolve(p) === hypignore,
     readFileSync: () => 'ignore\n',
   })
 }
@@ -366,7 +368,7 @@ test('scheduled capture migrates the route, skips unchanged files, and retries f
   }
 })
 
-test('an unreadable rollout warns once across an hour of sweeps, then imports when it recovers (#2070)', async () => {
+test('an unreadable rollout warns once across an hour of sweeps, then imports when it recovers (#2070)', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' },  async () => {
   const env = await stageEnv()
   const file = await writeModernRollout(env, 'rollout-locked.jsonl', modernConversation('locked'))
   try {
@@ -412,7 +414,7 @@ test('an unreadable rollout warns once across an hour of sweeps, then imports wh
   }
 })
 
-test('the remembered read failures are capped, so many unreadable rollouts still warn a bounded number of times (#2070)', async () => {
+test('the remembered read failures are capped, so many unreadable rollouts still warn a bounded number of times (#2070)', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' },  async () => {
   const env = await stageEnv()
   /** @type {string[]} */
   const files = []
@@ -613,7 +615,7 @@ test('backfill skips a session whose cwd is .hypignore-ignored', async () => {
     assert.ok(drop, 'expected a usage_policy_drop log entry')
     assert.equal(drop?.fields?.operation, 'usage_policy_drop')
     assert.equal(drop?.fields?.conversation_id, 'sess-ignored')
-    assert.equal(drop?.fields?.governed_by, '/work/repo/.hypignore')
+    assert.equal(drop?.fields?.governed_by, path.resolve('/work/repo/.hypignore'))
     const scanDone = logs.find((e) => e.message === 'codex.backfill.scan_complete')
     assert.equal(scanDone?.fields?.sessions_projected, 0)
     assert.equal(scanDone?.fields?.sessions_ignored, 1)

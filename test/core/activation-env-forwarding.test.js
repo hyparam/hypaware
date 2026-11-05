@@ -136,6 +136,8 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
       // under `hypHome` puts them where the `fs.rm` below reaches them even if
       // teardown ever stops reclaiming them.
       tmpRoot,
+      // Keeps the setup gate (#975) from refusing on a win32 host.
+      platform: /** @type {const} */ ('linux'),
     })
     assert.equal(code, 0, stderr.text())
 

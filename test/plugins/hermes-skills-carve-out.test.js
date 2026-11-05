@@ -80,7 +80,8 @@ async function snapshot(dir) {
  * @returns {Map<string, string>}
  */
 function withoutOurs(snap) {
-  return new Map([...snap].filter(([rel]) => !SHARED_SKILL_NAMES.some((name) => rel === `skills/${name}` || rel.startsWith(`skills/${name}${path.sep}`))))
+  // Relative keys are joined with the host separator, so the filter is too.
+  return new Map([...snap].filter(([rel]) => !SHARED_SKILL_NAMES.some((name) => rel === path.join('skills', name) || rel.startsWith(`${path.join('skills', name)}${path.sep}`))))
 }
 
 /**

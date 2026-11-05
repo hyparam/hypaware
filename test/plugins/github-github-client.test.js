@@ -299,7 +299,9 @@ test('GitHub CLI lookup extends a launchd-style path only for the child', async 
 
   await client.listViewerRepos()
   assert.ok(childPath.split(path.delimiter).includes('/opt/homebrew/bin'))
-  assert.ok(childPath.split(path.delimiter).includes('/Users/tester/.local/share/mise/shims'))
+  // Built with path.join: the shim entry joins with the host separator,
+  // which is '\' on win32.
+  assert.ok(childPath.split(path.delimiter).includes(path.join('/Users/tester', '.local', 'share', 'mise', 'shims')))
   assert.equal(env.PATH, '/usr/bin:/bin')
 })
 

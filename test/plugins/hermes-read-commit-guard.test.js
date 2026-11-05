@@ -205,10 +205,13 @@ async function cachedTexts(cacheRoot) {
 /** @param {TestContext} t */
 async function fixture(t, label = 'guard') {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), `hermes-${label}-`))
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const dbPath = path.join(dir, 'state.db')
   const db = createStore(dbPath)
+  // t.after hooks run in registration order: close before the rm, since
+  // win32 cannot unlink a database a live handle still holds (EBUSY). The
+  // retries cover the mapping sqlite releases just after close.
   t.after(() => db.close())
+  t.after(() => fsp.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const pollDir = path.join(dir, 'poll')
   await fsp.mkdir(pollDir)
   const common = { dbPath, cacheRoot: path.join(dir, 'cache') }
@@ -430,14 +433,19 @@ test('the guarded snapshot mark equals the change-scan mark, so a committed view
   insertMessage(db, 2, 's1', 'assistant', 'answer')
   rewind(db, 2)
   const reader = await openHermesStateDb(common.dbPath)
-  t.after(() => reader.close())
-  const [scanned] = await reader.listChangedSessions({})
-  const snapshot = await reader.readSessionSnapshot('s1')
-  assert.ok(snapshot)
-  assert.equal(snapshot.mark.fingerprint, scanned.fingerprint)
-  assert.equal(snapshot.mark.max_message_id, 1)
-  assert.deepEqual(snapshot.messages.map(message => message.id), [1])
-  assert.equal(await reader.readSessionSnapshot('missing'), null)
+  try {
+    const [scanned] = await reader.listChangedSessions({})
+    const snapshot = await reader.readSessionSnapshot('s1')
+    assert.ok(snapshot)
+    assert.equal(snapshot.mark.fingerprint, scanned.fingerprint)
+    assert.equal(snapshot.mark.max_message_id, 1)
+    assert.deepEqual(snapshot.messages.map(message => message.id), [1])
+    assert.equal(await reader.readSessionSnapshot('missing'), null)
+  } finally {
+    // Closed before the fixture's rm hook runs: win32 cannot unlink a
+    // database an open handle still maps.
+    reader.close()
+  }
 })
 
 test('a dry-run backfill takes no scope guard', async t => {

@@ -51,7 +51,9 @@ async function makeHomeThatFailsBoot() {
   await fs.mkdir(unitDir, { recursive: true })
   await fs.writeFile(path.join(unitDir, unitFileName()), '[Unit]\nDescription=HypAware\n')
   const usagePolicyDir = path.join(stateRoot, 'usage-policy')
-  await fs.symlink(path.join(stateRoot, 'nowhere'), usagePolicyDir)
+  // A junction on win32 (no Developer Mode needed); a dangling one still reads
+  // ENOENT on stat and refuses the mkdir, which is all the trap requires.
+  await fs.symlink(path.join(stateRoot, 'nowhere'), usagePolicyDir, process.platform === 'win32' ? 'junction' : null)
   return { hypHome, stateRoot, usagePolicyDir }
 }
 

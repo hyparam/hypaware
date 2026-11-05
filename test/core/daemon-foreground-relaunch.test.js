@@ -370,7 +370,14 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
     const applied = JSON.parse(await fs.readFile(path.join(stateRoot, 'config-control', 'config.b.json'), 'utf8'))
     assert.equal(applied.sinks.central.config.identity.bootstrap_token, undefined, 'the served revision is the operative central layer')
 
-    proc.kill('SIGTERM')
+    // win32 has no graceful SIGTERM delivery (kill is TerminateProcess), so
+    // stop through the LLP 0300 file control channel, the way a real stop
+    // reaches the daemon there.
+    if (process.platform === 'win32') {
+      spawn(process.execPath, [path.join(REPO_ROOT, 'bin', 'hypaware.js'), 'daemon', 'stop'], { env, stdio: 'ignore' })
+    } else {
+      proc.kill('SIGTERM')
+    }
     assert.deepEqual(await exited, { code: 0, signal: null }, describe())
     await assert.rejects(ask(gateway), 'the relaunched gateway stopped with the run')
   } finally {
@@ -382,7 +389,10 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
   }
 })
 
-test('a reload whose processing child will not stop still relaunches once the stop deadline kills it', { timeout: 90_000 }, async () => {
+test('a reload whose processing child will not stop still relaunches once the stop deadline kills it', {
+  timeout: 90_000,
+  skip: process.platform === 'win32' && 'the stall is a SIGSTOP and the reload a SIGHUP, both POSIX signal surfaces',
+}, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-relaunch-stalled-'))
   const hypHome = path.join(root, '.hyp')
   const upstream = await listen((req, res) => {

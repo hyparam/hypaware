@@ -9,7 +9,7 @@ import { clearFirstSyncHold, readFirstSyncDeadline } from '../usage-policy/first
 import { sinkInstanceName, onSinkHandleClose } from '../registry/sinks.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { sinkOutboxDir } from '../runtime/paths.js'
-import { createDiagnosticHistory } from './diagnostic_history.js'
+import { batchIdTime, createDiagnosticHistory } from './diagnostic_history.js'
 
 /**
  * @import { DatasetRegistration, ExportProgress, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
@@ -538,7 +538,7 @@ export function createSinkDriver(opts) {
    */
   function nextBatchId(now, instance) {
     batchSeq += 1
-    return `${instance}-${now.toISOString()}-${batchSeq}`
+    return `${instance}-${batchIdTime(now)}-${batchSeq}`
   }
 
   return { tick, dispatch, stop, drain, maintainDiagnostics }

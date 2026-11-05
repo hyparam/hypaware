@@ -286,8 +286,10 @@ test('Pi package and managed attach are independently discoverable and marker-ow
 })
 
 test('Pi resolves real environment roots and refuses ambiguous session identity', () => {
-  assert.equal(piSessionsRoot({ HOME: '/test', PI_CODING_AGENT_DIR: '/agent' }), '/agent/sessions')
-  assert.equal(piSessionsRoot({ PI_CODING_AGENT_SESSION_DIR: '/sessions' }), '/sessions')
+  // Resolved: the root resolves its spelling, which on win32 gains a drive
+  // letter and backslashes over a POSIX-written fixture.
+  assert.equal(piSessionsRoot({ HOME: '/test', PI_CODING_AGENT_DIR: '/agent' }), path.resolve('/agent', 'sessions'))
+  assert.equal(piSessionsRoot({ PI_CODING_AGENT_SESSION_DIR: '/sessions' }), path.resolve('/sessions'))
   assert.deepEqual(resolveSessionIdForCli({ env: { PI_SESSION_ID: 'native' }, cwd: '/test' }), { ok: true, sessionId: 'native', source: 'pi_env' })
   assert.equal(resolveSessionIdForCli({ env: { PI_SESSION_ID: 'native', CODEX_THREAD_ID: 'outer' }, cwd: '/test' }).ok, false)
   assert.equal(validatePiConfig({ listen_port: 4322, backfill: { sweep_cron: '*/5 * * * *' } }).ok, true)

@@ -359,7 +359,19 @@ test('state writes merge instead of clobbering the cached flag', async () => {
 })
 
 /**
- * Build a fake global install: `<dir>/prefix/lib/node_modules/hypaware`
+ * Where npm's global layout puts the package under a prefix on this host:
+ * `<prefix>/lib/node_modules/hypaware` on POSIX, `<prefix>/node_modules/hypaware`
+ * on Windows (matching `applySelfUpdate`'s own branch).
+ * @param {string} prefix
+ */
+function globalPackageRoot(prefix) {
+  return process.platform === 'win32'
+    ? path.join(prefix, 'node_modules', 'hypaware')
+    : path.join(prefix, 'lib', 'node_modules', 'hypaware')
+}
+
+/**
+ * Build a fake global install under this host's npm global layout,
  * with a package.json, plus a runner whose `npm config get prefix`
  * answers with that prefix and whose install succeeds.
  *
@@ -376,7 +388,7 @@ test('state writes merge instead of clobbering the cached flag', async () => {
  */
 async function fakeGlobalInstall(dir, opts = {}) {
   const prefix = opts.prefix ?? path.join(dir, 'prefix')
-  const packageRoot = path.join(prefix, 'lib', 'node_modules', 'hypaware')
+  const packageRoot = globalPackageRoot(prefix)
   await fsp.mkdir(packageRoot, { recursive: true })
   await fsp.writeFile(
     path.join(packageRoot, 'package.json'),
@@ -769,11 +781,12 @@ test('npm runs with the node bin directory on PATH, not the service manager defa
   assert.equal(launchd.PATH?.split(path.delimiter)[0], nodeBin)
   assert.ok(launchd.PATH?.includes('/usr/bin'))
   // An empty environment still gets the directory, and an entry already
-  // in front is left alone rather than duplicated.
+  // in front is left alone rather than duplicated. Joined with the host's
+  // PATH delimiter: ':' would read as one entry on win32.
   assert.equal(withNodeBinOnPath({}).PATH, nodeBin)
-  const already = withNodeBinOnPath({ PATH: `${nodeBin}:/usr/bin` })
-  assert.equal(already.PATH, `${nodeBin}:/usr/bin`)
-  assert.equal(withNodeBinOnPath({ PATH: `/usr/bin:${nodeBin}` }).PATH, `${nodeBin}:/usr/bin`)
+  const already = withNodeBinOnPath({ PATH: [nodeBin, '/usr/bin'].join(path.delimiter) })
+  assert.equal(already.PATH, [nodeBin, '/usr/bin'].join(path.delimiter))
+  assert.equal(withNodeBinOnPath({ PATH: ['/usr/bin', nodeBin].join(path.delimiter) }).PATH, [nodeBin, '/usr/bin'].join(path.delimiter))
 
   // And the apply actually uses it.
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-path-'))
@@ -988,8 +1001,10 @@ test('an npm install that exits 0 without replacing the root is not a success', 
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-noop-install-'))
   try {
     const { packageRoot, runner } = await fakeGlobalInstall(dir, { installWritesVersion: false })
+    // Host platform, so the fixture's global layout matches the one
+    // `applySelfUpdate` derives from the prefix.
     const result = await applySelfUpdate({
-      name: 'hypaware', version: '1.1.0', packageRoot, env: {}, runner, platform: 'darwin',
+      name: 'hypaware', version: '1.1.0', packageRoot, env: {}, runner,
     })
     assert.deepEqual(result, { applied: false, reason: 'version_not_installed' })
   } finally {

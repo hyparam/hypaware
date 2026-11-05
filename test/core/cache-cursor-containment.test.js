@@ -358,7 +358,7 @@ async function plantSymlinkedGeneration(partition, outside, name) {
   const precious = path.join(outside, 'metadata', 'precious.txt')
   await fs.writeFile(precious, 'a file the cache has no business in')
   await fs.utimes(precious, STALE, STALE)
-  await fs.symlink(outside, path.join(partition, name), 'dir')
+  await fs.symlink(outside, path.join(partition, name), process.platform === 'win32' ? 'junction' : 'dir')
   return { leak, precious }
 }
 
@@ -445,7 +445,7 @@ test('a cache reached through a symlinked ancestor keeps every cursor readable',
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cursor-symlinked-home-'))
   try {
     await fs.mkdir(path.join(root, 'volume', 'hyp-home'), { recursive: true })
-    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), 'dir')
+    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), process.platform === 'win32' ? 'junction' : 'dir')
     const cacheRoot = path.join(root, 'home', 'hyp-home', 'cache')
 
     await appendRowsToSourceTable(
@@ -556,7 +556,7 @@ test('a cursor that names no generation is still not a pointer to one', async ()
     const dir = partitionDir(cacheRoot)
     const leak = await plantStaleStagedName(outside)
     await fs.rm(path.join(dir, 'table'), { recursive: true, force: true })
-    await fs.symlink(outside, path.join(dir, 'table'), 'dir')
+    await fs.symlink(outside, path.join(dir, 'table'), process.platform === 'win32' ? 'junction' : 'dir')
     // The pre-`tableDir` spelling: legitimate, and it still resolves to a
     // generation name every reader joins onto the partition path.
     const { epoch, rowCount } = readCursorSync(dir)
@@ -582,7 +582,7 @@ test('a legacy epoch cursor resolves a default name too, and it is asked the sam
     const dir = partitionDir(cacheRoot)
     await plantStaleStagedName(outside)
     await fs.rm(path.join(dir, 'table'), { recursive: true, force: true })
-    await fs.symlink(outside, path.join(dir, 'epoch=0'), 'dir')
+    await fs.symlink(outside, path.join(dir, 'epoch=0'), process.platform === 'win32' ? 'junction' : 'dir')
     await fs.writeFile(path.join(dir, 'cursor.json'), JSON.stringify({ epoch: 0, rowCount: 1, compaction: null }))
 
     assert.equal(tryReadCursorSync(dir), null, '`epoch=<n>` is a generation name the readers resolve')
@@ -604,7 +604,7 @@ async function plantSymlinkedComponent(cacheRoot, outside, component) {
   const generation = path.join(partitionDir(cacheRoot), 'table')
   await fs.rm(path.join(generation, component), { recursive: true, force: true })
   await fs.mkdir(path.join(outside, component), { recursive: true })
-  await fs.symlink(path.join(outside, component), path.join(generation, component), 'dir')
+  await fs.symlink(path.join(outside, component), path.join(generation, component), process.platform === 'win32' ? 'junction' : 'dir')
 }
 
 test('the sweep reclaims nothing through a symlinked metadata directory', async () => {
@@ -668,7 +668,7 @@ test('and still reclaims it in a cache reached through a symlinked ancestor', as
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sweep-symlinked-home-'))
   try {
     await fs.mkdir(path.join(root, 'volume', 'hyp-home'), { recursive: true })
-    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), 'dir')
+    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), process.platform === 'win32' ? 'junction' : 'dir')
     const cacheRoot = path.join(root, 'home', 'hyp-home', 'cache')
     await appendRowsToSourceTable(
       cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
@@ -715,7 +715,7 @@ test('the spool flush reads and unlinks nothing through a symlinked spool direct
     const outside = path.join(root, 'outside')
     await fs.mkdir(tablePath, { recursive: true })
     await fs.mkdir(outside, { recursive: true })
-    await fs.symlink(outside, path.join(tablePath, SPOOL_DIR), 'dir')
+    await fs.symlink(outside, path.join(tablePath, SPOOL_DIR), process.platform === 'win32' ? 'junction' : 'dir')
     // The one file shape the drain reads and then removes by path.
     const planted = path.join(outside, 'flush-1700000000000-1-abcdef.jsonl')
     await fs.writeFile(planted, 'bytes that belong to whoever owns this directory\n')
@@ -761,7 +761,7 @@ test('and a spool reached through a symlinked ancestor drains like any other', a
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-spool-symlinked-home-'))
   try {
     await fs.mkdir(path.join(root, 'volume', 'hyp-home'), { recursive: true })
-    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), 'dir')
+    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), process.platform === 'win32' ? 'junction' : 'dir')
     const cacheRoot = path.join(root, 'home', 'hyp-home', 'cache')
     const tablePath = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
     await fs.mkdir(tablePath, { recursive: true })

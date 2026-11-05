@@ -589,7 +589,9 @@ test('prepareFirstAskEvidence: five queries, three files, one user-only folder r
   assert.equal(evidence.procedure, undefined)
   assert.equal(evidence.candidates?.[0].steps[0].command, 'git checkout -b')
   assert.deepEqual((await fsp.readdir(root)).sort(), ['ASK.md', 'candidates.md', 'on_disk.txt'], 'the stale file is gone')
-  assert.equal((await fsp.stat(root)).mode & 0o777, 0o700)
+  if (process.platform !== 'win32') { // No POSIX mode bits on win32.
+    assert.equal((await fsp.stat(root)).mode & 0o777, 0o700)
+  }
   const page = await fsp.readFile(path.join(root, 'candidates.md'), 'utf8')
   assert.ok(page.includes('Typed 12 times in 10 sessions on 7 days.'))
 })

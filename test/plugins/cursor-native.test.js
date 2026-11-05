@@ -240,12 +240,16 @@ test('native Read observes workspace, symlink and stricter policies; session ign
     const admission = cursorAdmission({ ignoredSessions })
     const exchange = readCursorSession(f.session).exchanges[0]
     assert.equal((await admission.filter(exchange))?.messages.length, 13)
-    await fs.unlink(path.join(f.cwd, 'notes.txt'))
-    await fs.writeFile(path.join(f.root, 'outside'), 'private')
-    await fs.symlink(path.join(f.root, 'outside'), path.join(f.cwd, 'notes.txt'))
-    const permitted = await admission.filter(exchange)
-    assert.equal(permitted?.messages.length, 11)
-    assert.equal(JSON.stringify(permitted).includes('native-call-0'), false, 'neither side of the refused Read survives')
+    // File symlink creation needs Developer Mode on win32, so the
+    // symlink-escape arrangement stays POSIX-only.
+    if (process.platform !== 'win32') {
+      await fs.unlink(path.join(f.cwd, 'notes.txt'))
+      await fs.writeFile(path.join(f.root, 'outside'), 'private')
+      await fs.symlink(path.join(f.root, 'outside'), path.join(f.cwd, 'notes.txt'))
+      const permitted = await admission.filter(exchange)
+      assert.equal(permitted?.messages.length, 11)
+      assert.equal(JSON.stringify(permitted).includes('native-call-0'), false, 'neither side of the refused Read survives')
+    }
     ignoredSessions.add(f.session.id)
     assert.equal(admission.session(f.session), false)
     assert.equal(await admission.filter(exchange), undefined)
@@ -292,8 +296,9 @@ test('sweep fingerprints advance only after successful non-dry recovery and manu
 })
 
 test('Cursor CLI config paths honor its config variables independently of editor storage', () => {
-  assert.equal(cursorStorePaths({ env: { HOME: '/home/user', CURSOR_CONFIG_DIR: '/custom' }, platform: 'linux' }).cliRoot, '/custom/chats')
-  assert.equal(cursorStorePaths({ env: { HOME: '/home/user', XDG_CONFIG_HOME: '/config' }, platform: 'linux' }).cliRoot, '/config/cursor/chats')
+  // Built with path.join: the store joins with the host separator, which is '\' on win32.
+  assert.equal(cursorStorePaths({ env: { HOME: '/home/user', CURSOR_CONFIG_DIR: '/custom' }, platform: 'linux' }).cliRoot, path.join('/custom', 'chats'))
+  assert.equal(cursorStorePaths({ env: { HOME: '/home/user', XDG_CONFIG_HOME: '/config' }, platform: 'linux' }).cliRoot, path.join('/config', 'cursor', 'chats'))
 })
 
 // @ref LLP 0403#storage [tests]: cursor joins the shared persistent store

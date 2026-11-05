@@ -172,6 +172,7 @@ test('a launchd/systemd install failure on a supported platform finishes the fin
     const stderr = makeBuf()
     const summary = await runPickerFinale(/** @type {any} */ ({
       ...finaleArgs(home, events, stderr),
+      platform: 'linux',
       installDaemonFn: async () => { throw new Err('launchctl bootstrap exited 5') },
     }))
     assert.equal(summary.daemonInstall.failed, true, `${Err.name} is recorded as a failed install`)
@@ -244,6 +245,7 @@ test('a global install that landed before the prefix lookup failed still gets th
   const stderr = makeBuf()
   const summary = await runPickerFinale(/** @type {any} */ ({
     ...finaleArgs(home, events, stderr),
+    platform: 'linux',
     installDaemonFn: async () => {
       throw new GlobalInstallError('npm config get prefix failed: ENOENT', { globalBinInstalled: true })
     },
@@ -256,7 +258,7 @@ test('a global install that landed before the prefix lookup failed still gets th
 
 // Skipped as root, who is refused by no mode bits: the mkdir would succeed and
 // the run would fail further along on something this test does not describe.
-test('an unwritable unit directory finishes the finale too', { skip: process.getuid?.() === 0 }, async () => {
+test('an unwritable unit directory finishes the finale too', { skip: process.platform === 'win32' ? 'chmod 0o500 does not seal a directory on win32' : process.getuid?.() === 0 }, async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-eacces-'))
   const systemdDir = path.join(home, '.config', 'systemd')
   await fs.mkdir(systemdDir, { recursive: true })
@@ -361,13 +363,14 @@ test('a durable-bin failure over a running daemon still restarts it onto the con
   const summary = await runPickerFinale(/** @type {any} */ ({
     ...finaleArgs(home, events, stderr),
     finale: { dryRun: false, skipDaemonRestart: false },
+    platform: 'linux',
     installDaemonFn: async () => {
       throw new GlobalInstallError(
         "npx detected, but npm install -g hypaware@1.0.0 failed: EACCES. Run 'npm install -g hypaware@1.0.0' manually"
       )
     },
     daemonService: {
-      serviceDaemonStatus: async () => ({ installed: true, loaded: true, pid: 4242, platform: process.platform }),
+      serviceDaemonStatus: async () => ({ installed: true, loaded: true, pid: 4242, platform: 'linux' }),
       restartServiceDaemon: async (/** @type {Record<string, unknown>} */ options) => { restarts.push(options) },
     },
   }))
@@ -397,13 +400,14 @@ test('a durable-bin failure with an unreachable service manager records the rest
   const summary = await runPickerFinale(/** @type {any} */ ({
     ...finaleArgs(home, events, stderr),
     finale: { dryRun: false, skipDaemonRestart: false },
+    platform: 'linux',
     installDaemonFn: async () => {
       throw new GlobalInstallError(
         "npx detected, but npm install -g hypaware@1.0.0 failed: EACCES. Run 'npm install -g hypaware@1.0.0' manually"
       )
     },
     daemonService: {
-      serviceDaemonStatus: async () => ({ installed: true, loaded: false, unreachable: true, platform: process.platform }),
+      serviceDaemonStatus: async () => ({ installed: true, loaded: false, unreachable: true, platform: 'linux' }),
       restartServiceDaemon: async () => { restarted = true },
     },
   }))
@@ -441,6 +445,7 @@ test('a systemctl that cannot reach the user bus reaches the finale as a withhel
   const summary = await runPickerFinale(/** @type {any} */ ({
     ...finaleArgs(home, events, stderr),
     finale: { dryRun: false, skipDaemonRestart: false },
+    platform: 'linux',
     installDaemonFn: async () => {
       throw new GlobalInstallError(
         "npx detected, but npm install -g hypaware@1.0.0 failed: EACCES. Run 'npm install -g hypaware@1.0.0' manually"
@@ -514,9 +519,10 @@ test('a service install that raised over a still-live daemon restarts it anyway'
   const summary = await runPickerFinale(/** @type {any} */ ({
     ...finaleArgs(home, events, stderr),
     finale: { dryRun: false, skipDaemonRestart: false },
+    platform: 'linux',
     installDaemonFn: async () => { throw new LaunchAgentError('launchctl bootstrap exited 5') },
     daemonService: {
-      serviceDaemonStatus: async () => ({ installed: true, loaded: true, pid: 5150, platform: process.platform }),
+      serviceDaemonStatus: async () => ({ installed: true, loaded: true, pid: 5150, platform: 'linux' }),
       restartServiceDaemon: async () => { restarted = true },
     },
   }))

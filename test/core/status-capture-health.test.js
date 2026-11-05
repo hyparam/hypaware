@@ -935,7 +935,7 @@ test('only the built-in claude descriptor is confirmed from transcripts; any oth
   }
 })
 
-test('a corner of the tree the walk could not read answers uncertain, never healthy', { skip: process.getuid?.() === 0 ? 'runs as root, where a mode-000 directory is still readable' : false }, async () => {
+test('a corner of the tree the walk could not read answers uncertain, never healthy', { skip: (process.platform === 'win32' && 'chmod 0o000 does not make a directory unlistable on win32') || (process.getuid?.() === 0 ? 'runs as root, where a mode-000 directory is still readable' : false) }, async () => {
   const home = await makeProbeHome()
   const hidden = path.join(home, '.claude', 'projects', '-Users-t-hidden')
   try {
@@ -954,7 +954,7 @@ test('a corner of the tree the walk could not read answers uncertain, never heal
   }
 })
 
-test('a symlinked transcript the walk will not follow answers uncertain, never healthy', async () => {
+test('a symlinked transcript the walk will not follow answers uncertain, never healthy', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async () => {
   const home = await makeProbeHome()
   try {
     // Symlinks are deliberately not followed, so the turn behind this one is

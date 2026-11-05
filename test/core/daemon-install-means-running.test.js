@@ -994,7 +994,9 @@ test('the OS agrees: an uninstall keeps the file of a live pid this uid may not 
 // already happened, so a pid file that cannot be removed is no reason to call
 // a completed uninstall a failure, and no reason to skip the other root: the
 // shape #2300 records on the stop path.
-test('a gateway pid file that cannot be removed fails neither the uninstall nor the other root', async (t) => {
+test('a gateway pid file that cannot be removed fails neither the uninstall nor the other root', {
+  skip: process.platform === 'win32' && 'chmod 0o555 does not make a directory\'s entries unremovable on win32',
+}, async (t) => {
   const home = tmpHome('uninstall-unremovable-pid')
   const staged = await stageServiceDaemon(home)
   const runDir = path.dirname(pidFilePath(staged.stateRoot))

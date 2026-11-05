@@ -19,6 +19,18 @@ import { pluginStateDir, runPluginRemove } from '../../src/core/commands/plugin.
 import { isWithinDir } from '../../src/core/runtime/contribution_names.js'
 
 /**
+ * A directory symlink, as a junction on win32: an unprivileged process
+ * cannot create a real symlink there, and a junction is the reparse-point
+ * shape a win32 attacker can actually plant. lstat reports both as links.
+ *
+ * @param {string} target
+ * @param {string} linkPath
+ */
+async function symlinkDir(target, linkPath) {
+  await fs.symlink(target, linkPath, process.platform === 'win32' ? 'junction' : null)
+}
+
+/**
  * @param {string} dir
  * @param {string} name
  */
@@ -71,7 +83,7 @@ test('removePlugin: a scope symlink out of the root is not followed, the row is 
   const root = path.join(stateDir, 'plugins')
   const { outside, intact } = await makeOutside(tmpRoot)
   await fs.mkdir(root, { recursive: true })
-  await fs.symlink(outside, path.join(root, '@evil'))
+  await symlinkDir(outside, path.join(root, '@evil'))
   for (const installDir of [path.join(root, '@evil', 'sub'), undefined]) {
     await writeLock(stateDir, {
       schema_version: 1,
@@ -95,7 +107,7 @@ test('removePlugin: a recorded install_dir that walks through a link deletes the
   await fs.writeFile(path.join(outside, 'victim', 'KEEP'), 'precious\n')
   await fs.mkdir(path.join(root, 'victim'), { recursive: true })
   await fs.writeFile(path.join(root, 'victim', 'index.js'), '')
-  await fs.symlink(path.join(outside, 'child'), path.join(root, 'jump'))
+  await symlinkDir(path.join(outside, 'child'), path.join(root, 'jump'))
   // Lexically `<root>/victim`, but the OS resolves `jump` first and lands in `outside`.
   const aliased = `${root}${path.sep}jump${path.sep}..${path.sep}victim`
   await writeLock(stateDir, {
@@ -115,7 +127,7 @@ test('removePlugin: a final link is unlinked and its target survives; a normal d
   const { outside, intact } = await makeOutside(tmpRoot)
   await fs.mkdir(path.join(root, '@scope', 'real'), { recursive: true })
   await fs.writeFile(path.join(root, '@scope', 'real', 'index.js'), '')
-  await fs.symlink(outside, path.join(root, 'linked'))
+  await symlinkDir(outside, path.join(root, 'linked'))
   await writeLock(stateDir, {
     schema_version: 1,
     plugins: /** @type {any} */ ({
@@ -144,7 +156,7 @@ test('installPlugin (local-dir): a pre-existing scope symlink refuses before any
   const prior = await installPlugin({ rawSource: await stagePlugin(path.join(tmpRoot, 'prior'), 'prior'), stateDir })
   assert.equal(prior.ok, true)
   const lockBefore = (await loadLock(stateDir)).plugins
-  await fs.symlink(outside, path.join(root, '@evil'))
+  await symlinkDir(outside, path.join(root, '@evil'))
 
   const result = await installPlugin({ rawSource: await stagePlugin(path.join(tmpRoot, 'src'), '@evil/sub'), stateDir })
   assert.equal(result.ok, false)
@@ -162,7 +174,7 @@ test('installPlugin (git): a pre-existing scope symlink refuses before the backu
   const root = path.join(stateDir, 'plugins')
   const { outside, intact } = await makeOutside(tmpRoot)
   await fs.mkdir(root, { recursive: true })
-  await fs.symlink(outside, path.join(root, '@evil'))
+  await symlinkDir(outside, path.join(root, '@evil'))
 
   const result = await installPlugin({
     rawSource: sourceUrl,
@@ -179,7 +191,7 @@ test('installPlugin (git): a pre-existing scope symlink refuses before the backu
 test('installPlugin and removePlugin: a symlinked HYP_HOME and a missing scope still install and remove', () => inTemp(async (tmpRoot) => {
   const realHome = path.join(tmpRoot, 'real-home')
   await fs.mkdir(realHome)
-  await fs.symlink(realHome, path.join(tmpRoot, 'home-link'))
+  await symlinkDir(realHome, path.join(tmpRoot, 'home-link'))
   const stateDir = path.join(tmpRoot, 'home-link', 'hypaware')
 
   const local = await installPlugin({ rawSource: await stagePlugin(path.join(tmpRoot, 'a'), '@fresh/a'), stateDir })
@@ -208,16 +220,18 @@ test('checkInstallDestination: absent paths pass; linked, looping and uninspecta
 
   // A scope linking to another scope inside the root aliases its plugins.
   await fs.mkdir(path.join(root, '@other', 'x'), { recursive: true })
-  await fs.symlink(path.join(root, '@other'), path.join(root, '@alias'))
+  await symlinkDir(path.join(root, '@other'), path.join(root, '@alias'))
   assert.match(String(/** @type {any} */ (await checkInstallDestination(stateDir, '@alias/x')).reason), /symbolic link/)
 
-  await fs.symlink(path.join(root, '@loop'), path.join(root, '@loop'))
+  await symlinkDir(path.join(root, '@loop'), path.join(root, '@loop'))
   assert.equal((await checkInstallDestination(stateDir, '@loop/x')).ok, false)
 
   await fs.writeFile(path.join(root, '@file'), '')
   assert.match(String(/** @type {any} */ (await checkInstallDestination(stateDir, '@file/x')).reason), /not a directory/)
 
-  if (process.getuid?.() !== 0) {
+  // chmod 0o000 does not seal a directory on win32, so the EACCES shape is
+  // POSIX-only (and root reads through it everywhere).
+  if (process.getuid?.() !== 0 && process.platform !== 'win32') {
     await fs.mkdir(path.join(root, '@locked'))
     await fs.chmod(path.join(root, '@locked'), 0o000)
     try {
@@ -230,13 +244,13 @@ test('checkInstallDestination: absent paths pass; linked, looping and uninspecta
   // The configured root may itself be a link, but not a dangling or looping one.
   const other = path.join(tmpRoot, 'other-state')
   await fs.mkdir(other)
-  await fs.symlink(path.join(tmpRoot, 'nowhere'), path.join(other, 'plugins'))
+  await symlinkDir(path.join(tmpRoot, 'nowhere'), path.join(other, 'plugins'))
   assert.match(String(/** @type {any} */ (await checkInstallDestination(other, 'plain')).reason), /symbolic link to nothing/)
   await fs.rm(path.join(other, 'plugins'))
-  await fs.symlink(path.join(other, 'plugins'), path.join(other, 'plugins'))
+  await symlinkDir(path.join(other, 'plugins'), path.join(other, 'plugins'))
   assert.match(String(/** @type {any} */ (await checkInstallDestination(other, 'plain')).reason), /ELOOP/)
   await fs.rm(path.join(other, 'plugins'))
-  await fs.symlink(root, path.join(other, 'plugins'))
+  await symlinkDir(root, path.join(other, 'plugins'))
   assert.deepEqual(await checkInstallDestination(other, '@other/x'), { ok: true })
 }))
 
@@ -253,7 +267,7 @@ test('runPluginRemove: a withheld delete is named on stderr after the removal li
   assert.equal(isWithinDir(stateDir, tmpRoot), true)
   const { outside, intact } = await makeOutside(tmpRoot)
   await fs.mkdir(path.join(stateDir, 'plugins'), { recursive: true })
-  await fs.symlink(outside, path.join(stateDir, 'plugins', '@evil'))
+  await symlinkDir(outside, path.join(stateDir, 'plugins', '@evil'))
   await writeLock(stateDir, {
     schema_version: 1,
     plugins: /** @type {any} */ ({ '@evil/sub': { name: '@evil/sub' } }),

@@ -40,7 +40,9 @@ test('resolveExportsBaseDir falls back to HYP_HOME', () => {
   const resolved = resolveExportsBaseDir({
     env: { HYP_HOME: '/tmp/hyp-home' },
   })
-  assert.equal(resolved, '/tmp/hyp-home/exports')
+  // Joined, not a literal: the resolver builds with path.join, which spells
+  // the separators the host's way on win32.
+  assert.equal(resolved, path.join('/tmp/hyp-home', 'exports'))
 })
 
 test('resolveExportsBaseDir falls back to homedir/.hyp when HYP_HOME unset', () => {

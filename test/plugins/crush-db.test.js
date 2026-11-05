@@ -50,14 +50,26 @@ function seed(dbPath) {
 
 /**
  * @param {TestContext} t
- * @returns {Promise<{ dir: string, dbPath: string }>}
+ * @returns {Promise<{ dir: string, dbPath: string, closeAtEnd: <T extends { close(): unknown }>(handle: T) => T }>}
  */
 async function fixture(t) {
   const dir = await tmpDir()
-  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  /** @type {Array<{ close(): unknown }>} */
+  const handles = []
+  // One hook owns the teardown order: close every handle, then remove the
+  // tree. win32 cannot unlink a database an open handle still maps (EBUSY);
+  // the retries cover the mapping sqlite releases just after close.
+  t.after(async () => {
+    for (const handle of handles.splice(0)) {
+      try { handle.close() } catch { /* the test already closed it */ }
+    }
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  })
+  /** @template {{ close(): unknown }} T @param {T} handle */
+  const closeAtEnd = (handle) => { handles.push(handle); return handle }
   const dbPath = await createCrushDb(path.join(dir, 'project'))
   seed(dbPath)
-  return { dir, dbPath }
+  return { dir, dbPath, closeAtEnd }
 }
 
 /**
@@ -79,9 +91,8 @@ function sqliteError(errcode) {
 }
 
 test('the reader opens read-only: a write through its handle throws', async (t) => {
-  const { dbPath } = await fixture(t)
-  const reader = openCrushDb(dbPath)
-  t.after(() => reader.close())
+  const { dbPath, closeAtEnd } = await fixture(t)
+  const reader = closeAtEnd(openCrushDb(dbPath))
   assert.throws(() => reader.db.exec("UPDATE sessions SET title = 'x'"), /readonly/i)
 })
 
@@ -104,9 +115,8 @@ test('with no -wal at the start, a read leaves crush.db byte-identical and creat
 })
 
 test('with a live -wal, a read leaves crush.db and the -wal byte-identical and sees the WAL rows', async (t) => {
-  const { dbPath } = await fixture(t)
-  const writer = openWriter(dbPath)
-  t.after(() => writer.close())
+  const { dbPath, closeAtEnd } = await fixture(t)
+  const writer = closeAtEnd(openWriter(dbPath))
   writer.exec('PRAGMA wal_autocheckpoint = 0')
   insertMessage(writer, { id: 'm3', session_id: ROOT, role: 'user', parts: [{ type: 'text', data: { text: 'later prompt' } }] })
   const dbBefore = await fs.readFile(dbPath)
@@ -122,9 +132,8 @@ test('with a live -wal, a read leaves crush.db and the -wal byte-identical and s
 })
 
 test('title sessions are skipped by every read', async (t) => {
-  const { dbPath } = await fixture(t)
-  const reader = openCrushDb(dbPath)
-  t.after(() => reader.close())
+  const { dbPath, closeAtEnd } = await fixture(t)
+  const reader = closeAtEnd(openCrushDb(dbPath))
   assert.deepEqual((await reader.listSessions()).map(s => s.id), [ROOT])
   const changes = await reader.changes(0)
   assert.deepEqual(changes.newRows.map(r => r.session_id), [ROOT])
@@ -135,9 +144,8 @@ test('title sessions are skipped by every read', async (t) => {
 })
 
 test('readSessionSnapshot returns ordered messages and the watermark mark', async (t) => {
-  const { dbPath } = await fixture(t)
-  const reader = openCrushDb(dbPath)
-  t.after(() => reader.close())
+  const { dbPath, closeAtEnd } = await fixture(t)
+  const reader = closeAtEnd(openCrushDb(dbPath))
   const snapshot = await reader.readSessionSnapshot(ROOT)
   assert.ok(snapshot)
   assert.equal(snapshot.session.title, 'Fixture session')
@@ -151,9 +159,8 @@ test('readSessionSnapshot returns ordered messages and the watermark mark', asyn
 })
 
 test('changes(cursor) returns only sessions with rows above the cursor', async (t) => {
-  const { dbPath } = await fixture(t)
-  const reader = openCrushDb(dbPath)
-  t.after(() => reader.close())
+  const { dbPath, closeAtEnd } = await fixture(t)
+  const reader = closeAtEnd(openCrushDb(dbPath))
   assert.deepEqual((await reader.changes(2)).newRows, [])
   assert.deepEqual((await reader.changes(1)).newRows, [{ session_id: ROOT, max_rowid: 2 }])
   assert.equal(await reader.sessionMaxRowid(ROOT), 2)
@@ -162,10 +169,13 @@ test('changes(cursor) returns only sessions with rows above the cursor', async (
 
 test('a missing required column fails with schema_unsupported naming it', async (t) => {
   const dir = await tmpDir()
-  t.after(() => fs.rm(dir, { recursive: true, force: true }))
   const dbPath = await createCrushDb(path.join(dir, 'project'), { dropColumn: ['messages', 'is_summary_message'] })
   const reader = openCrushDb(dbPath)
+  // Close before the rm (hooks run in registration order): win32 cannot
+  // unlink a database an open handle still maps; the retries cover the
+  // mapping sqlite releases just after close.
   t.after(() => reader.close())
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   await assert.rejects(reader.listSessions(), (err) => {
     assert.ok(err instanceof CrushDbError)
     assert.equal(err.code, 'schema_unsupported')
@@ -176,9 +186,8 @@ test('a missing required column fails with schema_unsupported naming it', async 
 })
 
 test('the reader never names files or read_files and never selects *', async (t) => {
-  const { dbPath } = await fixture(t)
-  const reader = openCrushDb(dbPath)
-  t.after(() => reader.close())
+  const { dbPath, closeAtEnd } = await fixture(t)
+  const reader = closeAtEnd(openCrushDb(dbPath))
   /** @type {string[]} */
   const prepared = []
   const prepare = reader.db.prepare.bind(reader.db)
@@ -199,9 +208,8 @@ test('the reader never names files or read_files and never selects *', async (t)
 })
 
 test('the per-session reads and the new-row read plan as a SEARCH', async (t) => {
-  const { dbPath } = await fixture(t)
-  const reader = openCrushDb(dbPath)
-  t.after(() => reader.close())
+  const { dbPath, closeAtEnd } = await fixture(t)
+  const reader = closeAtEnd(openCrushDb(dbPath))
   for (const [sql, args] of /** @type {Array<[string, Array<string | number>]>} */ ([[NEW_ROWS_SQL, [0]], [SESSION_MESSAGES_SQL, [ROOT]], [SESSION_MAX_ROWID_SQL, [ROOT]]])) {
     const plan = reader.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map(row => String(row.detail))
     assert.ok(plan.some(detail => detail.startsWith('SEARCH messages')), `${sql}\n${plan.join('\n')}`)
@@ -239,10 +247,13 @@ test('withBusyRetry gives up after the bound with sqlite_busy, and a non-busy er
 
 test('open refuses a missing file, an unreadable file and a missing node:sqlite', async (t) => {
   const dir = await tmpDir()
-  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  // maxRetries: win32 reports EBUSY while a just-closed sqlite handle still
+  // releases its mapping; POSIX ignores the extra options.
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   assert.throws(() => openCrushDb(path.join(dir, 'absent.db')), (err) => err instanceof CrushDbError && err.code === 'missing')
   assert.throws(() => openCrushDb(path.join(dir, 'absent.db'), { requireFn: () => { throw new Error('no such module') } }), (err) => err instanceof CrushDbError && err.code === 'sqlite_unavailable')
   if (process.getuid?.() === 0) return t.diagnostic('running as root; the permission case is skipped')
+  if (process.platform === 'win32') return t.diagnostic('chmod 0o000 does not make a file unreadable on win32; the permission case is skipped')
   const dbPath = await createCrushDb(path.join(dir, 'project'))
   await fs.chmod(dbPath, 0o000)
   assert.throws(() => openCrushDb(dbPath), (err) => err instanceof CrushDbError && err.code === 'permission_denied')
@@ -250,7 +261,9 @@ test('open refuses a missing file, an unreadable file and a missing node:sqlite'
 
 test('any other access failure is a typed error whose message names no path', async (t) => {
   const dir = await tmpDir()
-  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  // maxRetries: win32 reports EBUSY while a just-closed sqlite handle still
+  // releases its mapping; POSIX ignores the extra options.
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const dbPath = await createCrushDb(path.join(dir, 'project'))
   /** @param {string} code */
   const failWith = (code) => {

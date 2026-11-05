@@ -68,7 +68,7 @@ test('every setup help form records what `hyp setup --help` records', { timeout:
   }
 })
 
-test('a real preset run records what it recorded before the fix', { timeout: 60_000 }, async () => {
+test('a real preset run records what it recorded before the fix', { timeout: 60_000, skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships' }, async () => {
   const run = await recordedBy(['setup', 'claude-and-otel-local'])
   assert.equal(run.code, 0, run.output)
   assert.deepEqual(run.records, FIXTURE.preset)

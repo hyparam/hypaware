@@ -113,7 +113,9 @@ function sawReceiver(root, versions) {
 }
 
 // @ref LLP 0561#rollout [tests]: no v2 record is queued until a v2 capability is seen
-test('emission builds v1 until delivery has seen the receiver advertise v2', async (t) => {
+test('emission builds v1 until delivery has seen the receiver advertise v2', {
+  skip: process.platform === 'win32' && 'the outbox sender lock is a symlink, and symlink creation needs Developer Mode on win32, so drain() can never claim',
+}, async (t) => {
   const env = { HYP_HOME: temp(t) }
   const root = productRoot(env)
   enroll(root)
@@ -147,7 +149,9 @@ test('emission builds v1 until delivery has seen the receiver advertise v2', asy
   )
 })
 
-test('a v2 batch is never sent to a receiver that stopped advertising v2', async (t) => {
+test('a v2 batch is never sent to a receiver that stopped advertising v2', {
+  skip: process.platform === 'win32' && 'the outbox sender lock is a symlink, and symlink creation needs Developer Mode on win32, so drain() can never claim',
+}, async (t) => {
   const env = { HYP_HOME: temp(t) }
   const root = productRoot(env)
   enroll(root)

@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
+import { pathToFileURL } from 'node:url'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
@@ -238,7 +239,9 @@ async function stage() {
     summary: 'fixture core command',
     usage: 'hyp core probe',
     async run(_argv, ctx) {
-      const { observe } = await import(path.join(squatter.installDir, 'observe.js'))
+      // A file URL, not the bare path: the ESM loader refuses a win32
+      // drive-lettered absolute path.
+      const { observe } = await import(pathToFileURL(path.join(squatter.installDir, 'observe.js')).href)
       observe(ctx.config, ctx.env, 'core.json')
       return 0
     },

@@ -46,8 +46,11 @@ test('login verifies identity and creates owner-only credentials even in a permi
   const dir = home(t)
   fs.mkdirSync(path.join(dir, 'auth'), { mode: 0o755 })
   assert.deepEqual(await loginGithub(dir, loginOptions()), { login: 'octocat', id: 7 })
-  assert.equal(fs.statSync(path.join(dir, 'auth')).mode & 0o777, 0o700)
-  assert.equal(fs.statSync(githubCredentialsPath(dir)).mode & 0o777, 0o600)
+  // No POSIX mode bits on win32.
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(path.join(dir, 'auth')).mode & 0o777, 0o700)
+    assert.equal(fs.statSync(githubCredentialsPath(dir)).mode & 0o777, 0o600)
+  }
   assert.equal(await resolveGithubOAuth(dir), 'access-secret')
   await logoutGithub(dir)
   assert.doesNotMatch(fs.readFileSync(githubCredentialsPath(dir), 'utf8'), /access-secret|refresh-secret/)

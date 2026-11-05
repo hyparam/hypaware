@@ -336,8 +336,10 @@ async function detachJson(argv, seedCa) {
     const code = await runDetach([...argv, '--json'], cli.ctx)
     const leftover = (await fsp.readdir(caDir).catch(() => [])).sort()
     // Each stage has its own temp root, which the records name; strip it so
-    // two runs' stdout compare byte for byte.
-    const out = cli.out().split(s.root).join('<root>')
+    // two runs' stdout compare byte for byte. Inside a JSON record a win32
+    // root's backslashes arrive escaped, so strip that spelling too.
+    const jsonRoot = JSON.stringify(s.root).slice(1, -1)
+    const out = cli.out().split(jsonRoot).join('<root>').split(s.root).join('<root>')
     return { code, out, err: cli.err(), leftover }
   } finally {
     Object.defineProperty(process, 'platform', platform)

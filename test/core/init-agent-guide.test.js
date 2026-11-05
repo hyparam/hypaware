@@ -151,7 +151,8 @@ for (const github of [false, true]) {
     const f = await fixture(t)
     const args = ['setup', '--source', 'otel', '--no-daemon', '--no-backfill', '--export', 'keep-local']
     if (github) args.push('--github')
-    const opts = { env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr }
+    // Keeps the setup gate (#975) from refusing on a win32 host.
+    const opts = { env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr, platform: /** @type {const} */ ('linux') }
     assert.equal(await dispatch([...args, '--dry-run'], opts), 0, f.stderr())
     assert.equal(/Would enable GitHub collection/.test(f.stdout()), github)
     const configPath = path.join(f.home, 'hypaware-config.json')
@@ -176,7 +177,8 @@ test('GitHub opt-in from an existing config keeps settings, backs up, and does n
   ] }
   const original = JSON.stringify(config) + '\n'
   await fs.writeFile(configPath, original)
-  const opts = { env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr }
+  // Keeps the setup gate (#975) from refusing on a win32 host.
+  const opts = { env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr, platform: /** @type {const} */ ('linux') }
   const args = ['setup', '--from-file', configPath, '--github']
   assert.equal(await dispatch(args, opts), 1)
   assert.equal(await fs.readFile(configPath, 'utf8'), original)

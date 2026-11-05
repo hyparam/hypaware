@@ -2,6 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 
 import {
   parseHypignore,
@@ -65,21 +66,33 @@ test('parseHypignore: first token wins; trailing path patterns are parsed-but-ig
 // --- matcher.js: createUsagePolicyResolver -------------------------------
 
 /**
+ * The resolved spelling of a POSIX-written fixture path: on win32 it gains a
+ * drive letter and backslashes, which is what the resolver hands the fs.
+ * @param {string} p
+ */
+function P(p) {
+  return path.resolve(p)
+}
+
+/**
  * Build an injectable fs over a fixed map of `.hypignore` file -> contents.
- * Tracks read counts so the cache can be asserted.
+ * Tracks read counts so the cache can be asserted. Fixture keys are written
+ * POSIX; both sides are resolved so win32 lookups hit the same entries.
  *
  * @param {Record<string, string>} files
  */
 function fakeFs(files) {
+  const map = new Map(Object.entries(files).map(([p, body]) => [P(p), body]))
   const reads = /** @type {Record<string, number>} */ ({})
   return {
     reads,
     /** @param {string} p */
-    existsSync: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    existsSync: (p) => map.has(P(p)),
     /** @param {string} p */
     readFileSync: (p) => {
-      reads[p] = (reads[p] ?? 0) + 1
-      return files[p] ?? ''
+      const key = P(p)
+      reads[key] = (reads[key] ?? 0) + 1
+      return map.get(key) ?? ''
     },
   }
 }
@@ -103,11 +116,11 @@ test('resolve: nearest ancestor .hypignore wins', () => {
 
   const deep = resolver.resolve('/work/repo/sub/deeper/leaf')
   assert.equal(deep.class, 'ignore')
-  assert.equal(deep.governedBy, '/work/repo/sub/.hypignore')
+  assert.equal(deep.governedBy, P('/work/repo/sub/.hypignore'))
 
   const shallow = resolver.resolve('/work/repo/other')
   assert.equal(shallow.class, 'ignore')
-  assert.equal(shallow.governedBy, '/work/repo/.hypignore')
+  assert.equal(shallow.governedBy, P('/work/repo/.hypignore'))
 })
 
 test('resolve: walks all the way to the filesystem root', () => {
@@ -115,7 +128,7 @@ test('resolve: walks all the way to the filesystem root', () => {
   const resolver = createUsagePolicyResolver(fs)
   const result = resolver.resolve('/a/b/c/d/e')
   assert.equal(result.class, 'ignore')
-  assert.equal(result.governedBy, '/.hypignore')
+  assert.equal(result.governedBy, P('/.hypignore'))
 })
 
 test('resolve: dotfile `local-only` token is honored (implemented, LLP 0070), not clamped to ignore', () => {
@@ -124,7 +137,7 @@ test('resolve: dotfile `local-only` token is honored (implemented, LLP 0070), no
   const result = resolver.resolve('/work/repo/sub')
   assert.equal(result.class, 'local-only')
   assert.equal(result.declared, 'local-only')
-  assert.equal(result.governedBy, '/work/repo/.hypignore')
+  assert.equal(result.governedBy, P('/work/repo/.hypignore'))
   assert.equal(result.warn, undefined)
 })
 
@@ -134,7 +147,7 @@ test('resolve: a still-unimplemented class in a governing file fails safe to ign
   const result = resolver.resolve('/work/repo/sub')
   assert.equal(result.class, 'ignore')
   assert.equal(result.declared, 'some-future-class')
-  assert.equal(result.governedBy, '/work/repo/.hypignore')
+  assert.equal(result.governedBy, P('/work/repo/.hypignore'))
   assert.match(String(result.warn), /some-future-class/)
 })
 
@@ -148,7 +161,7 @@ test('resolve: a present-but-unreadable .hypignore fails closed to ignore (priva
   })
   const result = resolver.resolve('/work/repo/sub')
   assert.equal(result.class, 'ignore', 'an unreadable governing .hypignore must fail closed to ignore')
-  assert.equal(result.governedBy, '/work/repo/sub/.hypignore', 'the nearest existing file governs')
+  assert.equal(result.governedBy, P('/work/repo/sub/.hypignore'), 'the nearest existing file governs')
   assert.equal(resolver.isIgnored('/work/repo/sub'), true)
 })
 
@@ -159,12 +172,12 @@ test('resolve: per-cwd cache is stable and reads the file once', () => {
   const first = resolver.resolve('/work/repo/sub')
   const second = resolver.resolve('/work/repo/sub')
   assert.equal(first, second) // same memoized object
-  assert.deepEqual(first, { class: 'ignore', governedBy: '/work/repo/.hypignore', declared: 'ignore' })
-  assert.equal(fs.reads['/work/repo/.hypignore'], 1)
+  assert.deepEqual(first, { class: 'ignore', governedBy: P('/work/repo/.hypignore'), declared: 'ignore' })
+  assert.equal(fs.reads[P('/work/repo/.hypignore')], 1)
 
   // isIgnored shares the same cache: still one read.
   assert.equal(resolver.isIgnored('/work/repo/sub'), true)
-  assert.equal(fs.reads['/work/repo/.hypignore'], 1)
+  assert.equal(fs.reads[P('/work/repo/.hypignore')], 1)
 })
 
 test('resolve: relative cwd is normalized before caching', () => {
@@ -192,7 +205,7 @@ test('resolve: a .hypignore written after a cwd was cached `full` is honored onc
   assert.equal(resolver.resolve('/work/repo/sub').class, 'full')
 
   // User writes a .hypignore. Within the TTL the cached `full` still wins.
-  files['/work/repo/.hypignore'] = 'ignore\n'
+  files[P('/work/repo/.hypignore')] = 'ignore\n'
   clock += 1_000
   assert.equal(resolver.resolve('/work/repo/sub').class, 'full')
 
@@ -206,7 +219,7 @@ test('resolve: a .hypignore written after a cwd was cached `full` is honored onc
 test('resolve: removing a .hypignore is honored once the TTL elapses (unignore)', () => {
   // The inverse direction: after `hyp unignore` the subtree records again
   // within the TTL rather than staying suppressed until restart.
-  const files = /** @type {Record<string, string>} */ ({ '/work/repo/.hypignore': 'ignore\n' })
+  const files = /** @type {Record<string, string>} */ ({ [P('/work/repo/.hypignore')]: 'ignore\n' })
   let clock = 1_000
   const resolver = createUsagePolicyResolver({
     existsSync: (p) => Object.prototype.hasOwnProperty.call(files, p),
@@ -217,7 +230,7 @@ test('resolve: removing a .hypignore is honored once the TTL elapses (unignore)'
 
   assert.equal(resolver.resolve('/work/repo/sub').class, 'ignore')
 
-  delete files['/work/repo/.hypignore']
+  delete files[P('/work/repo/.hypignore')]
   clock += 5_001
   assert.equal(resolver.resolve('/work/repo/sub').class, 'full')
 })
@@ -236,7 +249,7 @@ test('resolve: no localOnlyListPath configured => resolver behaves exactly as be
   const resolver = createUsagePolicyResolver(fs)
   assert.deepEqual(resolver.resolve('/work/repo/sub'), {
     class: 'ignore',
-    governedBy: '/work/repo/.hypignore',
+    governedBy: P('/work/repo/.hypignore'),
     declared: 'ignore',
   })
   assert.equal(resolver.resolve('/private/side-project').class, 'full')
@@ -276,7 +289,7 @@ test('resolve: dotfile `ignore` beats a list `local-only` match (most-restrictiv
   const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
   const result = resolver.resolve('/work/repo/sub')
   assert.equal(result.class, 'ignore')
-  assert.equal(result.governedBy, '/work/repo/.hypignore', 'the stronger dotfile source names the governor')
+  assert.equal(result.governedBy, P('/work/repo/.hypignore'), 'the stronger dotfile source names the governor')
 })
 
 test('resolve: list `local-only` beats an unlisted `full` dotfile default (most-restrictive wins)', () => {
@@ -456,13 +469,13 @@ function fakeExistsFs(present) {
 }
 
 test('findRepoRoot: nearest ancestor with a .git entry is the repo root', () => {
-  const fs = fakeExistsFs(['/work/repo/.git'])
-  assert.equal(findRepoRoot('/work/repo/src/deep', fs), '/work/repo')
+  const fs = fakeExistsFs([P('/work/repo/.git')])
+  assert.equal(findRepoRoot('/work/repo/src/deep', fs), P('/work/repo'))
 })
 
 test('findRepoRoot: the start dir itself can be the repo root', () => {
-  const fs = fakeExistsFs(['/work/repo/.git'])
-  assert.equal(findRepoRoot('/work/repo', fs), '/work/repo')
+  const fs = fakeExistsFs([P('/work/repo/.git')])
+  assert.equal(findRepoRoot('/work/repo', fs), P('/work/repo'))
 })
 
 test('findRepoRoot: returns null when no ancestor has a .git', () => {

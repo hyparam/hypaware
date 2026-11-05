@@ -73,7 +73,9 @@ test('launchctl mock: setenv / getenv / unsetenv', (t) => {
   assert.equal(shim(root, 'launchctl', ['getenv', 'NODE_USE_SYSTEM_CA']).stdout, '')
 })
 
-test('launchctl mock: setenv reaches the job launchd starts', async (t) => {
+test('launchctl mock: setenv reaches the job launchd starts', {
+  skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have (the job is a /bin/sh program)',
+}, async (t) => {
   const { root, label } = sandboxRoot(t)
   // Storing a setenv value is not the behaviour attach depends on; delivering
   // it into the daemon launchd starts afterwards is. A mock that only stored

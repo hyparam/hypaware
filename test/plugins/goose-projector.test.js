@@ -102,9 +102,11 @@ function fixtureMessages(firstId = 1) {
 
 /** @param {string[]} [ignoredRoots] */
 function fakeResolver(ignoredRoots = []) {
-  const markers = new Set(ignoredRoots.map((root) => path.join(root, '.hypignore')))
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over a POSIX-written fixture.
+  const markers = new Set(ignoredRoots.map((root) => path.resolve(root, '.hypignore')))
   return createUsagePolicyResolver({
-    existsSync: (p) => markers.has(p),
+    existsSync: (p) => markers.has(path.resolve(p)),
     readFileSync: () => 'ignore\n',
   })
 }

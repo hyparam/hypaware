@@ -113,7 +113,9 @@ test('a heal after a refusal says so exactly once', async () => {
     }, RECOVERY)
     assert.equal(healed.length, 1, 'the read that clears an armed refusal retracts it')
     assert.match(healed[0], /INFO/, 'nothing is wrong, so it is not a second WARN')
-    assert.ok(healed[0].includes(partition), 'and it names the partition the refusal named')
+    // The partition as it appears inside a JSON log line (win32 backslashes
+    // arrive escaped there).
+    assert.ok(healed[0].includes(JSON.stringify(partition).slice(1, -1)), 'and it names the partition the refusal named')
 
     const again = await linesFrom(() => { tryReadCursorSync(partition) }, RECOVERY)
     assert.equal(again.length, 0, 'the retraction is per cleared refusal, not per healthy read')
@@ -256,7 +258,10 @@ test('a legacy partition the migration retires while poisoned warns again when i
   }
 })
 
-test('a retraction forced by an unreadable cursor does not claim the poison is gone', { skip: process.getuid?.() === 0 && 'root reads through mode 000' }, async () => {
+test('a retraction forced by an unreadable cursor does not claim the poison is gone', {
+  skip: (process.getuid?.() === 0 && 'root reads through mode 000')
+    || (process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32'),
+}, async () => {
   // A read can stop refusing for reasons that say nothing about the cursor's
   // contents: an EACCES on `cursor.json` here, an `lstat` the symlink check
   // fails open on elsewhere. The clear is still right (the escape condition

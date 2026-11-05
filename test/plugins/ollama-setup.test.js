@@ -24,7 +24,10 @@ async function fixture(t, handler) {
 test('readiness uses only version/tags at the preserved base and never executes PATH evidence', async t => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ollama-ready-'))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
-  await fs.writeFile(path.join(home, 'ollama'), '#!/bin/sh\nexit 99\n', { mode: 0o755 })
+  // The probe looks for `ollama.exe` on win32 (what Ollama ships there);
+  // it never executes the evidence, so the bytes are irrelevant.
+  if (process.platform === 'win32') await fs.writeFile(path.join(home, 'ollama.exe'), 'exit 99')
+  else await fs.writeFile(path.join(home, 'ollama'), '#!/bin/sh\nexit 99\n', { mode: 0o755 })
   const seen = []
   const root = await fixture(t, (req, res) => {
     seen.push([req.method, req.url])
@@ -171,7 +174,8 @@ test('explicit upstream saves only the endpoint, preserves mode and backup, and 
   assert.equal(result.payload.confirmed, false)
   assert.equal(result.payload.recording, false)
   assert.equal(await fs.readFile(result.payload.backup_path, 'utf8'), before)
-  assert.equal((await fs.stat(f.configPath)).mode & 0o777, 0o640)
+  // No POSIX mode bits on win32.
+  if (process.platform !== 'win32') assert.equal((await fs.stat(f.configPath)).mode & 0o777, 0o640)
   const expected = structuredClone(f.config)
   expected.plugins[0].config.upstreams[0].base_url = `${root}/service/`
   assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')), expected)
@@ -207,7 +211,7 @@ test('organization gateway ownership refuses an inert local upstream change', as
   assert.equal(await fs.readFile(f.configPath, 'utf8'), before)
 })
 
-test('native CLI parses fresh/add/repeat/from-file without attended probes and attach is explicit/idempotent', async t => {
+test('native CLI parses fresh/add/repeat/from-file without attended probes and attach is explicit/idempotent', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships' }, async t => {
   const f = await installFixture(t)
   await fs.rm(f.configPath)
   let probes = 0

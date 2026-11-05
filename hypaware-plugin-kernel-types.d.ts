@@ -1114,6 +1114,12 @@ export interface CommandRunContext {
   env: NodeJS.ProcessEnv
   cwd: string
   /**
+   * Platform override from `DispatchOptions.platform` (a test seam for the
+   * setup platform gate, #975). Command bodies that gate on the platform
+   * read this ?? `process.platform`; absent outside tests.
+   */
+  platform?: NodeJS.Platform
+  /**
    * The whole effective config, not the plugin's slice `activate()`
    * receives (LLP 0420 #split). A plugin-owned command body therefore
    * reads every section, a neighbour's inline credentials included;

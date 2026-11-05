@@ -354,9 +354,11 @@ test('backfill imports every session when none are ignored', async () => {
  * @param {string} ignoredRoot
  */
 function resolverIgnoring(ignoredRoot) {
-  const marker = path.join(ignoredRoot, '.hypignore')
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over a POSIX-written fixture.
+  const marker = path.resolve(ignoredRoot, '.hypignore')
   return createUsagePolicyResolver({
-    existsSync: (p) => p === marker,
+    existsSync: (p) => path.resolve(p) === marker,
     readFileSync: () => 'ignore\n',
   })
 }

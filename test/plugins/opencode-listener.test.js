@@ -694,9 +694,17 @@ test('a rejected snapshot body is drained only up to a cap, while a small one st
       method: 'POST',
       headers: { 'content-type': 'text/plain' },
       body: overCap,
+    }).catch((err) => {
+      // Winsock discards the queued 415 when the reset lands, so on win32
+      // this sender can meet ECONNRESET instead of the answer; the cap is
+      // measured on the listener's own socket below either way.
+      if (process.platform === 'win32') return undefined
+      throw err
     })
-    assert.equal(capped.status, 415)
-    await capped.text()
+    if (capped) {
+      assert.equal(capped.status, 415)
+      await capped.text()
+    }
     const [served] = serverSockets
     assert.ok(served, 'the rejected upload opened no server connection to measure')
     if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))

@@ -60,6 +60,9 @@ async function makeHome(seed = {}) {
       stderr,
       stdin: /** @type {any} */ ({ isTTY: true }),
       env: { ...process.env, HOME: home, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      // The preflight under test is platform-independent; the injected
+      // platform keeps the setup gate (#975) from refusing on a win32 host.
+      platform: /** @type {const} */ ('linux'),
     },
   }
 }
@@ -120,6 +123,8 @@ function interactiveWizardOpts(home, configPath, config) {
     stdout,
     stderr,
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1' },
+    // Keeps the wizard's setup gate (#975) from refusing on a win32 host.
+    platform: 'linux',
     ctx: { commands: { run: async () => 0 } },
     capabilities: { has: () => false },
     catalog: {
