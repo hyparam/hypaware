@@ -270,13 +270,44 @@ test('no part carries the working directory or a file path', async () => {
   assert.ok(!text.includes('AAAA'), 'binary bytes leaked')
 })
 
-test('stripCwd removes only the trailing cwd element', () => {
+test('stripCwd removes the last cwd element even before hook text', () => {
   assert.equal(stripCwd('out\n<cwd>/a/b</cwd>\n'), 'out')
-  assert.equal(stripCwd('<cwd>/a</cwd> in the middle'), '<cwd>/a</cwd> in the middle')
+  assert.equal(stripCwd('out\n\n<cwd>/a/b</cwd>\nnote from hook'), 'out\nnote from hook')
+  assert.equal(stripCwd('<cwd>/a</cwd> in the middle'), ' in the middle')
   // An earlier element in the output is content: only the last one goes.
   assert.equal(stripCwd('grep hit: <cwd>x</cwd> more\n<cwd>/a/b</cwd>\n'), 'grep hit: <cwd>x</cwd> more')
+  assert.equal(stripCwd('grep hit: <cwd>x</cwd> more\n<cwd>/a/b</cwd>\nhook context'), 'grep hit: <cwd>x</cwd> more\nhook context')
   assert.equal(stripCwd('a literal <cwd> tag\n<cwd>/a</cwd>'), 'a literal <cwd> tag')
+  assert.equal(stripCwd('out\n<cwd>/a</cwd>\nhook with a literal <cwd> tag'), 'out\nhook with a literal <cwd> tag')
+  assert.equal(stripCwd('a literal <cwd> tag'), 'a literal <cwd> tag')
+  assert.equal(stripCwd('a literal </cwd> tag'), 'a literal </cwd> tag')
   assert.equal(stripCwd('no element'), 'no element')
+})
+
+test('hook context and feedback survive projection without the tool working directory', async () => {
+  for (const feedback of ['pre-hook context', 'post-hook context', 'failure context', 'Hook feedback: blocked', 'pre-hook context\npost-hook context\nHook feedback: blocked']) {
+    const isError = feedback === 'failure context'
+    const parts = contentParts(await project({
+      messages: [message('m-hook', 'tool', [{
+        type: 'tool_result',
+        data: {
+          tool_call_id: 'call-hook',
+          content: `out\n\n<cwd>${PROJECT_DIR}/sub</cwd>\n${feedback}`,
+          metadata: JSON.stringify({ working_directory: `${PROJECT_DIR}/sub` }),
+          is_error: isError,
+        },
+      }])],
+    }))
+    assert.equal(parts.length, 1)
+    assert.deepEqual(parts[0].content[0], {
+      type: 'tool_result',
+      tool_use_id: 'call-hook',
+      content: `out\n${feedback}`,
+      ...(isError ? { is_error: true } : {}),
+    }, feedback)
+    assert.ok(!JSON.stringify(parts).includes(PROJECT_DIR), feedback)
+    assert.ok(!JSON.stringify(parts).includes('working_directory'), feedback)
+  }
 })
 
 test('the title rides the session-title row', async () => {
