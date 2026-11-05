@@ -71,15 +71,15 @@ const RESTART_INSTRUCTION =
  * deliberately routed that provider somewhere, and rerouting it silently is
  * the surprise R2 exists to prevent, so attach refuses and writes nothing.
  * An entry HypAware wrote is not that (it is self-identifying, and the same
- * ownership test core's detach applies before deleting one), so attach
- * overwrites its own: that is what makes re-attach-on-drift work, which
- * `action_attach.js`'s `isCurrent()` requires after an ephemeral-port rebind
- * (LLP 0086) or an asset-set change (LLP 0107).
+ * ownership test core's detach applies before removing the override), so
+ * attach refreshes its own routing fields while preserving user additions.
+ * This makes the re-attach `action_attach.js`'s `isCurrent()` requires work
+ * after an ephemeral-port rebind (LLP 0086) or asset-set change (LLP 0107).
  *
  * Never displacing a user value also means there is no undo record to write:
  * the entries themselves are the marker the manifest's `json_path`
- * `attach_probe` reads and core's detach reverses, and deletion is the whole
- * undo (LLP 0169).
+ * `attach_probe` reads and core's detach reverses. User additions survive
+ * removal of that override (LLP 0163).
  *
  * Split out of `index.js` rather than inlined into `registerClient()` the way
  * the Claude adapter's dry-run branch is, because the refuse-then-write
@@ -281,8 +281,8 @@ function withProviderEntries(config, endpoint) {
       ...models,
       providers: {
         ...providers,
-        anthropic: providerEntry(endpoint, 'anthropic'),
-        openai: providerEntry(`${endpoint}/v1`, 'openai'),
+        anthropic: providerEntry(endpoint, 'anthropic', providers.anthropic),
+        openai: providerEntry(`${endpoint}/v1`, 'openai', providers.openai),
       },
     },
   }
@@ -296,10 +296,16 @@ function withProviderEntries(config, endpoint) {
  *
  * @param {string} baseUrl
  * @param {string} upstream
+ * @param {unknown} existing  absent or already checked by the ownership predicate
  * @returns {Record<string, unknown>}
  */
-function providerEntry(baseUrl, upstream) {
+function providerEntry(baseUrl, upstream, existing) {
+  // Ownership identifies our override, not every field: OpenClaw API-key
+  // setup can add an anthropic-workspace-id header after attach.
+  const entry = isPlainObject(existing) ? existing : {}
+  const headers = isPlainObject(entry.headers) ? entry.headers : {}
   return {
+    ...entry,
     baseUrl,
     // Two headers, two readers: the marker names the upstream the gateway
     // forwards to; the client header is what the openclaw exchange projector
@@ -307,7 +313,7 @@ function providerEntry(baseUrl, upstream) {
     // later settle) as openclaw rather than falling through to the Claude
     // projector. Ownership (isOwnedProviderEntry) keys on the marker alone,
     // so entries written before the client header existed still detach.
-    headers: { [MARKER_HEADER]: upstream, [CLIENT_HEADER]: CLIENT_NAME },
+    headers: { ...headers, [MARKER_HEADER]: upstream, [CLIENT_HEADER]: CLIENT_NAME },
     models: [],
   }
 }

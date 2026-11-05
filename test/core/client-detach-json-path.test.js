@@ -123,6 +123,55 @@ test('json_path undo deletes the two entries the gateway wrote', async () => {
   }
 })
 
+test('json_path undo preserves user content added to an attached provider', async () => {
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeOpenclawConfig(home, { theme: 'dark' })
+    assert.deepEqual(await attachForReal(home), { status: 'done' })
+    const config = await readJsonFile(settingsPath)
+    const anthropic = config.models.providers.anthropic
+    anthropic.headers['anthropic-workspace-id'] = 'wrkspc_test'
+    anthropic.request = { headers: { authorization: 'user-secret' } }
+    const openai = config.models.providers.openai
+    openai.headers['OpenAI-Organization'] = 'org-test'
+    openai.authHeader = false
+    await fs.writeFile(settingsPath, JSON.stringify(config))
+    // Derived caches must still be purged so their old gateway URL cannot
+    // keep steering traffic after the settings override has been removed.
+    const cachePath = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { ...anthropic, models: [{ id: 'claude-test' }] },
+      openai: { baseUrl: `${ENDPOINT}/v1` },
+      google: { baseUrl: 'https://vendor.example' },
+    }))
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+    assert.equal(result.changed, true)
+    const expected = {
+      theme: 'dark',
+      models: { providers: {
+        anthropic: {
+          headers: { 'anthropic-workspace-id': 'wrkspc_test' },
+          request: anthropic.request,
+        },
+        openai: { headers: { 'OpenAI-Organization': 'org-test' }, authHeader: false },
+      } },
+    }
+    assert.deepEqual(await readJsonFile(settingsPath), expected)
+    assert.deepEqual(await readJsonFile(cachePath), { google: { baseUrl: 'https://vendor.example' } })
+    assert.equal(result.warning, undefined)
+
+    // No marker remains: a second detach is a no-op, and attach refuses to
+    // take over the now wholly user-owned provider rather than rerouting it.
+    const before = await fs.readFile(settingsPath, 'utf8')
+    const again = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+    assert.equal(again.changed, false)
+    assert.equal((await attachForReal(home)).status, 'refused')
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 /* ------------------ present but not ours: left in place -------------------- */
 
 test('json_path undo leaves a present-but-not-ours entry in place and warns by path', async () => {

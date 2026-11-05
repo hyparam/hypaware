@@ -161,6 +161,7 @@ export async function detachClientFromDisk({
   // @ref LLP 0172#lane-a-detach [implements]: the json_path branch LLP 0143 removed returns, reshaped for two provider entries plus a cache purge
   if (probe.format === 'json_path') {
     return await detachJsonPathProviders({
+      clientName: descriptor.name,
       settingsPath,
       settingsFile: probe.settings_file,
       containerPath: probe.container_path,
@@ -1146,19 +1147,21 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
  * 1. Absent settings file: `{ changed: false }`, like every other format.
  * 2. For each `providerKeys` entry under `containerPath` that is present:
  *    **ours** (its `markerHeader` names the key, its shape is attach's) is
- *    deleted; anything else is the user's and is **left in place**, warned
+ *    stripped of the override, preserving user additions and deleting the
+ *    entry only if nothing remains; anything else is **left in place**, warned
  *    about only when the same file also held ours - the same disposal the
  *    `json` undo makes for an externally overridden value, and a config that
  *    was never attached stays untouched and unremarked.
  * 3. The client's derived caches (`cacheGlob`) are then best-effort purged of
  *    HypAware's rows, judged per row by the same signature: a row whose
  *    marker header names its key is ours, a marker-less row rides out only on
- *    this run's settings deletions, and every other row is the user's and
- *    stays. Those caches do not self-heal, so a partial purge is strictly
+ *    this run's removed settings overrides, and every other row is the user's
+ *    and stays. Those caches do not self-heal, so a partial purge is strictly
  *    better than none, and one unreadable cache file must not fail a detach
  *    whose settings half already landed.
  *
  * @param {{
+ *   clientName: string,
  *   settingsPath: string,
  *   settingsFile: string,
  *   containerPath: string | undefined,
@@ -1171,6 +1174,7 @@ function restoreAtDottedPath(root, dottedPath, newValue) {
  * @ref LLP 0210#d1 [implements]: ownership is the entry's own signature, so the undo runs from disk alone; a not-ours entry is left in place, and the cache purge judges each row by that same signature
  */
 async function detachJsonPathProviders({
+  clientName,
   settingsPath,
   settingsFile,
   containerPath,
@@ -1216,7 +1220,7 @@ async function detachJsonPathProviders({
 
   for (const key of present) {
     const entry = containerObj[key]
-    // Deleting on the signature alone is deliberate: the marker header is
+    // Undoing on the signature alone is deliberate: the marker header is
     // HypAware's own name and nothing else writes attach's triple, so a match
     // is ours whatever URL it carries (an entry from an old port after an
     // ephemeral rebind is still ours, and still needs to go). This is the same
@@ -1224,10 +1228,21 @@ async function detachJsonPathProviders({
     // entry, and it is what lets this undo run with the daemon stopped or
     // uninstalled, when the gateway's live origin no longer exists to compare
     // against.
-    // @ref LLP 0210#d1 [implements]: the signature is sufficient to delete, so detach works from disk alone like every other format
+    // @ref LLP 0210#d1 [implements]: the signature is sufficient to undo the override, so detach works from disk alone like every other format
     if (isOwnedProviderEntry(entry, key, markerHeader)) {
       if (removed === undefined) removed = providerBaseUrl(entry)
-      delete containerObj[key]
+      // The signature proves ownership of the routing override, not of user
+      // additions such as anthropic-workspace-id. Remove only what attach
+      // wrote; built-in provider overlays can retain headers/options alone.
+      // @ref LLP 0163#back-up-then-repair-not-refuse [constrained-by]: never discard user-authored content when reversing managed settings
+      const remainder = /** @type {Record<string, unknown>} */ (entry)
+      const headers = /** @type {Record<string, unknown>} */ (remainder.headers)
+      delete remainder.baseUrl
+      delete remainder.models
+      delete headers[markerHeader]
+      if (headers['x-hypaware-client'] === clientName) delete headers['x-hypaware-client']
+      if (Object.keys(headers).length === 0) delete remainder.headers
+      if (Object.keys(remainder).length === 0) delete containerObj[key]
       deleted.push(key)
       changed = true
       continue

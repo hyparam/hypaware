@@ -7,6 +7,8 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { createOpenclawAttach } from '../../hypaware-core/plugins-workspace/openclaw/src/attach.js'
+import { createAttachHandler } from '../../src/core/config/action_attach.js'
+import { createActionReconciler } from '../../src/core/config/action_reconciler.js'
 
 /**
  * LLP 0172 §1.2 (design) / LLP 0171 R1, R2, R4: the OpenClaw attach surface
@@ -218,6 +220,59 @@ test('a second attach at a moved endpoint rewrites both baseUrls (re-attach on d
   }
 })
 
+test('drift re-attach preserves user headers and provider options added after attach', async () => {
+  const staged = await stage({ models: { providers: {} } })
+  try {
+    const manifest = JSON.parse(await fs.readFile(new URL(
+      '../../hypaware-core/plugins-workspace/openclaw/hypaware.plugin.json', import.meta.url
+    ), 'utf8'))
+    const descriptor = {
+      plugin: manifest.name,
+      name: 'openclaw',
+      skillDir: manifest.contributes.client.skill_dir,
+      attachProbe: manifest.contributes.client.attach_probe,
+    }
+    const registration = createOpenclawAttach({ homeDir: staged.homeDir, env: {} })
+    const reconciler = createActionReconciler({
+      stateRoot: path.join(staged.homeDir, '.hyp'),
+      handlers: [createAttachHandler()],
+      log: { debug() {}, info() {}, warn() {}, error() {} },
+    })
+    const input = /** @type {any} */ ({
+      config: { version: 2, plugins: [{ name: manifest.name }] },
+      env: { HOME: staged.homeDir },
+      clientDescriptors: new Map([['openclaw', descriptor]]),
+      clients: { getClient: () => registration },
+      endpoint: ENDPOINT,
+    })
+    const first = await reconciler.reconcile(input)
+    assert.deepEqual(first.results.map((r) => r.outcome), ['done'])
+    const current = await reconciler.reconcile(input)
+    assert.deepEqual(current.results.map((r) => r.outcome), ['skipped'])
+    const config = await readConfig(staged.settingsPath)
+    // OpenClaw v2026.11.1 API-key setup spreads the attached provider and
+    // adds this header. Other provider options can be user-owned too.
+    config.models.providers.anthropic.headers['anthropic-workspace-id'] = 'wrkspc_test'
+    config.models.providers.anthropic.request = { headers: { 'x-user-header': 'keep' } }
+    config.models.providers.openai.headers['OpenAI-Organization'] = 'org-test'
+    config.models.providers.openai.authHeader = false
+    await fs.writeFile(staged.settingsPath, JSON.stringify(config))
+
+    const moved = 'http://127.0.0.1:4111'
+    const drifted = await reconciler.reconcile({ ...input, endpoint: moved })
+    assert.deepEqual(drifted.results.map((r) => r.outcome), ['done'])
+    const written = await readConfig(staged.settingsPath)
+    assert.deepEqual(written.models.providers, {
+      anthropic: { ...config.models.providers.anthropic, baseUrl: moved },
+      openai: { ...config.models.providers.openai, baseUrl: `${moved}/v1` },
+    })
+    const settled = await reconciler.reconcile({ ...input, endpoint: moved })
+    assert.deepEqual(settled.results.map((r) => r.outcome), ['skipped'])
+  } finally {
+    await fs.rm(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
 // Upgrade path from entries written before the client header existed: the
 // ownership predicate keys on the marker header alone, so a pre-fix entry
 // (marker, empty models, no `x-hypaware-client`) is still ours, and a
@@ -253,8 +308,8 @@ test('re-attach over a pre-client-header entry succeeds and adds the header', as
   }
 })
 
-// R2 must survive the ownership rule: everything that is not *exactly* the
-// entry attach writes is still somebody else's, and still refuses. These are
+// R2 must survive the ownership rule: everything that fails the signature of
+// an entry attach writes is still somebody else's, and still refuses. These are
 // the near misses, not the obvious cases the test above covers.
 test('an entry that is not ours still refuses, however close it looks (R2)', async () => {
   /** @type {Array<[string, unknown]>} */
