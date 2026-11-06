@@ -16,7 +16,9 @@
 
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
-import { MASTRACODE_CONFIG_SECTION, validateMastracodeConfig } from './config.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
+import { createMastracodeBackfillProvider } from './backfill.js'
+import { MASTRACODE_CONFIG_SECTION, resolveHomeDir, resolveMastraDbLocation, validateMastracodeConfig } from './config.js'
 import { startMastracodeSource } from './source.js'
 
 const PLUGIN_NAME = '@hypaware/mastracode'
@@ -45,9 +47,19 @@ export async function activate(ctx) {
 
   // @ref LLP 0586#privacy [implements]: the durable session exclusions load at
   // activation; the poll refreshes them by signature on ticks with candidates.
-  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
+  const observabilityStateDir = readObservabilityEnv(ctx.env).stateDir
+  const ignoredSessions = new SessionIgnoreSet(observabilityStateDir, ctx.log)
   /** @type {MastraRunnerHolder} */
   const holder = {}
+
+  ctx.backfills.register(createMastracodeBackfillProvider({
+    location: resolveMastraDbLocation(ctx, resolveHomeDir(ctx)),
+    stateDir: ctx.paths.stateDir,
+    config: ctx.config,
+    ignoredSessions,
+    localOnlyListPath: localOnlyListPath(observabilityStateDir),
+    holder,
+  }))
 
   ctx.sources.register({
     name: SOURCE_NAME,
