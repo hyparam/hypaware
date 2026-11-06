@@ -37,9 +37,9 @@ page; it doesn't prove the plugin can run.
 This reference identifies each plugin-owned family:
 
 - `session ...`: shared commands provided by `@hypaware/ai-gateway`,
-  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, `@hypaware/grok`, `@hypaware/cursor`,
-  `@hypaware/copilot`, `@hypaware/nanoclaw`, `@hypaware/langgraph`, or
-  `@hypaware/antigravity` (also Antigravity Desktop).
+  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, `@hypaware/grok`,
+  `@hypaware/cursor`, `@hypaware/copilot`, `@hypaware/nanoclaw`,
+  `@hypaware/langgraph`, or `@hypaware/antigravity` (also Antigravity Desktop).
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.

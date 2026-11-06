@@ -18,7 +18,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
 | `pi` | Pi conversations from its managed extension and local session files |
 | `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory; no billed token usage or cost |
-| `grok` | Grok Build local sessions, including prompts, responses, reasoning summaries, tool arguments and results, and working directory; no token usage or cost |
+| `grok` | Grok Build local sessions, including prompts, responses, reasoning summaries, tool arguments and results, and working directory |
 | `openclaw` | OpenClaw conversations from gateway traffic and local transcripts |
 | `hermes` | Hermes Agent conversations read from its local state database |
 | `goose` | Goose CLI and Desktop conversations read from its local session database, including tool calls and results, token usage, and working directory |
@@ -217,34 +217,36 @@ ID automatically. If it cannot establish the ID, the command refuses to guess.
 For another supported recorder, pass an explicitly verified session ID as
 shown in the [session reference](CLI_REFERENCE.md#control-the-current-session).
 
-The command sends the exclusion to local recorder control routes for the gateway,
-Claude telemetry, OpenCode, Pi, Droid, Grok Build, and Cursor when they are running. Goose
-and Crush have no control route; they read the saved exclusion on their next
-poll. A Crush session is ignored by its HypAware session ID, `crush-` followed
-by the Crush session ID. On an install that records only Goose or Crush the
-command saves nothing, so mark the session's working directory with
-`hyp privacy ignore <dir>` instead. The Claude
-listener deletes ignored sessions' spooled bodies unread. Use
-`hyp session unignore` to resume and `hyp session status` to check the result.
+The command sends the exclusion to local recorder control routes for the
+gateway, Claude telemetry, OpenCode, Pi, Droid, Grok Build, and Cursor when they
+are running. Goose and Crush have no control route; they read the saved
+exclusion on their next poll. A Crush session is ignored by its HypAware session
+ID, `crush-` followed by the Crush session ID. On an install that records only
+Goose or Crush the command saves nothing, so mark the session's working
+directory with `hyp privacy ignore <dir>` instead. The Claude listener deletes
+ignored sessions' spooled bodies unread. Use `hyp session unignore` to resume
+and `hyp session status` to check the result.
 
-Gateway, Claude, OpenCode, Pi, Droid, Grok Build, Goose, and Crush exclusions are saved under
-`<HYP_HOME>/hypaware/session-ignores/` and survive restarts. **Cursor exclusions
-are currently in memory only and must be reapplied after a recorder restart.**
-OpenClaw and Hermes do not support this session control; use directory markings
-or disable their capture integrations.
+Gateway, Claude, OpenCode, Pi, Droid, Grok Build, Goose, and Crush exclusions
+are saved under `<HYP_HOME>/hypaware/session-ignores/` and survive restarts.
+**Cursor exclusions are currently in memory only and must be reapplied after a
+recorder restart.** OpenClaw and Hermes do not support this session control; use
+directory markings or disable their capture integrations.
 
-Claude (including Desktop transcripts), Codex, OpenCode, Pi, Droid, Grok Build, Goose, and Crush backfill honor
-saved exclusions, including manual imports in a separate process. Saving must
-succeed before a persistent recorder reports success. If its exclusion store is
-unreadable or corrupt, capture and transcript imports pause while AI requests
-still forward. Commands and source status report the error. Repair the saved
-state and restart HypAware before relying on capture again.
+Claude (including Desktop transcripts), Codex, OpenCode, Pi, Droid, Grok Build,
+Goose, and Crush backfill honor saved exclusions, including manual imports in a
+separate process. Saving must succeed before a persistent recorder reports
+success. If its exclusion store is unreadable or corrupt, capture and transcript
+imports pause while AI requests still forward. Commands and source status report
+the error. Repair the saved state and restart HypAware before relying on capture
+again.
 
 A resumed session keeps its ID. A fork creates a new ID and needs its own
-exclusion, except on Grok Build, where a fork or subagent inherits its parent's. For attached Claude Desktop Code sessions, the managed SessionStart
-hook supplies the ID to later Bash commands. Hosts without hooks or
-`CLAUDE_ENV_FILE` require an explicitly verified ID; a matching directory or
-recent transcript is insufficient.
+exclusion, except on Grok Build, where a fork or subagent inherits its parent's.
+For attached Claude Desktop Code sessions, the managed SessionStart hook
+supplies the ID to later Bash commands. Hosts without hooks or `CLAUDE_ENV_FILE`
+require an explicitly verified ID; a matching directory or recent transcript is
+insufficient.
 
 Ignoring does not delete earlier records, original client transcripts, or
 exported copies. Unignoring makes the entire transcript eligible for import,
