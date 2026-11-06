@@ -831,6 +831,19 @@ export function resolveSessionIdForCli(args) {
   const claudeSessionId = statedEnv(args.env.CLAUDE_CODE_SESSION_ID)
   const codexThreadId = statedEnv(args.env[CODEX_THREAD_ENV])
   const piSessionId = statedEnv(args.env.PI_SESSION_ID)
+  const grokSessionId = statedEnv(args.env.GROK_SESSION_ID)
+  if (grokSessionId && (piSessionId || claudeSessionId || codexThreadId)) {
+    const stated = [`GROK_SESSION_ID=${grokSessionId}`]
+    if (piSessionId) stated.push(`PI_SESSION_ID=${piSessionId}`)
+    if (claudeSessionId) stated.push(`CLAUDE_CODE_SESSION_ID=${claudeSessionId}`)
+    if (codexThreadId) stated.push(`${CODEX_THREAD_ENV}=${codexThreadId}`)
+    return {
+      ok: false,
+      error: `could not resolve a session id: more than one client states one for this invocation - ${stated.join(', ')}. Only one can be running this command, and it is not safe to guess which; pass the session id explicitly: hyp session ignore <session-id>.`,
+    }
+  }
+  // @ref LLP 0588#lineage: Grok hands its session id to the tools it runs
+  if (grokSessionId) return { ok: true, sessionId: grokSessionId, source: 'grok_env' }
   if (piSessionId && (claudeSessionId || codexThreadId)) {
     const stated = [`PI_SESSION_ID=${piSessionId}`]
     if (claudeSessionId) stated.push(`CLAUDE_CODE_SESSION_ID=${claudeSessionId}`)

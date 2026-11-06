@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/grok",
+  "version": "1.0.0",
+  "description": "Grok Build session capture through hooks and bounded recovery.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "network",
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_state"
+  ],
+  "contributes": {
+    "client": {
+      "name": "grok",
+      "skill_dir": ".grok/skills",
+      "attach_probe": {
+        "format": "json",
+        "settings_file": ".grok/hooks/hypaware.json",
+        "marker_key": "_hypaware"
+      }
+    },
+    "picker": [
+      {
+        "name": "grok",
+        "label": "Grok Build",
+        "summary": "Records Grok Build conversations and imports recent history. Setup adds a HypAware hook file.",
+        "detect": {
+          "settings_file": ".grok/config.toml"
+        },
+        "compose": {
+          "plugin": {
+            "name": "@hypaware/grok"
+          }
+        }
+      }
+    ],
+    "sources": [
+      {
+        "name": "grok"
+      }
+    ],
+    "commands": [
+      {
+        "name": "session ignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)"
+      },
+      {
+        "name": "session unignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Resume recording this AI session"
+      },
+      {
+        "name": "session status",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Report whether this AI session is being dropped right now (fails closed)"
+      }
+    ],
+    "skills": [
+      {
+        "name": "hypaware-query",
+        "clients": [
+          "grok"
+        ]
+      },
+      {
+        "name": "hypaware-reference",
+        "clients": [
+          "grok"
+        ]
+      },
+      {
+        "name": "hypaware-privacy",
+        "clients": [
+          "grok"
+        ]
+      },
+      {
+        "name": "hypaware-report",
+        "clients": [
+          "grok"
+        ]
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "grok",
+        "summary": "Grok Build listener, attach and scheduled session recovery."
+      }
+    ]
+  }
+}
