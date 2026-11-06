@@ -403,8 +403,10 @@ the caller's current working directory. Recorded means what it does for
 `hyp ask`: attached, or configured with no attach marker to write (Codex in
 its transcript mode). Its CLI must also be on `PATH`, and the
 `hypaware-report` skill must already be installed for it. Optional quoted
-instructions set the period or focus; otherwise the skill uses the previous
-calendar month. If more than one such client could be started, it asks which;
+instructions set the scope (this machine or the team), the period, or the
+focus; the skill asks for any it still needs, suggesting the last 7 days
+including today, and compares the period with the preceding period of the same
+length. If more than one such client could be started, it asks which;
 a run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
 takes the first client of the offered set rather than failing. The set is in
 the order `hyp ask` uses: ascending client id. That pick is
@@ -439,7 +441,8 @@ and `hyp report publish <name>` takes it by name. The skill ends with this
 step so an agent never writes under your home directory itself.
 
 The folder is held to the publish allow-list before anything moves: it must
-hold `report.md` and otherwise only `usage.md`, `work.md`, `health.md`, and
+hold `report.md` and otherwise only `comparison.md`, `work.md`,
+`automation.md`, `repeated-work.md`, `usage.md`, `health.md`, and
 `recommendation-<slug>.md` as regular files. A stray file (a working ledger,
 `.DS_Store`) is named and the command exits `2` with nothing created. The
 folder keeps its name, which must be a plain directory name with no hidden
@@ -471,8 +474,9 @@ Uploads Markdown for the remote to render. The source is a path, or the name
 of a saved report (`hyp report list --local`), which resolves to
 `$HYP_HOME/reports/<name>` when no such path exists here. A single file must
 be `.md` or `.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
-its root and may otherwise contain only `usage.md`, `work.md`, `health.md`,
-and `recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`).
+its root and may otherwise contain only `comparison.md`, `work.md`,
+`automation.md`, `repeated-work.md`, `usage.md`, `health.md`, and
+`recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`).
 The legacy `change-<slug>.md` spelling is also accepted. HTML,
 images, client assets, subdirectories, and symlinks are rejected before any
 upload. The remote renders the HTML; there is no local render step in the

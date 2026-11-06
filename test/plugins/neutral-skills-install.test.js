@@ -89,7 +89,7 @@ test('client skills install places every shared skill file under each client ski
     for (const rel of [
       'hypaware-query/reports.md',
       'hypaware-report/references/analyst-task.md',
-      'hypaware-report/references/querying.md',
+      'hypaware-query/sql.md',
       'hypaware-report/references/report-contract.md',
     ]) {
       await fs.access(path.join(base, rel))

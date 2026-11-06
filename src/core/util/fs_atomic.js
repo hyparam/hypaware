@@ -67,6 +67,60 @@ export function fsyncDirectorySync(directory) {
   try { fsSync.fsyncSync(fd) } finally { fsSync.closeSync(fd) }
 }
 
+// On win32 a rename over a destination another handle briefly holds (an
+// AV or indexer scan, or the delete-pending file a previous rename just
+// replaced) fails EPERM, EBUSY or EACCES until that handle closes. POSIX
+// replaces atomically and never retries. The bound matches the cache's
+// win32 cleanup retries (#2888, #2890): 10 retries, linear backoff, about
+// 550ms worst case.
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
+const RENAME_MAX_RETRIES = 10
+const RENAME_RETRY_DELAY_MS = 10
+const renameSleepCell = new Int32Array(new SharedArrayBuffer(4))
+
+/**
+ * @param {unknown} err
+ * @param {number} attempt
+ * @returns {boolean}
+ */
+function retryableRename(err, attempt) {
+  return process.platform === 'win32'
+    && attempt < RENAME_MAX_RETRIES
+    && RENAME_RETRY_CODES.has(errCode(err) ?? '')
+}
+
+/**
+ * @param {typeof fsp} fs
+ * @param {string} from
+ * @param {string} to
+ * @returns {Promise<void>}
+ */
+async function renameWithRetry(fs, from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fs.rename(from, to)
+    } catch (err) {
+      if (!retryableRename(err, attempt)) throw err
+    }
+    await new Promise(resolve => setTimeout(resolve, (attempt + 1) * RENAME_RETRY_DELAY_MS))
+  }
+}
+
+/**
+ * @param {string} from
+ * @param {string} to
+ */
+function renameSyncWithRetry(from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fsSync.renameSync(from, to)
+    } catch (err) {
+      if (!retryableRename(err, attempt)) throw err
+    }
+    Atomics.wait(renameSleepCell, 0, 0, (attempt + 1) * RENAME_RETRY_DELAY_MS)
+  }
+}
+
 /**
  * Write `data` to `filePath` atomically: temp file in the same
  * directory (same filesystem, so the rename is atomic), then rename
@@ -131,7 +185,7 @@ export async function atomicWriteFile(filePath, data, options = {}) {
     }
     // The create mode is narrowed by the process umask, so set it outright.
     if (mode !== undefined) await fs.chmod(tmpPath, mode)
-    await fs.rename(tmpPath, filePath)
+    await renameWithRetry(fs, tmpPath, filePath)
     renamed = true
     // @ref LLP 0417#cache-reclamation [implements]: journal admission must survive before delete commits
     if (fsync) await fsyncDirectory(path.dirname(filePath), fs)
@@ -165,7 +219,7 @@ export function atomicWriteFileSync(filePath, data, options = {}) {
   try {
     fsSync.writeFileSync(tmpPath, data, mode !== undefined ? { mode } : 'utf8')
     if (mode !== undefined) fsSync.chmodSync(tmpPath, mode)
-    fsSync.renameSync(tmpPath, filePath)
+    renameSyncWithRetry(tmpPath, filePath)
   } catch (err) {
     try {
       fsSync.rmSync(tmpPath, { force: true })

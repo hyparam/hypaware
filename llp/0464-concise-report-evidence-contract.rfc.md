@@ -30,18 +30,45 @@ capture normalization or the meaning of net input.
 ## Requested guidance {#guidance}
 
 Keep scope, coverage, delegation budgets, and delivery in the entrypoint. Keep
-analysis in the report contract and shared page requirements under query; let bounded experiments and
+analysis and page requirements in the report contract; let bounded experiments and
 workflow decisions be usable recommendation artifacts alongside patches. Rank
 by outcome improvement and evidence, not ease of producing a patch. Recommendation count follows the
 evidence and usefulness, with no fixed cap or required mix of types.
 
+Build a compact, sourced organization context around purpose, users, priorities
+and connected work. Check activity and GitHub graph coverage and use relevant
+relationships where available. Fall back to docs, code, bounded recordings and
+available GitHub records without requiring graph setup. Disclose coverage limits,
+keep capture accounting in the ledger, and reconcile corrections into the context.
+Establish intent from human requests before selecting investigations: goals,
+corrections, rejected approaches and work underway. Expand clipped turns where
+needed, distinguish explicit goals from inference, and require proposals to explain
+their value against those goals. Separate new opportunities from existing follow-up;
+easy-to-count incidents do not establish priority.
+Resolve remedy-changing questions before recommending a fix. When evidence or
+access is insufficient, make the recommendation a targeted investigation or
+decision, including its title and opening. Final application checks revalidate
+current state; they must not conceal unresolved premises of a confident fix.
+
 Keep the analyst assignment in one template and publishing in a reference read
 only when requested. Preserve host-specific worker selection, registered-dataset
 and privacy boundaries, safe query shapes, period coverage disclosure, and
-independent or explicit self-review. Preserve Markdown page names and linked
-recommendation headings used by the hosted renderer. Evidence pages accompany
-substantive analysis; small reviews can keep it in the brief and proposals. Publishing commands must
-match the installed CLI; a skill cannot supply an unavailable subcommand.
+independent or explicit self-review. Preserve `report.md`, recommendation page
+names and linked recommendation headings used by the hosted renderer. Put key
+findings in a scannable `report.md` overview, normally 300 to 500 words including
+linked recommendation summaries. Put period comparison in `comparison.md` and
+explain token allocation through `work.md`, `automation.md` and `repeated-work.md`.
+Human requests and corrections establish goals and intended autonomy; verified
+usage and execution records establish token amounts and outcomes. Each analytical
+page has one takeaway, a few useful charts and brief interpretation, not a general
+usage inventory. Keep token categories separate and attribution gaps explicit;
+these views overlap and must not be added together. Comparison reads retain
+existing scope and budgets. Recommendations own their evidence and implementation.
+After evidence review, make a separate reader clarity pass from the overview
+through linked pages: explain unfamiliar terms, clarify titles and chart labels,
+remove repetition, and preserve uncertainty. Recheck claims changed by simplification.
+If the CLI's storage or publishing allowlist excludes a chosen page, retain the
+complete local folder and report the limitation without reshaping the report.
 
 Before aggregating historical usage, verify provider/source identities and
 stream semantics. For proven copies of a response, retain one final record's
@@ -57,8 +84,12 @@ This request changes the local skills and worker guidance, not server prompts.
 
 ## Interactive scope and current evidence {#interactive-scope}
 
-Local reporting answers the user's question interactively. Default to the last
-7 days including today; an omitted end date means now. "Last week" means the
+Reporting establishes local or team scope, period and focus before analysis.
+Ask for missing choices together and wait; reuse established answers. Suggest
+7 days including today rather than silently defaulting. Resolve the remote and
+organization for team scope and carry it through schema reads, baseline queries
+and workers, without local fallback. Once a period is selected, an omitted end
+date means now. "Last week" means the
 last seven days including today unless the user explicitly requests a calendar
 week. Use calendar month or week boundaries only when specifically requested.
 Ask before resolving unclear periods, such as "last month", instead of assuming
@@ -88,11 +119,13 @@ larger budgets, and closed-period scheduling do not become local requirements.
 ## Skill ownership {#ownership}
 
 Query owns interactive investigation, quick recommendations, and report mechanics.
-Its `reports.md` holds shared artifact formats, saving, upload, listing, retrieval,
-and recommendation status/implementation guidance. Load it only for those tasks.
-Report owns full-period generation, delegated analysis, synthesis and review;
-it consults query's shared reference for artifacts and delivery. Investigation
-depth alone does not promote a quick recommendation into the report workflow.
+Its `reports.md` holds saving, upload, listing, retrieval, and recommendation
+status/implementation guidance. Its `recommendations.md` owns quick analysis and
+the shared Problem/Fix opening. Report owns full-period generation, delegated
+analysis, synthesis, page formats and review; it consults query for delivery.
+Standalone recommendation artifacts reuse the report's recommendation page format
+without starting its generation workflow. Investigation depth alone does not
+promote a quick recommendation into the report workflow.
 Reference explains the product and routes operational requests. Privacy retains
 audits and owns direct recording controls without requiring an audit. Move the
 existing controls there without changing capture behavior or authorization.

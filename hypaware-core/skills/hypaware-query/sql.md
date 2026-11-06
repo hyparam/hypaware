@@ -1,6 +1,6 @@
 # SQL dialect reference
 
-The query interface is read-only. This reference targets squirreling 0.16.15; older installations or remote deployments may differ.
+The query interface is read-only. This reference targets squirreling 0.16.16; older installations or remote deployments may differ.
 
 - **Discover the schema on the selected target.** Use `hyp query schema <table>` (add `--remote <target>` for remote queries) or `SELECT * FROM <table> LIMIT 1`. `SHOW TABLES` lists registered datasets, not columns; `DESCRIBE`, DDL, and `information_schema` are unsupported. Local `hyp cache status` cannot describe a remote.
 - **Dataset column names.** On `ai_gateway_messages`, use `conversation_source`, `message_created_at`, and JSON fields under `attributes.usage`, not `source`, `timestamp`/`ts`, or a `usage` column. The otel `logs` and `metrics` datasets do have `timestamp`. On `node`, use `node_type`, `natural_key`, and `label`; on `edge`, use `edge_type`, `src_type`, and `dst_type`. Neither graph table has `type`. Read the real column list in query errors instead of guessing another name.
@@ -11,3 +11,9 @@ The query interface is read-only. This reference targets squirreling 0.16.15; ol
 - **Remaining dialect differences.** `LIKE ... ESCAPE`, `datetime`, `strftime`, and `typeof` are unsupported. `regexp_extract(str, pattern, n)` returns capture group `n` (default `0`, the whole match); `REGEXP_SUBSTR` takes a 1-based start position and occurrence and returns the whole match. `UNION` operands need identical column names: alias both sides consistently. Aggregate windows (`COUNT`, `MAX`, `SUM` with `OVER`) are unsupported; aggregate in a subquery instead.
 - **Avoid repeated correlated scans.** Simple equality-correlated `EXISTS`/`NOT EXISTS`/`IN` predicates that stand as their own `AND` term can become semi-joins; eligible scalar aggregates can become grouped joins when correlation columns have matching known primitive types. Other forms, including correlated `LIMIT`, `NOT IN`, predicates inside `OR`, or computed `IN` values, may re-scan per outer row. For expensive queries, aggregate in a derived table and JOIN it back, or use `ROW_NUMBER()`.
 - **Never retry a memory-budget refusal unchanged.** Narrow the input with a schema-supported time filter and select fewer columns. `LIMIT` or aggregation can shrink results without bounding the scans, sorts, joins, or aggregate state needed to produce them.
+
+Never GROUP BY / DISTINCT / row-fetch wide content columns (`cwd`,
+`content_text`) on the messages table at scale. `system_text`, `tools`, and
+`attributes` are also expensive: extract needed fields, avoid serializing whole
+objects or per-row string transforms. Split expensive reads by date and avoid
+concurrent heavy scans.

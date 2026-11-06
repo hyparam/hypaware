@@ -2,16 +2,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { appendRowsToSourceTable, discoverCachePartitions, tryReadCursorSync } from '../../src/core/cache/partition.js'
+import { appendRowsToSourceTable, claimPartitionMutation, discoverCachePartitions, isPartitionMutationBusy, tryReadCursorSync } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { executeQuerySql } from '../../src/core/query/sql.js'
 import { aiGatewayDatasetRegistration, AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import * as kit from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
-import { graphDatasetRegistration, graphTablePath, EDGE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
+import { graphDatasetRegistration, graphTablePath, NODE_COLUMNS, EDGE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
+import { emptySource } from '../../src/core/query/index.js'
 import { projectGraph } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
+import { compactGraphTables, refreshGraphRows } from '../../hypaware-core/plugins-workspace/context-graph/src/maintenance.js'
 import { queryEvidence, queryNeighbors } from '../../hypaware-core/plugins-workspace/context-graph/src/query.js'
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 import { buildEnrichmentContract } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/contract.js'
@@ -275,4 +279,212 @@ test('skill evidence merge folds duplicate rows awaiting compaction', async () =
       assert.deepEqual(props, all, `${JSON.stringify(first)} then ${JSON.stringify(second)}`)
     }, [read])
   }
+})
+
+test('org-scoped projection and refresh update only registered org graph partitions', async () => {
+  const read = { ...source[0], session_id: 'scoped-session', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: 'cat /home/test/.codex/skills/review/SKILL.md' } }
+  await fixture(async ({ registry, storage }) => {
+    const contract = createAiGatewayGraphContract(kit)
+    const skillRule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+    const fresh = /** @type {Record<string, any>} */ (skillRule?.toRows?.(read)[0])
+    const current = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+    const foreign = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=other', 'graph_v1')
+    const broken = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=agno', 'graph_v1')
+    await storage.appendRowsToPartition('edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, [{ ...fresh, props: { dispatch_tool: true } }])
+    // Identical content-addressed ids can legitimately occur in two orgs.
+    await storage.appendRowsToPartition('edge', ['org=other', 'graph_v1'], EDGE_COLUMNS, [{ ...fresh, props: { dispatch_marker: true }, source_keys: { session_id: 'other-org' } }])
+    await appendRowsToSourceTable(storage.cacheRoot, 'edge', ['org=agno', 'graph_v1'], EDGE_COLUMNS, [fresh])
+    await fs.writeFile(path.join(broken, 'cursor.json'), '{ broken cursor')
+    const foreignCursor = await fs.readFile(path.join(foreign, 'cursor.json'), 'utf8')
+
+    // Mirror the server seam: graph reads and appends are physically scoped,
+    // while the storage handle's cacheRoot still names the shared cache.
+    const scoped = {
+      ...storage,
+      appendRows: async (tablePath, columns, rows) => storage.appendRowsToPartition(path.basename(path.dirname(tablePath)), ['org=current', 'graph_v1'], columns, rows),
+    }
+    const graphRegistration = dataset => ({
+      ...graphDatasetRegistration(dataset),
+      discoverPartitions: async () => {
+        const tablePath = path.join(storage.cacheRoot, 'datasets', dataset, 'org=current', 'graph_v1')
+        try { await fs.access(tablePath) } catch { return [] }
+        return [{ dataset, partition: { org: 'current' }, tablePath }]
+      },
+      createDataSource: async partitions => (partitions.length ? await storage.dataSourceForTable(partitions[0].tablePath) : null)
+        ?? emptySource((dataset === 'node' ? NODE_COLUMNS : EDGE_COLUMNS).map(c => c.name)),
+    })
+    const scopedRegistry = {
+      ...registry,
+      getDataset: name => name === 'node' || name === 'edge' ? graphRegistration(name) : registry.getDataset(name),
+    }
+    const sql = query => executeQuerySql({ query, storage: scoped, registry: scopedRegistry, includeLocalOnly: true, refresh: 'always' })
+
+    await projectGraph({ query: scopedRegistry, storage: scoped, contracts: [contract] })
+    let stored = (await sql(`SELECT props FROM edge WHERE edge_id = '${fresh.edge_id}'`)).rows
+    assert.equal(stored.length, 1)
+    const props = row => typeof row.props === 'string' ? JSON.parse(row.props) : row.props
+    assert.deepEqual(props(stored[0]), { dispatch_tool: true, dispatch_file_read: true })
+    assert.equal(tryReadCursorSync(current)?.layout, 'source-table', 'changed epoch graph is promoted by the generation swap')
+
+    await projectGraph({ query: scopedRegistry, storage: scoped, contracts: [contract], refresh: true })
+    stored = (await sql(`SELECT props FROM edge WHERE edge_id = '${fresh.edge_id}'`)).rows
+    assert.deepEqual(props(stored[0]), { dispatch_file_read: true })
+    assert.equal(await fs.readFile(path.join(foreign, 'cursor.json'), 'utf8'), foreignCursor, 'other org generation is unchanged')
+    assert.equal(await fs.readFile(path.join(broken, 'cursor.json'), 'utf8'), '{ broken cursor', 'unreadable foreign partition is untouched')
+
+    // Corruption inside the selected scope must still fail closed.
+    await fs.writeFile(path.join(current, 'cursor.json'), '{ broken own cursor')
+    await assert.rejects(projectGraph({ query: scopedRegistry, storage: scoped, contracts: [contract], refresh: true }), /unreadable partition/)
+  }, [read])
+})
+
+test('unscoped projection does not update matching evidence in a named org graph', async () => {
+  const read = { ...source[0], session_id: 'shared', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: 'cat /home/test/.codex/skills/review/SKILL.md' } }
+  await fixture(async ({ registry, storage }) => {
+    const contract = createAiGatewayGraphContract(kit)
+    const rule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+    assert.ok(rule?.toRows)
+    const fresh = rule.toRows(read)[0]
+    const part = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=other', 'graph_v1')
+    await storage.appendRowsToPartition('edge', ['org=other', 'graph_v1'], [...EDGE_COLUMNS, { name: 'org', type: 'STRING' }], [{ ...fresh, org: 'other', props: { dispatch_tool: true }, source_keys: { session_id: 'shared', message_id: 'other-message', part_id: 'other-part' } }])
+    const before = await fs.readFile(path.join(part, 'cursor.json'), 'utf8')
+    await projectGraph({ query: registry, storage, contracts: [contract] })
+    assert.equal(await fs.readFile(path.join(part, 'cursor.json'), 'utf8'), before)
+  }, [read])
+})
+
+for (const fault of ['missing-cursor', 'missing-table', 'ambiguous-epoch']) {
+  test(`graph refresh refuses selected graph with ${fault}`, async () => {
+    await fixture(async ({ registry, storage }) => {
+      const fresh = { edge_id: 'e', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+      const current = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+      const other = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=other', 'graph_v1')
+      await storage.appendRowsToPartition('edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, [fresh])
+      if (fault === 'missing-cursor') await fs.unlink(path.join(current, 'cursor.json'))
+      if (fault === 'missing-table') await fs.rm(path.join(current, 'epoch=0'), { recursive: true })
+      if (fault === 'ambiguous-epoch') {
+        await storage.appendRowsToPartition('edge', ['org=other', 'graph_v1'], EDGE_COLUMNS, [fresh, { ...fresh, edge_id: 'other-org-only' }])
+        await fs.rm(path.join(current, 'epoch=0'), { recursive: true })
+        await fs.symlink(path.join(other, 'epoch=0'), path.join(current, 'epoch=0'), process.platform === 'win32' ? 'junction' : 'dir')
+        await fs.writeFile(path.join(current, 'cursor.json'), JSON.stringify({ epoch: 0, rowCount: 2, layout: 'epoch', tableDir: 'table' }))
+      }
+      const before = await fs.readFile(path.join(current, 'cursor.json'), 'utf8').catch(() => null)
+      const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org: 'current' }, tablePath: current }] }) }
+      await assert.rejects(refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] }), /graph refresh: (unreadable partition|missing table|ambiguous epoch)/)
+      assert.equal(await fs.readFile(path.join(current, 'cursor.json'), 'utf8').catch(() => null), before)
+      if (fault === 'ambiguous-epoch') await assert.rejects(fs.access(path.join(other, 'epoch=0', '.retired')))
+    })
+  })
+}
+
+test('an acknowledged append during graph publication survives epoch promotion', async () => {
+  await fixture(async ({ registry, storage }) => {
+    const fresh = { edge_id: 'e', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+    const part = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+    const append = rows => storage.appendRowsToPartition('edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, rows)
+    await append([fresh])
+    const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org: 'current' }, tablePath: part }] }) }
+    const rename = fs.rename
+    let concurrent
+    fs.rename = async function (from, to) {
+      if (!concurrent && to === path.join(part, 'cursor.json')) {
+        let guarded = false
+        try {
+          const release = claimPartitionMutation(part)
+          release()
+        } catch (error) {
+          if (!isPartitionMutationBusy(error)) throw error
+          guarded = true
+        }
+        concurrent = append([{ ...fresh, edge_id: 'acknowledged-append' }])
+        // Without a publication guard, force the append to acknowledge before
+        // rename. With the guard, it waits and appends to the new generation.
+        if (!guarded) await concurrent
+      }
+      return rename.call(fs, from, to)
+    }
+    try {
+      await refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] })
+      await concurrent
+      assert.ok(concurrent)
+      assert.equal(tryReadCursorSync(part)?.rowCount, 2)
+      const result = await executeQuerySql({ query: 'SELECT edge_id FROM edge', storage, registry: query, includeLocalOnly: true, refresh: 'never' })
+      assert.deepEqual(result.rows.map(row => row.edge_id).sort(), ['acknowledged-append', 'e'])
+    } finally { fs.rename = rename }
+  })
+})
+
+test('graph refresh preserves cross-process purge and append with an unchanged row count', async () => {
+  await fixture(async ({ registry, storage }) => {
+    const fresh = { edge_id: 'e', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+    const part = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+    await storage.appendRowsToPartition('edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, [fresh])
+    const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org: 'current' }, tablePath: part }] }) }
+    const mkdir = fsSync.mkdirSync
+    let outcome
+    fsSync.mkdirSync = function (directory, ...args) {
+      if (!outcome && String(directory).startsWith(path.join(part, 'table-'))) {
+        const script = `
+          import { purgeCache } from './src/core/cache/purge.js'
+          import { appendRowsToPartition, claimPartitionMutation, isPartitionMutationBusy } from './src/core/cache/partition.js'
+          import { EDGE_COLUMNS } from './hypaware-core/plugins-workspace/context-graph/src/datasets.js'
+          try { const release = claimPartitionMutation(${JSON.stringify(part)}); release() }
+          catch (error) { if (!isPartitionMutationBusy(error)) throw error; console.log('blocked'); process.exit(0) }
+          await purgeCache({ cacheRoot: ${JSON.stringify(storage.cacheRoot)}, target: { kind: 'all' } })
+          await appendRowsToPartition(${JSON.stringify(storage.cacheRoot)}, 'edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, [${JSON.stringify({ ...fresh, edge_id: 'acknowledged-new' })}])
+          console.log('mutated')
+        `
+        const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15000 })
+        assert.equal(result.status, 0, result.stderr)
+        outcome = result.stdout.trim()
+      }
+      return mkdir.call(fsSync, directory, ...args)
+    }
+    try {
+      await refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] }).catch(error => {
+        if (!/concurrent-write/.test(error.message)) throw error
+      })
+      assert.ok(outcome)
+      const result = await executeQuerySql({ query: 'SELECT edge_id FROM edge', storage, registry: query, includeLocalOnly: true, refresh: 'never' })
+      assert.deepEqual(result.rows.map(row => row.edge_id), [outcome === 'blocked' ? 'e' : 'acknowledged-new'])
+    } finally { fsSync.mkdirSync = mkdir }
+  })
+})
+
+for (const level of ['partition', 'org']) {
+  test(`graph refresh refuses a symlinked ${level} mutation path`, async () => {
+    await fixture(async ({ registry, storage }) => {
+      const fresh = { edge_id: 'e', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+      const other = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=other', 'graph_v1')
+      const selected = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+      await storage.appendRowsToPartition('edge', ['org=other', 'graph_v1'], EDGE_COLUMNS, [fresh])
+      const target = level === 'partition' ? other : path.dirname(other)
+      const link = level === 'partition' ? selected : path.dirname(selected)
+      await fs.mkdir(path.dirname(link), { recursive: true })
+      await fs.symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+      const before = await fs.readFile(path.join(other, 'cursor.json'), 'utf8')
+      const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org: 'current' }, tablePath: selected }] }) }
+      await assert.rejects(refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] }), /graph refresh: symlinked partition/)
+      assert.equal(await fs.readFile(path.join(other, 'cursor.json'), 'utf8'), before)
+    })
+  })
+}
+
+test('local compaction does not merge named-org namespaces after epoch promotion', async () => {
+  await fixture(async ({ registry, storage }) => {
+    const fresh = { edge_id: 'shared-id', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+    const paths = []
+    for (const org of ['one', 'two']) {
+      const part = path.join(storage.cacheRoot, 'datasets', 'edge', `org=${org}`, 'graph_v1')
+      paths.push(part)
+      await storage.appendRowsToPartition('edge', [`org=${org}`, 'graph_v1'], [...EDGE_COLUMNS, { name: 'org', type: 'STRING' }], [{ ...fresh, org }])
+      const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org }, tablePath: part }] }) }
+      await refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] })
+      assert.equal(tryReadCursorSync(part)?.layout, 'source-table')
+    }
+    const cursors = () => Promise.all(paths.map(part => fs.readFile(path.join(part, 'cursor.json'), 'utf8')))
+    const before = await cursors()
+    await compactGraphTables({ storage })
+    assert.deepEqual(await cursors(), before, 'each organization keeps its own shared graph identity')
+  })
 })

@@ -77,6 +77,14 @@ const CONTENT_COLUMNS = {
   edge: ['props', 'source_keys'],
 }
 
+// Stable callbacks let maintenance distinguish this unscoped read union from
+// a host-provided discovery function that explicitly selects one org's graph.
+/** @type {Record<'node' | 'edge', DatasetRegistration['discoverPartitions']>} */
+const DISCOVER_PARTITIONS = {
+  node: ctx => discoverParts(ctx, NODE_DATASET),
+  edge: ctx => discoverParts(ctx, EDGE_DATASET),
+}
+
 /**
  * Spool/label table path the projector appends to. On flush the storage
  * service re-routes rows to `<dataset>/source=<...>/table/`; queries find
@@ -100,7 +108,7 @@ export function graphDatasetRegistration(dataset) {
     schema: { columns: [...COLUMNS[dataset]] },
     localOnlyContentColumns: [...CONTENT_COLUMNS[dataset]],
     primaryTimestampColumn: 'first_seen',
-    discoverPartitions: (ctx) => discoverParts(ctx, dataset),
+    discoverPartitions: DISCOVER_PARTITIONS[dataset],
     refreshPartition: async () => /** @type {DatasetRefreshResult} */ ({ status: 'skipped', rows: 0 }),
     createDataSource: (partitions, ctx) => createDataSource(partitions, ctx, dataset),
   }
