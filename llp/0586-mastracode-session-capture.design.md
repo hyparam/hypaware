@@ -1,13 +1,16 @@
 # LLP 0586: Mastra Code session capture - technical design
 
 **Type:** Design
-**Status:** Draft
+**Status:** Active
 **Systems:** Sources, Plugins
 **Author:** HypForge
 **Date:** 2026-11-05
 **Related:** LLP 0570, LLP 0571, LLP 0573, LLP 0574, LLP 0118, LLP 0119, LLP 0120, LLP 0121, LLP 0122, LLP 0123, LLP 0124, LLP 0449, LLP 0527, LLP 0359, LLP 0035, LLP 0050, LLP 0070, LLP 0130, LLP 0131, LLP 0394, LLP 0403, LLP 0587
 
 > Buildable design for a `@hypaware/mastracode` client adapter.
+> Active 2026-11-06: every Build task in LLP 0587 has landed; the Linux and
+> Mac results are recorded in
+> [LLP 0587#validation-results](./0587-mastracode-session-capture.plan.md#validation-results).
 > `@ref LLP 0570 [constrained-by]`: the goose adapter is the template; this
 > design names only where Mastra Code differs and why.
 > `@ref LLP 0573 [constrained-by]`: the Crush adapter is the precedent for a
