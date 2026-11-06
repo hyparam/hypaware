@@ -954,15 +954,17 @@ export async function runReportGet(argv, ctx) {
 }
 
 /**
- * The shape of a server-minted recommendation id: `hyprec-` and 16 hex
- * characters. The `rec-` form is what servers minted before server LLP
- * 0432 and what an older server still lists; it is admitted so a client
- * and a server updated in either order keep working, and the server
- * answers either form with the current one.
+ * The shape of a server-minted recommendation id, in every spelling a live
+ * server mints or lists: `hyprec-` and ten base32 characters (server LLP
+ * 0690, the form minted now), `hyprec-` and 16 hex characters (minted
+ * before it), and `rec-` and 16 hex (before server LLP 0432). All three
+ * are admitted so a client and a server updated in either order keep
+ * working; the CLI never rewrites an id, and the server answers each in
+ * the spelling it was minted with.
  *
  * @ref LLP 0414#id-is-the-handle [constrained-by]: the grammar is the server's; the CLI admits what any live server mints
  */
-const RECOMMENDATION_ID_RE = /^(?:hyprec|rec)-[0-9a-f]{16}$/
+const RECOMMENDATION_ID_RE = /^hyprec-[0-9a-hjkmnp-tv-z]{10}$|^(?:hyprec|rec)-[0-9a-f]{16}$/
 
 /**
  * The forms a recommendation page is published in, most readable first:
@@ -990,7 +992,7 @@ const NAMES_EXTENSION_RE = /\.[0-9]*[a-z][a-z0-9]*$/i
  * `hyp report fix [id]`: start an attached client on one of a report's
  * recommendations, in the directory the command was typed in.
  *
- * The id is the server's (`hyprec-` and sixteen hex characters, minted at
+ * The id is the server's (`hyprec-` and its token, minted at
  * publish and listed by `hyp report list`), so a bare id is enough to
  * resolve the report and the page: the resolve route answers with both.
  * With no id on a terminal, the recent listing becomes a picker, one row
@@ -1048,7 +1050,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
     // Grammar first, as the server does: an id that could never have been
     // minted is refused without a round trip.
     if (!RECOMMENDATION_ID_RE.test(id)) {
-      ctx.stderr.write(`hyp report fix: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-0123456789abcdef)\n`)
+      ctx.stderr.write(`hyp report fix: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-qcyx22sjav)\n`)
       return 2
     }
     const found = await resolveRecommendation({ ctx, gate, resolved, cmd: 'report fix' }, id)
@@ -1270,7 +1272,7 @@ function recommendationLabel(page) {
  */
 async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
   if (!RECOMMENDATION_ID_RE.test(id)) {
-    ctx.stderr.write(`hyp ${cmd}: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-0123456789abcdef)\n`)
+    ctx.stderr.write(`hyp ${cmd}: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-qcyx22sjav)\n`)
     return 2
   }
   const url = new URL(`${resolved.endpoint}/_recommendations/${encodeURIComponent(id)}`)
@@ -1643,7 +1645,7 @@ export async function runReportMark(argv, ctx) {
     return 2
   }
   if (!RECOMMENDATION_ID_RE.test(id)) {
-    ctx.stderr.write(`hyp report mark: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-0123456789abcdef)\n`)
+    ctx.stderr.write(`hyp report mark: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-qcyx22sjav)\n`)
     return 2
   }
   const reason = gate.params.reason === undefined ? '' : oneLine(String(gate.params.reason))

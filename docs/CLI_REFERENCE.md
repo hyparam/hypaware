@@ -613,7 +613,7 @@ hyp report get usage-review 2026-W34 REPORT_ID --output ./usage-review.html
 
 Replace `REPORT_ID` with the ID from `hyp report list`.
 
-Given a recommendation id instead (`hyprec-` and sixteen hex characters, the id
+Given a recommendation id instead (`hyprec-` and its token, like `hyprec-qcyx22sjav`, the id
 `hyp report list` prints under each report), it resolves the id to its report
 and page and prints that page (Markdown, or HTML when the report was published
 without it) with a `Citations from the report record` tail: the turns the page

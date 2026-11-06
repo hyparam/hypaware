@@ -105,7 +105,7 @@ Read one recommendation: its summary, status, status history and report. Set `in
 
 | Argument | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `id` | string | yes |  | The recommendation id (hyprec- and 16 hex characters). |
+| `id` | string | yes |  | The recommendation id (hyprec- and its token, like hyprec-qcyx22sjav). |
 | `include_evidence` | boolean | no | `false` | Add evidence, basis, history reasons and links, and the page. |
 
 ### `list_recommendations`
@@ -148,7 +148,7 @@ Set one recommendation's status. After you have fixed it and checked the fix, ma
 
 | Argument | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `id` | string | yes |  | The recommendation id (hyprec- and 16 hex characters). |
+| `id` | string | yes |  | The recommendation id (hyprec- and its token, like hyprec-qcyx22sjav). |
 | `state` | string: `open`, `in_progress`, `applied`, `dismissed` | yes |  | The new state. |
 | `reason` | string | no |  | Why, in a line (at most 2000 characters). Required for dismissed. |
 | `links` | array of string | no |  | Links to the change, such as the pull request or commit (absolute http(s) URLs, at most 8). |
@@ -176,7 +176,7 @@ Check one recommendation against the current code, make the change in this repos
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `id` | yes | The recommendation id (hyprec- and 16 hex characters). |
+| `id` | yes | The recommendation id (hyprec- and its token, like hyprec-qcyx22sjav). |
 
 ### `open_recommendations`
 

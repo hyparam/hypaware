@@ -12,8 +12,14 @@
 
 import { HAND_OFF, MARK_TOOL, recommendationAccess } from './instructions.js'
 
-/** The server's recommendation id: `hyprec-` and 16 hex characters. */
-const RECOMMENDATION_ID_RE = /^hyprec-[0-9a-f]{16}$/
+/**
+ * The server's recommendation id: `hyprec-` and ten base32 characters
+ * (server LLP 0690), or `hyprec-` and 16 hex characters on a report
+ * published before it. Never the pre-LLP-0432 `rec-` spelling: this prompt
+ * is handed ids the dashboard shows today, and the CLI is the place a
+ * token copied years ago is retyped.
+ */
+const RECOMMENDATION_ID_RE = /^hyprec-[0-9a-hjkmnp-tv-z]{10}$|^hyprec-[0-9a-f]{16}$/
 /** Server grammar for a report `kind`, as `hyp report publish` checks it. */
 const KIND_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 const LIMIT_RE = /^[0-9]{1,2}$/
@@ -36,7 +42,7 @@ const PROMPTS = Object.freeze([
     description: 'Check one recommendation against the current code, make the change in this repository, '
       + 'and record it as applied. It makes the change without asking first. Review the diff before you merge it.',
     arguments: Object.freeze([
-      Object.freeze({ name: 'id', description: 'The recommendation id (hyprec- and 16 hex characters).', required: true }),
+      Object.freeze({ name: 'id', description: 'The recommendation id (hyprec- and its token, like hyprec-qcyx22sjav).', required: true }),
     ]),
   }),
   Object.freeze({
@@ -119,7 +125,7 @@ export function renderPrompt(name, args, visible, transport) {
   if (prompt.name === 'fix_recommendation') {
     const id = given.id
     if (typeof id !== 'string' || !RECOMMENDATION_ID_RE.test(id)) {
-      return { ok: false, error: 'id must be a recommendation id (hyprec- and 16 hex characters)' }
+      return { ok: false, error: 'id must be a recommendation id (hyprec- and its token, like hyprec-qcyx22sjav)' }
     }
     text = fixText(id, visible, transport)
   } else if (prompt.name === 'open_recommendations') {

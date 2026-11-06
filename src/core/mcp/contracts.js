@@ -79,7 +79,7 @@ export const REMOTE_TOOL_CONTRACTS = freezeDeep(/** @type {RemoteToolContract[]}
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'The recommendation id (hyprec- and 16 hex characters).' },
+        id: { type: 'string', description: 'The recommendation id (hyprec- and its token, like hyprec-qcyx22sjav).' },
         include_evidence: { type: 'boolean', description: 'Add evidence, basis, history reasons and links, and the page.', default: false },
       },
       required: ['id'],
@@ -96,7 +96,7 @@ export const REMOTE_TOOL_CONTRACTS = freezeDeep(/** @type {RemoteToolContract[]}
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'The recommendation id (hyprec- and 16 hex characters).' },
+        id: { type: 'string', description: 'The recommendation id (hyprec- and its token, like hyprec-qcyx22sjav).' },
         state: { type: 'string', description: 'The new state.', enum: [...RECOMMENDATION_STATES] },
         reason: { type: 'string', description: 'Why, in a line (at most 2000 characters). Required for dismissed.' },
         links: {
