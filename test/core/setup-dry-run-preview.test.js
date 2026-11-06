@@ -30,7 +30,11 @@ const BIN = fileURLToPath(new URL('../../bin/hypaware.js', import.meta.url))
  * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
  */
 function runCli(home, argv, extra = {}) {
-  const env = { ...process.env, HOME: home, ...extra }
+  // Sandbox `os.homedir()` on both platforms: it reads HOME on POSIX and
+  // USERPROFILE on win32 (hypHomeFromEnv falls back to os.homedir() when
+  // HYP_HOME is unset), so setting only HOME would leak to the real profile
+  // on Windows and pick up the user's actual ~/.hyp.
+  const env = { ...process.env, HOME: home, USERPROFILE: home, ...extra }
   for (const key of ['HYP_HOME', 'HYP_CONFIG', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME']) {
     if (!(key in extra)) delete env[key]
   }
@@ -54,7 +58,9 @@ async function snapshot(dir) {
   const tree = new Map()
   for (const entry of await fs.readdir(dir, { recursive: true, withFileTypes: true })) {
     const full = path.join(entry.parentPath, entry.name)
-    const rel = path.relative(dir, full)
+    // Forward-slash keys so the path assertions below read the same on win32,
+    // where path.relative returns backslash-separated paths.
+    const rel = path.relative(dir, full).split(path.sep).join('/')
     if (entry.isDirectory()) tree.set(rel, 'dir')
     else if (entry.isFile()) tree.set(rel, createHash('sha256').update(await fs.readFile(full)).digest('hex'))
     else tree.set(rel, 'other')
@@ -67,7 +73,7 @@ function show(run) {
   return `exit ${run.code}\n${run.stdout}\n${run.stderr}`
 }
 
-test('a setup preview in a fresh HOME leaves it empty, in every form', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 180_000 }, async () => {
+test('a setup preview in a fresh HOME leaves it empty, in every form', { timeout: 180_000 }, async () => {
   /** @type {Array<[string, string[]]>} */
   const forms = [
     ['--yes', ['setup', '--yes', '--dry-run']],
@@ -88,7 +94,7 @@ test('a setup preview in a fresh HOME leaves it empty, in every form', { skip: p
   }
 })
 
-test('a setup preview with HYP_HOME outside HOME leaves both empty', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 60_000 }, async () => {
+test('a setup preview with HYP_HOME outside HOME leaves both empty', { timeout: 60_000 }, async () => {
   const home = temporaryDirectory('hyp-setup-preview-home-')
   const hypHome = temporaryDirectory('hyp-setup-preview-state-')
   const run = await runCli(home, ['setup', '--yes', '--dry-run'], { HYP_HOME: hypHome })
@@ -97,7 +103,7 @@ test('a setup preview with HYP_HOME outside HOME leaves both empty', { skip: pro
   assert.deepEqual([...(await snapshot(hypHome)).keys()], [], 'HYP_HOME')
 })
 
-test('a real setup in the same harness still creates the plugin and export dirs', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 60_000 }, async () => {
+test('a real setup in the same harness still creates the plugin and export dirs', { timeout: 60_000 }, async () => {
   const home = temporaryDirectory('hyp-setup-real-')
   const run = await runCli(home, ['setup', '--yes', '--no-daemon'])
   assert.equal(run.code, 0, show(run))
@@ -110,7 +116,7 @@ test('a real setup in the same harness still creates the plugin and export dirs'
   assert.notEqual(tree.get('.hyp/hypaware-config.json'), undefined, 'config written')
 })
 
-test('a setup preview over an existing install with custom destinations changes nothing', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 60_000 }, async () => {
+test('a setup preview over an existing install with custom destinations changes nothing', { timeout: 60_000 }, async () => {
   const home = temporaryDirectory('hyp-setup-preview-existing-')
   const outside = temporaryDirectory('hyp-setup-preview-outside-')
   const hypHome = path.join(home, '.hyp')
@@ -140,7 +146,7 @@ test('a setup preview over an existing install with custom destinations changes 
   assert.deepEqual(await snapshot(outside), beforeOutside, 'custom destinations not created')
 })
 
-test('the legacy proxy preflight refuses a preview the same way and changes nothing', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships',  timeout: 60_000 }, async () => {
+test('the legacy proxy preflight refuses a preview the same way and changes nothing', { timeout: 60_000 }, async () => {
   const home = temporaryDirectory('hyp-setup-preview-proxy-')
   await fs.mkdir(path.join(home, '.hyp'))
   await fs.writeFile(path.join(home, '.hyp', 'hypaware-config.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n')
@@ -161,7 +167,7 @@ test('the unsupported-platform guard refuses a preview the same way and changes 
   const descriptor = /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(process, 'platform'))
   let stderr = ''
   let stdout = ''
-  Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+  Object.defineProperty(process, 'platform', { ...descriptor, value: 'aix' })
   let code
   try {
     code = await dispatch(['setup', '--yes', '--dry-run'], {
@@ -173,7 +179,7 @@ test('the unsupported-platform guard refuses a preview the same way and changes 
     Object.defineProperty(process, 'platform', descriptor)
   }
   assert.equal(code, 1)
-  assert.match(stderr, /hyp setup: unsupported platform: win32 \(only macOS and Linux are supported\)/)
+  assert.match(stderr, /hyp setup: unsupported platform: aix \(only macOS, Linux and Windows are supported\)/)
   assert.equal(stdout, '')
   assert.deepEqual([...(await snapshot(home)).keys()], [], 'HOME is still empty')
 })

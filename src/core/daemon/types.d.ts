@@ -958,10 +958,11 @@ export interface SchtasksAdapter {
 }
 
 export interface BuildTaskXmlOptions {
-  nodePath: string
-  /** The resolved JavaScript entry node runs directly (never the .cmd shim). */
-  jsEntry: string
-  configPath: string
+  /** The GUI script host (`wscript.exe`) the action runs; the window-hiding launcher. */
+  wscriptPath: string
+  /** The generated launcher script the action passes to wscript. */
+  launcherPath: string
+  configPath?: string
   logDir: string
   /** The user's SID, which the logon trigger and principal are bound to. */
   sid: string
@@ -1002,6 +1003,10 @@ export interface TaskInstallPlan {
   configPath: string
   logDir: string
   nodePath: string
+  /** Absolute path of the generated windowless launcher the task action runs. */
+  launcherPath: string
+  /** The launcher's contents, written to `launcherPath` at install time. */
+  launcherContent: string
   manageCommands: string[][]
   /** Result of the npx->durable global-bin upgrade installDaemon ran (if any). */
   globalInstall?: DurableBinResult

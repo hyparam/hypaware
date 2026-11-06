@@ -156,9 +156,14 @@ const ALLOW_REAL_SERVICE_MANAGER_ENV = 'HYP_ALLOW_REAL_SERVICE_MANAGER'
  * invocation puts a `.test.js` on the command line.
  *
  * @returns {boolean}
+ * Exported so the win32 orphan-kill after `schtasks /End` (win32.js) can wear
+ * the same guard: a `process.kill` of the pid file's daemon is the same host
+ * hazard a service-manager spawn is, so a temp HOME must not let a test reach
+ * the host's real daemon.
+ *
  * @ref LLP 0181#the-guard [implements]: the two extra arms are not defensive padding, both shapes were measured kicking the host's daemon after #602's first fix
  */
-function underTestRunner() {
+export function underTestRunner() {
   if (process.env.NODE_TEST_CONTEXT !== undefined) return true
   if (process.execArgv.includes('--test')) return true
   return process.argv.slice(1).some((arg) => arg.endsWith('.test.js'))

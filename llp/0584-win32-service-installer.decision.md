@@ -10,7 +10,7 @@
 
 ## Summary
 
-The daemon has run on Windows under `hyp daemon run --foreground` since LLP 0300, but nothing installs it to start unattended, so `platformIsSupported` still refuses win32 and `hyp daemon install` throws. This LLP adds the Windows backend: a **per-user Scheduled Task**, triggered at logon, that runs the daemon as the logged-in user with no elevation - the Windows shape of the per-user launchd LaunchAgent and `systemctl --user` unit the project already chose on macOS and Linux. It flips the platform gate for the daemon service family only; the `hyp setup` wizard stays gated for a separate follow-up.
+The daemon has run on Windows under `hyp daemon run --foreground` since LLP 0300, but nothing installs it to start unattended, so `platformIsSupported` still refuses win32 and `hyp daemon install` throws. This LLP adds the Windows backend: a **per-user Scheduled Task**, triggered at logon, that runs the daemon as the logged-in user with no elevation - the Windows shape of the per-user launchd LaunchAgent and `systemctl --user` unit the project already chose on macOS and Linux. It flips the platform gate for the daemon service family, and - after the interactive onboarding was validated on a real Windows host (#gate, #validation) - for the `hyp setup` wizard too.
 
 ## Motivation
 
@@ -28,11 +28,15 @@ Windows offers three ways to start a process unattended, and the choice is const
 
 ### D1: A per-user logon Scheduled Task is the Windows service backend {#task}
 
-Add `src/core/daemon/win32.js` mirroring the surface `install.js` dispatches through (`plan*`, `install*`, `uninstall*`, `start*`, `stop*`, `restart*`, `*Installed`, `*Status`), and give it a win32 arm in each of the eight platform branches in `install.js`. The backend drives the Task through `schtasks` (resolved on PATH; no new dependency), behind the same injectable adapter seam the POSIX modules use, and registered with the LLP 0181 test-sandbox guard so the suite never touches the host's real Task Scheduler (the `schtasks` analogue of `HYP_ALLOW_REAL_SERVICE_MANAGER`). The task triggers **at logon of the installing user**, runs **as that user at LIMITED run level** (no elevation), and is **per-user by construction**, matching `launchctl … gui/<uid>` and `systemctl --user`. The daemon therefore runs while the user is logged in and not otherwise - the same session scope as a LaunchAgent, and the correct scope for a tool recording that user's sessions.
+Add `src/core/daemon/win32.js` mirroring the surface `install.js` dispatches through (`plan*`, `install*`, `uninstall*`, `start*`, `stop*`, `restart*`, `*Installed`, `*Status`), and give it a win32 arm in each of the eight platform branches in `install.js`. The backend drives the Task through `schtasks` (resolved on PATH; no new dependency), behind the same injectable adapter seam the POSIX modules use, and registered with the LLP 0181 test-sandbox guard so the suite never touches the host's real Task Scheduler (the `schtasks` analogue of `HYP_ALLOW_REAL_SERVICE_MANAGER`). The task triggers **at logon of the installing user**, runs **as that user at LIMITED run level** (no elevation), and is **per-user by construction**, matching `launchctl … gui/<uid>` and `systemctl --user`.
 
-### D2: The exec line is node pointed straight at the JS entry {#exec}
+The principal logon type is **InteractiveToken**, and the console window that would otherwise bring is suppressed by the launcher in D2, not by the logon type. The first real-Windows validation run (#validation) is what forced this to be explicit: node is a console-subsystem binary, and an `InteractiveToken` task launches it in the user's desktop session, where Task Scheduler allocates a **visible console window** that stays open for the daemon's whole life - nothing the task XML can suppress (`<Hidden>` only hides the task in the Scheduler UI; launchd and systemd never attach a console, so this is a win32-only wart). The obvious fix, S4U ("run whether the user is logged on or not"), which runs non-interactive with no window, is **not available to a plain CLI**: `schtasks /Create` for an S4U principal is refused with "Access is denied" unless elevated, and requiring Administrator to install a per-user daemon breaks the no-elevation invariant this whole backend rests on (it is also what would make the daemon outlive a logoff, which is not wanted - the LaunchAgent scope is). So the logon type stays InteractiveToken (non-elevated, torn down at logoff, started again by the logon trigger - LaunchAgent / `systemctl --user` parity), and the window is removed in the action instead.
 
-The task action is `process.execPath` invoking the global package's **JavaScript entry directly** - `[nodePath, jsEntry, 'daemon', 'run', '--config', configPath]`, structurally identical to the launchd/systemd exec line. It does **not** invoke the `hypaware.cmd` shim, so no cmd.exe batch-parsing layer sits between the Task and node (the layer LLP 0581 had to escape for untrusted `hyp ask` prompts; a service command line we author ourselves gains nothing from it). The durable-bin resolver returns `hypaware.cmd` on win32, so the installer resolves the JS entry behind it from npm's stable global layout (`<prefix>\node_modules\hypaware\bin\hypaware.js`), never an ephemeral path (LLP 0017 #install-global-package-then-service-manager).
+### D2: The exec line runs node at the JS entry, through a windowless launcher {#exec}
+
+The daemon node runs is `process.execPath` invoking the global package's **JavaScript entry directly** - `[nodePath, jsEntry, 'daemon', 'run', '--config', configPath, '--supervised']`, structurally identical to the launchd/systemd exec line. It does **not** invoke the `hypaware.cmd` shim, so no cmd.exe batch-parsing layer sits between the task and node (the layer LLP 0581 had to escape for untrusted `hyp ask` prompts; a command line we author ourselves gains nothing from it). The durable-bin resolver returns `hypaware.cmd` on win32, so the installer resolves the JS entry behind it from npm's stable global layout (`<prefix>\node_modules\hypaware\bin\hypaware.js`), never an ephemeral path (LLP 0017 #install-global-package-then-service-manager).
+
+The task **action** is not that command line directly, though: it is `wscript.exe //B //Nologo <launcher>.vbs`, a generated one-line VBScript (`WScript.Quit shell.Run("<the node command>", 0, True)`) written to a stable per-user path at install time and removed at uninstall. This is the console-window fix D1 defers to. `wscript` is the GUI-subsystem script host (no console of its own), and window style `0` starts node hidden; `True` waits, so the launcher's exit code **is** node's, which keeps the exit-code supervision of D3 intact (a crash or exit 75 still propagates to Task Scheduler's restart-on-failure). `//B` suppresses WSH error dialogs. Unlike the cmd.exe shim of LLP 0581 the script is authored entirely by us - there is no untrusted text in it, only our own paths, quoted and VBS-escaped (a literal `"` doubled). It is the minimal windowless launcher available without a new dependency or elevation; `cmd /c start` reintroduces the cmd layer D2 avoids and still flashes a window, and `conhost --headless` relies on undocumented exit-code behavior that would make D3's supervision a guess.
 
 ### D3: The exit code is the supervision contract; the Task is the sole supervisor {#supervision}
 
@@ -52,11 +56,15 @@ Consequence to record: Task Scheduler's restart-on-failure minimum interval is *
 
 If the daemon does not consume the request within `DAEMON_STOP_TIMEOUT_MS` (10s) - wedged, ignoring the channel - stop **escalates to `schtasks /End`** (a hard kill) and says so. This settles the open question LLP 0300 left (#posix-keeps-signals / its Open questions): a `stop` that can silently leave a stuck daemon running is a worse broken promise than losing an in-flight flush from a process that was already hung. Graceful is always tried first, so the hard kill only ever fires in the pathological case. The stop window nesting (LLP 0520: proxy 5s < gateway 8s < stop 10s) is unchanged; the `schtasks /End` escalation sits at the 10s boundary, outside the graceful window as systemd's 90s / launchd's 20s do.
 
+`/End` alone is not enough **because of the D2 launcher**. It terminates the process Task Scheduler tracks - `wscript` - but not the node daemon `wscript` spawned, which is orphaned and keeps running (measured on a real host: node survived `/End`). So the win32 `/End` path, in both `hyp daemon stop`'s timeout escalation and `hyp daemon restart`'s fall-back, follows the `/End` with a direct `process.kill` of the pid the daemon's pid file names, guarded by the LLP 0515 identity check (`daemon run` on the command line; an unreadable command line is fail-closed to "it is the daemon", a provably-unrelated pid is left alone). Without this, a wedged `stop` would End the launcher and report success over a still-live daemon, and a `restart` would start a second daemon beside the orphan. The kill wears the LLP 0181 test-runner guard, since `process.kill` of a pid file's daemon is the same host hazard a real service-manager spawn is. Verified on a real Windows host: after the escalation the daemon process is gone.
+
 Start is `schtasks /Run` (run the task now); restart is a graceful stop followed by `schtasks /Run`; install, per LLP 0317, creates the task, runs it, and proves a live pid before reporting success, honoring a `RunAtLoad: false` equivalent (create but do not run) when the caller asks not to start. `serviceDaemonStatus` queries the task's existence and state, never raises (LLP 0017 #status-queries-never-raise), and reports `unreachable: true` when `schtasks` cannot be run (LLP 0545). Uninstall removes the task, then detaches every attached client (LLP 0206 #d1).
 
-### D5: The platform gate splits - the service family opens, the setup wizard does not {#gate}
+### D5: The platform gate includes win32 for the service family and the setup wizard alike {#gate}
 
-`platformIsSupported` today gates both the daemon service family and the whole `hyp setup` onboarding wizard (refused at dispatch on win32, the #975 gate). This LLP opens the **service family only**: `hyp daemon install / uninstall / start / stop / restart / status` work on win32. The `hyp setup` wizard keeps its refusal until a separate follow-up validates the full interactive onboarding (first-look, attach cascade, skills/agents, backfill, finale) live on Windows - surface that has never run end-to-end there. Concretely, the single predicate is split: the daemon/service checks include win32, while the setup-wizard refusal keeps its own predicate (darwin/linux) until the follow-up. A Windows user onboards in the interim with `hyp daemon install` and `hyp client attach <x>` by hand; every piece works and is proven, and the follow-up builds the wizard finale's install step on the installer this LLP provides.
+`platformIsSupported` gates both the daemon service family and the whole `hyp setup` onboarding wizard (the #975 dispatch gate). Both include win32.
+
+This decision reached win32 in two steps within the same draft. The first opened the **service family** (`hyp daemon install / uninstall / start / stop / restart / status`) while holding the wizard behind a second predicate, `setupPlatformIsSupported`, because the interactive onboarding - first look, the attach cascade, skills/agents, backfill, the finale - had never run end-to-end on Windows. That validation has since happened on a real Windows host (see #validation): dry-run previews change nothing; a scripted `hyp setup` runs the full finale (config write, Claude attach, skills and agents copied, history backfill, daemon install and restart) to exit 0; and the interactive TUI runs. So the split predicate is retired: `setupPlatformIsSupported` is deleted and the setup preflight and `runInitWizard` refusal route through `platformIsSupported` alone. `setupUnsupportedNote` still refuses a platform with no service backend (e.g. `aix`), now naming "macOS, Linux and Windows" as the supported set. A win32 user onboards with `hyp setup` like anyone else; `hyp daemon install` plus `hyp client attach <x>` by hand remains available but is no longer the only path.
 
 ### D6: The task is named per-user, keyed by SID {#naming}
 
@@ -65,11 +73,11 @@ Task Scheduler has no per-user domain - its library is machine-wide - so two use
 ## Consequences
 
 - `platformIsSupported('win32')` is true for the daemon service family; `hyp daemon install` registers a per-user logon Scheduled Task and the rest of the family works. The `hyp daemon install` family's eight `install.js` branches and `platform.js` labels gain a win32 arm.
-- Windows recording survives logout/login without a terminal, bounded to the user's logged-in sessions (LaunchAgent parity).
+- Windows recording survives logout/login without a terminal, bounded to the user's logged-in sessions (LaunchAgent parity): the InteractiveToken task stops at logoff and the logon trigger starts it again at the next sign-in. It runs windowless via the `wscript` launcher (#exec); there is no visible console.
 - `detectSupervisor` gains a win32 signal (the task's supervised marker); the self-update (LLP 0365/0539), port-conflict pacing (LLP 0521) and self-relaunch (LLP 0529) lanes behave as on POSIX, with no double-relaunch.
 - The standing `TODO(win32)` at `runtime.js` (arm the control watcher early so a boot-time stop is honored) comes into scope: a Scheduled Task's stop rides the same LLP 0300 channel, so the watcher must be armed next to the pid write, not only at the tail of `runDaemon`.
 - Crash-recovery latency on win32 is coarser (~1 min) than systemd (~5s); documented.
-- `hyp setup` still refuses on win32 (friendly note) until its own follow-up LLP.
+- `hyp setup` runs on win32 in every form, validated on a real host (#validation, #gate); the `setupPlatformIsSupported` split predicate is retired.
 
 ## Validation {#validation}
 
@@ -82,13 +90,21 @@ The tests drive `schtasks` through a fake adapter (LLP 0181), so they prove the 
 5. Make the daemon exit 75 (a staged restart, e.g. `hyp update` or a config replace): the task relaunches it.
 6. `hyp daemon uninstall`: the task is gone from `schtasks /Query /TN \hypaware\<SID>`.
 
+The wizard gate (#gate) rests on a further real-Windows pass, done before the `setupPlatformIsSupported` split was retired:
+
+7. `hyp setup --dry-run` (every form) leaves HOME and HYP_HOME unchanged.
+8. A scripted `hyp setup --yes --no-daemon` runs the full finale to exit 0: config written, Claude Code attached (settings under the win32 profile), skills and agents copied, history backfilled, plugin/export dirs created.
+9. A real `hyp setup` installs and starts the daemon (step 1) and runs the interactive TUI prompts.
+
+That first run is also what surfaced the two win32 defects this doc records: the daemon's task launched node in a visible console window (fixed by the `wscript` launcher, D1/D2), confirmed gone after reinstall; and the setup tests' HOME-only sandbox leaked to the real profile because `os.homedir()` reads `USERPROFILE` on win32 (fixed in the tests).
+
 The release notes record the `schtasks /Query /V /FO LIST` output after step 1, the `<Principals>` block of `schtasks /Query /XML`, and the observed relaunch delay in steps 4 and 5 (D3 expects up to about a minute).
 
 ## Open questions
 
 - Whether the supervised marker is best carried as an environment variable in the task action or as a CLI flag on the exec line (both are unambiguous; the flag is visible in `schtasks /Query` output, the env var is not).
 - Whether `install` should offer a `--run-level highest` escape hatch for users who deliberately want an elevated daemon, or keep LIMITED-only to match the no-elevation principle.
-- The follow-up scope: how much of the `hyp setup` finale (attach cascade, backfill) is validated before its gate is flipped.
+- (Resolved) The `hyp setup` finale was validated on a real Windows host before its gate was flipped - config write, attach cascade, skills/agents, backfill, and the daemon install/restart all run (#gate, #validation).
 
 ## References
 

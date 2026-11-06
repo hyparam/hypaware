@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { WIN32_TASK_FOLDER, defaultLogDir } from './platform.js'
-import { ServiceOpError, defaultSleep, ensureFsOp, ensureOk, runServiceCommand } from './service_ops.js'
+import { ServiceOpError, defaultSleep, ensureFsOp, ensureOk, runServiceCommand, underTestRunner } from './service_ops.js'
 
 /**
  * @import {
@@ -129,21 +129,22 @@ function xmlEscape(value) {
  *
  * Deterministic for the same inputs so tests compare against fixed strings. A
  * logon trigger bound to the user's SID, a least-privilege interactive-token
- * principal (no elevation), single-instance, no execution time limit (the
- * daemon runs until stopped), and restart-on-failure - the win32 equivalent
- * of launchd `KeepAlive` / systemd `Restart=always`, whose floor is one
- * minute (LLP 0584 #supervision). The action runs node at the JS entry with
- * `--supervised`, the marker `detectSupervisor` reads (LLP 0584 #supervision).
+ * principal (runs as the user, no elevation, stops at logoff), single-instance,
+ * no execution time limit (the daemon runs until stopped), and
+ * restart-on-failure - the win32 equivalent of launchd `KeepAlive` / systemd
+ * `Restart=always`, whose floor is one minute (LLP 0584 #supervision). The
+ * action runs the windowless `wscript` launcher ({@link buildLauncherVbs}),
+ * which starts node at the JS entry with `--supervised` - the marker
+ * `detectSupervisor` reads - and no console window.
  *
  * @ref LLP 0584#task [implements]: per-user logon task, least-privilege, restart-on-failure
  * @param {BuildTaskXmlOptions} options
  * @returns {string}
  */
 export function buildTaskXml(options) {
-  const { nodePath, jsEntry, configPath, logDir, sid } = options
-  if (!nodePath || typeof nodePath !== 'string') throw new ScheduledTaskError('nodePath is required')
-  if (!jsEntry || typeof jsEntry !== 'string') throw new ScheduledTaskError('jsEntry is required')
-  if (!configPath || typeof configPath !== 'string') throw new ScheduledTaskError('configPath is required')
+  const { wscriptPath, launcherPath, logDir, sid } = options
+  if (!wscriptPath || typeof wscriptPath !== 'string') throw new ScheduledTaskError('wscriptPath is required')
+  if (!launcherPath || typeof launcherPath !== 'string') throw new ScheduledTaskError('launcherPath is required')
   if (!logDir || typeof logDir !== 'string') throw new ScheduledTaskError('logDir is required')
   if (!sid || typeof sid !== 'string') throw new ScheduledTaskError('sid is required')
 
@@ -151,11 +152,15 @@ export function buildTaskXml(options) {
   const restart = options.restart !== false
   const interval = options.restartIntervalIso ?? 'PT1M'
   const enabledAtLogon = options.runAtLoad !== false
-  // The command line node receives: the JS entry, then `daemon run`, the
-  // config, and the supervised marker. Quoted so a path with spaces survives
-  // the argv split; the quotes are XML-escaped but Task Scheduler unescapes
-  // before building the command line, so they reach node intact.
-  const args = `"${jsEntry}" daemon run --config "${configPath}" --supervised`
+  // The action runs the windowless launcher, not node directly (LLP 0584
+  // #exec): node is a console binary, and an InteractiveToken task launching it
+  // would allocate a visible console window that stays up for the daemon's
+  // whole life. `wscript //B` runs the GUI-subsystem script host (no console of
+  // its own) which starts node with a hidden window; `//B` suppresses WSH error
+  // dialogs. The launcher waits for node and exits with its code, so the task
+  // still supervises on the exit code (D3). Quoted so a path with spaces
+  // survives; XML-escaped, which Task Scheduler unescapes before the spawn.
+  const args = `//B //Nologo "${launcherPath}"`
   const restartBlock = restart
     ? [
       '    <RestartOnFailure>',
@@ -180,6 +185,14 @@ export function buildTaskXml(options) {
     '  <Principals>',
     '    <Principal id="Author">',
     `      <UserId>${xmlEscape(sid)}</UserId>`,
+    // InteractiveToken runs the task in the user's own logon session as that
+    // user, needs no elevation (S4U / "run whether logged on or not" is denied
+    // to a non-admin, so it is not an option for a plain CLI), and is torn down
+    // when the session ends - the daemon stops at logoff and the logon trigger
+    // starts it again at the next sign-in, the session scope of a launchd
+    // LaunchAgent / systemd --user unit. The console window an interactive node
+    // would show is suppressed by the launcher in the action below, not by the
+    // logon type.
     '      <LogonType>InteractiveToken</LogonType>',
     '      <RunLevel>LeastPrivilege</RunLevel>',
     '    </Principal>',
@@ -202,13 +215,66 @@ export function buildTaskXml(options) {
     '  </Settings>',
     '  <Actions Context="Author">',
     '    <Exec>',
-    `      <Command>${xmlEscape(nodePath)}</Command>`,
+    `      <Command>${xmlEscape(wscriptPath)}</Command>`,
     `      <Arguments>${xmlEscape(args)}</Arguments>`,
     '    </Exec>',
     '  </Actions>',
     '</Task>',
     '',
   ].join('\n')
+}
+
+/**
+ * The VBScript the task's `wscript` action runs. Its whole job is to start node
+ * with a hidden window (window style 0) and no console, wait for it, and exit
+ * with node's exit code so Task Scheduler's restart-on-failure still sees the
+ * daemon's own exit (LLP 0584 #supervision). Authored by us, so unlike the
+ * cmd.exe shim of LLP 0581 there is no untrusted text to escape - only our own
+ * paths, quoted and VBS-escaped (a literal `"` is doubled inside a VBS string).
+ *
+ * @ref LLP 0584#exec [implements]: node runs the JS entry with --supervised, launched windowless
+ * @param {{ nodePath: string, jsEntry: string, configPath: string }} options
+ * @returns {string}
+ */
+export function buildLauncherVbs(options) {
+  const { nodePath, jsEntry, configPath } = options
+  if (!nodePath || typeof nodePath !== 'string') throw new ScheduledTaskError('nodePath is required')
+  if (!jsEntry || typeof jsEntry !== 'string') throw new ScheduledTaskError('jsEntry is required')
+  if (!configPath || typeof configPath !== 'string') throw new ScheduledTaskError('configPath is required')
+  const command = `"${nodePath}" "${jsEntry}" daemon run --config "${configPath}" --supervised`
+  const vbsCommand = command.replace(/"/g, '""')
+  return [
+    "' HypAware daemon launcher (generated). Runs the daemon with no console",
+    "' window and exits with its code so the Scheduled Task can supervise it.",
+    'Dim shell',
+    'Set shell = CreateObject("WScript.Shell")',
+    `WScript.Quit shell.Run("${vbsCommand}", 0, True)`,
+    '',
+  ].join('\r\n')
+}
+
+/**
+ * The GUI script host that runs the launcher. Resolved from `%SystemRoot%` so
+ * the task names an absolute path rather than trusting the task's PATH; falls
+ * back to the conventional location for a cross-platform `--dry-run`.
+ *
+ * @returns {string}
+ */
+function resolveWscriptPath() {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
+  return path.win32.join(root, 'System32', 'wscript.exe')
+}
+
+/**
+ * Where the generated launcher lives: beside the kernel state dir, one level up
+ * from the log dir, so it is a stable per-user path the task can name and the
+ * uninstall can remove.
+ *
+ * @param {string} logDir
+ * @returns {string}
+ */
+function launcherPathFor(logDir) {
+  return path.posix.join(path.posix.dirname(logDir.replace(/\\/g, '/')), 'daemon-launcher.vbs')
 }
 
 /**
@@ -225,10 +291,12 @@ export function planTaskInstall(options) {
   const logDir = options.logDir ?? defaultLogDir(options.homeDir)
   const nodePath = options.nodePath ?? process.execPath
   const jsEntry = resolveTaskJsEntry(options.binPath)
+  const wscriptPath = resolveWscriptPath()
+  const launcherPath = launcherPathFor(logDir)
+  const launcherContent = buildLauncherVbs({ nodePath, jsEntry, configPath: options.configPath })
   const content = buildTaskXml({
-    nodePath,
-    jsEntry,
-    configPath: options.configPath,
+    wscriptPath,
+    launcherPath,
     logDir,
     sid,
     description: options.description,
@@ -248,6 +316,10 @@ export function planTaskInstall(options) {
     configPath: options.configPath,
     logDir,
     nodePath,
+    // The generated windowless launcher: installTask writes it to disk, the
+    // task's action runs it, and uninstall removes it.
+    launcherPath,
+    launcherContent,
     manageCommands: [
       ['schtasks', '/Create', '/TN', taskName, '/XML', '<task.xml>', '/F'],
       ['schtasks', '/Run', '/TN', taskName],
@@ -304,6 +376,14 @@ export async function installTask(options) {
 
   ensureFs(function() { fs.mkdirSync(plan.logDir, { recursive: true }) }, `create ${plan.logDir}`)
 
+  // The task's action runs this launcher, so it must be on disk before the task
+  // can start. Plain ASCII (wscript reads it fine); written before the task is
+  // created so a /Run never races a missing file.
+  ensureFs(
+    function() { fs.writeFileSync(plan.launcherPath, plan.launcherContent, { mode: 0o600 }) },
+    `write ${plan.launcherPath}`,
+  )
+
   // schtasks /XML reads UTF-16LE; a UTF-8 file is rejected as malformed. The
   // temp file is this process's own, removed once the task is created.
   const xmlPath = path.join(os.tmpdir(), `hypaware-task-${process.pid}-${plan.taskName.replace(/[^A-Za-z0-9]/g, '')}.xml`)
@@ -329,7 +409,7 @@ export async function installTask(options) {
  * Delete the HypAware task, tolerating one already gone. Removes only the
  * task; config, recordings, and logs are untouched.
  *
- * @param {{ label?: string, sid?: string, taskName?: string, homeDir?: string, schtasks?: SchtasksAdapter }} options
+ * @param {{ label?: string, sid?: string, taskName?: string, homeDir?: string, logDir?: string, schtasks?: SchtasksAdapter }} options
  * @returns {Promise<void>}
  */
 export async function uninstallTask(options) {
@@ -341,6 +421,13 @@ export async function uninstallTask(options) {
   if (res.exitCode !== 0 && !/cannot find|does not exist|ERROR: The system cannot find/i.test(res.stderr + res.stdout)) {
     throw new ScheduledTaskError(`failed to delete scheduled task ${taskName}: ${res.stderr.trim() || `exit ${res.exitCode}`}`,
       { exitCode: res.exitCode, stderr: res.stderr })
+  }
+  // Remove the generated launcher when we can place it (homeDir or logDir
+  // given). Best-effort: a leftover .vbs is inert once its task is gone, so a
+  // missing path or a failed unlink never fails the uninstall.
+  const logDir = options.logDir ?? (options.homeDir ? defaultLogDir(options.homeDir) : undefined)
+  if (logDir) {
+    try { fs.unlinkSync(launcherPathFor(logDir)) } catch { /* already gone or unresolvable */ }
   }
 }
 
@@ -356,16 +443,69 @@ export async function startTask(options) {
 }
 
 /**
- * End the running task. This is `TerminateProcess` on the daemon - the hard
- * stop a graceful `hyp daemon stop` escalates to only after its file-channel
- * request times out (LLP 0584 #stop), never the routine path.
- * @param {{ label?: string, sid?: string, taskName?: string, schtasks?: SchtasksAdapter }} options
+ * End the running task, then kill the daemon it launched. `schtasks /End`
+ * terminates the process Task Scheduler tracks - `wscript` (D2's launcher) -
+ * but not the node daemon `wscript` spawned, which is orphaned and keeps
+ * running (measured on a real host). So the hard stop must reach node itself
+ * (see {@link killOrphanedDaemon}); without this, a wedged `hyp daemon stop`
+ * would End the launcher, report success, and leave the daemon alive - the
+ * broken promise LLP 0584 #stop exists to prevent.
+ *
+ * @param {{ label?: string, sid?: string, taskName?: string, homeDir?: string, schtasks?: SchtasksAdapter }} options
  * @returns {Promise<void>}
+ * @ref LLP 0584#stop [implements]: the /End hard stop reaches node, which ending the wscript launcher does not
  */
 export async function stopTask(options) {
   const schtasks = options.schtasks ?? realSchtasks
   const taskName = resolveTaskName(options)
   ensure(await schtasks.end(taskName), `end scheduled task ${taskName}`)
+  await killOrphanAfterEnd(options.homeDir)
+}
+
+/**
+ * Kill the daemon orphaned by a `schtasks /End` (see {@link stopTask}), guarded
+ * so a test never reaches the host's real daemon. The `process.kill` of the pid
+ * file's daemon is the same host hazard a real service-manager spawn is, so it
+ * wears the LLP 0181 guard: skipped under the test runner unless
+ * `HYP_ALLOW_REAL_SERVICE_MANAGER=1`.
+ *
+ * @param {string} [homeDir]
+ * @returns {Promise<void>}
+ */
+async function killOrphanAfterEnd(homeDir) {
+  if (underTestRunner() && process.env.HYP_ALLOW_REAL_SERVICE_MANAGER !== '1') return
+  const { stateRootFromEnv } = await import('../runtime/paths.js')
+  await killOrphanedDaemon(stateRootFromEnv(process.env, homeDir))
+}
+
+/**
+ * Kill the daemon named by the pid file under `stateRoot`, but only when the
+ * LLP 0515 identity check does not prove the pid is someone else's: an unclean
+ * shutdown can leave a stale pid file, and pid numbers are reused, so a pid we
+ * cannot confirm is treated as the daemon (fail-closed) while one that is
+ * provably not `daemon run` is left alone. `process.kill` with the default
+ * signal is `TerminateProcess` on win32, the hard stop this path is already in.
+ *
+ * Process interactions are injectable for the unit test; the default reads the
+ * real pid file and signals the real pid.
+ *
+ * @param {string} stateRoot
+ * @param {{ readPidFile?: (r: string) => ({ pid: number } | null), processIsAlive?: (p: number) => boolean, isDaemonProcess?: (p: number) => (boolean | null), kill?: (p: number) => void }} [deps]
+ * @returns {Promise<boolean>} whether a kill was issued
+ * @ref LLP 0515#identity [implements]: only a pid the `daemon run` check does not disown is killed
+ */
+export async function killOrphanedDaemon(stateRoot, deps = {}) {
+  const pid = await import('./pid.js')
+  const readPidFile = deps.readPidFile ?? pid.readPidFile
+  const processIsAlive = deps.processIsAlive ?? pid.processIsAlive
+  const isDaemonProcess = deps.isDaemonProcess ?? pid.isDaemonProcess
+  const kill = deps.kill ?? ((p) => { process.kill(p) })
+  let entry
+  try { entry = readPidFile(stateRoot) } catch { return false } // a corrupt pid file is status's to report, not this stop's
+  if (!entry || !processIsAlive(entry.pid)) return false
+  if (isDaemonProcess(entry.pid) === false) return false
+  try { kill(entry.pid) } catch { /* already gone, or a race with its own exit */ }
+  return true
 }
 
 /**
@@ -396,6 +536,10 @@ export async function restartTask(options) {
   const outcome = await requestStop()
   if (outcome !== 'stopped') {
     await schtasks.end(taskName).catch(function() { /* best-effort; it may not be running */ })
+    // /End terminates the wscript launcher, not the node daemon it spawned
+    // (stopTask), so the orphan must be killed too - otherwise the /Run below
+    // starts a second daemon beside the one still running.
+    await killOrphanAfterEnd(options.homeDir)
   }
   // The daemon process is gone once the stop returns, but the task can read
   // Running for a moment longer, and `IgnoreNew` drops a `/Run` that lands

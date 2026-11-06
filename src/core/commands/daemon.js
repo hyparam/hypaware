@@ -1,5 +1,6 @@
 // @ts-check
 
+import os from 'node:os'
 import path from 'node:path'
 import { hypHomeFromEnv, stateRootOf } from '../runtime/paths.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
@@ -554,9 +555,15 @@ export async function runDaemonInstall(argv, ctx, opts = {}) {
     ctx.stdout.write(`bin:         ${plan.binPath}\n`)
     ctx.stdout.write(`config:      ${plan.configPath}\n`)
     ctx.stdout.write(`log dir:     ${plan.logDir}\n`)
+    if (plan.launcherPath !== undefined) ctx.stdout.write(`launcher:    ${plan.launcherPath}\n`)
     ctx.stdout.write('--- content ---\n')
     ctx.stdout.write(plan.content)
     if (!plan.content.endsWith('\n')) ctx.stdout.write('\n')
+    if (plan.launcherContent !== undefined) {
+      ctx.stdout.write('--- launcher ---\n')
+      ctx.stdout.write(plan.launcherContent)
+      if (!plan.launcherContent.endsWith('\n')) ctx.stdout.write('\n')
+    }
     return 0
   }
 
@@ -605,9 +612,12 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
   if (!parsed.ok) return parsed.code
   const { uninstallDaemon, daemonKindLabel } = await import('../daemon/install.js')
   const { detachAllClientsFromDisk } = await import('./clients.js')
-  const homeDir = ctx.env.HOME
+  // The same home install wrote under: an unset HOME (cmd.exe and PowerShell
+  // set none) falls back to os.homedir(), as defaultLogDir does at install,
+  // so the win32 launcher beside the log dir is found and removed.
+  const homeDir = ctx.env.HOME ?? os.homedir()
   try {
-    await (deps.uninstallDaemon ?? uninstallDaemon)({ ...(homeDir !== undefined ? { homeDir } : {}) })
+    await (deps.uninstallDaemon ?? uninstallDaemon)({ homeDir })
     ctx.stdout.write(`✓ Daemon removed (${daemonKindLabel()})\n`)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

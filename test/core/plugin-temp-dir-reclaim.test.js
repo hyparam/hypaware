@@ -124,7 +124,7 @@ async function serveMcp(root) {
   return { child, exited }
 }
 
-test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tmpdir', { skip: process.platform === 'win32' && 'the spawned CLI refuses init at the platform gate (#975); unskip when win32 setup ships' }, async () => {
+test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tmpdir', { skip: process.platform === 'win32' && 'this test redirects os.tmpdir() via TMPDIR and runs a minimal env, neither of which ports to win32 (os.tmpdir reads TEMP/TMP; a win32 child needs SystemRoot); unrelated to the setup gate, which now allows win32' }, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-reclaim-'))
   const tmp = path.join(root, 'tmp')
   await fs.mkdir(path.join(root, 'home'), { recursive: true })
