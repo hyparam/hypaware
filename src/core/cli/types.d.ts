@@ -87,6 +87,7 @@ export type PickerSource =
   | 'hermes'
   | 'goose'
   | 'crush'
+  | 'grok'
   | 'mastracode'
   | 'raw-anthropic'
   | 'raw-openai'
@@ -342,7 +343,7 @@ export interface InitFlags {
   dryRun: boolean
   github?: boolean
   noBackfill?: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'droid' | 'ollama' | 'langgraph' | 'antigravity' | 'antigravity-desktop')[]
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'droid' | 'grok' | 'ollama' | 'langgraph' | 'antigravity' | 'antigravity-desktop')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number

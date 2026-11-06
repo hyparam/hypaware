@@ -22,7 +22,8 @@ const argv = process.argv.slice(2)
 
 // @ref LLP 0399#coexistence: Cursor inherits these Claude hook commands even
 // when Claude is inactive. Skip before config/dispatch can reject the command.
-if (process.env.CURSOR_VERSION && argv[0] === 'claude-hook' &&
+// @ref LLP 0588#coexistence: so does Grok Build.
+if ((process.env.CURSOR_VERSION || process.env.GROK_HOOK_EVENT) && argv[0] === 'claude-hook' &&
     (argv[1] === 'session-context' || argv[1] === 'classify-cwd') &&
     !argv.includes('--help') && !argv.includes('-h')) process.exit(0)
 

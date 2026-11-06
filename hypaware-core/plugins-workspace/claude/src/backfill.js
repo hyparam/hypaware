@@ -1,6 +1,8 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
+import path from 'node:path'
+import { isPlainObject } from 'hypaware/core/util'
 import { captureSessionTitle } from '../../../../src/core/backfill/session_title.js'
 import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
@@ -32,6 +34,7 @@ import {
   sessionEntrypoint,
 } from '../../../../src/core/backfill/entrypoint_owner.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
+import { openCodeToolEvidenceApplies, openCodeTranscriptSession, readOpenCodeClaudeSessions } from './opencode_ownership.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
@@ -129,6 +132,7 @@ export function createClaudeBackfillProvider(opts) {
       const desktop3pDirs = findDesktop3pProjectsDirs(opts.homeDir)
       yield* runClaudeBackfill({
         ctx,
+        homeDir: opts.homeDir,
         projectsDir,
         extraProjectsDirs: desktop3pDirs,
         stateFile,
@@ -182,6 +186,7 @@ function resolveSweepCron(config) {
  *
  * @param {{
  *   ctx: BackfillRunContext,
+ *   homeDir: string,
  *   projectsDir: string,
  *   extraProjectsDirs?: string[],
  *   stateFile: string,
@@ -261,6 +266,71 @@ async function* runClaudeBackfill(args) {
     }
   }
 
+  // A failed ownership read is not evidence that these are Claude sessions.
+  // Stop before yielding any rows, so repairing a locked or drifted store
+  // cannot turn an OpenCode opt-out into a Claude-attributed export.
+  let openCodeSessions
+  try {
+    openCodeSessions = candidates.length === 0 ? new Set() : await readOpenCodeClaudeSessions(args.homeDir, ctx.env)
+  } catch (err) {
+    // A runtime code or this module's fixed token, never the message: SQLite
+    // and filesystem messages can carry paths or record contents.
+    const code = /** @type {{ code?: unknown }} */ (err)?.code
+    const message = err instanceof Error ? err.message : ''
+    const errorCode = typeof code === 'string' ? code : /^opencode_ownership_[a-z_]+$/.test(message) ? message : 'unknown'
+    log.error('claude.backfill.ownership_read_failed', {
+      component: 'plugin.claude.backfill', operation: 'ownership_gate',
+      owner_client: 'opencode', error_kind: 'ownership_read_failed', status: 'error',
+      error_code: errorCode,
+    })
+    const nodeStep = errorCode === 'opencode_ownership_sqlite_unavailable' ? ' This needs Node 22.13 or newer.' : ''
+    throw new Error(`Claude history import stopped: could not read OpenCode's session list (${errorCode}), so it cannot tell OpenCode's Claude sessions from your own. The next run retries.${nodeStep}`)
+  }
+
+  // A current mapping can name a fork rather than its original transcript.
+  // Read that file first so its native forkedFrom IDs gate the ancestors
+  // before they could be projected. Each file is still read only once.
+  /** @type {Map<string, number> | undefined} */
+  let bySessionFile
+  /** @type {number[]} */
+  const priority = []
+  const prioritized = new Set()
+  let next = 0
+  /** @param {string} id */
+  function prioritize(id) {
+    // Ordinary Claude-only scans allocate no filename index or visited set.
+    if (!bySessionFile) {
+      bySessionFile = new Map()
+      for (let index = 0; index < candidates.length; index++) {
+        bySessionFile.set(path.basename(candidates[index].filePath, '.jsonl'), index)
+      }
+    }
+    const index = bySessionFile.get(id)
+    if (index !== undefined && index >= next && !prioritized.has(index)) priority.push(index)
+  }
+  for (const id of openCodeSessions) prioritize(id)
+  /** @param {string} id */
+  function ownSession(id) {
+    if (openCodeSessions.has(id)) return
+    if (openCodeSessions.size >= 65536) throw new Error('OpenCode ownership session budget exceeded; Claude history import stopped')
+    openCodeSessions.add(id)
+    prioritize(id)
+  }
+  function* orderedCandidates() {
+    for (;;) {
+      const index = priority.pop()
+      if (index !== undefined) {
+        if (index < next || prioritized.has(index)) continue
+        prioritized.add(index)
+        yield candidates[index]
+      } else {
+        if (next >= candidates.length) return
+        const index = next++
+        if (!prioritized.delete(index)) yield candidates[index]
+      }
+    }
+  }
+
   // Degrades to [] on error so a missing or unreadable channel never
   // aborts the backfill: the join is best-effort and `cwd` /
   // `git_branch` are nullable columns.
@@ -299,7 +369,7 @@ async function* runClaudeBackfill(args) {
   /** @type {Map<string, number>} */
   const unclaimedEntrypoints = new Map()
 
-  for (const { filePath, inContainer, fingerprint } of candidates) {
+  for (const { filePath, inContainer, fingerprint } of orderedCandidates()) {
     if (ctx.signal?.aborted) break
     filesRead += 1
     // Read before this file yields anything, so the stamp below can tell a
@@ -307,8 +377,26 @@ async function* runClaudeBackfill(args) {
     const failedBefore = ctx.itemsFailed ?? 0
     /** @type {TranscriptEntry[]} */
     let entries
+    /** @type {Map<string, Set<string>>} */
+    const forks = new Map()
+    const transcriptOwnedSessions = new Set()
+    /** @type {Set<string> | undefined} */
+    let toolEvidenceSessions
     try {
-      entries = await loadTranscriptFile(filePath)
+      entries = await loadTranscriptFile(filePath, row => {
+        const evidence = openCodeTranscriptSession(row)
+        if (evidence?.launched) transcriptOwnedSessions.add(evidence.sessionId)
+        else if (evidence) (toolEvidenceSessions ??= new Set()).add(evidence.sessionId)
+        if (!isPlainObject(row) || typeof row.sessionId !== 'string' || !isPlainObject(row.forkedFrom)
+            || typeof row.forkedFrom.sessionId !== 'string') return
+        const parent = row.forkedFrom.sessionId
+        if (forks.get(row.sessionId)?.has(parent)) return
+        for (const [a, b] of [[row.sessionId, parent], [parent, row.sessionId]]) {
+          const neighbors = forks.get(a) ?? new Set()
+          neighbors.add(b)
+          forks.set(a, neighbors)
+        }
+      })
     } catch (err) {
       log.warn('claude.backfill.transcript_read_failed', {
         component: 'plugin.claude.backfill',
@@ -322,10 +410,42 @@ async function* runClaudeBackfill(args) {
       continue
     }
 
+    // Evidence rows such as `api-request-shape` carry no entrypoint, so read
+    // the session's the way the entrypoint gate below does.
+    for (const id of toolEvidenceSessions ?? []) {
+      if (!transcriptOwnedSessions.has(id)
+          && openCodeToolEvidenceApplies(sessionEntrypoint(entries.filter(entry => entry.sessionId === id)))) {
+        transcriptOwnedSessions.add(id)
+      }
+    }
+    for (const id of transcriptOwnedSessions) ownSession(id)
+    const pending = [...forks.keys()].filter(id => openCodeSessions.has(id))
+    const reached = new Set(pending)
+    while (pending.length) {
+      const id = /** @type {string} */ (pending.pop())
+      ownSession(id)
+      for (const neighbor of forks.get(id) ?? []) {
+        if (reached.has(neighbor)) continue
+        reached.add(neighbor)
+        pending.push(neighbor)
+      }
+    }
+
     for (const [sessionId, sessionEntries] of groupBySession(entries)) {
+      // @ref LLP 0589#single-producer [implements]: OpenCode's native lane owns these turns even when its adapter is switched off
+      if (openCodeSessions.has(sessionId)) {
+        sessionsGated += 1
+        log.info('claude.backfill.foreign_session_drop', {
+          component: 'plugin.claude.backfill', operation: 'ownership_gate',
+          session_id: sessionId, owner_client: 'opencode',
+          reason: transcriptOwnedSessions.has(sessionId) ? 'transcript_provenance' : 'native_session_ownership',
+          status: 'ok',
+        })
+        continue
+      }
       // Claude Code writes the transcript whatever the live drop decided, and
       // the live drop wrote no row, so `part_id` dedupe cannot absorb a
-      // re-import. First in the loop, so an ignored session costs one
+      // re-import. Before projection, so an ignored session costs one
       // `Set.has` and no window filter, projection, or git probe.
       // @ref LLP 0395#sweep-consults-the-set [implements]: the automatic sweep
       // shares the recorder's process, so it shares the recorder's drop set

@@ -232,15 +232,15 @@ See [querying](QUERYING.md) for searches, session drill-downs, and bounded SQL.
 ## History import failed
 
 `hyp status` shows this problem when a provider's scheduled history import
-could not read one or more files on its last run:
+failed on its last run:
 
 ```output
-codex history import failed on its last run, so some history may be missing. Anything it could read was still imported. The next scheduled run retries, and this clears once a run succeeds.
+codex history import failed on its last run, so some history may be missing. Rows read before the failure may have been imported; the command below shows the cause. The next scheduled run retries, and this clears once a run succeeds.
 ```
 
-Files that could be read were still imported. A file that failed is retried on
-every scheduled run, and the warning clears on its own once a run succeeds. To
-see how many files failed and the first one with its error:
+Rows read before the failure may have been imported. Every scheduled run
+retries, and the warning clears on its own once a run succeeds. To see the
+error, and the failing file if there is one:
 
 ```sh
 hyp backfill codex --dry-run
@@ -253,6 +253,12 @@ example a Codex session file over its
 of the session directory clears the warning on the next run, but HypAware will
 not import it and Codex will no longer list that session, so keep the file
 somewhere safe.
+
+A Claude import that cannot read OpenCode's session list stops before it
+writes anything, so it never records OpenCode's Claude sessions as your own.
+`hyp backfill claude --dry-run` shows why. If it says Node 22.13 or newer is
+needed, upgrade Node; otherwise fix the problem it names, such as the
+permissions on OpenCode's data directory.
 
 ## An export or team sync is missing
 

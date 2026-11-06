@@ -6,10 +6,11 @@ import { isPlainObject } from '../util/json_util.js'
  * The ownership test for a `json_path` provider entry, shared by the two
  * sides that have to agree about it: the plugin's `attach()` (which overwrites
  * its own entry and refuses over anyone else's) and core's
- * `detachClientFromDisk` (which deletes its own entry and leaves anyone
- * else's in place). Kept in one module rather than copied, because the
- * failure mode of the two drifting apart is asymmetric and silent: attach
- * would refuse to rewrite an entry detach is happy to delete, or
+ * `detachClientFromDisk` (which removes its own override, preserves user
+ * additions, and leaves anyone else's entry in place). Kept in one module
+ * rather than copied, because the failure mode of the two drifting apart is
+ * asymmetric and silent: attach would refuse to rewrite an entry detach is
+ * happy to delete, or
  * delete-on-detach an entry attach believes is the user's.
  *
  * The entry attach writes is self-identifying by construction: a marker header

@@ -593,9 +593,9 @@ export async function collectHypAwareStatus(opts = {}) {
   for (const provider of failingBackfills) {
     diagnostics.push({
       severity: 'error', kind: 'backfill_failed',
-      message: `${provider} history import failed on its last run, so some history may be missing. Anything it could read was still imported. The next scheduled run retries, and this clears once a run succeeds.`,
+      message: `${provider} history import failed on its last run, so some history may be missing. Rows read before the failure may have been imported; the command below shows the cause. The next scheduled run retries, and this clears once a run succeeds.`,
       repair: [
-        `hyp backfill ${provider} --dry-run  # names the failing file and the error`,
+        `hyp backfill ${provider} --dry-run  # shows the error, and the failing file if there is one`,
         'If the error is a permission problem, fix it and the next run picks the file up. If the same file keeps failing, the file cannot be imported as it is.',
       ],
     })
