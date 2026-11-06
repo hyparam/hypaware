@@ -445,9 +445,16 @@ an `annotations` object. The kernel builds both in `toolEntry(verb)`
 
 | Auth class | Hints |
 | --- | --- |
-| `read` | `readOnlyHint: true` |
-| `write` | `readOnlyHint: false`, `destructiveHint: false` |
-| `operator` | `readOnlyHint: false`, `destructiveHint: true` |
+| `read` | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
+| `write` | `readOnlyHint: false`, `destructiveHint: false`, `openWorldHint: false` |
+| `operator` | `readOnlyHint: false`, `destructiveHint: true`, `openWorldHint: true` |
+
+- **All three hints are explicit on every class.** The MCP spec defaults
+  an absent `destructiveHint` and `openWorldHint` to `true`, and OpenAI's
+  app review flags any tool that leaves one out, labeling a read tool as
+  possibly destructive. `read` and `write` verbs touch only the org's own
+  recorded data, so they are closed-world; `operator` holds verbs that
+  reach outside (`github_backfill`), so it is open-world.
 
 - `destructiveHint: false` on `write` is what HYP-141 asks for the mark,
   and it is honest for the one verb in the class: a mark appends to the

@@ -106,12 +106,12 @@ function assertAnnotated(tools, lookup) {
     assert.equal(entry.annotations.title, entry.title, `${entry.name} annotations.title matches title`)
     const authClass = verb.authClass ?? 'read'
     if (authClass === 'read') {
-      assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: true }, `${entry.name} is a read tool`)
+      assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: true, destructiveHint: false, openWorldHint: false }, `${entry.name} is a read tool`)
     } else if (authClass === 'write') {
-      assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: false, destructiveHint: false }, `${entry.name} is a write tool`)
+      assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: false, destructiveHint: false, openWorldHint: false }, `${entry.name} is a write tool`)
     } else {
       assert.equal(authClass, 'operator')
-      assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: false, destructiveHint: true }, `${entry.name} is an operator tool`)
+      assert.deepEqual(entry.annotations, { title: entry.title, readOnlyHint: false, destructiveHint: true, openWorldHint: true }, `${entry.name} is an operator tool`)
     }
   }
 }
@@ -181,7 +181,7 @@ test('an http principal with report-publish sees the bound mark titled and hinte
       ['annotations_untitled', 'graph_neighbors', 'grep_search', 'query_sql', 'set_recommendation_status'])
     assertAnnotated(tools, (t) => booted.kernel.verbs.getByTool(t))
     assert.deepEqual(tools.find((/** @type {any} */ t) => t.name === 'set_recommendation_status').annotations,
-      { title: 'Set recommendation status', readOnlyHint: false, destructiveHint: false })
+      { title: 'Set recommendation status', readOnlyHint: false, destructiveHint: false, openWorldHint: false })
   } finally {
     await fs.rm(booted.tmp, { recursive: true, force: true })
   }
@@ -193,7 +193,7 @@ test('the stdio host registers no write verb', async () => {
     assert.deepEqual(booted.kernel.verbs.list().filter((v) => v.authClass === 'write').map((v) => v.name), [])
     const tools = await stdioTools(booted)
     assert.ok(!tools.some((t) => t.name === 'set_recommendation_status'))
-    assert.ok(!tools.some((t) => t.annotations.destructiveHint === false))
+    assert.ok(!tools.some((t) => t.annotations.readOnlyHint === false && t.annotations.destructiveHint === false))
   } finally {
     await fs.rm(booted.tmp, { recursive: true, force: true })
   }

@@ -245,7 +245,7 @@ test('the shipped verb set is advertised exactly as the plain property read did'
     title: verb.title ?? verb.tool,
     description: verb.summary,
     inputSchema: toJsonSchema(verb.inputSchema),
-    annotations: { title: verb.title ?? verb.tool, readOnlyHint: true },
+    annotations: { title: verb.title ?? verb.tool, readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   }))
   assert.deepEqual(tools.map((/** @type {any} */ t) => t.name), ['graph_neighbors', 'grep_search', 'query_sql'])
   assert.equal(JSON.stringify(tools), JSON.stringify(expected))
