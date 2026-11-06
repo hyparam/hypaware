@@ -1625,7 +1625,7 @@ Daemon commands don't activate plugins.
 ### `hyp daemon install`
 
 ```text
-hyp daemon install [--config <path>] [--bin <path>] [--force] [--dry-run [--json]]
+hyp daemon install [--config <path>] [--bin <path>] [--force] [--dry-run [--json] [--platform darwin|linux|win32]]
 ```
 
 Installs the persistent launchd or systemd user service, or on Windows the
@@ -1639,10 +1639,11 @@ for that platform instead of this one.
 
 On success it names the service it installed, such as
 `LaunchAgent: com.hyperparam.hypaware`, `systemd unit: hypaware.service` or
-`Scheduled Task: \hypaware`, then its target and the config path. On macOS and
-Linux it also prints the service log path. On Windows the task keeps no service
-log, so there is no `logs` line; it says instead that Windows restarts a
-crashed daemon within about a minute. A Windows install also writes the
+`Scheduled Task: \hypaware`, then its target and the config path. The Windows
+label names the task folder; the `target` line names the task itself,
+`\hypaware\<SID>`. On macOS and Linux it also prints the service log path. On
+Windows the task keeps no service log, so there is no `logs` line; it says
+instead that Windows restarts a crashed daemon within about a minute. A Windows install also writes the
 windowless launcher the task runs, `daemon-launcher.vbs`; `--dry-run` shows its
 content after the task definition.
 

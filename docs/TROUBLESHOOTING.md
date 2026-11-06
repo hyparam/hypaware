@@ -470,9 +470,10 @@ your installation if you configured another home.
 On Windows, the Scheduled Task does not capture the daemon's output, so there
 is no `daemon.out.log` or `daemon.err.log`; `daemon.log` is still written.
 Run `hyp daemon status` to see whether the daemon is running. To check the
-task itself, query it with the SID that `whoami /user` prints:
+task itself, run this in PowerShell or Command Prompt, replacing `<SID>` with
+the SID that `whoami /user` prints (it starts with `S-1-5-`):
 
-```sh
+```powershell
 schtasks /Query /TN \hypaware\<SID> /V /FO LIST
 ```
 
