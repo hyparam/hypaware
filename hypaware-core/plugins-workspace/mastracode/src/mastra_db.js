@@ -353,6 +353,11 @@ export function openMastraDb(dbPath, opts = {}) {
     version = String(db.prepare(SQLITE_VERSION_SQL).get()?.version)
   } catch (cause) {
     db.close()
+    // The first statement is where a writer's lock surfaces; it is busy,
+    // not unreadable, and the next tick retries the open.
+    if (isRetryableBusyError(cause)) {
+      throw new MastraDbError('mastra.db is locked (SQLITE_BUSY) at open', { code: 'sqlite_busy', cause })
+    }
     throw new MastraDbError('mastra.db could not be opened read-only', { code: 'open_failed', cause })
   }
   if (!sqliteVersionSupported(version)) {
