@@ -99,7 +99,7 @@ export function loadSqliteModule(requireFn) {
     )
   } catch (err) {
     throw new MastraDbError(
-      'mastracode source requires Node >= 22.12 (node:sqlite builtin not available)',
+      'mastracode source requires Node >= 22.13 (node:sqlite builtin not available)',
       { code: 'sqlite_unavailable', cause: err }
     )
   }

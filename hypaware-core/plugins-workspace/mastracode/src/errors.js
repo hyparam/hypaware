@@ -6,7 +6,7 @@
  * source reports (LLP 0586#status):
  *
  * - `sqlite_unavailable`: the `node:sqlite` builtin is missing (Node
- *   < 22.5, or an EOL runtime that ignored the `engines` floor).
+ *   before 22.13, where it is absent or behind a flag).
  * - `sqlite_unsupported`: the bundled SQLite is older than 3.45 and cannot
  *   read JSONB through `json()`.
  * - `missing`: no file exists at the resolved database path.

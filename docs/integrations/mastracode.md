@@ -160,7 +160,7 @@ records what ran; it does not enforce Mastra Code's permissions.
 - If Mastra Code changes its database schema, `hyp status` reports the
   missing table or column and HypAware records nothing until a release
   supports the new schema. It never writes partial rows.
-- Capture needs Node 22.12 or later, with a built-in SQLite of 3.45 or newer
+- Capture needs Node 22.13 or later, with a built-in SQLite of 3.45 or newer
   to read Mastra Code's thread metadata.
 
 For status messages and fixes, see
