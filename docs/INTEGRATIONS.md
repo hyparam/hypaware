@@ -38,6 +38,7 @@ collector inside the cloud environment.
 | [Factory Droid](integrations/droid.md) | Supported | Your machine, a server, or CI | Native hooks signal local transcript changes, plus recovery every five minutes; no billed token usage or cost | Yes | `droid` |
 | [Goose](integrations/goose.md) | Supported | Your machine | Goose's local session database, read-only, for the CLI and desktop app, polled every 60 seconds, plus recovery every 15 minutes | Yes | `goose` |
 | [Crush](integrations/crush.md) | Supported | Your machine | Each project's `crush.db`, read-only, found through Crush's project index, polled every 60 seconds, plus recovery every 15 minutes; no token usage | Yes | `crush` |
+| [Mastra Code](integrations/mastracode.md) | Supported | Your machine | Mastra Code's local `mastra.db`, read-only, polled every 60 seconds, plus recovery every 15 minutes; no per-turn token usage | Yes | `mastracode` |
 | [Antigravity](integrations/antigravity.md) | Beta | Your machine | Antigravity CLI and Desktop local conversation stores, polled every 30 seconds, plus recovery every five minutes | Yes | `antigravity`, `antigravity-desktop` |
 
 ## Cloud agents
