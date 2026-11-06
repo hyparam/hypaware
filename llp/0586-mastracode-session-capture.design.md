@@ -161,19 +161,25 @@ design decisions; D4 is the one Design narrows, with the reason given.
   a continued thread, so a difference between two observations can be
   negative, or can cover a turn the daemon never saw. Design therefore
   ships the Crush answer (LLP 0573 D2) by default: the thread's
-  `tokenUsage` (the five counters, never `raw`) is carried as
+  `tokenUsage` (the six counters `promptTokens`, `completionTokens`,
+  `totalTokens`, `cachedInputTokens`, `cacheCreationInputTokens` and
+  `reasoningTokens`, never `raw`) is carried as
   `attributes.mastracode.process_token_usage` on the last part of the latest
   assistant message, and no row carries LLP 0035 usage, so no query that
-  sums usage counts it. The attribute is the counter Mastra Code keeps for
-  the latest process on this thread; it resets when a thread is continued
-  and is not a thread total. T3 (LLP 0587) tries the proof against the pinned
-  `@mastra/core` source and the probe samples. Differencing ships only if
+  sums usage counts it. The attribute is the running counter Mastra Code keeps
+  on the thread, written on every step. In 0.49.0 a continued thread adds to
+  it rather than resetting it (the a3 reset was not reproduced: the Linux and
+  Mac probe runs both took 203/23 to 306/36 on `-c`), but a swallowed write
+  failure can leave it short, so it is neither a per-turn value nor a
+  guaranteed thread total. T3 (LLP 0587) tried the proof against the pinned
+  `@mastra/core` source and the probe samples, and all three conditions
+  below fail, so the default ships. Differencing ships only if
   T3 shows the gauge is written once per turn, in the same transaction as
   that turn's assistant row, and accumulates from zero for exactly that
   turn; then the turn's usage is the gauge read with that row, under LLP
   0035 `#net-input` and `#one-carrier`. Otherwise the docs state that
-  Mastra Code rows carry no per-turn usage, only the latest process's
-  counter, which is not a thread total. This is guardian question Q5.
+  Mastra Code rows carry no per-turn usage, only that running
+  counter. This is guardian question Q5.
 - **D5. Detect with a stat gate, a rowid cursor and per-thread state, and
   reconcile a whole thread on any change** (LLP 0449). #reconciliation gives
   the rules.
@@ -333,14 +339,14 @@ order. Key: `(session_id, part_id)`.
   `state` is `result`. An invocation in any other state gives only its
   tool-call part, and the open-thread rule (#reconciliation step 5) reads it
   again when it completes.
+  `step-start` gives no part; its model rides on the parts of its step.
+  `data-workspace-metadata` gives no part (D6). Any other part type,
+  `reasoning` included, is skipped and counted (#open-questions).
 - **No error flag.** Mastra Code's `tool-invocation` part carries no error
   field, so a tool-result part sets none. The one error signal in the probe,
   `data-sandbox-exit`, is a separate part and stays skipped and counted;
   joining it to its invocation by `toolCallId` is a later change
   (#open-questions).
-  `step-start` gives no part; its model rides on the parts of its step.
-  `data-workspace-metadata` gives no part (D6). Any other part type,
-  `reasoning` included, is skipped and counted (#open-questions).
 - The model is the step's `step-start` model, else `content.metadata.modelId`,
   else the thread's `currentModelId`. The provider is `content.metadata.provider`
   else the provider segment of the model id.
