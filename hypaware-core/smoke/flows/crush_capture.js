@@ -159,6 +159,23 @@ export async function run({ harness, expect }) {
       expect.that('privacy: .hypignored project absent', ignoredRows, (n) => n === 0)
     })
 
+    await counted('subagent_report', async () => {
+      const reportText = `report-${needle}`
+      insertMessage(db, {
+        id: 'S1-report', session_id: 'S1', role: 'user', created_at: nowSeconds(),
+        parts: [{ type: 'sub_agent_report', data: { label: 'Ada', output: `${reportText}\n<cwd>${toolCwd}</cwd>`, model: 'child-provider/child-model' } }],
+      })
+      await waitFor(async () => await sqlCount("select count(*) as n from ai_gateway_messages where session_id = 'crush-S1' and message_id = 'crush-S1-S1-report-0'", lifetime) === 1, 15_000)
+      const rows = await queryJson(markerSql, lifetime)
+      const report = rows.find(r => r.message_id === 'crush-S1-S1-report-0')
+      expect.that('report: delivered to the existing parent as tool output with cwd stripped', report, (r) => r?.role === 'tool' && r.part_type === 'tool_result' && r.content_text === reportText)
+      expect.that('report: label and child display model preserved', crushAttrs(report?.attributes), (a) => a?.subagent_label === 'Ada' && a.subagent_model === 'child-provider/child-model')
+      expect.that('report: no synthetic human prompt', rows.filter(r => r.role === 'user' && r.part_type === 'text'), (value) => value.length === 1)
+      expect.that('report: no token usage introduced', rows, (value) => value.every(r => usageOf(r.attributes) === undefined))
+      const result = await dispatchText(['query', 'grep', reportText, '--format', 'json'], lifetime)
+      expect.that('report: grep finds the delivered output in the parent session', result, (r) => r.code === 0 && parseJson(r.stdout)?.some((/** @type {any} */ row) => row.session_id === 'crush-S1' && row.snippet === reportText))
+    })
+
     await counted('grep', async () => {
       const result = await dispatchText(['query', 'grep', needle, '--include-local-only', '--format', 'json'], lifetime)
       expect.that('grep: exited 0', { code: result.code, stderr: result.stderr }, (value) => value.code === 0)
