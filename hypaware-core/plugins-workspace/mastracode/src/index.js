@@ -10,10 +10,14 @@
  * @ref LLP 0586#manifest [implements]: bundled, read-only adapter in the
  *   goose shape; it writes nothing into Mastra Code and installs no skills.
  *
- * @import { PluginActivationContext, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { MastraRunnerHolder } from './types.js'
  */
 
-import { MASTRACODE_CONFIG_SECTION, resolveMastracodeEnabled, validateMastracodeConfig } from './config.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
+import { MASTRACODE_CONFIG_SECTION, validateMastracodeConfig } from './config.js'
+import { startMastracodeSource } from './source.js'
 
 const PLUGIN_NAME = '@hypaware/mastracode'
 const SOURCE_NAME = 'mastracode'
@@ -39,42 +43,17 @@ export async function activate(ctx) {
     validate: validateMastracodeConfig,
   })
 
+  // @ref LLP 0586#privacy [implements]: the durable session exclusions load at
+  // activation; the poll refreshes them by signature on ticks with candidates.
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
+  /** @type {MastraRunnerHolder} */
+  const holder = {}
+
   ctx.sources.register({
     name: SOURCE_NAME,
     plugin: PLUGIN_NAME,
     summary: 'Mastra Code mastra.db poll source (ongoing capture)',
     configSection: MASTRACODE_CONFIG_SECTION,
-    start: startMastracodeSource,
+    start: (sctx) => startMastracodeSource(sctx, { ignoredSessions, holder }),
   })
-}
-
-/**
- * Start the source. It reads nothing yet and reports `ready` with zero rows.
- *
- * @param {PluginActivationContext} ctx
- * @returns {Promise<StartedSource>}
- */
-async function startMastracodeSource(ctx) {
-  const enabled = resolveMastracodeEnabled(ctx.config)
-  if (!enabled) {
-    ctx.log.info('mastracode.source_disabled', {
-      component: 'mastracode',
-      operation: 'mastracode.start',
-      detail: 'mastracode.enabled = false',
-    })
-  }
-  return {
-    async status() {
-      return {
-        state: 'ready',
-        message: enabled
-          ? 'mastracode source started, no threads read'
-          : 'mastracode ongoing capture disabled (mastracode.enabled = false)',
-        rowsWritten: 0,
-        details: { enabled },
-      }
-    },
-    async reload() {},
-    async stop() {},
-  }
 }

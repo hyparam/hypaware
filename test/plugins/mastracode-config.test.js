@@ -1,6 +1,8 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -191,7 +193,10 @@ async function startViaActivate(config) {
   const sources = []
   /** @type {any[]} */
   const sections = []
-  const ctx = /** @type {any} */ (makeCtx(config))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mastracode-config-'))
+  const ctx = /** @type {any} */ (makeCtx(config, { HYP_HOME: dir, MASTRA_DB_PATH: path.join(dir, 'absent', 'mastra.db') }))
+  ctx.paths = { rootDir: dir, stateDir: dir, cacheDir: dir, tempDir: dir }
+  ctx.log = { ...ctx.log, debug() {}, warn() {}, error() {} }
   ctx.configRegistry = { registerSection: (/** @type {any} */ s) => sections.push(s) }
   ctx.sources = { register: (/** @type {any} */ s) => sources.push(s) }
   await activate(ctx)
@@ -205,11 +210,11 @@ async function startViaActivate(config) {
 }
 
 test('the source starts and reports ready with zero rows', async () => {
-  const { source } = await startViaActivate(undefined)
+  const { source, ctx } = await startViaActivate(undefined)
   const status = await source.status()
   assert.equal(status.state, 'ready')
   assert.equal(status.rowsWritten, 0)
-  assert.equal(status.details?.enabled, true)
+  assert.equal(status.message, `no mastracode installation detected at ${ctx.env.MASTRA_DB_PATH}`)
   await source.stop()
 })
 
