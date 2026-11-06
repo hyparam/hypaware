@@ -1,7 +1,7 @@
 # LLP 0587: Mastra Code session capture, implementation plan
 
 **Type:** plan
-**Status:** Draft
+**Status:** Active
 **Systems:** Sources, Plugins
 **Author:** HypForge
 **Date:** 2026-11-05
@@ -16,6 +16,9 @@
 > into tasks that each land on their own, with a test that proves the task
 > and nothing more. It follows the Crush plan (LLP 0574), whose file and test
 > layout the tasks copy, less discovery: there is one database.
+>
+> Active 2026-11-06: T1-T10 are done; the results are in #validation-results.
+> G-DOC and G-UW run at Close.
 
 ## How this refines the design {#refinement}
 
@@ -162,3 +165,42 @@ an owner, an evidence path in the mission folder and a done-when.
 - id: T8  branch: codex/mastracode-session-capture/T8  deps: [T7]      complexity: 2  -- docs/integrations/mastracode.md (the package and pinned version named; what is recorded, setup, history import, limits: usage per D4 (the latest process's counter, not a thread total, unless T3 proved per-turn usage), the D8 disclosures (90-day chat retention, with the sentence "HypAware keeps a thread Mastra Code deletes, but drops messages Mastra Code prunes from a thread still in use" adjusted to T3's prune granularity, one factual PostHog sentence with `MASTRA_TELEMETRY_DISABLED=1`, deny mode still runs tools, remote stores unsupported, titles as content), the macOS picker that does not pre-check Mastra Code, Windows offered but unvalidated, `db_path` for a moved database or a daemon under launchd or systemd, and the sweep-cadence latency for late in-place edits) modeled on docs/integrations/goose.md; a row in the docs/INTEGRATIONS.md "Coding agents" table; README client list; docs/CLIENTS.md entry; docs/PRIVACY.md client table, Mastra Code in the session-exclusion lists, and the files HypAware never reads; docs/TROUBLESHOOTING.md entries for each degraded state in LLP 0586#status. No edits under hypaware-core/skills/. Test: every command in the new text run in the T9 sandbox; `npm test` (doc drift guards) green.
 - id: T9  branch: codex/mastracode-session-capture/T9  deps: [T8]      complexity: 2  -- Validation, no code: `npm pack`, then `scripts/sandbox/hyp-sandbox` installs the tarball, runs `hyp setup` with Mastra Code picked, real Mastra Code 0.49.0 turns from the pinned tarball in two project directories against the labeled loopback fixture with `MASTRA_TELEMETRY_DISABLED=1`: a prompt with a tool call, SQL and `hyp query grep` readback, a `-c` continue that appends with no duplicates, a turn while the daemon is stopped that is recovered after it starts, a daemon restart that does not re-import, a `.hypignore`d project and a session ignore checked on the real product, disable and re-enable, `hyp status` diagnostics, and cleanup. Row 5's upgrade case is n/a because the plugin is new; the receipt says so. Test: the receipt at validation/T9-linux/RECEIPT.md in the mission folder records the candidate and base sha, the package and Mastra Code tarball shasums, versions, every command with its exit status, limits, and the loopback label, and names the coverage rows it settles on Linux.
 - id: T10 branch: codex/mastracode-session-capture/T10 deps: [T9]      complexity: 2  -- Mac Part B: a product-pinned, reviewed `mastracode-part-b` recipe registered through the shared runner (as G-A) runs the same packaged candidate on the Mac under a disposable HYP_HOME and HOME, with T9's journey steps labeled loopback where they apply, plus the checkpoint-and-reset stat-gate check and the reader side-effect check from LLP 0586#sqlite: which files a read-only open creates and their sizes, that an idle read leaves `mastra.db` and `-wal` size, mtime and inode unchanged, and that the next idle tick opens nothing. The invoking seat records its own invocation. A relay, if one happens, is recorded in OPERATOR-ASSISTANCE.md as an intervention, not as the plan path. Test: evidence in mac-job/partB/evidence/ with a verifying SHA256SUMS, recording the candidate sha256 and the actor, and the Mac column of every coverage row filled from it. Done-when: the results above are read back from that folder; if macOS differs from Linux, LLP 0586 is amended before Close.
+
+### Validation results {#validation-results}
+
+Recorded 2026-11-06. T1-T8 landed in #2920. T9 and T10 ran the same packaged
+candidate on Linux and macOS.
+
+| Task | Platform | Result | Evidence |
+| --- | --- | --- | --- |
+| T1-T8 | CI | Landed in #2920 (merge 65be3a76, landing head 470025b2) | The merge queue run on 470025b2 (the second attempt; the first failed on an unrelated `daemon-pid-identity` timing flake) |
+| T9 | Linux x86_64, `hyp-sandbox`, Mastra Code 0.49.0, loopback fixture provider | Passed. Coverage rows 4 to 10, 12 and 13 settled; row 11 stays on its cost model and fixture tests, with no regression seen | Sandbox run of the 1.49.0 tarball from 470025b2 (sha256 `5a48b7a1`), the mission receipt validation/T9-linux/RECEIPT.md |
+| T10 | macOS 27.2 arm64, the dedicated Mac test account, Mastra Code 0.49.0, loopback fixture provider, seat-run through the shared runner | Passed: 60 checks pass, 0 fail, 0 skip, exit 0, and the summary matches the Linux dry run of the same recipe on all 32 compared facts | Part B run `mastracode-partB-20261106T041637Z-43698` of the same tarball (`5a48b7a1`), recipe `mastracode-part-b-v1` (manifest `ce6318b0`, approved in upstream-watch#11); all 96 SHA256SUMS entries verified after fetch |
+
+What the runs show for #sqlite and #cost, on both platforms:
+
+- After a clean close (a TRUNCATE checkpoint by the last connection) left no
+  sidecars, the daemon's first read-only open created a 0-byte `-wal` and a
+  32768-byte `-shm`, the case LLP 0586 `#sqlite` names. The change gate
+  leaves `-shm` out and records the signature after the reader closes, so
+  the next tick opened nothing.
+- Over 27 idle samples 5 s apart, the `mastra.db` and `-wal` size, mtime
+  and inode and the `-shm` mtime did not move.
+- On a synthetic scratch database with a writer held open, the stat
+  signature moved on every spaced commit, including after a checkpoint and
+  WAL reset.
+
+What the runs do not prove:
+
+- Both platforms used a labeled loopback provider in headless `-p` runs, so
+  they prove Mastra Code's storage and HypAware's capture, not authenticated
+  inference or the TUI.
+- On a Mastra Code-only install `hyp session ignore` exits 3 because no
+  gateway port is bound, as on any poll-source-only install (#2860). `hyp privacy ignore <dir>`
+  works and was checked on both platforms.
+- Neither run measured CPU or memory; row 11 rests on the cost model and the
+  fixture tests. The missing, busy, remote-store and schema states, history
+  pruning and upgrade are fixture-only on both platforms (upgrade has no
+  earlier Mastra Code-capable release to start from).
+
+Nothing LLP 0586 or this plan decided changes.
