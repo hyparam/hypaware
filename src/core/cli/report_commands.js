@@ -356,7 +356,11 @@ export async function runReportSave(argv, ctx) {
       return 1
     }
     try {
-      // POSIX rename replaces the empty directory this save just claimed.
+      // POSIX rename replaces the empty directory this save just claimed; on
+      // win32 rename never replaces a directory, so release the claimed slot
+      // first. A concurrent save that reclaims the name in that gap makes the
+      // rename fail, which the catch below reports with nothing saved.
+      if (process.platform === 'win32') await fs.rmdir(dest)
       await fs.rename(staging, dest)
     } catch (err) {
       await fs.rmdir(dest).catch(() => {})
@@ -1939,6 +1943,7 @@ async function describeErrorResponse(response, unnamed) {
 
 /**
  * @ref LLP 0436#sources [implements]: reject assets before packing; the server still validates every upload
+ * @ref LLP 0585#pages [implements]: the default comparison, automation and repeated-work pages pass too
  * @param {string} dir
  * @returns {Promise<string[]>}
  */
@@ -1946,8 +1951,8 @@ async function reportSourcePages(dir) {
   const pages = []
   const entries = await fs.opendir(dir)
   for await (const entry of entries) {
-    if (!entry.isFile() || !/^(?:report|usage|work|health|(?:recommendation|change)-[a-z0-9][a-z0-9-]*)\.md$/.test(entry.name)) {
-      throw new Error(`unsupported report entry '${esc(entry.name)}'; upload only report.md, usage.md, work.md, health.md, and recommendation-<slug>.md as regular files, without HTML, assets, directories, or symlinks; names are lowercase, and a slug is [a-z0-9][a-z0-9-]* - remove stray files such as .DS_Store first`)
+    if (!entry.isFile() || !/^(?:report|comparison|work|automation|repeated-work|usage|health|(?:recommendation|change)-[a-z0-9][a-z0-9-]*)\.md$/.test(entry.name)) {
+      throw new Error(`unsupported report entry '${esc(entry.name)}'; upload only report.md, comparison.md, work.md, automation.md, repeated-work.md, usage.md, health.md, and recommendation-<slug>.md as regular files, without HTML, assets, directories, or symlinks; names are lowercase, and a slug is [a-z0-9][a-z0-9-]* - remove stray files such as .DS_Store first`)
     }
     pages.push(entry.name)
   }

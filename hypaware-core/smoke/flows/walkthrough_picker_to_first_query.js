@@ -259,6 +259,7 @@ export async function run({ harness, expect }) {
         '--source', 'codex',
         '--source', 'opencode',
         '--source', 'crush',
+        '--source', 'mastracode',
         '--source', 'otel',
         '--export', 'local-parquet',
         '--retention-days', '30',
@@ -497,6 +498,7 @@ export async function run({ harness, expect }) {
         '--source', 'codex',
         '--source', 'opencode',
         '--source', 'crush',
+        '--source', 'mastracode',
         '--source', 'otel',
         '--export', 'local-parquet',
         '--retention-days', '30',
@@ -628,7 +630,7 @@ export async function run({ harness, expect }) {
       finishSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_picked === 5 &&
+        v.sources_picked === 6 &&
         v.export_picked === 'local-parquet' &&
         v.clients_picked === 3 &&
         v.retention_days === 30
@@ -838,6 +840,8 @@ async function goldenPickerConfig(hypHome) {
     { name: '@hypaware/codex', config: {} },
     // A sweep-only source: picked with `--source crush`, no client attach.
     { name: '@hypaware/crush' },
+    // A poll source with no client attach: picked with `--source mastracode`.
+    { name: '@hypaware/mastracode' },
   ]
 
   // Riders land after every picked plugin, in the order the composer folds

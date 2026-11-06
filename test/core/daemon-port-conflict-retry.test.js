@@ -106,7 +106,7 @@ test('the owner probe names the process holding a real loopback port, by pid and
   }
 })
 
-test('the owner probe says unknown when it cannot know', async () => {
+test('the owner probe says unknown when it cannot know', { skip: process.platform === 'win32' && "the fixture's fake /proc fd entries are symlinks, which need Developer Mode on win32" },  async () => {
   const free = await occupyLoopbackPort()
   const port = portOf(free)
   await new Promise(resolve => free.close(resolve))
@@ -138,7 +138,7 @@ test('the owner probe says unknown when it cannot know', async () => {
   }
 })
 
-test('the Linux probe names only a listener that could refuse the failing bind, and one process or none', async () => {
+test('the Linux probe names only a listener that could refuse the failing bind, and one process or none', { skip: process.platform === 'win32' && "the fixture's fake /proc fd entries are symlinks, which need Developer Mode on win32" },  async () => {
   const procRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-port-owner-family-'))
   try {
     await fs.mkdir(path.join(procRoot, 'net'))
@@ -164,7 +164,7 @@ test('the Linux probe names only a listener that could refuse the failing bind, 
   }
 })
 
-test('the owner probe answers within its budget even when one read hangs', async (t) => {
+test('the owner probe answers within its budget even when one read hangs', { skip: process.platform === 'win32' && "the fixture's fake /proc fd entries are symlinks, which need Developer Mode on win32" },  async (t) => {
   const procRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-port-owner-slow-'))
   try {
     await fs.mkdir(path.join(procRoot, 'net'))
@@ -431,7 +431,7 @@ process.exit(0)
   }
 })
 
-test('stopping a supervised daemon during the retry wait is prompt, and the owner is left alone', async () => {
+test('stopping a supervised daemon during the retry wait is prompt, and the owner is left alone', { skip: process.platform === 'win32' && 'graceful SIGTERM delivery is a POSIX surface; win32 stops via the LLP 0300 file channel' }, async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-port-conflict-stop-'))
   const squatter = await occupyLoopbackPort()
   /** @type {ChildProcess | undefined} */

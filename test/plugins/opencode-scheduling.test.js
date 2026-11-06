@@ -5,7 +5,7 @@ import test from 'node:test'
 
 const source = await fs.readFile(new URL('../../hypaware-core/plugins-workspace/opencode/assets/hypaware.js', import.meta.url), 'utf8')
 
-async function harness() {
+async function harness(initialEnv = {}) {
   let now = 0
   const timers = new Map()
   const reads = []
@@ -14,7 +14,7 @@ async function harness() {
   let upload = async (signal) => ({ body: { cancel() {} } })
   const context = vm.createContext({
     Date: { now: () => now },
-    process: { env: {} },
+    process: { env: { ...initialEnv } },
     AbortController,
     AbortSignal: {
       any: AbortSignal.any,
@@ -47,7 +47,7 @@ async function harness() {
     for (let i = 0; i < 20; i++) await Promise.resolve()
   }
   return {
-    hooks, reads, uploads,
+    hooks, reads, uploads, env: context.process.env,
     setRead(fn) { read = fn },
     setUpload(fn) { upload = fn },
     event(id = 'session', type = 'message.part.updated') {
@@ -69,6 +69,17 @@ async function harness() {
     },
   }
 }
+
+test('the managed OpenCode plugin stamps Claude SDK launch provenance before any capture event', async () => {
+  for (const inherited of [undefined, 'sdk-ts']) {
+    const h = await harness({ CLAUDE_CODE_ENTRYPOINT: inherited, OPENCODE_CLIENT: 'desktop' })
+    assert.equal(h.env.CLAUDE_CODE_ENTRYPOINT, 'opencode')
+    assert.equal(h.env.OPENCODE_CLIENT, 'desktop')
+    assert.equal(h.reads.length, 0)
+    assert.equal(h.uploads.length, 0)
+    h.hooks.dispose()
+  }
+})
 
 test('streaming bursts coalesce, rate-limit full snapshots, and retain the latest trigger', async () => {
   const h = await harness()

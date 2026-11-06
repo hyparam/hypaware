@@ -194,7 +194,10 @@ test('a forced rewrite over unreadable metadata is refused, the walk continues, 
   }
 })
 
-test('metadata that exists but cannot be opened is refused the same way', { skip: process.getuid?.() === 0 && 'root reads a mode-000 file' }, async () => {
+test('metadata that exists but cannot be opened is refused the same way', {
+  skip: (process.getuid?.() === 0 && 'root reads a mode-000 file')
+    || (process.platform === 'win32' && 'chmod 0o000 does not make a file unopenable on win32'),
+}, async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-forced-refusal-eacces-'))
   /** @type {string | undefined} */
   let metadataFile
@@ -261,7 +264,10 @@ async function editMetadata(file, edit) {
 }
 
 for (const breakage of BREAKAGES) {
-  test(`a forced rewrite over ${breakage.name} is refused and changes nothing`, { skip: breakage.root && process.getuid?.() === 0 && 'root lists a mode-000 directory' }, async () => {
+  test(`a forced rewrite over ${breakage.name} is refused and changes nothing`, {
+    skip: (breakage.root && process.getuid?.() === 0 && 'root lists a mode-000 directory')
+      || (breakage.root && process.platform === 'win32' && 'chmod 0o000 does not make a directory unlistable on win32'),
+  }, async () => {
     const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-forced-refusal-layout-'))
     /** @type {string | undefined} */
     let metadataFile

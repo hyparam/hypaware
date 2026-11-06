@@ -15,7 +15,9 @@ import { SHIM, shim, systemdRoot, isAlive, recordedPid } from '../helpers/sandbo
  * from `sandbox-shim.test.js` for the same reason as its siblings.
  */
 
-test('systemctl mock: --spawn starts the unit and reports its MainPID', async (t) => {
+test('systemctl mock: --spawn starts the unit and reports its MainPID', {
+  skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have (the unit\'s ExecStart is /bin/sleep)',
+}, async (t) => {
   const { root, home, unit } = systemdRoot(t)
   const env = { HOME: home, HYP_SANDBOX_SPAWN: '1' }
 
@@ -73,7 +75,9 @@ test('systemctl mock: a start while the unit is between restarts does not add a 
   )
 })
 
-test('systemctl mock: a stop says when it kept the instance that replaced the one it killed', async (t) => {
+test('systemctl mock: a stop says when it kept the instance that replaced the one it killed', {
+  skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have (the draining program is a /bin/sh TERM trap)',
+}, async (t) => {
   const { root, home, unit } = systemdRoot(t)
   const env = { HOME: home, HYP_SANDBOX_SPAWN: '1' }
   // The supervisor exits on the first SIGTERM while its program is still

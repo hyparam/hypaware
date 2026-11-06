@@ -1,4 +1,4 @@
-import type { JsonObject } from '../../../../hypaware-plugin-kernel-types.d.ts'
+import type { AiGatewayProjectedMessage, JsonObject } from '../../../../hypaware-plugin-kernel-types.d.ts'
 
 /**
  * One Codex rollout session recovered from a `~/.codex/sessions/**` file.
@@ -69,6 +69,8 @@ export interface CodexRolloutItem {
   payload: Record<string, unknown>
   /** Envelope timestamp in epoch millis, when present (modern JSONL only). */
   timestampMs?: number
+  /** A checkpoint reduced during parsing, so its replacement snapshot can be freed. */
+  projectedMessage?: AiGatewayProjectedMessage
   /**
    * Per-turn token usage recovered from a `token_count` event_msg, already
    * normalized into the gateway's `{ usage: {...} }` attributes shape. Present

@@ -222,14 +222,18 @@ test('file tools cannot capture outside roots, symlink targets or stricter desce
 })
 
 test('paths and config cover relocated data, portable installs, profiles and reject invented options', async () => {
-  assert.deepEqual(dataRoots({ HOME: '/home/p', XDG_CONFIG_HOME: '/xdg' }, {}, 'linux'), ['/xdg/Code', '/xdg/Code - Insiders'])
-  assert.deepEqual(dataRoots({ VSCODE_PORTABLE: '/portable' }), ['/portable/user-data'])
+  // Built with path.join: the roots join with the host separator, which is '\' on win32.
+  assert.deepEqual(dataRoots({ HOME: '/home/p', XDG_CONFIG_HOME: '/xdg' }, {}, 'linux'), [path.join('/xdg', 'Code'), path.join('/xdg', 'Code - Insiders')])
+  assert.deepEqual(dataRoots({ VSCODE_PORTABLE: '/portable' }), [path.join('/portable', 'user-data')])
   assert.equal(validateCopilotConfig({ user_data_dirs: ['/custom'], backfill: { sweep_cron: '* * * * *', window_days: 2 } }).ok, true)
   for (const config of [{ user_data_dirs: ['relative'] }, { made_up: true }, { backfill: { sweep_cron: 'no' } }]) assert.equal(validateCopilotConfig(config).ok, false)
   const f = await setup()
   try {
     const relocated = path.join(f.root, 'User', 'profiles', 'profile-1', 'globalStorage', 'github.copilot-chat')
     await fs.mkdir(path.dirname(relocated), { recursive: true })
+    // win32 cannot rename a directory while an open handle maps a file inside
+    // it, so the fixture writer closes first there (close() is idempotent).
+    if (process.platform === 'win32') f.close()
     await fs.rename(path.dirname(f.file), relocated)
     assert.equal((await discoverStores(f.env, f.opts.config))[0].profile, path.join(f.root, 'User', 'profiles', 'profile-1'))
     assert.equal((await f.scan()).rows.length, 6)

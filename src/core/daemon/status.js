@@ -584,6 +584,22 @@ export async function collectHypAwareStatus(opts = {}) {
   // Is the snapshot a live daemon's own, and so readable in the present tense
   // at all? Every reader below that makes a claim about *now* is gated on it.
   const snapshotIsLive = daemon.running && snapshotIsThisProcess
+  // @ref LLP 0583#failures [implements]: a good row from another thread cannot hide a failed transcript scan
+  const failingBackfills = new Set((snapshotIsLive && Array.isArray(daemonStatusFile?.warnings)
+    ? daemonStatusFile.warnings : []).flatMap(value => {
+      const match = typeof value === 'string' ? /^backfill_failed:([a-zA-Z0-9_.-]{1,96})$/.exec(value) : null
+      return match ? [match[1]] : []
+    }))
+  for (const provider of failingBackfills) {
+    diagnostics.push({
+      severity: 'error', kind: 'backfill_failed',
+      message: `${provider} history import failed on its last run, so some history may be missing. Rows read before the failure may have been imported; the command below shows the cause. The next scheduled run retries, and this clears once a run succeeds.`,
+      repair: [
+        `hyp backfill ${provider} --dry-run  # shows the error, and the failing file if there is one`,
+        'If the error is a permission problem, fix it and the next run picks the file up. If the same file keeps failing, the file cannot be imported as it is.',
+      ],
+    })
+  }
   const heartbeatAgeMs = snapshotIsLive
     ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
     : null
@@ -1707,7 +1723,7 @@ export async function collectHypAwareStatus(opts = {}) {
         attachedAt: null,
         listenerStartedAt: null,
         gapMs: 0,
-        state: newestRowAt === null ? 'unknown' : 'ok',
+        state: newestRowAt === null || failingBackfills.has(clientName) ? 'unknown' : 'ok',
       })
     }
   }

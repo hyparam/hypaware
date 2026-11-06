@@ -1233,17 +1233,21 @@ test('two distinct skill trees never share a content digest', async () => {
   // the length line of the entry it stands in for: this pair digests alike
   // under a hasher that frames the bytes and terminates the path at a newline,
   // and only a path carrying its own length closes it.
-  const named = path.join(root, 'named')
-  await fs.mkdir(named, { recursive: true })
-  await fs.writeFile(path.join(named, 'a\n2'), '', 'utf8')
-  const lined = path.join(root, 'lined')
-  await fs.mkdir(lined, { recursive: true })
-  await fs.writeFile(path.join(lined, 'a'), '0\n', 'utf8')
-  assert.notEqual(
-    await digestClientAsset(named),
-    await digestClientAsset(lined),
-    'a newline in a file name must not read as another tree\'s framing'
-  )
+  // NTFS forbids control characters in file names, so the newline-named
+  // fixture cannot exist on win32; the framing claim stays POSIX-checked.
+  if (process.platform !== 'win32') {
+    const named = path.join(root, 'named')
+    await fs.mkdir(named, { recursive: true })
+    await fs.writeFile(path.join(named, 'a\n2'), '', 'utf8')
+    const lined = path.join(root, 'lined')
+    await fs.mkdir(lined, { recursive: true })
+    await fs.writeFile(path.join(lined, 'a'), '0\n', 'utf8')
+    assert.notEqual(
+      await digestClientAsset(named),
+      await digestClientAsset(lined),
+      'a newline in a file name must not read as another tree\'s framing'
+    )
+  }
 
   await fs.rm(root, { recursive: true, force: true })
 })

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import * as paths from '../../src/core/runtime/paths.js'
 
@@ -51,34 +52,38 @@ const STATE = [
   ['sinksRoot', `${ROOT}/sinks`],
 ]
 
+// The helpers join with the host separator, so the POSIX-written fixture
+// strings are normalized before comparing.
+const N = (/** @type {string} */ p) => path.normalize(p)
+
 test('state paths: every kernel path resolves to the pinned layout', () => {
   for (const [name, expected] of LAYOUT) {
     const fn = /** @type {(h: string) => string} */ (/** @type {any} */ (paths)[name])
     assert.equal(typeof fn, 'function', name)
-    assert.equal(fn(HYP_HOME), expected, name)
+    assert.equal(fn(HYP_HOME), N(expected), name)
   }
   for (const [name, expected] of STATE) {
     const fn = /** @type {(r: string) => string} */ (/** @type {any} */ (paths)[name])
     assert.equal(typeof fn, 'function', name)
-    assert.equal(fn(ROOT), expected, name)
+    assert.equal(fn(ROOT), N(expected), name)
   }
-  assert.equal(paths.configSlotPath(ROOT, 'a'), `${ROOT}/config-control/config.a.json`)
-  assert.equal(paths.configSlotEtagPath(ROOT, 'b'), `${ROOT}/config-control/config.b.etag`)
-  assert.equal(paths.usagePolicyPath(ROOT, 'first-sync-hold'), `${ROOT}/usage-policy/first-sync-hold.json`)
-  assert.equal(paths.usagePolicyPath(ROOT, 'folder-ask'), `${ROOT}/usage-policy/folder-ask.json`)
-  assert.equal(paths.usagePolicyPath(ROOT, 'local-only'), `${ROOT}/usage-policy/local-only.json`)
-  assert.equal(paths.usagePolicyPath(ROOT, 'client-sync'), `${ROOT}/usage-policy/client-sync.json`)
-  assert.equal(paths.sinkOutboxDir(ROOT, 'central'), `${ROOT}/sinks/central/outbox`)
-  assert.equal(paths.pluginStateDir(ROOT, '@hypaware/claude'), `${ROOT}/plugins/@hypaware/claude`)
+  assert.equal(paths.configSlotPath(ROOT, 'a'), N(`${ROOT}/config-control/config.a.json`))
+  assert.equal(paths.configSlotEtagPath(ROOT, 'b'), N(`${ROOT}/config-control/config.b.etag`))
+  assert.equal(paths.usagePolicyPath(ROOT, 'first-sync-hold'), N(`${ROOT}/usage-policy/first-sync-hold.json`))
+  assert.equal(paths.usagePolicyPath(ROOT, 'folder-ask'), N(`${ROOT}/usage-policy/folder-ask.json`))
+  assert.equal(paths.usagePolicyPath(ROOT, 'local-only'), N(`${ROOT}/usage-policy/local-only.json`))
+  assert.equal(paths.usagePolicyPath(ROOT, 'client-sync'), N(`${ROOT}/usage-policy/client-sync.json`))
+  assert.equal(paths.sinkOutboxDir(ROOT, 'central'), N(`${ROOT}/sinks/central/outbox`))
+  assert.equal(paths.pluginStateDir(ROOT, '@hypaware/claude'), N(`${ROOT}/plugins/@hypaware/claude`))
   // The processing daemon's files are the ordinary helpers over its own root.
-  assert.equal(paths.pidFilePath(paths.processingStateRoot(ROOT)), `${ROOT}/processing/run/hypaware.pid`)
-  assert.equal(paths.daemonLogPath(paths.processingStateRoot(ROOT)), `${ROOT}/processing/logs/daemon.log`)
+  assert.equal(paths.pidFilePath(paths.processingStateRoot(ROOT)), N(`${ROOT}/processing/run/hypaware.pid`))
+  assert.equal(paths.daemonLogPath(paths.processingStateRoot(ROOT)), N(`${ROOT}/processing/logs/daemon.log`))
 })
 
 test('state paths: HYP_HOME resolution honours the override, the given home, and never an empty home', () => {
   assert.equal(paths.hypHomeFromEnv({ HYP_HOME: '/x' }, '/ignored'), '/x')
-  assert.equal(paths.hypHomeFromEnv({}, '/home/u'), '/home/u/.hyp')
-  assert.equal(paths.stateRootFromEnv({}, '/home/u'), '/home/u/.hyp/hypaware')
+  assert.equal(paths.hypHomeFromEnv({}, '/home/u'), N('/home/u/.hyp'))
+  assert.equal(paths.stateRootFromEnv({}, '/home/u'), N('/home/u/.hyp/hypaware'))
   // @ref LLP 0300#home-resolution [tests]: '' is never a home
   assert.ok(path.isAbsolute(paths.hypHomeFromEnv({}, '')))
   assert.notEqual(paths.hypHomeFromEnv({}, ''), '.hyp')
@@ -117,7 +122,7 @@ function sourceFiles(dir) {
 }
 
 test('state paths: no module outside paths.js joins a state root with a layout literal', () => {
-  const here = path.dirname(new URL(import.meta.url).pathname)
+  const here = path.dirname(fileURLToPath(import.meta.url))
   const repo = path.resolve(here, '..', '..')
   const owner = path.join(repo, 'src', 'core', 'runtime', 'paths.js')
   /** @type {string[]} */

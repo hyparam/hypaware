@@ -87,6 +87,8 @@ export type PickerSource =
   | 'hermes'
   | 'goose'
   | 'crush'
+  | 'grok'
+  | 'mastracode'
   | 'raw-anthropic'
   | 'raw-openai'
   | 'otel'
@@ -341,7 +343,7 @@ export interface InitFlags {
   dryRun: boolean
   github?: boolean
   noBackfill?: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'droid' | 'ollama' | 'langgraph' | 'antigravity' | 'antigravity-desktop')[]
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'droid' | 'grok' | 'ollama' | 'langgraph' | 'antigravity' | 'antigravity-desktop')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number
@@ -364,6 +366,13 @@ export interface DispatchOptions {
   workspaceDir?: string
   /** Override OS temp root (tests); reaches `createPluginPaths` through `bootKernel`. */
   tmpRoot?: string
+  /**
+   * Act as if on this platform at the setup preflight (#975) and in the
+   * wizard lanes it guards, the same seam `runInitWizard` takes directly.
+   * Tests exercising setup behavior that is not platform-gated inject a
+   * supported platform here; everything else still reads `process.platform`.
+   */
+  platform?: NodeJS.Platform
   registry?: ReturnType<typeof createCommandRegistry>
   kernel?: KernelRuntime
 }

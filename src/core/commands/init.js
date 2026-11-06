@@ -154,6 +154,7 @@ export async function runInit(argv, ctx) {
         stdout: ctx.stdout,
         stderr: ctx.stderr,
         ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+        ...(ctx.platform ? { platform: ctx.platform } : {}),
         env: ctx.env,
         capabilities: ctx.capabilities,
         sources: /** @type {any} */ (ctx.sources),
@@ -379,7 +380,7 @@ function hasInitFlags(argv) {
  */
 export const INIT_SOURCE_CHOICES = Object.freeze(/** @type {PickerSource[]} */ ([
   'ollama', 'langgraph', 'codex-cloud', 'chatgpt-work',
-  'claude', 'claude-desktop', 'codex', 'opencode', 'antigravity', 'antigravity-desktop', 'cursor', 'copilot', 'pi', 'droid', 'openclaw', 'hermes', 'goose', 'crush', 'raw-anthropic', 'raw-openai', 'otel',
+  'claude', 'claude-desktop', 'codex', 'opencode', 'antigravity', 'antigravity-desktop', 'cursor', 'copilot', 'pi', 'droid', 'grok', 'openclaw', 'hermes', 'goose', 'crush', 'mastracode', 'raw-anthropic', 'raw-openai', 'otel',
 ]))
 
 /**
@@ -393,7 +394,7 @@ export const INIT_SOURCE_CHOICES = Object.freeze(/** @type {PickerSource[]} */ (
  */
 export const INIT_CLIENT_CHOICES = Object.freeze(/** @type {InitFlags['clients'][number][]} */ ([
   'ollama', 'langgraph',
-  'claude', 'claude-desktop', 'codex', 'opencode', 'antigravity', 'antigravity-desktop', 'cursor', 'copilot', 'pi', 'droid',
+  'claude', 'claude-desktop', 'codex', 'opencode', 'antigravity', 'antigravity-desktop', 'cursor', 'copilot', 'pi', 'droid', 'grok',
 ]))
 
 /**
@@ -535,6 +536,7 @@ async function runPickerInit(flags, ctx) {
     ctx,
     stdout: ctx.stdout,
     stderr: ctx.stderr,
+    ...(ctx.platform ? { platform: ctx.platform } : {}),
     env: ctx.env,
     capabilities: ctx.capabilities,
     sources: /** @type {any} */ (ctx.sources),

@@ -424,7 +424,7 @@ test("'hyp client attach all' never asks the migration question mid-run, but poi
 // fails the attach. The write step is driven into a real filesystem refusal;
 // the attach must still land in base-URL mode with exit 0 and a warning that
 // names the backup state.
-test('a failed accepted migration warns and the attach still succeeds', async () => {
+test('a failed accepted migration warns and the attach still succeeds', { skip: process.platform === 'win32' && 'chmod 0o555 does not make a directory unwritable on win32' }, async () => {
   await withTempHome(async (home) => {
     writeGatewayConfig(home)
     await stageProxyClientPlugin(home)

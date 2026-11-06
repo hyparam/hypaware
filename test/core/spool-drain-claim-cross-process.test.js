@@ -67,7 +67,7 @@ function spawnStalledAppend(cacheRoot, signals, { id, torn = false, atMarker = f
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
     const writeMarker = fs.writeFile
     fs.writeFile = async (file, data, opts) => {
-      if (atMarker !== '1' || !String(file).includes('/.append-')) return writeMarker(file, data, opts)
+      if (atMarker !== '1' || !String(file).includes(path.sep + '.append-')) return writeMarker(file, data, opts)
       await writeMarker(file, '', opts)
       fsSync.writeFileSync(path.join(signals, 'paused'), '')
       while (!fsSync.existsSync(path.join(signals, 'go'))) await sleep(5)

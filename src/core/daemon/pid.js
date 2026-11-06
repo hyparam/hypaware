@@ -91,7 +91,9 @@ export function processIsAlive(pid) {
 /**
  * Command line of `pid` as a string, or `null` when it cannot be read
  * (no such process, no permission, or no supported mechanism). Linux
- * reads `/proc/<pid>/cmdline`; elsewhere falls back to `ps`.
+ * reads `/proc/<pid>/cmdline`; win32 asks CIM through PowerShell, since
+ * `tasklist` reports no command line and `wmic` is removed from current
+ * Windows 11 builds; elsewhere falls back to `ps`.
  *
  * @param {number} pid
  * @returns {string | null}
@@ -102,6 +104,26 @@ export function readProcessCmdline(pid) {
     try {
       const raw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8')
       return raw.replace(/\0/g, ' ').trim() || null
+    } catch {
+      return null
+    }
+  }
+  if (process.platform === 'win32') {
+    try {
+      // `pid` is a validated positive integer, so the interpolation cannot
+      // inject PowerShell syntax. A missing pid prints nothing, which reads
+      // as null: fail-closed, same as an unreadable /proc entry.
+      const out = execFileSync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`,
+      ], {
+        encoding: 'utf8',
+        timeout: 10000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      })
+      const cmd = String(out).trim()
+      return cmd || null
     } catch {
       return null
     }

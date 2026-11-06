@@ -568,7 +568,7 @@ test('control writes survive a fresh gateway and DELETE survives another restart
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
-test('failed persistence returns HTTP 500 and retains the previous membership', async () => {
+test('failed persistence returns HTTP 500 and retains the previous membership', { skip: process.platform === 'win32' && 'a file planted where the store directory belongs reads as ENOENT, not ENOTDIR, on win32, so the removal is swallowed as already-gone' }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-route-'))
   try {
     const set = new SessionIgnoreSet(root)

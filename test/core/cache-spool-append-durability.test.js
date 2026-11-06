@@ -79,7 +79,9 @@ function failWith(which) {
   return Object.assign(new Error(`simulated ${which} failure`), { code: 'EIO' })
 }
 
-test('append that fails at sync() leaves no record for a later flush to commit', async () => {
+test('append that fails at sync() leaves no record for a later flush to commit', {
+  skip: process.platform === 'win32' && 'ftruncate on an append-mode handle is EPERM on win32, so this rollback always takes the refused-truncate branch instead',
+}, async () => {
   const cacheRoot = await makeTmpDir('sync')
   const restore = interceptActiveFile((handle) => {
     handle.sync = async () => { throw failWith('sync') }

@@ -144,7 +144,7 @@ export async function run({ harness, expect }) {
       expect.that('marker: user text carries the needle', rows, (value) => value.some((r) => r.role === 'user' && r.part_type === 'text' && r.content_text === needle))
       expect.that('marker: assistant text present', rows, (value) => value.some((r) => r.role === 'assistant' && r.part_type === 'text' && r.content_text === 'listing the files'))
       expect.that('marker: tool call bash/call-1', rows, (value) => value.some((r) => r.part_type === 'tool_call' && r.tool_name === 'bash' && r.tool_call_id === 'call-1'))
-      expect.that('marker: tool result for call-1', rows, (value) => value.some((r) => r.part_type === 'tool_result' && r.tool_call_id === 'call-1'))
+      expect.that('marker: tool result preserves hook context', rows, (value) => value.some((r) => r.part_type === 'tool_result' && r.tool_call_id === 'call-1' && r.content_text === 'a.txt\npost-hook context'))
       expect.that('marker: no usage on any row', rows, (value) => value.every((r) => usageOf(r.attributes) === undefined))
       expect.that('marker: root session cost rides an assistant part', rows, (value) => value.some((r) => r.role === 'assistant' && crushAttrs(r.attributes)?.session_cost_usd === 0.25))
       expect.that('marker: rows tagged crush/fixture-provider/fixture-model', rows, (value) => value.every((r) => r.client_name === 'crush' && r.conversation_source === 'crush' && r.entrypoint === 'crush') && value.some((r) => r.provider === 'fixture-provider' && r.model === 'fixture-model'))
@@ -157,6 +157,23 @@ export async function run({ harness, expect }) {
       expect.that('privacy: title session absent', titleRows, (n) => n === 0)
       const ignoredRows = await sqlCount("select count(*) as n from ai_gateway_messages where session_id = 'crush-S3'", lifetime)
       expect.that('privacy: .hypignored project absent', ignoredRows, (n) => n === 0)
+    })
+
+    await counted('subagent_report', async () => {
+      const reportText = `report-${needle}`
+      insertMessage(db, {
+        id: 'S1-report', session_id: 'S1', role: 'user', created_at: nowSeconds(),
+        parts: [{ type: 'sub_agent_report', data: { label: 'Ada', output: `${reportText}\n<cwd>${toolCwd}</cwd>`, model: 'child-provider/child-model' } }],
+      })
+      await waitFor(async () => await sqlCount("select count(*) as n from ai_gateway_messages where session_id = 'crush-S1' and message_id = 'crush-S1-S1-report-0'", lifetime) === 1, 15_000)
+      const rows = await queryJson(markerSql, lifetime)
+      const report = rows.find(r => r.message_id === 'crush-S1-S1-report-0')
+      expect.that('report: delivered to the existing parent as tool output with cwd stripped', report, (r) => r?.role === 'tool' && r.part_type === 'tool_result' && r.content_text === reportText)
+      expect.that('report: label and child display model preserved', crushAttrs(report?.attributes), (a) => a?.subagent_label === 'Ada' && a.subagent_model === 'child-provider/child-model')
+      expect.that('report: no synthetic human prompt', rows.filter(r => r.role === 'user' && r.part_type === 'text'), (value) => value.length === 1)
+      expect.that('report: no token usage introduced', rows, (value) => value.every(r => usageOf(r.attributes) === undefined))
+      const result = await dispatchText(['query', 'grep', reportText, '--format', 'json'], lifetime)
+      expect.that('report: grep finds the delivered output in the parent session', result, (r) => r.code === 0 && parseJson(r.stdout)?.some((/** @type {any} */ row) => row.session_id === 'crush-S1' && row.snippet === reportText))
     })
 
     await counted('grep', async () => {
@@ -311,7 +328,8 @@ function writeUserSession(db, { id, text }) {
 
 /**
  * The marker turn: user text, assistant text plus a tool call, the tool
- * result with Crush's trailing `<cwd>` element, and a cost on the session.
+ * result with Crush's `<cwd>` element followed by hook context, and a cost
+ * on the session.
  *
  * @param {any} db
  * @param {{ id: string, needle: string, title: string, toolCwd: string }} session
@@ -337,7 +355,7 @@ function writeMarkerSession(db, { id, needle, title, toolCwd }) {
     id: `${id}-m3`,
     session_id: id,
     role: 'tool',
-    parts: [{ type: 'tool_result', data: { tool_call_id: 'call-1', name: 'bash', content: `a.txt\n\n<cwd>${toolCwd}</cwd>`, metadata: JSON.stringify({ working_directory: toolCwd }) } }],
+    parts: [{ type: 'tool_result', data: { tool_call_id: 'call-1', name: 'bash', content: `a.txt\n\n<cwd>${toolCwd}</cwd>\npost-hook context`, metadata: JSON.stringify({ working_directory: toolCwd }) } }],
     created_at: at,
   })
 }

@@ -359,6 +359,8 @@ test('setup through the wizard exits non-zero when a picked client did not attac
     stdout,
     stderr,
     env: { HOME: booted.home, HYP_HOME: booted.hypHome, HYP_NO_TUI: '1' },
+    // Keeps the setup gate (#975) from refusing on a win32 host.
+    platform: 'linux',
     // The same ctx fields dispatch fills from the boot.
     ctx: {
       commands: { run: async () => 0 },

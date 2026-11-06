@@ -66,18 +66,19 @@ export function mintCrushPartId(sessionId, messageId, index, suffix) {
 }
 
 /**
- * The trailing `<cwd>...</cwd>` element Crush appends to tool output.
+ * Remove Crush's last `<cwd>...</cwd>` element, preserving any hook text
+ * appended after it. Earlier elements belong to the command's output.
  *
  * @ref LLP 0573#owner-decisions [implements]: D5, the working directory is stripped before a row is built.
- */
-const TRAILING_CWD = /\s*<cwd>(?:(?!<cwd>)[\s\S])*<\/cwd>\s*$/
-
-/**
  * @param {string} text
  * @returns {string}
  */
 export function stripCwd(text) {
-  return text.replace(TRAILING_CWD, '')
+  const end = text.lastIndexOf('</cwd>')
+  if (end === -1) return text
+  const start = text.lastIndexOf('<cwd>', end)
+  if (start === -1) return text
+  return `${text.slice(0, start).trimEnd()}${text.slice(end + 6)}`.trimEnd()
 }
 
 /**
@@ -107,16 +108,17 @@ function roleOf(role) {
  *
  * D5: a tool result's `metadata` (which holds `working_directory`, and for
  * file tools the file path) is never carried, and its `content` loses the
- * trailing `<cwd>` element. Image and binary parts become placeholders that
- * name the type and MIME type, never the bytes, URL or file path.
+ * last `<cwd>` element, even before hook text. Image and binary parts become
+ * placeholders that name the type and MIME type, never the bytes, URL or file
+ * path.
  *
  * @param {CrushMessageRow} row
  * @param {'user' | 'assistant' | 'tool'} role
- * @returns {{ parts: Array<{ index: number, suffix?: string, role: string, content: JsonObject[], shell?: boolean }>, finish?: string }}
+ * @returns {{ parts: Array<{ index: number, suffix?: string, role: string, content: JsonObject[], shell?: boolean, crush?: JsonObject }>, finish?: string }}
  */
 function partsForMessageRow(row, role) {
   const parsed = parseMaybeJson(row.parts)
-  /** @type {Array<{ index: number, suffix?: string, role: string, content: JsonObject[], shell?: boolean }>} */
+  /** @type {Array<{ index: number, suffix?: string, role: string, content: JsonObject[], shell?: boolean, crush?: JsonObject }>} */
   const parts = []
   /** @type {string | undefined} */
   let finish
@@ -147,6 +149,20 @@ function partsForMessageRow(row, role) {
       if (typeof data.content === 'string') block.content = stripCwd(data.content)
       if (data.is_error === true) block.is_error = true
       parts.push({ index, role: 'tool', content: [block] })
+    } else if (item.type === 'sub_agent_report') {
+      // Crush v0.100.0 stores detached results as user messages, but they
+      // are tool output, not human prompts. No tool-call id is supplied.
+      /** @type {JsonObject} */
+      const block = { type: 'tool_result', content: typeof data.output === 'string' ? stripCwd(data.output) : '' }
+      if (data.failed === true) block.is_error = true
+      /** @type {JsonObject} */
+      const crush = {}
+      const label = stringValue(data.label)
+      const model = stringValue(data.model)
+      if (label) crush.subagent_label = label
+      // Keep the child's display model separate from parent turn attribution.
+      if (model) crush.subagent_model = model
+      parts.push({ index, role: 'tool', content: [block], crush })
     } else if (item.type === 'shell_command') {
       // A command the user ran with `!`: a tool call and its result, marked
       // so it is not counted as a prompt.
@@ -265,7 +281,7 @@ export async function projectCrushSession(args) {
       if (model && part.role === 'assistant') projected.model = model
       if (provider) projected.provider = provider
       /** @type {JsonObject} */
-      const crush = {}
+      const crush = part.crush ?? {}
       if (part.shell) crush.user_shell = true
       if (row.is_summary_message) crush.summary = true
       if (Object.keys(crush).length > 0) projected.attributes = { crush }

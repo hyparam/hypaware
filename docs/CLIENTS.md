@@ -31,6 +31,10 @@ native transcript-change hooks; restart Droid afterward. Recovery imports local
 session files every five minutes. Hosted sessions without local transcripts
 are not captured.
 
+[Grok Build](integrations/grok.md) uses the setup id `grok`. Attach adds a
+HypAware hook file under `~/.grok/hooks`; restart Grok Build afterward. Recovery
+imports local session files every five minutes.
+
 [Goose](integrations/goose.md) uses the setup id `goose`. It reads Goose's
 local session database read-only and changes nothing in Goose, so there is
 nothing to restart. Check it with `hyp status`; `hyp client status` does not
@@ -40,6 +44,11 @@ list it.
 project's Crush database read-only and changes nothing in Crush, so there is
 nothing to restart. Check it with `hyp status`; `hyp client status` does not
 list it.
+
+[Mastra Code](integrations/mastracode.md) uses the setup id `mastracode`. It
+reads Mastra Code's local database read-only and changes nothing in Mastra
+Code, so there is nothing to restart. Check it with `hyp status`;
+`hyp client status` does not list it.
 
 ```sh
 hyp setup

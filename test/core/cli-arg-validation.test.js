@@ -93,6 +93,8 @@ async function run(argv, env = {}) {
     env: { ...process.env, HYP_HOME, NO_COLOR: '1', ...env },
     registry,
     kernel,
+    // Keeps the setup gate (#975) from refusing on a win32 host.
+    platform: /** @type {const} */ ('linux'),
   })
   return { code, stdout: stdout.text(), stderr: stderr.text() }
 }

@@ -71,8 +71,10 @@ test('a service join keeps the secret beside identity.json, private, and never p
   assert.equal(read.state === 'ok' && read.record.secret, SECRET)
   assert.equal(read.state === 'ok' && read.record.central_url, URL)
   assert.equal(read.state === 'ok' && read.record.stopped_code, undefined)
-  assert.equal((await fs.stat(recordPath)).mode & 0o777, 0o600)
-  assert.equal((await fs.stat(centralDir)).mode & 0o777, 0o700)
+  if (process.platform !== 'win32') { // No POSIX mode bits on win32.
+    assert.equal((await fs.stat(recordPath)).mode & 0o777, 0o600)
+    assert.equal((await fs.stat(centralDir)).mode & 0o777, 0o700)
+  }
   await fs.stat(centralSeedPath(stateRoot))
 })
 
@@ -135,7 +137,7 @@ test('a record that cannot be retired stops the join before the seed changes', a
   assert.equal(await fs.readFile(centralSeedPath(stateRoot), 'utf8'), seedBefore)
 })
 
-test('a record that cannot be written stops the join before the seed is written', { skip: process.getuid?.() === 0 && 'root ignores directory modes' }, async () => {
+test('a record that cannot be written stops the join before the seed is written', { skip: (process.platform === 'win32' && 'chmod 0o500 does not make a directory unwritable on win32') || (process.getuid?.() === 0 && 'root ignores directory modes') }, async () => {
   const { home, stateRoot, centralDir } = await makeHome()
   await fs.mkdir(centralDir, { recursive: true })
   await fs.chmod(centralDir, 0o500)

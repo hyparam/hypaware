@@ -22,9 +22,11 @@ import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../src/core/usa
  * @param {string} ignoredDir
  */
 function ignoringResolver(ignoredDir) {
-  const hypignore = path.join(ignoredDir, '.hypignore')
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over the POSIX-written fixture.
+  const hypignore = path.resolve(path.join(ignoredDir, '.hypignore'))
   return createUsagePolicyResolver({
-    existsSync: (p) => p === hypignore,
+    existsSync: (p) => path.resolve(p) === hypignore,
     readFileSync: () => 'ignore\n',
   })
 }
@@ -248,11 +250,15 @@ test('the rollout cwd is stamped on the row, and a key not covering it no longer
 // LLP 0350#evidence subscription reproduction.
 test('subscription route: the key covering the ROLLOUT cwd enriches, not the first-listed ignored one (#1189)', () => {
   let lookups = 0
+  // Host spellings: workspace-covers-cwd compares with the host separator, so
+  // the POSIX-written fixture paths are resolved the way real metadata would be.
+  const cleanWorkspace = path.resolve('/work/clean')
+  const cleanSub = path.resolve('/work/clean/sub')
   const projector = createCodexExchangeProjector({
     resolver: ignoringResolver('/work/ignored'),
     rolloutCwd: {
       /** @param {string} threadId */
-      resolve(threadId) { lookups += 1; return threadId === SUBSCRIPTION_THREAD_ID ? '/work/clean/sub' : undefined },
+      resolve(threadId) { lookups += 1; return threadId === SUBSCRIPTION_THREAD_ID ? cleanSub : undefined },
     },
   })
   const projection = /** @type {any} */ (projector.project(exchange({
@@ -262,11 +268,11 @@ test('subscription route: the key covering the ROLLOUT cwd enriches, not the fir
       'x-codex-turn-metadata': JSON.stringify({
         thread_id: SUBSCRIPTION_THREAD_ID,
         workspaces: {
-          '/work/ignored/secret-proj': {
+          [path.resolve('/work/ignored/secret-proj')]: {
             associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
             latest_git_commit_hash: 'deadbeef',
           },
-          '/work/clean': {
+          [cleanWorkspace]: {
             associated_remote_urls: { origin: 'https://github.com/acme/clean.git' },
             latest_git_commit_hash: 'feedface',
           },
@@ -278,10 +284,10 @@ test('subscription route: the key covering the ROLLOUT cwd enriches, not the fir
   }), context()))
   assert.ok(projection && projection !== USAGE_POLICY_DROP)
   assert.equal(lookups, 1, 'the rollout is read once, as before')
-  assert.equal(projection.cwd, '/work/clean/sub')
+  assert.equal(projection.cwd, cleanSub)
   assert.equal(projection.git_remote, 'https://github.com/acme/clean.git')
   assert.equal(projection.head_sha, 'feedface')
-  assert.equal(projection.attributes.codex.workspace, '/work/clean')
+  assert.equal(projection.attributes.codex.workspace, cleanWorkspace)
   assert.ok(!JSON.stringify(projection).includes('SECRET'))
 })
 

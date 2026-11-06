@@ -352,6 +352,16 @@ export function parseConfigShape(value) {
     }
   }
 
+  /** @type {boolean|undefined} */
+  let firstSyncHold
+  if (root.first_sync_hold !== undefined) {
+    if (typeof root.first_sync_hold !== 'boolean') {
+      errors.push({ pointer: '/first_sync_hold', message: 'first_sync_hold must be a boolean' })
+    } else {
+      firstSyncHold = root.first_sync_hold
+    }
+  }
+
   const redaction = parseRedactionConfig(root.redaction, errors)
 
   for (const key of Object.keys(root)) {
@@ -369,11 +379,12 @@ export function parseConfigShape(value) {
   if (query) config.query = query
   if (disambiguate) config.disambiguate = disambiguate
   if (autoUpdate !== undefined) config.auto_update = autoUpdate
+  if (firstSyncHold !== undefined) config.first_sync_hold = firstSyncHold
   if (redaction !== undefined) config.redaction = redaction
   return { ok: true, config }
 }
 
-const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'redaction'])
+const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'first_sync_hold', 'redaction'])
 
 /**
  * Build the kernel `ConfigRegistry`. Plugins call `registerSection`

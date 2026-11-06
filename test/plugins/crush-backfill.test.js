@@ -399,7 +399,7 @@ test('crush backfill: an ignore-policy project is emptied without opening its da
   assert.equal(fields.sessions_seen, 0, 'the database is not opened')
 })
 
-test('crush backfill: an unreadable database fails by kind and keeps its path out of every record', async () => {
+test('crush backfill: an unreadable database fails by kind and keeps its path out of every record', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' }, async () => {
   const h = await stage()
   seedSession(h.dbPaths[0], 's1')
   await fs.chmod(h.dbPaths[0], 0o000)

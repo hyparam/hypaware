@@ -127,6 +127,32 @@ Reading a database can leave an empty `crush.db-wal` and a 32 KiB
 `crush.db-shm` in the project's `.crush/` directory until Crush next closes it
 cleanly. These are SQLite's own index files and hold no content.
 
+## Mastra Code records nothing
+
+Mastra Code capture reads Mastra Code's `mastra.db`, so `hyp status` is where
+its health shows. `hyp client status` does not list Mastra Code. `hyp status`
+prints a Mastra Code line only when something is wrong. The ready messages,
+the last three rows below, show in `hyp status --json` as the `mastracode`
+entry's `health.message`.
+
+| Mastra Code status says | What to do |
+| --- | --- |
+| `cannot read the mastracode database at <path>` | The daemon's user cannot read the file, or SQLite could not open it, for example because it is damaged. Run HypAware as the same user as Mastra Code, and check that Mastra Code itself still opens its threads. |
+| `mastracode database busy, retrying next poll` | Mastra Code was writing when HypAware read. It retries on the next poll; if this persists, check for a stuck Mastra Code process. |
+| `mastra.db has no <table> table` or `mastra.db has no <table>.<column> column` | Your Mastra Code version uses a database schema this HypAware release does not support. Nothing is recorded until you upgrade HypAware to a release that supports it. |
+| `SQLite <version> cannot read Mastra Code's JSONB metadata (needs 3.45 or newer)` | The Node.js that runs HypAware has a built-in SQLite too old to read Mastra Code's thread metadata. Upgrade that Node.js, then run `hyp daemon restart`. |
+| `mastracode source requires Node >= 22.13 (node:sqlite builtin not available)` | Mastra Code capture reads the database with Node's built-in SQLite. Upgrade the Node.js that runs HypAware, then run `hyp daemon restart`. |
+| `MASTRA_DB_URL is set; remote stores are not supported` | Mastra Code writes to a remote Turso or Postgres store, which HypAware cannot read. Nothing is recorded while `MASTRA_DB_URL` is set in the daemon's environment. |
+| `mastracode poll failed: <kind>` | HypAware retries on the next poll. If it persists, run `hyp daemon restart`. |
+| `session exclusions could not be read`, `session exclusions could not be loaded`, or `Session exclusions could not be loaded; capture is disabled. ...` | HypAware could not read its saved session exclusions under `<HYP_HOME>/hypaware/session-ignores/`, so it records nothing rather than risk recording an ignored thread. `hyp backfill mastracode` fails with `Mastra Code session exclusions are unreadable` for the same reason. Check that the daemon's user can read that directory and its files, then run `hyp daemon restart`. |
+| `no mastracode installation detected at <path>` or `no mastra.db at the resolved path` | HypAware found no database at that path. If you set `MASTRA_DB_PATH`, `MASTRA_APP_DATA_DIR` or (on Linux) `XDG_DATA_HOME`, or moved the database, set `db_path` as shown on the [Mastra Code page](integrations/mastracode.md#use-a-different-database-location), then run `hyp daemon restart`. |
+| `polling mastracode every 60000ms, no threads yet` or `polling mastracode every 60000ms` | Capture is ready. The `, no threads yet` ending drops once the poll has recorded a row since the daemon started, and comes back after a restart until the next new row. With no rows yet, finish a Mastra Code turn and wait up to a minute. |
+| `mastracode ongoing capture disabled (mastracode.enabled = false)` | Capture is off in your configuration. Set `mastracode.enabled` to `true`, then run `hyp daemon restart`. |
+
+New messages arrive within a minute. A change Mastra Code makes to a message
+it already wrote arrives with the scheduled import, up to 15 minutes later.
+Run `hyp backfill mastracode` to pick it up at once.
+
 ## Ollama capture is unconfirmed
 
 <!-- @ref LLP 0474#diagnostics [implements]: default status and local diagnostics distinguish readiness, observed traffic, persistence evidence and actionable finite failures -->
@@ -203,6 +229,37 @@ by dates, hit count, searchable columns, privacy, or local retention.
   this does not lift your query's own `LIMIT`.
 
 See [querying](QUERYING.md) for searches, session drill-downs, and bounded SQL.
+
+## History import failed
+
+`hyp status` shows this problem when a provider's scheduled history import
+failed on its last run:
+
+```output
+codex history import failed on its last run, so some history may be missing. Rows read before the failure may have been imported; the command below shows the cause. The next scheduled run retries, and this clears once a run succeeds.
+```
+
+Rows read before the failure may have been imported. Every scheduled run
+retries, and the warning clears on its own once a run succeeds. To see the
+error, and the failing file if there is one:
+
+```sh
+hyp backfill codex --dry-run
+```
+
+If the error is a permission problem, fix it and the next run picks the file
+up. If the same file keeps failing, the file cannot be imported as it is, for
+example a Codex session file over its
+[size limits](integrations/codex.md#large-session-files). Moving that file out
+of the session directory clears the warning on the next run, but HypAware will
+not import it and Codex will no longer list that session, so keep the file
+somewhere safe.
+
+A Claude import that cannot read OpenCode's session list stops before it
+writes anything, so it never records OpenCode's Claude sessions as your own.
+`hyp backfill claude --dry-run` shows why. If it says Node 22.13 or newer is
+needed, upgrade Node; otherwise fix the problem it names, such as the
+permissions on OpenCode's data directory.
 
 ## An export or team sync is missing
 

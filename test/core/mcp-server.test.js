@@ -312,7 +312,7 @@ test('with report-publish admitted the mark is listed as a non-destructive write
   const mark = list.result.tools.find((/** @type {any} */ t) => t.name === 'set_recommendation_status')
   assert.ok(mark, 'the mark is listed')
   assert.equal(mark.title, 'Set recommendation status')
-  assert.deepEqual(mark.annotations, { title: 'Set recommendation status', readOnlyHint: false, destructiveHint: false })
+  assert.deepEqual(mark.annotations, { title: 'Set recommendation status', readOnlyHint: false, destructiveHint: false, openWorldHint: false })
   assert.deepEqual(mark.inputSchema.required, ['id', 'state'])
 
   const r = /** @type {any} */ (await s.handleMessage(MARK_CALL))

@@ -183,9 +183,11 @@ test('metadata probes reject malformed, oversized and symlinked files and isolat
     assert.equal((await detectPickerSources(catalog, { HOME: home }, home)).has('langgraph'), false)
   }
   await fs.unlink(file)
-  await fs.writeFile(path.join(home, 'real.json'), '{"dependencies":{"@langchain/langgraph":"*"}}')
-  await fs.symlink(path.join(home, 'real.json'), file)
-  assert.equal((await detectPickerSources(catalog, { HOME: home }, home)).has('langgraph'), false)
+  if (process.platform !== 'win32') { // File symlink creation needs Developer Mode on win32.
+    await fs.writeFile(path.join(home, 'real.json'), '{"dependencies":{"@langchain/langgraph":"*"}}')
+    await fs.symlink(path.join(home, 'real.json'), file)
+    assert.equal((await detectPickerSources(catalog, { HOME: home }, home)).has('langgraph'), false)
+  }
   await fs.writeFile(path.join(home, 'requirements.txt'), 'langgraph>=1\n')
   assert.equal((await detectPickerSources(catalog, { HOME: home }, home)).has('langgraph'), true)
 })

@@ -33,7 +33,10 @@ const FIXTURE = JSON.parse(fs.readFileSync(new URL('../fixtures/setup-help-telem
  */
 async function recordedBy(argv) {
   const home = temporaryDirectory('hyp-setup-help-telemetry-')
-  const env = { ...process.env, HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  // USERPROFILE as well as HOME: a preset that attaches a client writes its
+  // config under os.homedir(), which reads USERPROFILE on win32, so without
+  // this the run would reach into the real profile.
+  const env = { ...process.env, HOME: home, USERPROFILE: home, HYP_HOME: path.join(home, '.hyp') }
   for (const key of ['HYP_CONFIG', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME']) delete env[key]
   const root = productRoot(env)
   assert.ok(root.startsWith(home + path.sep), `telemetry root ${root} is under the test HOME`)

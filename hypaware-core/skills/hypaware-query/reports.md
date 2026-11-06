@@ -1,8 +1,9 @@
-# Reports and recommendation artifacts
+# Report operations
 
 Read this file when saving, uploading, listing, viewing, or acting on a report
-or recommendation, or when writing its Markdown artifact. Ordinary query answers
-and quick recommendations do not require pages or the report-generation workflow.
+or recommendation. For full report writing, use
+[hypaware-report](../hypaware-report/SKILL.md); for standalone recommendations,
+use [recommendations.md](recommendations.md).
 Use `hyp report --help` and subcommand help for the installed command surface.
 
 ## Save locally
@@ -22,6 +23,11 @@ It admits only a folder holding `report.md` and supported pages, copies it to
 it refuses a stray file, move that file outside the publish folder and retry;
 do not write under the user's home directory yourself. Its receipt prints the saved path and the
 publish command for this report.
+
+The CLI's filename allowlist below limits storage and publishing, not report
+structure. If it excludes an intentional supporting page, keep the complete
+report in its local folder and return that path with the limitation. Do not
+discard or rename useful pages merely to fit the allowlist.
 
 ## List and view
 
@@ -60,7 +66,10 @@ Pass the saved report's name, which resolves to `$HYP_HOME/reports`, or a path
 to a report folder. An explicitly requested calendar month may use `YYYY-MM`. Upload only supported
 report Markdown, without the ledger, raw logs, images, HTML, or assets. The server renders it;
 no local render step is needed. Links may use http(s), mailto, page fragments,
-or another page in the report. See the page requirements below.
+or another page in the report. Supported report filenames are `report.md`,
+`comparison.md`, `work.md`, `automation.md`, `repeated-work.md`, `usage.md`,
+`health.md`, and `recommendation-<slug>.md`, with slugs matching
+`[a-z0-9][a-z0-9-]*`.
 
 When the analysis yields one recommendation rather than a report, publish that
 page on its own with `hyp report recommend <recommendation-page>.md --remote
@@ -120,75 +129,3 @@ hyp report mark <id> dismissed --reason "<why>" --remote <target>
 
 `open` reopens. Carry the same remote and organization as the read; ordinary
 members must not use operator-only `--org`.
-
-
-## Pages
-
-For a full report, deliver `report.md` and a `recommendation-<slug>.md` page for each proposal. Use
-`usage.md`, `work.md`, and `health.md` for substantive supporting analysis;
-small or narrowly scoped reviews can keep evidence in the brief and proposals
-instead of manufacturing extra pages. A standalone recommendation needs only
-its recommendation page. Slugs match `[a-z0-9][a-z0-9-]*`. Use relative page links,
-Markdown tables and fenced code; no raw HTML, images, or renderer assets.
-Each page identifies scope and absolute dates, with a descriptive H1 title.
-Non-recommendation pages open with a short bold thesis. For recommendations,
-read and follow [recommendation writing](recommendations.md#recommendation-writing).
-Write plainly, without em dashes. Token volume, never
-dollars or invented savings; discuss patterns, never as an output-per-person
-ranking.
-
-- **report.md:** a brief with `## Overview` and `## Recommendations`. Give the
-  main conclusion and the few figures that support it, linking to the evidence
-  pages. Use compact weekly/work-share tables when meaningful. Rank entries as
-  `### [1. Action title](recommendation-slug.md)` followed by the shared
-  recommendation opening. This linked H3 form lets
-  the server render recommendation cards and IDs. Do not mint IDs yourself.
-- **usage.md:** token categories, trends, model and session concentration, with
-  coherent denominators and interpretation. Missing attribution stays unknown.
-- **work.md:** work categories, sampled coverage, outcome evidence, delegation
-  and automation where relevant. A prompt count is not a token share; assign
-  usage to a category only with evidence tying requests to that work. Do not
-  classify an entire mixed session from its opening prompt. For selected prior
-  reports, distinguish adoption, improvement, and unavailable outcome evidence.
-- **health.md:** consequential tool failures, recoveries, and recording gaps,
-  with the denominator for any failure rate.
-
-Give each page one job: the brief states priorities, recommendation pages give
-self-contained evidence and actions, and supporting pages add distinct context.
-Keep uncertainties beside affected claims. Avoid repeated incident histories,
-handoffs, tables, and qualifications or padding to satisfy word counts. Preserve
-decisive dates, locators, uncertainty, and completion criteria.
-
-## Recommendation pages
-
-Explain the pattern, outcome consequence, proposed mechanism, and next action.
-Give measured frequency/recency where available, relevant counterevidence, and
-tradeoffs. The proposal must be usable:
-
-- A fix includes a diff against known content, a complete skill/command file,
-  exact configuration, or concrete source/destination paths. Never invent unseen
-  file contents.
-- A targeted investigation names the evidence-backed target, unresolved question,
-  hypothesis and alternatives, what to inspect, and a completion test that allows
-  no change. Finish what recordings can establish first; do not hand off another
-  generic usage review or guess a patch against unseen code.
-- A workflow change names the decision, when it applies, and how to judge it.
-- An experiment specifies the hypothesis, comparison, bounded observation
-  window/sample, outcome measure, quality guardrail, and resulting decision.
-  Proposed thresholds are choices, not measured facts. "Measure more" is not
-  enough without the decision that measurement enables.
-
-Name the target, exact deliverable, and completion test for each action. After
-the shared recommendation opening, use measured numbers where informative,
-never a numeric quota or invented cost/effect. Unknown impact stays unknown.
-Use sections What we saw, What it costs, The fix, and Expected effect and the case against it,
-followed by Evidence, Query, and Check before applying. Keep the finding and
-latest state together, with essential evidence and a usable next action. Put
-artifacts under The fix and scope, dates, and accounting rules under Evidence.
-The opening supports a quick decision; the sections substantiate it.
-
-Cite 1 to 3 verified turns using page-local evidence headings, locators, and
-short excerpts. Include query labels and exact bounded SQL for supporting
-figures, or link to their single definition elsewhere in the report. End with
-`## Check before applying`: specific present-state checks that could change
-the proposal. Keep historical observations distinct from today's unknown state.

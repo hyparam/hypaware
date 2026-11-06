@@ -34,10 +34,12 @@ const COLUMNS = [
   { name: 'timestamp', type: 'STRING', nullable: true },
 ]
 
-const REPO_A = '/home/u/repoA'
-const REPO_A_SUB = '/home/u/repoA/sub'
-const REPO_B = '/home/u/repoB'
-const SECRET = '/home/u/secret'
+// Resolved: purge reports and matches the host's resolved spelling, which on
+// win32 gains a drive letter and backslashes over a POSIX-written literal.
+const REPO_A = path.resolve('/home/u/repoA')
+const REPO_A_SUB = path.resolve('/home/u/repoA/sub')
+const REPO_B = path.resolve('/home/u/repoB')
+const SECRET = path.resolve('/home/u/secret')
 
 /** @param {string} prefix */
 async function makeTmpDir(prefix) {
@@ -132,7 +134,9 @@ test('purge subtree matches a row recorded under a symlink spelling of the targe
     const real = path.join(root, 'real', 'proj')
     await fs.mkdir(real, { recursive: true })
     const link = path.join(root, 'link')
-    await fs.symlink(real, link)
+    // 'junction' on win32: an unprivileged process cannot create a real
+    // directory symlink there, and a junction resolves the same way.
+    await fs.symlink(real, link, process.platform === 'win32' ? 'junction' : null)
     await seed(cacheRoot, [
       // The capture seam recorded the `cwd` the client reported: the symlink.
       { session_id: 's1', cwd: path.join(link, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
@@ -411,7 +415,7 @@ test('runPurge sweeps the spool for a targeted purge too, and says nothing when 
 // `completed` while that holds - it would contradict the nonzero exit code.
 // @ref LLP 0253#purge-and-detach-sweep [tests]: an unremoved spool file is
 //   reported as an incomplete local purge, not a silently swallowed sweep
-test('runPurge reports local status incomplete when the capture spool sweep fails, even without a local purge error', async () => {
+test('runPurge reports local status incomplete when the capture spool sweep fails, even without a local purge error', { skip: process.platform === 'win32' && 'chmod 0o500 does not make a directory unwritable on win32' }, async () => {
   const cacheRoot = await makeTmpDir('cli-spool-fail')
   const hypHome = await makeTmpDir('cli-spool-fail-home')
   const spoolDir = claudeBodySpoolDir(hypHome)
@@ -446,10 +450,10 @@ test('runPurge subtree warns about resurrection when the dir still resolves full
     await seed(cacheRoot)
     // No .hypignore, empty local-only list => REPO_A resolves `full`.
     const { ctx, stderr } = makeCtx({ cacheRoot, hypHome })
-    const code = await runPurge(['/home/u/repoA', '--yes'], ctx)
+    const code = await runPurge([REPO_A, '--yes'], ctx)
     assert.equal(code, 0)
     assert.match(stderr.text, /still record and will be re-imported/)
-    assert.match(stderr.text, /home\/u\/repoA/)
+    assert.ok(stderr.text.includes(REPO_A), stderr.text)
     assert.match(stderr.text, /hyp privacy set <path> ignore/)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
@@ -533,6 +537,16 @@ test('runPurge --json reports a session fence instead of a resurrection warning'
 const NFC = 'caf\u00e9'
 const NFD = 'cafe\u0301'
 
+/**
+ * A fake-volume directory in the host's resolved spelling: purge resolves the
+ * target and probes the resolved spelling, which on win32 gains a drive
+ * letter and backslashes over a POSIX-written literal.
+ * @param {string} name
+ */
+function volDir(name) {
+  return path.resolve('/vol', name)
+}
+
 test('#485 premise: the two fixture spellings are different strings that NFC folds together', () => {
   assert.notEqual(NFC, NFD)
   assert.equal(NFD.normalize('NFC'), NFC)
@@ -569,27 +583,27 @@ const NO_SYMLINKS = /** @param {string} p */ (p) => p
 
 test('purge subtree deletes a row recorded NFD when the target is typed NFC, on a volume that folds them', async () => {
   const cacheRoot = await makeTmpDir('alias-nfd')
-  const nfcDir = `/vol/${NFC}`
-  const nfdDir = `/vol/${NFD}`
+  const nfcDir = volDir(NFC)
+  const nfdDir = volDir(NFD)
   try {
     await seed(cacheRoot, [
       // The capture seam recorded what the client reported: the NFD spelling.
-      { session_id: 's1', cwd: `${nfdDir}/sub`, part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's1', cwd: path.join(nfdDir, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
       // A sibling that merely shares the folded prefix, and an unrelated dir.
-      { session_id: 's2', cwd: `/vol/${NFC}-other`, part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
-      { session_id: 's3', cwd: '/vol/elsewhere', part_id: 'm3#0', timestamp: '2026-07-01T00:00:02Z' },
+      { session_id: 's2', cwd: volDir(`${NFC}-other`), part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+      { session_id: 's3', cwd: volDir('elsewhere'), part_id: 'm3#0', timestamp: '2026-07-01T00:00:02Z' },
     ])
     const summary = await purgeCache({
       cacheRoot,
       target: { kind: 'subtree', path: nfcDir },
       deps: {
         realpathSync: NO_SYMLINKS,
-        statSync: spellingInsensitiveVolume([nfcDir, `/vol/${NFC}-other`, '/vol/elsewhere']),
+        statSync: spellingInsensitiveVolume([nfcDir, volDir(`${NFC}-other`), volDir('elsewhere')]),
       },
     })
     assert.equal(summary.rowsDeleted, 1, 'the NFD-spelled row is inside the directory the user named')
     assert.equal(summary.retainedAliasRows, 0, 'nothing was left behind, so nothing to report')
-    assert.deepEqual(summary.purgedCwds, [`${nfdDir}/sub`], 'the deleted cwd drives the resurrection warning')
+    assert.deepEqual(summary.purgedCwds, [path.join(nfdDir, 'sub')], 'the deleted cwd drives the resurrection warning')
     const rows = await remainingRows(cacheRoot)
     assert.deepEqual(rows.map((r) => r.part_id).sort(), ['m2#0', 'm3#0'])
   } finally {
@@ -599,19 +613,19 @@ test('purge subtree deletes a row recorded NFD when the target is typed NFC, on 
 
 test('purge subtree deletes a row recorded NFC when the target is typed NFD, on a volume that folds them', async () => {
   const cacheRoot = await makeTmpDir('alias-nfc')
-  const nfcDir = `/vol/${NFC}`
-  const nfdDir = `/vol/${NFD}`
+  const nfcDir = volDir(NFC)
+  const nfdDir = volDir(NFD)
   try {
     await seed(cacheRoot, [
       { session_id: 's1', cwd: nfcDir, part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
-      { session_id: 's2', cwd: '/vol/elsewhere', part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+      { session_id: 's2', cwd: volDir('elsewhere'), part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
     ])
     const summary = await purgeCache({
       cacheRoot,
       target: { kind: 'subtree', path: nfdDir },
       deps: {
         realpathSync: NO_SYMLINKS,
-        statSync: spellingInsensitiveVolume([nfcDir, '/vol/elsewhere']),
+        statSync: spellingInsensitiveVolume([nfcDir, volDir('elsewhere')]),
       },
     })
     assert.equal(summary.rowsDeleted, 1)
@@ -626,15 +640,15 @@ test('purge subtree deletes a row recorded under a case variant, on a case-insen
   const cacheRoot = await makeTmpDir('alias-case')
   try {
     await seed(cacheRoot, [
-      { session_id: 's1', cwd: '/vol/proj/sub', part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
-      { session_id: 's2', cwd: '/vol/projx', part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+      { session_id: 's1', cwd: path.join(volDir('proj'), 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: volDir('projx'), part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
     ])
     const summary = await purgeCache({
       cacheRoot,
-      target: { kind: 'subtree', path: '/vol/Proj' },
+      target: { kind: 'subtree', path: volDir('Proj') },
       deps: {
         realpathSync: NO_SYMLINKS,
-        statSync: spellingInsensitiveVolume(['/vol/Proj', '/vol/projx']),
+        statSync: spellingInsensitiveVolume([volDir('Proj'), volDir('projx')]),
       },
     })
     assert.equal(summary.rowsDeleted, 1)
@@ -647,11 +661,11 @@ test('purge subtree deletes a row recorded under a case variant, on a case-insen
 
 test('purge subtree never widens onto a spelling the volume says is a different directory', async () => {
   const cacheRoot = await makeTmpDir('alias-unproven')
-  const nfcDir = `/vol/${NFC}`
-  const nfdDir = `/vol/${NFD}`
+  const nfcDir = volDir(NFC)
+  const nfdDir = volDir(NFD)
   try {
     await seed(cacheRoot, [
-      { session_id: 's1', cwd: `${nfdDir}/sub`, part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's1', cwd: path.join(nfdDir, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
       { session_id: 's2', cwd: nfcDir, part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
     ])
     // Both spellings exist and are *different* inodes: an ext4-style volume,
@@ -662,15 +676,15 @@ test('purge subtree never widens onto a spelling the volume says is a different 
       deps: {
         realpathSync: NO_SYMLINKS,
         statSync: (p) => {
-          if (p === nfcDir) return { dev: 42, ino: 1 }
-          if (p === nfdDir) return { dev: 42, ino: 2 }
+          if (path.resolve(p) === nfcDir) return { dev: 42, ino: 1 }
+          if (path.resolve(p) === nfdDir) return { dev: 42, ino: 2 }
           throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' })
         },
       },
     })
     assert.equal(summary.rowsDeleted, 1, 'only the directory the user actually named')
     assert.equal(summary.retainedAliasRows, 1, 'the lookalike row was retained')
-    assert.deepEqual(summary.retainedAliasCwds, [`${nfdDir}/sub`], 'and is named, so the retention is not silent')
+    assert.deepEqual(summary.retainedAliasCwds, [path.join(nfdDir, 'sub')], 'and is named, so the retention is not silent')
     const rows = await remainingRows(cacheRoot)
     assert.deepEqual(rows.map((r) => r.part_id), ['m1#0'])
   } finally {
@@ -875,7 +889,7 @@ test('the near-miss note agrees in number with the rows it is counting', async (
 // would land `EEXIST` instead of building the loop. That host cannot host this
 // cause at all (a folded volume proves the alias and deletes), so it skips
 // rather than erroring, and the `ENOENT` case above still covers the retention.
-test('the near-miss note does not say "no longer on disk" of an alias that is on disk but unreadable', async (t) => {
+test('the near-miss note does not say "no longer on disk" of an alias that is on disk but unreadable', { skip: process.platform === 'win32' && 'symlink creation needs Developer Mode on win32' }, async (t) => {
   const cacheRoot = await makeTmpDir('cli-alias-eloop')
   const hypHome = await makeTmpDir('cli-alias-eloop-home')
   const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-eloop-'))
@@ -1062,7 +1076,7 @@ test('an aborted subtree purge still discloses the near-miss rows it left in pla
 // The predicate accepts a row before its batch commits, so visiting a cwd is
 // not proof its rows were deleted. A delete that fails at the commit must not
 // put its directory on the purged list.
-test('an aborted purge never reports a directory whose delete did not return', async (t) => {
+test('an aborted purge never reports a directory whose delete did not return', { skip: process.platform === 'win32' && 'chmod 0o555 does not make a directory unwritable on win32' }, async (t) => {
   if (process.getuid?.() === 0) return t.skip('root ignores directory permissions')
   const cacheRoot = await makeTmpDir('abort-commit')
   const partitions = await seedWalk(cacheRoot, [

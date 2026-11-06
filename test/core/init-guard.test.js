@@ -35,6 +35,9 @@ async function makeHome() {
       stderr,
       stdin: /** @type {any} */ ({ isTTY: true }),
       env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      // The guard under test is platform-independent; the injected platform
+      // keeps the setup preflight (#975) from refusing on a win32 host.
+      platform: /** @type {const} */ ('linux'),
     },
   }
 }

@@ -31,6 +31,14 @@ const WIN32_SKIPPED_FILES = new Set([
   path.join('core', 'service-manager-test-sandbox.test.js'),
 ])
 
+// Windows refuses a CreateProcess command line past 32,767 characters
+// (spawnSync reports ENAMETOOLONG). Passing paths relative to the repo root
+// (see toNodeArg) keeps the whole suite well under this, so win32 runs one
+// concurrent batch like the POSIX legs rather than several sequential ones;
+// the cap stays as a backstop for an unusually long run. Headroom for the
+// quoting spawnSync adds per argument.
+const WIN32_CMDLINE_LIMIT = 28_000
+
 if (isMain(import.meta.url, process.argv[1])) {
   process.exit(run(process.argv.slice(2)))
 }
@@ -66,16 +74,22 @@ export function run(forwardedArgs) {
   try {
     const homeDir = path.join(temp, 'home')
     fs.mkdirSync(homeDir)
-    const result = spawnSync(
-      process.execPath,
-      buildNodeTestArgs(files, forwardedArgs),
-      { stdio: 'inherit', env: { ...isolatedClientEnv(process.env, homeDir), TMPDIR: temp, TMP: temp, TEMP: temp } },
-    )
-    if (result.error) {
-      process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)
-      return 1
+    const limit = process.platform === 'win32' ? WIN32_CMDLINE_LIMIT : Infinity
+    const batches = batchTestFiles(files.map(toNodeArg), forwardedArgs, limit)
+    let status = 0
+    for (const batch of batches) {
+      const result = spawnSync(
+        process.execPath,
+        buildNodeTestArgs(batch, forwardedArgs),
+        { stdio: 'inherit', env: { ...isolatedClientEnv(process.env, homeDir), TMPDIR: temp, TMP: temp, TEMP: temp } },
+      )
+      if (result.error) {
+        process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)
+        return 1
+      }
+      if (status === 0 && (result.status ?? 1) !== 0) status = result.status ?? 1
     }
-    return result.status ?? 1
+    return status
   } finally {
     // Best effort. `force` only swallows ENOENT and `maxRetries` never retries
     // EACCES, so a fixture the suite left unreadable (a test that chmod'd a
@@ -96,6 +110,60 @@ export function run(forwardedArgs) {
  */
 export function buildNodeTestArgs(files, forwardedArgs = []) {
   return ['--test', ...forwardedArgs, ...files]
+}
+
+/**
+ * The argument `node --test` receives for a collected (absolute) test file: a
+ * path relative to the current directory when that is shorter and does not
+ * climb out of it, else the absolute path unchanged. The spawn below does not
+ * set `cwd`, so the child inherits this process's, and `node --test` resolves a
+ * relative arg against that same directory - identical target, far shorter
+ * command line. The whole point is win32's CreateProcess length cap: relative
+ * `test\core\x.test.js` paths keep the suite in one batch where absolute ones
+ * forced several. A caller run from outside the repo (relative would be a long
+ * `..\..\` climb) keeps the absolute path, so this never makes the line longer.
+ *
+ * @param {string} file absolute path from {@link collectTestFiles}
+ * @returns {string}
+ */
+export function toNodeArg(file) {
+  const rel = path.relative(process.cwd(), file)
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return file
+  return rel.length < file.length ? rel : file
+}
+
+/**
+ * Split `files` into runs whose spawned command line stays under `limit`
+ * characters, counting the interpreter path, the fixed `--test` flags, and
+ * per-argument quoting overhead. One batch (today's behavior) everywhere the
+ * limit is `Infinity`; a batch always takes at least one file so an oversized
+ * single path fails in the spawn, where the error names it, not here.
+ *
+ * @param {string[]} files
+ * @param {string[]} forwardedArgs
+ * @param {number} limit
+ * @returns {string[][]}
+ */
+export function batchTestFiles(files, forwardedArgs, limit) {
+  const fixed = process.execPath.length + 3 +
+    ['--test', ...forwardedArgs].reduce((n, arg) => n + arg.length + 3, 0)
+  /** @type {string[][]} */
+  const batches = []
+  /** @type {string[]} */
+  let batch = []
+  let length = fixed
+  for (const file of files) {
+    const cost = file.length + 3
+    if (batch.length > 0 && length + cost > limit) {
+      batches.push(batch)
+      batch = []
+      length = fixed
+    }
+    batch.push(file)
+    length += cost
+  }
+  if (batch.length > 0) batches.push(batch)
+  return batches
 }
 
 /**

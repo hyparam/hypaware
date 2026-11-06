@@ -60,6 +60,11 @@ function fakeCtx(opts) {
  * @param {any} [config]
  * @param {NodeJS.ProcessEnv} [env]
  */
+// The npxRig below models the POSIX npm global layout, whose bin is a symlink
+// into the global root; win32 npm writes .cmd shims instead, and an
+// unprivileged win32 process cannot create the fixture's symlink at all.
+const SKIP_POSIX_LINK_RIG = process.platform === 'win32' && 'the rig models the POSIX npm global layout (symlinked bin)'
+
 async function invoke(run, argv, config, env) {
   let out = ''
   let err = ''
@@ -139,7 +144,7 @@ test('status reports the helper as not installed until install-helper runs', asy
 })
 
 // @ref LLP 0116#helper-contract [tests]: Desktop is the only observer of a rotted wrapper, so status has to read the file rather than stat it
-test('status reports a wrapper whose baked interpreter rotted away, rather than "installed"', async () => {
+test('status reports a wrapper whose baked interpreter rotted away, rather than "installed"', { skip: process.platform === 'win32' && 'the sh wrapper and its baked interpreter line are POSIX artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-'))
   const { ctx, commands } = fakeCtx({ stateDir, mode: 'org_key' })
   await activate(ctx)
@@ -341,7 +346,7 @@ async function runInstallHelperWithEntry(t, rig, entry, envExtra) {
   return { ...result, body: fs.readFileSync(path.join(rig.stateDir, HELPER_BASENAME), 'utf8') }
 }
 
-test('the generated wrapper records the installed CLI, not the npx cache path', async (t) => {
+test('the generated wrapper records the installed CLI, not the npx cache path', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   const rig = npxRig({ installedBin: true })
   assert.equal(isNpxBinPath(rig.npxCliPath, rig.env), true, 'rig did not build an npx entrypoint')
 
@@ -388,7 +393,7 @@ test('a $PATH entry node cannot run is declined, not recorded as durable', async
   assert.match(err, /npx cache/)
 })
 
-test('a shim in front of a durable install does not end the search', async (t) => {
+test('a shim in front of a durable install does not end the search', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // The shim test above only proves a shim is not recorded. It is not enough:
   // the walk stops at the first `hypaware` it meets, so testing runnability on
   // that single answer throws away the search instead of continuing it. pnpm,
@@ -407,7 +412,7 @@ test('a shim in front of a durable install does not end the search', async (t) =
   assert.equal(err, '', 'a durable path was found, so there is nothing to repair')
 })
 
-test('the runnability test tracks what node loads, not this package\'s bin name', async (t) => {
+test('the runnability test tracks what node loads, not this package\'s bin name', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // The check asks whether `node <path>` can run the target, so it accepts
   // every extension node loads and not just the one `package.json` names
   // today. Pinned to `hypaware.js`, a later rename of the bin entry would put
@@ -428,7 +433,7 @@ test('the runnability test tracks what node loads, not this package\'s bin name'
 // nothing on this machine reporting it. The walk already refuses these
 // directories on the `$PATH` side; before this the entrypoint check did not,
 // so the path was baked into the wrapper flagged durable and nothing warned.
-test('the wrapper records the installed CLI, not a project-local node_modules path', async (t) => {
+test('the wrapper records the installed CLI, not a project-local node_modules path', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   const rig = npxRig({ installedBin: true })
 
   const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.projectCliPath)
@@ -444,7 +449,7 @@ test('the wrapper records the installed CLI, not a project-local node_modules pa
 // is installed. Baking the pinned copy instead is the defect the test above
 // exists to prevent, so what the swap owes the operator is a notice and not a
 // different answer: both paths, and `HYPAWARE_BIN` as the way to pin one.
-test('a repointed wrapper reports the swap and names the override', async (t) => {
+test('a repointed wrapper reports the swap and names the override', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   const rig = npxRig({ installedBin: true })
 
   const { code, out, err, body } = await runInstallHelperWithEntry(t, rig, rig.projectCliPath)
@@ -468,7 +473,7 @@ test('a repointed wrapper reports the swap and names the override', async (t) =>
 // (issue #1625), so it comes down the walk, and the name that walk finds is a
 // link into that same root. One install, two spellings: nothing was swapped
 // and there is nothing to disclose.
-test('one install reached by two spellings reports no swap', async (t) => {
+test('one install reached by two spellings reports no swap', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   const rig = npxRig({ installedBin: true, shimAhead: 'link' })
   t.after(() => rig.cleanup())
 
@@ -484,7 +489,7 @@ test('one install reached by two spellings reports no swap', async (t) => {
   )
 })
 
-test('a wrapper recorded as it stands reports no swap', async (t) => {
+test('a wrapper recorded as it stands reports no swap', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // The other half of the contract. An ordinary durable entry script is never
   // repointed, so there is nothing to disclose and a notice would be noise.
   const rig = npxRig({ installedBin: true })
@@ -546,7 +551,7 @@ for (const manager of ['pnpm', 'yarn']) {
   })
 }
 
-test('a HypAware clone is not a project-local install', async (t) => {
+test('a HypAware clone is not a project-local install', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // `node <clone>/bin/hypaware.js` is the normal development entrypoint and
   // carries a `package.json` of its own. It is not under a `node_modules`, so
   // a developer never gets the warning and their wrapper is never repointed.
@@ -563,7 +568,7 @@ test('a HypAware clone is not a project-local install', async (t) => {
   assert.equal(err, '')
 })
 
-test('an ordinary durable install is recorded as it stands', async (t) => {
+test('an ordinary durable install is recorded as it stands', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // The one regression that would be worse than the bug: repointing a working
   // install at some other `hypaware` that happens to be on `$PATH`.
   const rig = npxRig({ installedBin: true })
@@ -578,7 +583,7 @@ test('an ordinary durable install is recorded as it stands', async (t) => {
   assert.equal(err, '')
 })
 
-test('an explicit binary override wins over both', (t) => {
+test('an explicit binary override wins over both', { skip: SKIP_POSIX_LINK_RIG }, (t) => {
   const rig = npxRig({ installedBin: true })
   t.after(() => rig.cleanup())
   const cases = [

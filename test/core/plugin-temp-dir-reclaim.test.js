@@ -124,7 +124,7 @@ async function serveMcp(root) {
   return { child, exited }
 }
 
-test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tmpdir', async () => {
+test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tmpdir', { skip: process.platform === 'win32' && 'this test redirects os.tmpdir() via TMPDIR and runs a minimal env, neither of which ports to win32 (os.tmpdir reads TEMP/TMP; a win32 child needs SystemRoot); unrelated to the setup gate, which now allows win32' }, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-reclaim-'))
   const tmp = path.join(root, 'tmp')
   await fs.mkdir(path.join(root, 'home'), { recursive: true })
@@ -284,7 +284,7 @@ test('a throw from the post-boot sink warning path still reclaims the boot temp 
 // serve` is the shape that gives one: it boots `config`, so plugins activate,
 // then it blocks on stdin, and its JSON-RPC reply to `initialize` is written
 // from inside the command body.
-test('a termination signal mid-run reclaims the boot temp dirs before the signal exit', async () => {
+test('a termination signal mid-run reclaims the boot temp dirs before the signal exit', { skip: process.platform === 'win32' && 'graceful SIGTERM delivery is a POSIX surface' }, async () => {
   for (const signal of /** @type {const} */ (['SIGTERM', 'SIGINT'])) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-signal-'))
     const tmp = path.join(root, 'tmp')
@@ -437,7 +437,7 @@ test('a dispatch nested inside another owning dispatch adds no second signal lis
 // ended the process with the body's code: exit 0, sources half stopped, both
 // boot temp dirs left. The child here is a plain `dispatch` so the body can
 // slow the source stop down and return inside that window on purpose.
-test('a command body returning mid-signal-teardown waits for it and still exits by the signal', async () => {
+test('a command body returning mid-signal-teardown waits for it and still exits by the signal', { skip: process.platform === 'win32' && 'graceful SIGTERM delivery is a POSIX surface' }, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-signal-race-'))
   const scratch = path.join(root, 'scratch')
   try {

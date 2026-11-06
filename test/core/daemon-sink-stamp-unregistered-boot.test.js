@@ -12,6 +12,7 @@ import { renderStatusText } from '../../src/core/commands/status.js'
 import { runDaemonStatus } from '../../src/core/commands/daemon.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
+import { batchIdTime } from '../../src/core/sinks/diagnostic_history.js'
 
 // Issue #2359 / LLP 0453. The recovered `lastSuccessAt` is the fixed point the
 // export warning is defined against, and the daemon's first status write lands
@@ -121,7 +122,7 @@ async function stageInstall({ prefix, configureSink, breakActivation }) {
   const succeededAt = new Date(nowMs - 30 * 60_000).toISOString()
   const outbox = path.join(stateRoot, 'sinks', SINK, 'outbox')
   await fs.mkdir(outbox, { recursive: true })
-  await fs.writeFile(path.join(outbox, `${SINK}-${failedAt}-0.json`), JSON.stringify({ error: 'fetch failed' }))
+  await fs.writeFile(path.join(outbox, `${SINK}-${batchIdTime(new Date(failedAt))}-0.json`), JSON.stringify({ error: 'fetch failed' }))
   writeStatusFile(stateRoot, /** @type {any} */ ({
     state: 'stopped',
     pid: 4242,

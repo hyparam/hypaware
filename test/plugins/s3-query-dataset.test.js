@@ -436,7 +436,7 @@ test('a declared S3 schema still renders its columns, on an empty source too', a
   assert.deepEqual(counts, { list: 0, get: 0 })
 })
 
-test('the suggested query runs as printed for names that are not bare SQL identifiers', async () => {
+test('the suggested query runs as printed for names that are not bare SQL identifiers', { skip: process.platform === 'win32' && 'the suggested command is parsed by sh, a POSIX-shell surface win32 does not have' }, async () => {
   // A stand-in `hyp` that prints the SQL argument it was handed, so the shell
   // parses the printed line exactly as a user's would.
   const bin = temporaryDirectory('hyp-schema-hint-')

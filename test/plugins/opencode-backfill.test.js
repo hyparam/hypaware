@@ -340,11 +340,19 @@ test('OpenCode backfill still fails when the list command runs and errors', asyn
  */
 async function hangingOpenCodeOnPath() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-opencode-hang-'))
-  const bin = path.join(root, 'opencode')
-  // `exec` so the signal reaches the sleep itself, leaving no orphan holding
-  // the stdout pipe open past the kill.
-  await fs.writeFile(bin, '#!/bin/sh\nexec sleep 30\n', 'utf8')
-  await fs.chmod(bin, 0o755)
+  if (process.platform === 'win32') {
+    // A pure-batch spin: the runner drives this through cmd.exe, whose kill
+    // reaches only cmd itself, and anything cmd spawned (sleep, ping) would
+    // be a grandchild holding the stdout pipe open past the kill - execFile
+    // settles only once every stdio stream closes.
+    await fs.writeFile(path.join(root, 'opencode.cmd'), '@ECHO OFF\r\n:loop\r\ngoto loop\r\n')
+  } else {
+    const bin = path.join(root, 'opencode')
+    // `exec` so the signal reaches the sleep itself, leaving no orphan holding
+    // the stdout pipe open past the kill.
+    await fs.writeFile(bin, '#!/bin/sh\nexec sleep 30\n', 'utf8')
+    await fs.chmod(bin, 0o755)
+  }
   const priorPath = process.env.PATH
   process.env.PATH = `${root}${path.delimiter}${priorPath ?? ''}`
   return async () => {

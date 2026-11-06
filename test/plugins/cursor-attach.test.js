@@ -11,6 +11,7 @@ import { runClaudeClassifyHook } from '../../hypaware-core/plugins-workspace/cla
 import { runClaudeSessionContextHook } from '../../hypaware-core/plugins-workspace/claude/src/hook_command.js'
 import { Readable } from 'node:stream'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 /** @type {any} */
 const descriptor = { name: 'cursor', plugin: '@hypaware/cursor', attachProbe: { format: 'json', settings_file: '.cursor/hooks.json', marker_key: '_hypaware' } }
@@ -91,7 +92,7 @@ test('inherited Claude hook executables exit quietly before loading an absent or
     for (const config of ['{"version":2,"plugins":[]}', 'invalid json']) {
       await fs.writeFile(path.join(home, 'hypaware-config.json'), config)
       for (const command of ['session-context', 'classify-cwd']) {
-        const result = spawnSync(process.execPath, [new URL('../../bin/hypaware.js', import.meta.url).pathname,
+        const result = spawnSync(process.execPath, [fileURLToPath(new URL('../../bin/hypaware.js', import.meta.url)),
           'claude-hook', command, '--state-file', path.join(home, 'context.jsonl')], {
           env: { ...process.env, CURSOR_VERSION: '2026.09.08-6caf4ff', HYP_HOME: home, HYP_CONFIG: '' },
           input: '{"session_id":"cursor","cwd":"/probe"}', encoding: 'utf8', timeout: 15000,
@@ -104,7 +105,7 @@ test('inherited Claude hook executables exit quietly before loading an absent or
     assert.deepEqual((await fs.readdir(home)).sort(), ['hypaware-config.json'])
     await fs.writeFile(path.join(home, 'hypaware-config.json'), '{"version":2,"plugins":[]}')
     for (const [version, command] of [['', 'session-context'], ['3.19.19', 'not-a-hook']]) {
-      const result = spawnSync(process.execPath, [new URL('../../bin/hypaware.js', import.meta.url).pathname,
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL('../../bin/hypaware.js', import.meta.url)),
         'claude-hook', command], {
         env: { ...process.env, CURSOR_VERSION: version, HYP_HOME: home, HYP_CONFIG: '' },
         input: '{}', encoding: 'utf8', timeout: 15000,

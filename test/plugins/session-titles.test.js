@@ -146,10 +146,12 @@ test('Codex title database budget counts committed WAL pages, not only the main 
   let DatabaseSync
   try { ({ DatabaseSync } = await import('node:sqlite')) } catch { t.skip('node:sqlite unavailable'); return }
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-title-wal-'))
-  t.after(() => fs.rm(home, { recursive: true, force: true }))
   const file = path.join(home, 'state_3.sqlite')
   const writer = new DatabaseSync(file)
   t.after(() => writer.close())
+  // Close before the rm (hooks run in registration order): win32 cannot
+  // unlink a database an open handle still maps (EBUSY).
+  t.after(() => fs.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   writer.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0')
   writer.exec('CREATE TABLE threads (id TEXT, name TEXT, updated_at INTEGER, updated_at_ms INTEGER)')
   writer.exec('PRAGMA wal_checkpoint(TRUNCATE)')

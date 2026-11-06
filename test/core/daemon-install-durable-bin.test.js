@@ -45,10 +45,14 @@ function fakeLaunchctl() {
   }
 }
 
-const NPX_BIN = '/Users/hyp/.npm/_npx/deadbeef/node_modules/hypaware/bin/hypaware.js'
-const NPX_ENV = { npm_config_cache: '/Users/hyp/.npm' }
+// Pre-resolved: the plan carries the resolved spelling, which on win32
+// gains a drive letter and backslashes over the POSIX-written literal.
+const NPX_BIN = path.resolve('/Users/hyp/.npm/_npx/deadbeef/node_modules/hypaware/bin/hypaware.js')
+const NPX_ENV = { npm_config_cache: path.resolve('/Users/hyp/.npm') }
 const GLOBAL_PREFIX = '/Users/hyp/.npm-global'
-const GLOBAL_BIN = globalHypawareBin(GLOBAL_PREFIX, 'darwin')
+// Host platform, so the expectation matches the layout the real
+// `ensureDurableBin` derives (POSIX bin/hypaware, win32 hypaware.cmd).
+const GLOBAL_BIN = globalHypawareBin(GLOBAL_PREFIX)
 
 const tmpHome = () => fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-durable-bin-'))
 

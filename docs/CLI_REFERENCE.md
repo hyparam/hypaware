@@ -37,9 +37,9 @@ page; it doesn't prove the plugin can run.
 This reference identifies each plugin-owned family:
 
 - `session ...`: shared commands provided by `@hypaware/ai-gateway`,
-  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, `@hypaware/cursor`,
-  `@hypaware/copilot`, `@hypaware/nanoclaw`, `@hypaware/langgraph`, or
-  `@hypaware/antigravity` (also Antigravity Desktop).
+  `@hypaware/opencode`, `@hypaware/pi`, `@hypaware/droid`, `@hypaware/grok`,
+  `@hypaware/cursor`, `@hypaware/copilot`, `@hypaware/nanoclaw`,
+  `@hypaware/langgraph`, or `@hypaware/antigravity` (also Antigravity Desktop).
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
@@ -403,8 +403,10 @@ the caller's current working directory. Recorded means what it does for
 `hyp ask`: attached, or configured with no attach marker to write (Codex in
 its transcript mode). Its CLI must also be on `PATH`, and the
 `hypaware-report` skill must already be installed for it. Optional quoted
-instructions set the period or focus; otherwise the skill uses the previous
-calendar month. If more than one such client could be started, it asks which;
+instructions set the scope (this machine or the team), the period, or the
+focus; the skill asks for any it still needs, suggesting the last 7 days
+including today, and compares the period with the preceding period of the same
+length. If more than one such client could be started, it asks which;
 a run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
 takes the first client of the offered set rather than failing. The set is in
 the order `hyp ask` uses: ascending client id. That pick is
@@ -439,7 +441,8 @@ and `hyp report publish <name>` takes it by name. The skill ends with this
 step so an agent never writes under your home directory itself.
 
 The folder is held to the publish allow-list before anything moves: it must
-hold `report.md` and otherwise only `usage.md`, `work.md`, `health.md`, and
+hold `report.md` and otherwise only `comparison.md`, `work.md`,
+`automation.md`, `repeated-work.md`, `usage.md`, `health.md`, and
 `recommendation-<slug>.md` as regular files. A stray file (a working ledger,
 `.DS_Store`) is named and the command exits `2` with nothing created. The
 folder keeps its name, which must be a plain directory name with no hidden
@@ -471,8 +474,9 @@ Uploads Markdown for the remote to render. The source is a path, or the name
 of a saved report (`hyp report list --local`), which resolves to
 `$HYP_HOME/reports/<name>` when no such path exists here. A single file must
 be `.md` or `.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
-its root and may otherwise contain only `usage.md`, `work.md`, `health.md`,
-and `recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`).
+its root and may otherwise contain only `comparison.md`, `work.md`,
+`automation.md`, `repeated-work.md`, `usage.md`, `health.md`, and
+`recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`).
 The legacy `change-<slug>.md` spelling is also accepted. HTML,
 images, client assets, subdirectories, and symlinks are rejected before any
 upload. The remote renders the HTML; there is no local render step in the
@@ -796,6 +800,10 @@ client through its gateway, so on a Goose-only install use
 Crush also has no live route: pass `crush-` followed by its Crush session ID,
 as the `session_id` column of its rows shows, and HypAware reads the saved
 ignore on the next Crush poll. The same gateway rule applies, so on a Crush-only install use
+`hyp privacy ignore <dir>` on the project directory instead.
+Mastra Code has no live route either: pass `mastracode-` followed by its thread
+ID, and HypAware reads the saved ignore on the next Mastra Code poll. The same
+gateway rule applies, so on a Mastra Code-only install use
 `hyp privacy ignore <dir>` on the project directory instead.
 OpenClaw and Hermes do not support session opt-out; use
 [directory controls](PRIVACY.md#marking-directories) for them.
@@ -1270,6 +1278,7 @@ capture:
 | `@hypaware/codex` (transcript mode) | One minute | No (it is Codex's only capture lane) |
 | `@hypaware/pi` | Five minutes | Yes |
 | `@hypaware/droid` | Five minutes | Yes |
+| `@hypaware/grok` | Five minutes | Yes |
 | `@hypaware/claude` (also Claude Desktop) | Five minutes | Yes |
 | `@hypaware/cursor` | Five minutes | Yes |
 | `@hypaware/openclaw` | Five minutes | Yes |
@@ -1277,6 +1286,7 @@ capture:
 | `@hypaware/antigravity` (also Antigravity Desktop) | Five minutes | Yes |
 | `@hypaware/goose` | 15 minutes | Yes |
 | `@hypaware/crush` | 15 minutes | Yes |
+| `@hypaware/mastracode` | 15 minutes | Yes |
 | `@hypaware/copilot` | One minute | No (it is Copilot's only capture lane; with `on_join: false` it skips sessions from before the daemon started) |
 
 `hyp client detach <client>` stops every client's scheduled recovery, whatever

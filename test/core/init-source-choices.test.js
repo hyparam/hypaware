@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { detectPickerSources } from '../../src/core/cli/detect.js'
-import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
+import { composePickerConfig, visiblePickerDescriptors } from '../../src/core/cli/walkthrough.js'
 import { INIT_CLIENT_CHOICES, INIT_SOURCE_CHOICES, resolveInitSources } from '../../src/core/commands/init.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
@@ -242,5 +242,86 @@ test('adding crush to a config with other clients leaves their sections unchange
   assert.equal(after, prior)
   assert.ok(added.plugins?.some((p) => p.name === '@hypaware/crush'))
   // All three rows share one gateway entry; crush adds no upstream.
+  assert.equal(added.plugins?.filter((p) => p.name === '@hypaware/ai-gateway').length, 1)
+})
+
+// Mastra Code, like goose and crush, is a picker row and a `--source` value
+// but not a `--client` one: it contributes no client (LLP 0586#manifest).
+// Detection is one stat of the directory holding the Linux default
+// `mastra.db`; it never opens the database. The macOS default is not probed
+// (LLP 0586#detect-platforms), so a Mac install is offered unchecked.
+// @ref LLP 0587#tasks [tests]: T2 picker row, detection, and setup re-run cases
+test('the picker pre-checks mastracode only when ~/.local/share/mastracode/mastra.db exists, and opens no database', async () => {
+  const catalog = await realCatalog()
+  assert.deepEqual(catalog.pickerDescriptors.get('mastracode')?.detect, { settings_file: '.local/share/mastracode/mastra.db' })
+  assert.equal(INIT_CLIENT_CHOICES.includes(/** @type {InitFlags['clients'][number]} */ ('mastracode')), false)
+  assert.deepEqual(resolveInitSources(flags({ sources: ['mastracode'] })), ['mastracode'])
+
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-mastracode-detect-'))
+  try {
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('mastracode'), false)
+    const dataDir = path.join(home, '.local', 'share', 'mastracode')
+    await fs.mkdir(dataDir, { recursive: true })
+    // Not a SQLite file: detection must not need to open it, and must leave
+    // no -wal, -shm or -journal companion behind.
+    const bytes = 'not a sqlite database'
+    await fs.writeFile(path.join(dataDir, 'mastra.db'), bytes)
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('mastracode'), true)
+    assert.deepEqual(await fs.readdir(dataDir), ['mastra.db'])
+    assert.equal(await fs.readFile(path.join(dataDir, 'mastra.db'), 'utf8'), bytes)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a HOME holding only the macOS mastra.db is not pre-checked, and mastracode is still offered there', async () => {
+  const catalog = await realCatalog()
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-mastracode-mac-'))
+  try {
+    const macDir = path.join(home, 'Library', 'Application Support', 'mastracode')
+    await fs.mkdir(macDir, { recursive: true })
+    await fs.writeFile(path.join(macDir, 'mastra.db'), 'not a sqlite database')
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('mastracode'), false)
+    assert.deepEqual(await fs.readdir(macDir), ['mastra.db'])
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const offered = visiblePickerDescriptors(catalog.pickerDescriptors.values(), platform).map((d) => d.id)
+    assert.ok(offered.includes('mastracode'), platform)
+  }
+})
+
+test('re-running setup with mastracode picked keeps mastracode.enabled = false, byte for byte', async () => {
+  const catalog = await realCatalog()
+  const existing = composeSetup(catalog, ['mastracode'])
+  const mastracode = existing.plugins?.find((p) => p.name === '@hypaware/mastracode')
+  assert.ok(mastracode, 'the mastracode row composes @hypaware/mastracode')
+  mastracode.config = { enabled: false }
+  const before = JSON.stringify(existing, null, 2) + '\n'
+
+  const rerun = composeSetup(catalog, ['mastracode'], JSON.parse(before))
+  assert.equal(JSON.stringify(rerun, null, 2) + '\n', before)
+  assert.deepEqual(rerun.plugins?.find((p) => p.name === '@hypaware/mastracode')?.config, { enabled: false })
+})
+
+test('adding mastracode to a config with other clients leaves their sections unchanged', async () => {
+  const catalog = await realCatalog()
+  const existing = composeSetup(catalog, ['goose', 'crush'])
+  const goose = existing.plugins?.find((p) => p.name === '@hypaware/goose')
+  const crush = existing.plugins?.find((p) => p.name === '@hypaware/crush')
+  assert.ok(goose && crush)
+  goose.config = { enabled: false, poll_interval: '45s' }
+  crush.config = { enabled: true, poll_interval: '20s' }
+  const prior = JSON.stringify([goose, crush])
+
+  const added = composeSetup(catalog, ['goose', 'crush', 'mastracode'], structuredClone(existing))
+  const after = JSON.stringify([
+    added.plugins?.find((p) => p.name === '@hypaware/goose'),
+    added.plugins?.find((p) => p.name === '@hypaware/crush'),
+  ])
+  assert.equal(after, prior)
+  assert.ok(added.plugins?.some((p) => p.name === '@hypaware/mastracode'))
+  // All three rows share one gateway entry; mastracode adds no upstream.
   assert.equal(added.plugins?.filter((p) => p.name === '@hypaware/ai-gateway').length, 1)
 })

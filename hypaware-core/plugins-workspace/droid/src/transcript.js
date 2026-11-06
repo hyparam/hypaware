@@ -39,6 +39,23 @@ export function present(file) {
 export function fingerprint(stat) { return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}` }
 
 /**
+ * How long a file's timestamps must have stood before its fingerprint can
+ * vouch that nothing was rewritten in place. Filesystem timestamps move in
+ * ticks - roughly 16ms for the NTFS clock, a full second on HFS+ - so a
+ * same-size rewrite landing in the same tick as the write the fingerprint
+ * was taken from leaves every field of it unchanged. Until the stat has aged
+ * past the coarsest of those ticks a matching fingerprint is treated as
+ * unsettled and the file is read again, which replays rows that are harmless
+ * by native ID, rather than skipping a rewrite the stat cannot distinguish.
+ */
+const FINGERPRINT_SETTLE_MS = 2000
+
+/** @param {Stats} stat */
+export function fingerprintSettled(stat) {
+  return Date.now() - Math.max(stat.mtimeMs, stat.ctimeMs) >= FINGERPRINT_SETTLE_MS
+}
+
+/**
  * Snapshot one transcript, yielding bounded batches and a success-only cursor.
  * The consumer must finish writing a batch before requesting the next item.
  * @param {string} file
@@ -72,8 +89,10 @@ export async function* readDroidTranscript(file, opts) {
     let sequence = -1
     const cursor = opts.cursor
     if (cursor && cursor.inode === inode && cursor.header === header && cursor.offset <= stat.size &&
-        // A same-size edit is not an append. Replaying is harmless by native ID.
-        (cursor.offset < stat.size || cursor.fingerprint === currentFingerprint) &&
+        // A same-size edit is not an append, and a fingerprint can only rule
+        // one out once the stat has aged past the timestamp tick (see
+        // `fingerprintSettled`). Replaying is harmless by native ID.
+        (cursor.offset < stat.size || (cursor.fingerprint === currentFingerprint && fingerprintSettled(stat))) &&
         cursor.boundary === await boundary(fd, cursor.offset)) {
       offset = cursor.offset
       sequence = cursor.sequence
@@ -134,14 +153,21 @@ export async function* readDroidTranscript(file, opts) {
 }
 
 /** @param {FileHandle} fd @param {number} offset */
-async function boundary(fd, offset) {
+export async function boundary(fd, offset) {
   const buffer = Buffer.alloc(Math.min(128, offset))
   const { bytesRead } = await fd.read(buffer, 0, buffer.length, offset - buffer.length)
   return buffer.subarray(0, bytesRead).toString('base64')
 }
 
-/** LF framing only: never parse an unfinished append. @param {FileHandle} fd @param {number} start @param {number} end */
-async function* lines(fd, start, end) {
+/**
+ * LF framing only: never parse an unfinished append.
+ * @param {FileHandle} fd
+ * @param {number} start
+ * @param {number} end
+ * @param {number} [maxLineBytes]
+ * @param {boolean} [skipOversized] yield an oversized line as `oversized` with empty text, instead of throwing
+ */
+export async function* lines(fd, start, end, maxLineBytes = MAX_LINE_BYTES, skipOversized = false) {
   if (start >= end) return
   /** @type {Buffer[]} */
   let fragments = []
@@ -160,7 +186,20 @@ async function* lines(fd, start, end) {
       const stop = newline < 0 ? chunk.length : newline
       const fragment = chunk.subarray(index, stop)
       bytes += fragment.length
-      if (bytes > MAX_LINE_BYTES) throw new Error('line_budget')
+      const oversized = bytes > maxLineBytes
+      if (oversized && !skipOversized) throw new Error('line_budget')
+      if (oversized && newline >= 0) {
+        offset += bytes + 1
+        yield { text: '', end: offset, bytes, oversized: true }
+        fragments = []
+        bytes = 0
+        index = stop + 1
+        continue
+      }
+      if (oversized) {
+        fragments = []
+        break
+      }
       if (newline < 0) {
         fragments.push(fragment)
         break

@@ -311,7 +311,8 @@ test('a spool under a symlinked $HYP_HOME is still emptied', { skip: skipSymlink
 // into the same zero-count success an empty spool reports, which is the
 // user-visible half of the guard going quiet.
 test('a spool the process cannot stat is reported as unswept, not declared foreign', {
-  skip: process.getuid?.() === 0 && 'a root process traverses a mode-000 directory anyway',
+  skip: (process.getuid?.() === 0 && 'a root process traverses a mode-000 directory anyway')
+    || (process.platform === 'win32' && 'chmod 0o000 does not make a directory unlistable on win32'),
 }, async (t) => {
   const home = await tmpDir('unreadable')
   const blocked = path.join(home, 'blocked')
@@ -376,7 +377,9 @@ function virtualSpoolFs({ root, files = ['req-1.json'], rootIsSymlink = false, l
 
 // A path that exists nowhere on this machine, so the pre-change guard could
 // only ever have answered about it with the real filesystem's `false`.
-const VIRTUAL_SPOOL = path.join(path.sep, 'hyp-virtual-spool', 'claude-bodies')
+// Resolved: the sweep hands the fs the resolved spelling, which on win32
+// gains a drive letter over a POSIX-written fixture.
+const VIRTUAL_SPOOL = path.resolve(path.sep, 'hyp-virtual-spool', 'claude-bodies')
 
 test('the injected filesystem answers the containment check, not node:fs', async () => {
   const v = virtualSpoolFs({ root: VIRTUAL_SPOOL, rootIsSymlink: true })

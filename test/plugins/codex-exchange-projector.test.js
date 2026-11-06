@@ -23,9 +23,11 @@ import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../src/core/usa
  * @param {string} ignoredDir
  */
 function ignoringResolver(ignoredDir) {
-  const hypignore = path.join(ignoredDir, '.hypignore')
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over the POSIX-written fixture.
+  const hypignore = path.resolve(path.join(ignoredDir, '.hypignore'))
   return createUsagePolicyResolver({
-    existsSync: (p) => p === hypignore,
+    existsSync: (p) => path.resolve(p) === hypignore,
     readFileSync: () => 'ignore\n',
   })
 }
@@ -40,9 +42,9 @@ function ignoringResolver(ignoredDir) {
  * @param {string} ignoredDir
  */
 function clampingResolver(ignoredDir) {
-  const hypignore = path.join(ignoredDir, '.hypignore')
+  const hypignore = path.resolve(path.join(ignoredDir, '.hypignore'))
   return createUsagePolicyResolver({
-    existsSync: (p) => p === hypignore,
+    existsSync: (p) => path.resolve(p) === hypignore,
     readFileSync: () => 'some-future-class\n',
   })
 }
@@ -127,7 +129,7 @@ test('project() emits a usage_policy_drop log on an ignored cwd', () => {
   const drop = infos.find((e) => e.message === 'plugin.codex.usage_policy_drop')
   assert.ok(drop, 'expected a usage_policy_drop log entry')
   assert.equal(drop.fields?.operation, 'usage_policy_drop')
-  assert.equal(drop.fields?.governed_by, '/work/ignored/.hypignore')
+  assert.equal(drop.fields?.governed_by, path.resolve('/work/ignored/.hypignore'))
   assert.equal(drop.fields?.declared, 'ignore', 'an intended ignore carries declared=ignore')
 })
 
@@ -1657,31 +1659,33 @@ test('an ignored workspace key does not enrich a row whose cwd a clean key cover
     request_headers: JSON.stringify({
       'x-codex-turn-metadata': JSON.stringify({
         thread_id: 'thread-1189a',
+        // Host spellings: workspace-covers-cwd compares with the host
+        // separator, the way real metadata arrives on this platform.
         workspaces: {
-          '/work/ignored/secret-proj': {
+          [path.resolve('/work/ignored/secret-proj')]: {
             associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
             latest_git_commit_hash: 'deadbeef',
           },
-          '/work/clean': {
+          [path.resolve('/work/clean')]: {
             associated_remote_urls: { origin: 'https://github.com/acme/clean.git' },
             latest_git_commit_hash: 'feedface',
           },
         },
       }),
     }),
-    request_body: JSON.stringify({ cwd: '/work/clean/sub', input: 'go' }),
+    request_body: JSON.stringify({ cwd: path.resolve('/work/clean/sub'), input: 'go' }),
     response_body: JSON.stringify({ output_text: 'done' }),
   }), { log }))
 
   assert.ok(projection && projection !== USAGE_POLICY_DROP, 'the session ran in a clean tree')
-  assert.equal(projection.cwd, '/work/clean/sub', 'the row still records where it actually ran')
+  assert.equal(projection.cwd, path.resolve('/work/clean/sub'), 'the row still records where it actually ran')
   assert.equal(
     projection.git_remote,
     'https://github.com/acme/clean.git',
     'the remote comes from the key that covers the cwd, never the ignored tree',
   )
   assert.equal(projection.head_sha, 'feedface')
-  assert.equal(projection.attributes.codex.workspace, '/work/clean')
+  assert.equal(projection.attributes.codex.workspace, path.resolve('/work/clean'))
   assert.equal(projection.attributes.codex.git_origin_url, 'https://github.com/acme/clean.git')
   assert.ok(
     !JSON.stringify(projection).includes('SECRET'),
@@ -1707,15 +1711,15 @@ test('the NEAREST covering workspace key wins, not merely the first one listed (
       'x-codex-turn-metadata': JSON.stringify({
         thread_id: 'thread-1189b',
         workspaces: {
-          '/work': { associated_remote_urls: { origin: 'git@github.com:acme/outer.git' } },
-          '/work/clean': { associated_remote_urls: { origin: 'git@github.com:acme/inner.git' } },
+          [path.resolve('/work')]: { associated_remote_urls: { origin: 'git@github.com:acme/outer.git' } },
+          [path.resolve('/work/clean')]: { associated_remote_urls: { origin: 'git@github.com:acme/inner.git' } },
         },
       }),
     }),
-    request_body: JSON.stringify({ cwd: '/work/clean/sub', input: 'go' }),
+    request_body: JSON.stringify({ cwd: path.resolve('/work/clean/sub'), input: 'go' }),
     response_body: JSON.stringify({ output_text: 'done' }),
   }), context()))
-  assert.equal(projection.attributes.codex.workspace, '/work/clean')
+  assert.equal(projection.attributes.codex.workspace, path.resolve('/work/clean'))
   assert.equal(projection.git_remote, 'git@github.com:acme/inner.git')
 })
 
@@ -1897,15 +1901,17 @@ test('a clean covering key enriches in either map order, beside an ignored unrel
     associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
     latest_git_commit_hash: 'deadbeef',
   }
+  const cleanKey = path.resolve('/work/clean')
+  const secretKey = path.resolve('/work/ignored/secret-proj')
   for (const order of ['secret-first', 'clean-first']) {
     const workspaces = order === 'secret-first'
-      ? { '/work/ignored/secret-proj': secret, '/work/clean': clean }
-      : { '/work/clean': clean, '/work/ignored/secret-proj': secret }
+      ? { [secretKey]: secret, [cleanKey]: clean }
+      : { [cleanKey]: clean, [secretKey]: secret }
     const projector = createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') })
-    const projection = /** @type {any} */ (projector.project(apiKeyTurn('/work/clean/sub', workspaces), context()))
+    const projection = /** @type {any} */ (projector.project(apiKeyTurn(path.resolve('/work/clean/sub'), workspaces), context()))
     assert.equal(projection.git_remote, 'https://github.com/acme/clean.git', `${order}: redacted covering remote`)
     assert.equal(projection.head_sha, 'feedface', order)
-    assert.equal(projection.attributes.codex.workspace, '/work/clean', order)
+    assert.equal(projection.attributes.codex.workspace, cleanKey, order)
     assert.equal(projection.attributes.codex.git_origin_url, 'https://github.com/acme/clean.git', order)
     assert.equal(projection.attributes.codex.git_commit, 'feedface', order)
     assert.equal(projection.attributes.codex.has_changes, false, order)
@@ -2016,10 +2022,15 @@ test('the stored header keeps the covering workspace byte-exact and drops the ig
     associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
     latest_git_commit_hash: 'deadbeef',
   }
+  const cleanKey = path.resolve('/work/clean')
+  const secretKey = path.resolve('/work/ignored/secret-proj')
+  // The ignored path as it appears inside a JSON string (win32 backslashes
+  // arrive escaped there).
+  const ignoredNeedle = JSON.stringify(path.resolve('/work/ignored')).slice(1, -1)
   for (const order of ['secret-first', 'clean-first']) {
     const workspaces = order === 'secret-first'
-      ? { '/work/ignored/secret-proj': secret, '/work/clean': clean }
-      : { '/work/clean': clean, '/work/ignored/secret-proj': secret }
+      ? { [secretKey]: secret, [cleanKey]: clean }
+      : { [cleanKey]: clean, [secretKey]: secret }
     const metadata = { session_id: 'session-2636', thread_id: 'thread-2636', workspaces, turn_id: 'turn-1' }
     const { rows, logged } = await gatewayRows(createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') }), {
       path: '/v1/responses',
@@ -2028,23 +2039,23 @@ test('the stored header keeps the covering workspace byte-exact and drops the ig
         'user-agent': 'codex_cli_rs/0.50.0',
         'x-codex-turn-metadata': JSON.stringify(metadata),
       }),
-      request_body: JSON.stringify({ model: 'gpt-5-codex', metadata: { cwd: '/work/clean/sub' }, input: 'go' }),
+      request_body: JSON.stringify({ model: 'gpt-5-codex', metadata: { cwd: path.resolve('/work/clean/sub') }, input: 'go' }),
       response_body: JSON.stringify({ output_text: 'done' }),
     })
     assert.ok(rows.length > 0, `${order}: the clean turn records`)
     for (const row of rows) {
       assert.equal(
         storedTurnMetadata(row),
-        JSON.stringify({ ...metadata, workspaces: { '/work/clean': clean } }),
+        JSON.stringify({ ...metadata, workspaces: { [cleanKey]: clean } }),
         `${order}: only the covering entry remains, byte-exact, with every other field intact`,
       )
       assert.equal(row.attributes.gateway.request_headers['user-agent'], 'codex_cli_rs/0.50.0', order)
     }
     assert.ok(!JSON.stringify(rows).includes('SECRET'), `${order}: no row carries the ignored remote`)
     assert.ok(!JSON.stringify(rows).includes('deadbeef'), `${order}: nor its commit`)
-    assert.ok(!JSON.stringify(rows).includes('/work/ignored'), `${order}: nor its path`)
+    assert.ok(!JSON.stringify(rows).includes(ignoredNeedle), `${order}: nor its path`)
     const telemetry = JSON.stringify(logged)
-    assert.ok(!telemetry.includes('SECRET') && !telemetry.includes('/work/ignored'), `${order}: no log line carries it either`)
+    assert.ok(!telemetry.includes('SECRET') && !telemetry.includes(ignoredNeedle), `${order}: no log line carries it either`)
   }
 })
 
@@ -2075,12 +2086,12 @@ test('a turn whose every workspace may stay stores its headers untouched (#2636)
     'x-codex-turn-metadata': JSON.stringify({
       thread_id: 'thread-2636c',
       workspaces: {
-        '/work': { associated_remote_urls: { origin: 'https://github.com/acme/mono.git' } },
-        '/work/clean': { associated_remote_urls: { origin: 'https://github.com/acme/clean.git' } },
+        [path.resolve('/work')]: { associated_remote_urls: { origin: 'https://github.com/acme/mono.git' } },
+        [path.resolve('/work/clean')]: { associated_remote_urls: { origin: 'https://github.com/acme/clean.git' } },
       },
     }),
   })
-  const input = apiKeyTurn('/work/clean/sub', {})
+  const input = apiKeyTurn(path.resolve('/work/clean/sub'), {})
   input.request_headers = headers
   const projection = createCodexExchangeProjector({ resolver: governsNothingResolver() }).project(input, context())
   assert.ok(projection && projection !== USAGE_POLICY_DROP)
@@ -2722,6 +2733,96 @@ test('part_id and message_id stay byte-identical for the turn-metadata shape alr
       { role: 'assistant', session_id: 'session-identity', conversation_id: 'thread-identity', message_id: '179fd16763044acd', part_id: '179fd16763044acd#0' },
     ]
   )
+})
+
+// Compaction fixtures use native content_item_kinds, not reasoning.summary.
+test('Responses summary replays retain native identity and creation time without usage', async () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const gateway = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+  const summary = {
+    type: 'message', id: 'msg-compact', role: 'assistant',
+    content: [{ type: 'input_text', text: 'Use the revised decision.' }],
+    internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'], create_time: 1779667203 },
+  }
+  const input = exchange({
+    path: '/v1/responses',
+    request_body: JSON.stringify({ metadata: { session_id: 'compact-session' }, input: [] }),
+    response_body: JSON.stringify({ output: [summary], usage: { input_tokens: 100, output_tokens: 10 } }),
+  })
+  const rows = await gateway.projectExchange(input)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].message_id, 'msg-compact')
+  assert.equal(rows[0].is_compact_summary, true)
+  assert.equal(rows[0].provider_subtype, 'compaction.summary')
+  assert.equal(rows[0].message_created_at, '2026-05-25T00:00:03.000Z')
+  assert.equal(/** @type {any} */ (rows[0].attributes)?.usage, undefined)
+  assert.deepEqual(await gateway.projectExchange(input), [])
+  const replay = await gateway.projectExchange(exchange({
+    ...input,
+    request_body: JSON.stringify({ metadata: { session_id: 'compact-session' }, input: [summary] }),
+    response_body: JSON.stringify({ output_text: 'Continued', usage: { input_tokens: 100, output_tokens: 10 } }),
+  }))
+  assert.equal(replay.length, 1, 'the historical summary is already seen')
+  assert.equal(replay[0].content_text, 'Continued')
+  assert.equal(/** @type {any} */ (replay[0].attributes).usage.output_tokens, 10)
+})
+
+test('Responses SSE keeps usage on the genuine reply when a summary follows it', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    request_body: JSON.stringify({ input: [] }),
+    stream_events: [{ event: 'response.completed', data: JSON.stringify({
+      type: 'response.completed', response: {
+        output: [
+          { type: 'message', role: 'assistant', content: 'Genuine reply' },
+          { type: 'message', id: 'msg-summary-sse', role: 'assistant', content: [{ type: 'input_text', text: 'Historical summary' }], internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'] } },
+        ],
+        usage: { input_tokens: 100, output_tokens: 10 },
+      },
+    }) }],
+  }), context()))
+  assert.equal(projection.messages[0].attributes.usage.output_tokens, 10)
+  assert.equal(projection.messages[1].message_id, 'msg-summary-sse')
+  assert.equal(projection.messages[1].is_compact_summary, true)
+  assert.equal(projection.messages[1].attributes.usage, undefined)
+})
+
+test('compact endpoint output is historical context, including retained user messages', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses/compact',
+    request_body: JSON.stringify({ input: [] }),
+    response_body: JSON.stringify({
+      object: 'response.compaction',
+      output: [
+        { type: 'message', role: 'user', content: 'Retained question' },
+        { type: 'message', role: 'assistant', content: 'Retained answer' },
+        { type: 'compaction', id: 'cmp-1', encrypted_content: 'opaque-state', content: 'Unsupported plaintext' },
+      ],
+      usage: { input_tokens: 100, output_tokens: 10 },
+    }),
+  }), context()))
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant'])
+  assert.ok(projection.messages.every((/** @type {any} */ m) => m.attributes?.usage === undefined))
+  assert.ok(!JSON.stringify(projection).includes('opaque-state'))
+})
+
+test('Responses input omits opaque compaction variants and never marks reasoning as compaction', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    request_body: JSON.stringify({ input: [
+      { type: 'compaction', encrypted_content: 'opaque-state', content: 'Unsupported plaintext' },
+      { type: 'compaction_summary', encrypted_content: 'opaque-state' },
+      { type: 'context_compaction', encrypted_content: 'opaque-state' },
+      { type: 'message', role: 'user', content: [], internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'] } },
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Reasoning summary' }] },
+    ] }),
+  }), context()))
+  assert.equal(projection.messages.length, 1)
+  assert.equal(projection.messages[0].content[0].type, 'thinking')
+  assert.equal(projection.messages[0].is_compact_summary, undefined)
 })
 
 // ---------------------------------------------------------------------

@@ -71,15 +71,15 @@ const RESTART_INSTRUCTION =
  * deliberately routed that provider somewhere, and rerouting it silently is
  * the surprise R2 exists to prevent, so attach refuses and writes nothing.
  * An entry HypAware wrote is not that (it is self-identifying, and the same
- * ownership test core's detach applies before deleting one), so attach
- * overwrites its own: that is what makes re-attach-on-drift work, which
- * `action_attach.js`'s `isCurrent()` requires after an ephemeral-port rebind
- * (LLP 0086) or an asset-set change (LLP 0107).
+ * ownership test core's detach applies before removing the override), so
+ * attach refreshes its own routing fields while preserving user additions.
+ * This makes the re-attach `action_attach.js`'s `isCurrent()` requires work
+ * after an ephemeral-port rebind (LLP 0086) or asset-set change (LLP 0107).
  *
  * Never displacing a user value also means there is no undo record to write:
  * the entries themselves are the marker the manifest's `json_path`
- * `attach_probe` reads and core's detach reverses, and deletion is the whole
- * undo (LLP 0169).
+ * `attach_probe` reads and core's detach reverses. User additions survive
+ * removal of that override (LLP 0163).
  *
  * Split out of `index.js` rather than inlined into `registerClient()` the way
  * the Claude adapter's dry-run branch is, because the refuse-then-write
@@ -154,12 +154,7 @@ export function createOpenclawAttach(opts) {
 
           const existing = conflictingProviderKeys(read.value)
           if (existing.length > 0) {
-            const reason =
-              `models.providers.${existing.join(' and models.providers.')} already ` +
-              `exists in ${settingsPath} and was not written by HypAware; attach ` +
-              `refuses to merge (LLP 0167#attach-detach). ` +
-              `Remove it by hand or run 'hyp client detach ${CLIENT_NAME}' first.`
-            return refuse(span, attachCtx, logger, settingsPath, reason)
+            return refuse(span, attachCtx, logger, settingsPath, refusalReason(read.value, existing, settingsPath))
           }
 
           if (attachCtx.dryRun === true) {
@@ -256,6 +251,77 @@ function conflictingProviderKeys(config) {
 }
 
 /**
+ * The refusal text for the keys {@link conflictingProviderKeys} found. An
+ * entry with no `baseUrl` routes nowhere: it is what detach leaves when the
+ * user added settings to our entry (an `anthropic-workspace-id` header, say).
+ * Detach has nothing left to undo there, so pointing at it would loop; say
+ * what the entry holds and how to attach without losing it. Settings are named
+ * by path and never by value, because this reason is printed and logged.
+ *
+ * @param {Record<string, unknown>} config
+ * @param {string[]} keys
+ * @param {string} settingsPath
+ * @returns {string}
+ */
+function refusalReason(config, keys, settingsPath) {
+  const container = /** @type {Record<string, unknown>} */ (readPath(config, CONTAINER_KEYS))
+  const settingsOnly = keys.filter((key) => {
+    const entry = container[key]
+    return isPlainObject(entry) && !Object.hasOwn(entry, 'baseUrl')
+  })
+  const routed = keys.filter((key) => !settingsOnly.includes(key))
+  const parts = []
+  if (routed.length > 0) {
+    parts.push(
+      `models.providers.${routed.join(' and models.providers.')} already ` +
+      `exists in ${settingsPath} and was not written by HypAware; attach ` +
+      `refuses to merge (LLP 0167#attach-detach). ` +
+      `Remove it by hand or run 'hyp client detach ${CLIENT_NAME}' first.`
+    )
+  }
+  if (settingsOnly.length === 0) return parts.join(' ')
+  let hasSettings = false
+  for (const key of settingsOnly) {
+    const names = settingNames(/** @type {Record<string, unknown>} */ (container[key]))
+    if (names.length > 0) hasSettings = true
+    const holds = names.length > 0 ? `holds only your own settings (${names.join(', ')})` : 'is empty'
+    parts.push(
+      `models.providers.${key} in ${settingsPath} ${holds}, with no baseUrl, ` +
+      `so HypAware will not edit it.`
+    )
+  }
+  const remove = `remove models.providers.${settingsOnly.join(' and models.providers.')}`
+  const command = `'hyp client attach ${CLIENT_NAME}'`
+  const entries = settingsOnly.length > 1 ? 'the new entries' : 'the new entry'
+  parts.push(hasSettings
+    ? `To attach, copy those settings, ${remove}, run ${command}, then add those settings back to ${entries}.`
+    : `To attach, ${remove}, then run ${command}.`)
+  return parts.join(' ')
+}
+
+const MAX_SETTING_NAMES = 5
+
+/**
+ * Bounded list of an entry's setting paths, headers by name.
+ * @param {Record<string, unknown>} entry
+ * @returns {string[]}
+ */
+function settingNames(entry) {
+  /** @type {string[]} */
+  const names = []
+  for (const [key, value] of Object.entries(entry)) {
+    if (key === 'headers' && isPlainObject(value) && Object.keys(value).length > 0) {
+      for (const header of Object.keys(value)) names.push(`headers.${header}`)
+    } else {
+      names.push(key)
+    }
+  }
+  const shown = names.slice(0, MAX_SETTING_NAMES).map((name) => name.slice(0, 64))
+  if (names.length > shown.length) shown.push(`${names.length - shown.length} more`)
+  return shown
+}
+
+/**
  * The config with the two entries added, structurally shared down the
  * `models.providers` spine only: every other key of `models`, of
  * `models.providers`, and of the file's top level is carried through by
@@ -281,8 +347,8 @@ function withProviderEntries(config, endpoint) {
       ...models,
       providers: {
         ...providers,
-        anthropic: providerEntry(endpoint, 'anthropic'),
-        openai: providerEntry(`${endpoint}/v1`, 'openai'),
+        anthropic: providerEntry(endpoint, 'anthropic', providers.anthropic),
+        openai: providerEntry(`${endpoint}/v1`, 'openai', providers.openai),
       },
     },
   }
@@ -296,10 +362,16 @@ function withProviderEntries(config, endpoint) {
  *
  * @param {string} baseUrl
  * @param {string} upstream
+ * @param {unknown} existing  absent or already checked by the ownership predicate
  * @returns {Record<string, unknown>}
  */
-function providerEntry(baseUrl, upstream) {
+function providerEntry(baseUrl, upstream, existing) {
+  // Ownership identifies our override, not every field: OpenClaw API-key
+  // setup can add an anthropic-workspace-id header after attach.
+  const entry = isPlainObject(existing) ? existing : {}
+  const headers = isPlainObject(entry.headers) ? entry.headers : {}
   return {
+    ...entry,
     baseUrl,
     // Two headers, two readers: the marker names the upstream the gateway
     // forwards to; the client header is what the openclaw exchange projector
@@ -307,7 +379,7 @@ function providerEntry(baseUrl, upstream) {
     // later settle) as openclaw rather than falling through to the Claude
     // projector. Ownership (isOwnedProviderEntry) keys on the marker alone,
     // so entries written before the client header existed still detach.
-    headers: { [MARKER_HEADER]: upstream, [CLIENT_HEADER]: CLIENT_NAME },
+    headers: { ...headers, [MARKER_HEADER]: upstream, [CLIENT_HEADER]: CLIENT_NAME },
     models: [],
   }
 }

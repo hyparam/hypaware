@@ -364,7 +364,10 @@ test('runWizardJoin: real disk check never polls and locks only an applied confi
   assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [], lockedResolved: false })
 
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(cfg(['@hypaware/claude'])))
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  // The pointer the apply engine writes on this host: a symlink on POSIX,
+  // a regular pointer file on win32 (LLP 0580).
+  if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
+  else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
   assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: ['claude'], lockedResolved: true, managed: true })
   assert.doesNotMatch(opts.stdout.text(), /Applying your org's configuration|Didn't hear back/)
 })

@@ -5,11 +5,10 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
 test('test and smoke client environments discard inherited settings and history paths', () => {
-  const inherited = { HOME: '/live', FACTORY_HOME_OVERRIDE: '/live/factory', CODEX_HOME: '/live/codex', HYP_CONFIG: '/live/hyp.json', CLAUDE_CONFIG_DIR: '/live/claude', PI_CODING_AGENT_SESSION_DIR: '/live/pi', XDG_CONFIG_HOME: '/live/config', PATH: '/bin' }
+  const inherited = { HOME: '/live', FACTORY_HOME_OVERRIDE: '/live/factory', GROK_HOME: '/live/grok', CODEX_HOME: '/live/codex', HYP_CONFIG: '/live/hyp.json', CLAUDE_CONFIG_DIR: '/live/claude', PI_CODING_AGENT_SESSION_DIR: '/live/pi', XDG_CONFIG_HOME: '/live/config', PATH: '/bin' }
   const env = isolatedClientEnv(inherited, '/fixture')
   assert.equal(env.HOME, '/fixture')
   assert.equal(env.USERPROFILE, '/fixture')
@@ -18,6 +17,7 @@ test('test and smoke client environments discard inherited settings and history 
   assert.equal(env.CLAUDE_CONFIG_DIR, undefined)
   assert.equal(env.PI_CODING_AGENT_SESSION_DIR, undefined)
   assert.equal(env.FACTORY_HOME_OVERRIDE, undefined)
+  assert.equal(env.GROK_HOME, undefined)
   assert.equal(env.XDG_CONFIG_HOME, path.join('/fixture', '.config'))
   assert.equal(env.PATH, '/bin')
   assert.equal(inherited.CODEX_HOME, '/live/codex')
@@ -26,9 +26,11 @@ test('test and smoke client environments discard inherited settings and history 
 test('smoke harness replaces inherited Codex home before importing the flow', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-smoke-isolation-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
-  const harnessPath = fileURLToPath(new URL('../../hypaware-core/smoke/lib/harness.js', import.meta.url))
+  // A file URL, not the bare path: the ESM loader refuses a win32
+  // drive-lettered absolute path as an import specifier.
+  const harnessUrl = new URL('../../hypaware-core/smoke/lib/harness.js', import.meta.url).href
   const script = `
-    import { runFlow } from ${JSON.stringify(harnessPath)}
+    import { runFlow } from ${JSON.stringify(harnessUrl)}
     import os from 'node:os'
     const result = await runFlow('core_boot_noop')
     console.log(JSON.stringify({ tmpDir: result.tmpDir, home: os.homedir(), codex: process.env.CODEX_HOME }))

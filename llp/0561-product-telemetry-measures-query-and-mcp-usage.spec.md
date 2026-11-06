@@ -105,7 +105,7 @@ list:
 `agent_shell` means the CLI ran with an environment marker that a known agent
 harness sets for the shell commands it runs. The markers are listed in
 `contract.js` (`AGENT_SHELL_MARKERS`: `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
-`CODEX_THREAD_ID`, `CODEX_SANDBOX`, `GEMINI_CLI`, `CURSOR_AGENT`). Only a
+`CODEX_THREAD_ID`, `CODEX_SANDBOX`, `GEMINI_CLI`, `CURSOR_AGENT`, `GROK_SESSION_ID`). Only a
 marker's presence is read; its value is never read or forwarded. Without a
 marker the surface is `cli`. This undercounts agents that set no marker; it
 never sends anything the user typed.

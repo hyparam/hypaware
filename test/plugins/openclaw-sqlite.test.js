@@ -132,8 +132,10 @@ test('read failures preserve already native rows with their own policy context',
   assert.deepEqual(await enricher.settle([row], /** @type {any} */ ({})), [row])
 })
 test('state directory override points discovery at the actual OpenClaw store', () => {
-  assert.equal(defaultOpenclawAgentsDir({ OPENCLAW_STATE_DIR: '/state' }, '/home'), '/state/agents')
-  assert.equal(defaultOpenclawAgentsDir({ OPENCLAW_STATE_DIR: '~/state' }, '/home'), '/home/state/agents')
+  // Resolved: the override resolves its spelling, which on win32 gains a
+  // drive letter and backslashes over a POSIX-written fixture.
+  assert.equal(defaultOpenclawAgentsDir({ OPENCLAW_STATE_DIR: '/state' }, '/home'), path.resolve('/state', 'agents'))
+  assert.equal(defaultOpenclawAgentsDir({ OPENCLAW_STATE_DIR: '~/state' }, '/home'), path.resolve('/home/state', 'agents'))
 })
 for (const storage of ['sqlite', 'file']) {
   test(`verified ${storage} cold archives project without restoring the upstream database`, { skip: !zlib.zstdCompressSync }, async t => {

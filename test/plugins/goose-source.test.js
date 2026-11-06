@@ -406,7 +406,7 @@ test('a recording source reports ready, polling, and the rows it wrote', async (
   assert.equal(status.details?.error_kind, undefined)
 })
 
-test('an unreadable sessions.db degrades with permission_denied and names the path in status only', async () => {
+test('an unreadable sessions.db degrades with permission_denied and names the path in status only', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' }, async () => {
   const dir = await tmpDir()
   const sessionsDb = path.join(dir, 'sessions.db')
   createFixtureDb(sessionsDb).close()

@@ -30,7 +30,11 @@ const BIN = fileURLToPath(new URL('../../bin/hypaware.js', import.meta.url))
  * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
  */
 function runCli(home, argv, extra = {}) {
-  const env = { ...process.env, HOME: home, ...extra }
+  // Sandbox `os.homedir()` on both platforms: it reads HOME on POSIX and
+  // USERPROFILE on win32 (hypHomeFromEnv falls back to os.homedir() when
+  // HYP_HOME is unset), so setting only HOME would leak to the real profile
+  // on Windows and pick up the user's actual ~/.hyp.
+  const env = { ...process.env, HOME: home, USERPROFILE: home, ...extra }
   for (const key of ['HYP_HOME', 'HYP_CONFIG', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME']) {
     if (!(key in extra)) delete env[key]
   }
@@ -54,7 +58,9 @@ async function snapshot(dir) {
   const tree = new Map()
   for (const entry of await fs.readdir(dir, { recursive: true, withFileTypes: true })) {
     const full = path.join(entry.parentPath, entry.name)
-    const rel = path.relative(dir, full)
+    // Forward-slash keys so the path assertions below read the same on win32,
+    // where path.relative returns backslash-separated paths.
+    const rel = path.relative(dir, full).split(path.sep).join('/')
     if (entry.isDirectory()) tree.set(rel, 'dir')
     else if (entry.isFile()) tree.set(rel, createHash('sha256').update(await fs.readFile(full)).digest('hex'))
     else tree.set(rel, 'other')
@@ -161,7 +167,7 @@ test('the unsupported-platform guard refuses a preview the same way and changes 
   const descriptor = /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(process, 'platform'))
   let stderr = ''
   let stdout = ''
-  Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+  Object.defineProperty(process, 'platform', { ...descriptor, value: 'aix' })
   let code
   try {
     code = await dispatch(['setup', '--yes', '--dry-run'], {
@@ -173,7 +179,7 @@ test('the unsupported-platform guard refuses a preview the same way and changes 
     Object.defineProperty(process, 'platform', descriptor)
   }
   assert.equal(code, 1)
-  assert.match(stderr, /hyp setup: unsupported platform: win32 \(only macOS and Linux are supported\)/)
+  assert.match(stderr, /hyp setup: unsupported platform: aix \(only macOS, Linux and Windows are supported\)/)
   assert.equal(stdout, '')
   assert.deepEqual([...(await snapshot(home)).keys()], [], 'HOME is still empty')
 })

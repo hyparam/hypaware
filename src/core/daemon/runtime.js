@@ -19,7 +19,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { createConfigControl } from '../config/apply.js'
 import { buildConfigApplyDeps } from '../config/apply_deps.js'
 import { createActionReconciler } from '../config/action_reconciler.js'
-import { attachHandler } from '../config/action_attach.js'
+import { attachHandler, telemetryListenPorts } from '../config/action_attach.js'
 import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
@@ -634,6 +634,9 @@ export async function runDaemon(opts = {}) {
           // @ref LLP 0219#incomplete-activation-prunes-nothing [implements]: an
           //   incomplete activation copies but removes nothing
           failedPlugins: boot.unavailablePlugins,
+          // The port each telemetry listener bound, so a Claude OTEL attach
+          // whose settings name another port re-attaches (LLP 0577).
+          telemetryPorts: telemetryListenPorts(status.sources),
         })
         fileLog.info('daemon.reconcile_pass', {
           hyp_reason: reason,
@@ -759,6 +762,18 @@ export async function runDaemon(opts = {}) {
     storage: boot.runtime.storage,
     query: boot.runtime.query,
     config: boot.config ?? undefined,
+    // @ref LLP 0583#failures [implements]: reuse the bounded status warning surface and log transitions only
+    onResult(identity, ok) {
+      const warning = `backfill_failed:${identity.name}`
+      const prior = status.warnings?.includes(warning) ?? false
+      if (prior === !ok) return
+      status.warnings = (status.warnings ?? []).filter(value => value !== warning)
+      if (!ok) status.warnings.push(warning)
+      fileLog[ok ? 'info' : 'warn'](ok ? 'daemon.backfill_recovered' : 'daemon.backfill_failed', {
+        provider: identity.name, status: ok ? 'ok' : 'failed',
+      })
+      requestBookkeeping()
+    },
   })
 
   // The destinations this boot's effective config still names. Their recovered

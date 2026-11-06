@@ -240,6 +240,9 @@ async function wizardOpts(over = {}) {
     stdout,
     stderr,
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1' },
+    // The lanes under test are platform-independent; the injected platform
+    // keeps the wizard's setup gate (#975) from refusing on a win32 host.
+    platform: 'linux',
     ctx: /** @type {any} */ ({ commands: { run: async () => 0 } }),
     capabilities: /** @type {any} */ ({ has: () => false }),
     catalog: emptyCatalog(),
@@ -706,6 +709,8 @@ test('runInitWizard end-to-end: join, back to the fork, local, and one combined 
     stderr,
     stdin: io.stdin,
     env,
+    // Keeps the wizard's setup gate (#975) from refusing on a win32 host.
+    platform: 'linux',
     ctx: /** @type {any} */ ({ commands: { run: async () => 0 } }),
     catalog: await realCatalog(),
     // The one lane that would leave the machine, in the shape that made

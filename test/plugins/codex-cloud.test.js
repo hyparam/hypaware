@@ -390,7 +390,8 @@ test('connection commands validate before auth, persist only grants and replace 
   const grant = await readCloudConnection(stateDir)
   assert.equal(grant?.version, 2)
   assert.ok(grant?.version === 2 && Number.isFinite(Date.parse(grant.since ?? '')))
-  assert.equal((await fs.stat(cloudConnectionPath(stateDir))).mode & 0o777, 0o600)
+  // No POSIX mode bits on win32.
+  if (process.platform !== 'win32') assert.equal((await fs.stat(cloudConnectionPath(stateDir))).mode & 0o777, 0o600)
   assert.equal((await fs.readFile(cloudConnectionPath(stateDir), 'utf8')).includes(auth.token), false)
   stdout = ''
   await run('status')

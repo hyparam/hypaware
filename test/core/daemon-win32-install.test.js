@@ -1,0 +1,397 @@
+// @ts-check
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+/**
+ * @import { SchtasksAdapter } from '../../src/core/daemon/types.js'
+ * @import { TestContext } from 'node:test'
+ * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
+ */
+
+import {
+  buildTaskXml,
+  buildLauncherVbs,
+  planTaskInstall,
+  resolveTaskJsEntry,
+  taskNameForSid,
+  installTask,
+  uninstallTask,
+  startTask,
+  stopTask,
+  restartTask,
+  killOrphanedDaemon,
+  isTaskInstalled,
+  taskStatus,
+} from '../../src/core/daemon/win32.js'
+import { planDaemonInstall, renderDaemonInstall, serviceDaemonStatus } from '../../src/core/daemon/install.js'
+import { platformIsSupported, daemonKindLabel } from '../../src/core/daemon/platform.js'
+import { detectSupervisor } from '../../src/core/update/self_update.js'
+import { runDaemonInstall, runDaemonStop } from '../../src/core/commands/daemon.js'
+
+const SID = 'S-1-5-21-1111-2222-3333-1001'
+const BIN = 'C:\\Users\\kenny\\AppData\\Roaming\\npm\\hypaware.cmd'
+const JS = 'C:\\Users\\kenny\\AppData\\Roaming\\npm\\node_modules\\hypaware\\bin\\hypaware.js'
+const CONFIG = 'C:\\Users\\kenny\\.hyp\\hypaware-config.json'
+const NODE = 'C:\\Program Files\\nodejs\\node.exe'
+
+/**
+ * A recording fake Task Scheduler. `query` reports Running by default so the
+ * install-means-running poll settles at once; override any verb per test.
+ * @param {Partial<SchtasksAdapter>} [overrides]
+ */
+function fakeSchtasks(overrides = {}) {
+  /** @type {Array<{ verb: string, taskName: string, xmlPath?: string, xmlBytes?: Buffer }>} */
+  const calls = []
+  const ok = { exitCode: 0, stdout: '', stderr: '' }
+  /** @type {SchtasksAdapter} */
+  const adapter = {
+    async create(taskName, xmlPath) { calls.push({ verb: 'create', taskName, xmlPath, xmlBytes: fs.readFileSync(xmlPath) }); return ok },
+    async delete(taskName) { calls.push({ verb: 'delete', taskName }); return ok },
+    async run(taskName) { calls.push({ verb: 'run', taskName }); return ok },
+    async end(taskName) { calls.push({ verb: 'end', taskName }); return ok },
+    async query(taskName) { calls.push({ verb: 'query', taskName }); return { exitCode: 0, stdout: '"HOST","\\hypaware\\sid","N/A","Running",...', stderr: '' } },
+    ...overrides,
+  }
+  return { calls, adapter }
+}
+
+const BASE = { binPath: BIN, configPath: CONFIG, nodePath: NODE, sid: SID, logDir: 'C:\\Users\\kenny\\.hyp\\hypaware\\logs' }
+
+test('resolveTaskJsEntry points at the JS behind the .cmd shim, and leaves a .js as-is', () => {
+  assert.equal(resolveTaskJsEntry(BIN), JS)
+  assert.equal(resolveTaskJsEntry('C:\\apps\\hypaware.CMD'), 'C:\\apps\\node_modules\\hypaware\\bin\\hypaware.js')
+  assert.equal(resolveTaskJsEntry(JS), JS)
+  assert.equal(resolveTaskJsEntry('C:\\custom\\entry.mjs'), 'C:\\custom\\entry.mjs')
+})
+
+test('taskNameForSid keys the task per-user by SID under the hypaware folder', () => {
+  assert.equal(taskNameForSid(SID), `\\hypaware\\${SID}`)
+})
+
+const WSCRIPT = 'C:\\Windows\\System32\\wscript.exe'
+const LAUNCHER = 'C:/Users/kenny/.hyp/hypaware/daemon-launcher.vbs'
+
+// @ref LLP 0584#task [tests]: logon trigger, least-privilege principal, single instance, no time limit, restart-on-failure
+// @ref LLP 0584#exec [tests]: the action runs the windowless wscript launcher, not node directly
+test('buildTaskXml encodes the decisions: logon/SID, least-privilege, restart-on-failure, windowless launcher', () => {
+  const xml = buildTaskXml({ wscriptPath: WSCRIPT, launcherPath: LAUNCHER, logDir: BASE.logDir, sid: SID })
+  assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-16"\?>/)
+  assert.match(xml, /<LogonTrigger>[\s\S]*<UserId>S-1-5-21-1111-2222-3333-1001<\/UserId>[\s\S]*<\/LogonTrigger>/)
+  // InteractiveToken (non-elevated, stops at logoff); S4U creation is denied to
+  // a non-admin. The window is hidden by the launcher, not the logon type.
+  assert.match(xml, /<LogonType>InteractiveToken<\/LogonType>/)
+  assert.doesNotMatch(xml, /S4U/)
+  assert.match(xml, /<RunLevel>LeastPrivilege<\/RunLevel>/)
+  assert.match(xml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/)
+  assert.match(xml, /<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/)
+  assert.match(xml, /<RestartOnFailure>\s*<Interval>PT1M<\/Interval>/)
+  // the action runs wscript against the launcher (//B suppresses WSH dialogs).
+  assert.match(xml, new RegExp(`<Command>${WSCRIPT.replace(/\\/g, '\\\\')}</Command>`))
+  assert.match(xml, /<Arguments>\/\/B \/\/Nologo &quot;.*daemon-launcher\.vbs&quot;<\/Arguments>/)
+  // restart:false drops the block entirely.
+  assert.doesNotMatch(buildTaskXml({ wscriptPath: WSCRIPT, launcherPath: LAUNCHER, logDir: BASE.logDir, sid: SID, restart: false }), /RestartOnFailure/)
+})
+
+// @ref LLP 0584#exec [tests]: the launcher runs node at the JS entry with --supervised, windowless
+test('buildLauncherVbs runs node hidden, waits, and exits with its code', () => {
+  const vbs = buildLauncherVbs({ nodePath: NODE, jsEntry: JS, configPath: CONFIG })
+  // window style 0 = hidden, True = wait; WScript.Quit propagates node's exit code.
+  assert.match(vbs, /WScript\.Quit shell\.Run\(".*", 0, True\)/)
+  // node -> JS entry -> daemon run --config -> supervised marker; VBS quotes doubled.
+  assert.match(vbs, /""C:\\Program Files\\nodejs\\node\.exe"" ""/)
+  assert.match(vbs, /hypaware\.js"" daemon run --config ""/)
+  assert.match(vbs, /hypaware-config\.json"" --supervised/)
+  assert.doesNotMatch(vbs, /\.cmd/)
+})
+
+test('planTaskInstall resolves the JS entry as binPath and names the task from the SID', () => {
+  const plan = planTaskInstall(BASE)
+  assert.equal(plan.platform, 'win32')
+  assert.equal(plan.taskName, `\\hypaware\\${SID}`)
+  assert.equal(plan.binPath, JS, 'the plan reports the JS entry node actually runs')
+  assert.equal(plan.configPath, CONFIG)
+  // --supervised now lives in the launcher the action runs, not the task XML.
+  assert.match(plan.content, /daemon-launcher\.vbs/)
+  assert.match(plan.launcherContent, /--supervised/)
+  assert.ok(plan.manageCommands.some(c => c[0] === 'schtasks' && c.includes('/Create')))
+})
+
+/**
+ * A BASE whose logDir sits one level inside a throwaway temp dir, so
+ * installTask's real mkdir and launcher write (beside the log dir, in its
+ * parent) never touch the host's home or the shared tmpdir root. Cleaned up
+ * after the test.
+ * @param {TestContext} t
+ */
+function tempBase(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-task-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  return { ...BASE, logDir: path.join(root, 'logs') }
+}
+
+test('installTask writes UTF-16LE XML, writes the launcher, creates with /F, runs it, and polls', async (t) => {
+  const base = tempBase(t)
+  const { calls, adapter } = fakeSchtasks()
+  const plan = await installTask({ ...base, schtasks: adapter, sleep: async () => {} })
+  assert.equal(plan.taskName, `\\hypaware\\${SID}`)
+  const create = calls.find(c => c.verb === 'create')
+  assert.ok(create, 'create was called')
+  assert.equal(create.taskName, `\\hypaware\\${SID}`)
+  // schtasks /XML requires UTF-16LE; assert the BOM and that it decodes to the XML.
+  const bytes = /** @type {Buffer} */ (create.xmlBytes)
+  assert.equal(bytes[0], 0xff, 'UTF-16LE BOM byte 0')
+  assert.equal(bytes[1], 0xfe, 'UTF-16LE BOM byte 1')
+  assert.match(bytes.toString('utf16le').replace(/^\ufeff/, ''), /<Task version="1\.2"/)
+  assert.deepEqual(calls.map(c => c.verb), ['create', 'run', 'query'])
+  // The launcher is on disk (the task action runs it) and holds the node command.
+  assert.ok(fs.existsSync(plan.launcherPath), 'launcher written')
+  assert.match(fs.readFileSync(plan.launcherPath, 'utf8'), /WScript\.Quit shell\.Run\(.*--supervised.*, 0, True\)/)
+  // The temp XML is cleaned up.
+  assert.equal(fs.existsSync(/** @type {string} */ (create.xmlPath)), false)
+})
+
+test('installTask with runAtLoad:false creates but does not run the task', async (t) => {
+  const base = tempBase(t)
+  const { calls, adapter } = fakeSchtasks()
+  await installTask({ ...base, runAtLoad: false, schtasks: adapter, sleep: async () => {} })
+  assert.deepEqual(calls.map(c => c.verb), ['create'])
+})
+
+test('a failed create surfaces as a ScheduledTaskError and never runs the task', async (t) => {
+  const base = tempBase(t)
+  const { calls, adapter } = fakeSchtasks({
+    async create(taskName) { calls.push({ verb: 'create', taskName }); return { exitCode: 1, stdout: '', stderr: 'ERROR: Access is denied.' } },
+  })
+  await assert.rejects(installTask({ ...base, schtasks: adapter, sleep: async () => {} }), /Access is denied/)
+  assert.deepEqual(calls.map(c => c.verb), ['create'], 'create was attempted but run was never reached')
+})
+
+// @ref LLP 0584#exec [tests]: the launcher written at install is removed at uninstall
+test('uninstallTask removes the launcher install wrote under the same home', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-home-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const { logDir: _logDir, ...base } = BASE
+  const { adapter } = fakeSchtasks()
+  const plan = await installTask({ ...base, homeDir: home, schtasks: adapter, sleep: async () => {} })
+  assert.ok(fs.existsSync(plan.launcherPath), 'install wrote the launcher')
+  await uninstallTask({ sid: SID, homeDir: home, schtasks: adapter })
+  assert.equal(fs.existsSync(plan.launcherPath), false, 'uninstall removed the launcher')
+})
+
+test('uninstallTask deletes the task and tolerates one already gone', async () => {
+  const present = fakeSchtasks()
+  await uninstallTask({ sid: SID, schtasks: present.adapter })
+  assert.deepEqual(present.calls.map(c => c.verb), ['delete'])
+
+  const missing = fakeSchtasks({ async delete() { return { exitCode: 1, stdout: '', stderr: 'ERROR: The system cannot find the file specified.' } } })
+  await uninstallTask({ sid: SID, schtasks: missing.adapter }) // does not throw
+})
+
+test('start/stop map to run and end', async () => {
+  const s = fakeSchtasks(); await startTask({ sid: SID, schtasks: s.adapter })
+  assert.deepEqual(s.calls.map(c => c.verb), ['run'])
+  const e = fakeSchtasks(); await stopTask({ sid: SID, schtasks: e.adapter })
+  assert.deepEqual(e.calls.map(c => c.verb), ['end'])
+})
+
+// @ref LLP 0584#stop [tests]: /End orphans node under the wscript launcher, so the hard stop kills the pid, identity-checked (LLP 0515)
+test('killOrphanedDaemon kills the daemon pid only when the identity check does not disown it', async () => {
+  /** @param {object} over */
+  const run = async (over) => {
+    /** @type {number[]} */
+    const killed = []
+    const base = {
+      readPidFile: () => ({ pid: 4242 }),
+      processIsAlive: () => true,
+      isDaemonProcess: () => true,
+      kill: (/** @type {number} */ p) => { killed.push(p) },
+    }
+    const issued = await killOrphanedDaemon('C:/state', { ...base, ...over })
+    return { killed, issued }
+  }
+  // alive + confirmed daemon -> killed.
+  assert.deepEqual((await run({})).killed, [4242])
+  // unreadable command line (null) is fail-closed: treated as the daemon, killed.
+  assert.deepEqual((await run({ isDaemonProcess: () => null })).killed, [4242])
+  // provably not our daemon -> never killed.
+  assert.deepEqual((await run({ isDaemonProcess: () => false })).killed, [])
+  // no pid file, or a dead pid -> nothing to kill.
+  assert.deepEqual((await run({ readPidFile: () => null })).killed, [])
+  assert.deepEqual((await run({ processIsAlive: () => false })).killed, [])
+  // a corrupt pid file is status's to report, not this stop's: swallowed.
+  assert.equal((await run({ readPidFile: () => { throw new Error('malformed') } })).issued, false)
+})
+
+const RUNNING = { exitCode: 0, stdout: '"HOST","\\hypaware\\sid","N/A","Running",...', stderr: '' }
+const READY = { exitCode: 0, stdout: '"HOST","\\hypaware\\sid","N/A","Ready",...', stderr: '' }
+const noSleep = async () => {}
+
+/**
+ * A fake Task Scheduler whose recorded `query` answers from `answer(n)`, n
+ * counting from 1.
+ * @param {(n: number) => { exitCode: number, stdout: string, stderr: string }} answer
+ */
+function fakeQuerying(answer) {
+  const fake = fakeSchtasks()
+  let n = 0
+  fake.adapter.query = async function(taskName) { n += 1; fake.calls.push({ verb: 'query', taskName }); return answer(n) }
+  return fake
+}
+
+// @ref LLP 0584#stop [tests]: restart stops through the file channel and never Ends a daemon that stopped gracefully
+test('restartTask: a graceful stop is followed by Run, with no End', async () => {
+  const r = fakeQuerying(() => READY)
+  /** @type {string[]} */
+  const order = []
+  await restartTask({ sid: SID, schtasks: r.adapter, sleep: noSleep, requestStop: async () => { order.push('requestStop'); return 'stopped' } })
+  assert.deepEqual(order, ['requestStop'])
+  assert.deepEqual(r.calls.map(c => c.verb), ['query', 'run'])
+})
+
+// @ref LLP 0584#stop [tests]: /End is the escalation when the graceful request goes unconsumed
+test('restartTask: a timed-out stop escalates to End, then Run', async () => {
+  const r = fakeQuerying(() => READY)
+  await restartTask({ sid: SID, schtasks: r.adapter, sleep: noSleep, requestStop: async () => 'timed_out' })
+  assert.deepEqual(r.calls.map(c => c.verb), ['end', 'query', 'run'])
+})
+
+test('restartTask: with no live daemon to ask, End clears the task instance before Run', async () => {
+  const r = fakeQuerying(() => READY)
+  await restartTask({ sid: SID, schtasks: r.adapter, sleep: noSleep, requestStop: async () => 'not_running' })
+  assert.deepEqual(r.calls.map(c => c.verb), ['end', 'query', 'run'])
+})
+
+test('restartTask: Run waits (bounded) for the task to leave Running, so IgnoreNew cannot drop it', async () => {
+  const r = fakeQuerying(n => n < 3 ? RUNNING : READY)
+  await restartTask({ sid: SID, schtasks: r.adapter, sleep: noSleep, requestStop: async () => 'stopped' })
+  assert.deepEqual(r.calls.map(c => c.verb), ['query', 'query', 'query', 'run'])
+
+  // A task stuck reading Running still gets its Run after the bound.
+  const stuck = fakeSchtasks()
+  await restartTask({ sid: SID, schtasks: stuck.adapter, sleep: noSleep, requestStop: async () => 'stopped' })
+  assert.equal(stuck.calls.filter(c => c.verb === 'query').length, 20)
+  assert.equal(stuck.calls.at(-1)?.verb, 'run')
+})
+
+/**
+ * A staged HOME and the context `hyp daemon stop` runs against it with.
+ * @param {TestContext} t
+ */
+function stageStopCtx(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-stop-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  let out = ''
+  let err = ''
+  const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
+    stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
+    stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
+    env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+  }))
+  return { ctx, out: () => out, err: () => err }
+}
+
+// @ref LLP 0584#stop [tests]: an unconsumed stop request force-stops an installed task and says so
+test('hyp daemon stop on win32: a timed-out stop of an installed task Ends it and prints the forced-stop line', async (t) => {
+  const staged = stageStopCtx(t)
+  const s = fakeSchtasks()
+  const code = await runDaemonStop([], staged.ctx, { service: { platform: 'win32', sid: SID, schtasks: s.adapter }, requestStop: async () => 'timed_out' })
+  assert.equal(code, 0)
+  assert.deepEqual(s.calls.filter(c => c.verb !== 'query').map(c => c.verb), ['end'])
+  assert.match(staged.err(), /^hyp daemon stop: the daemon did not stop within 10s, so it was force-stopped; anything it had not saved yet may be lost\n$/)
+})
+
+test('hyp daemon stop on win32: with no task installed a timeout is reported and nothing is Ended', async (t) => {
+  const staged = stageStopCtx(t)
+  const s = fakeSchtasks({ async query() { return { exitCode: 1, stdout: '', stderr: 'ERROR: The system cannot find the file specified.' } } })
+  const code = await runDaemonStop([], staged.ctx, { service: { platform: 'win32', sid: SID, schtasks: s.adapter }, requestStop: async () => 'timed_out' })
+  assert.equal(code, 1)
+  assert.equal(s.calls.filter(c => c.verb === 'end').length, 0)
+  assert.match(staged.err(), /stop signal sent but the daemon did not exit within 10s/)
+})
+
+test('hyp daemon stop on win32: a graceful stop never touches the task', async (t) => {
+  const staged = stageStopCtx(t)
+  const s = fakeSchtasks()
+  const code = await runDaemonStop([], staged.ctx, { service: { platform: 'win32', sid: SID, schtasks: s.adapter }, requestStop: async () => 'stopped' })
+  assert.equal(code, 0)
+  assert.equal(s.calls.filter(c => c.verb !== 'query').length, 0)
+  assert.equal(staged.out(), 'daemon: stopped\n')
+})
+
+test('taskStatus reads Running as active, Ready as loaded-not-active, and a missing task as not loaded', async () => {
+  const running = fakeSchtasks()
+  assert.deepEqual(await taskStatus({ sid: SID, schtasks: running.adapter }), { loaded: true, active: true })
+
+  const ready = fakeSchtasks({ async query() { return { exitCode: 0, stdout: '"HOST","\\hypaware\\sid","N/A","Ready",...', stderr: '' } } })
+  assert.deepEqual(await taskStatus({ sid: SID, schtasks: ready.adapter }), { loaded: true, active: false })
+
+  const gone = fakeSchtasks({ async query() { return { exitCode: 1, stdout: '', stderr: 'ERROR: The system cannot find the file specified.' } } })
+  assert.deepEqual(await taskStatus({ sid: SID, schtasks: gone.adapter }), { loaded: false })
+
+  const broken = fakeSchtasks({ async query() { return { exitCode: 1, stdout: '', stderr: 'ERROR: Access is denied.' } } })
+  assert.deepEqual(await taskStatus({ sid: SID, schtasks: broken.adapter }), { loaded: false, unreachable: true })
+
+  assert.equal(await isTaskInstalled({ sid: SID, schtasks: running.adapter }), true)
+  assert.equal(await isTaskInstalled({ sid: SID, schtasks: gone.adapter }), false)
+})
+
+// @ref LLP 0584#task [tests]: the generic dispatcher reaches the win32 backend
+test('install.js dispatches win32 through the task backend', () => {
+  const plan = planDaemonInstall({ platform: 'win32', binPath: BIN, configPath: CONFIG, sid: SID, nodePath: NODE, logDir: BASE.logDir })
+  assert.equal(plan.platform, 'win32')
+  const rendered = renderDaemonInstall({ platform: 'win32', binPath: BIN, configPath: CONFIG, sid: SID, nodePath: NODE, logDir: BASE.logDir })
+  assert.equal(rendered.platform, 'win32')
+  assert.equal(rendered.taskName, `\\hypaware\\${SID}`)
+  assert.equal(rendered.serviceKind, 'Scheduled Task: \\hypaware')
+  assert.equal(rendered.launcherPath, plan.launcherPath)
+  assert.match(String(rendered.launcherContent), /--supervised/)
+})
+
+test('hyp daemon install --dry-run on win32 shows the launcher and the command it runs', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-preview-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  let out = ''
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: { HOME: home },
+    stdout: { write(/** @type {string} */ c) { out += String(c); return true } },
+    stderr: { write() { return true } },
+  }))
+  const code = await runDaemonInstall(['--dry-run', '--bin', BIN, '--platform', 'win32'], ctx)
+  assert.equal(code, 0)
+  assert.match(out, /^launcher: +.*daemon-launcher\.vbs$/m)
+  // The XML's action names only wscript and the launcher; the node command
+  // line is in the launcher block printed after it.
+  const [xml, launcher] = out.split('--- launcher ---\n')
+  assert.match(xml, /--- content ---\n[\s\S]*wscript\.exe/)
+  assert.match(launcher, /WScript\.Quit shell\.Run\(".*daemon run --config .*--supervised.*", 0, True\)/)
+  assert.equal(fs.readdirSync(home).length, 0, 'the preview wrote nothing')
+})
+
+test('serviceDaemonStatus reports the win32 task state through the adapter', async () => {
+  const { adapter } = fakeSchtasks()
+  const status = await serviceDaemonStatus({ platform: 'win32', sid: SID, schtasks: adapter })
+  assert.equal(status.platform, 'win32')
+  assert.equal(status.installed, true)
+  assert.equal(status.loaded, true)
+  assert.equal(status.active, true)
+})
+
+// @ref LLP 0584#gate [tests]: the split predicate folded back in - win32 is supported for the service family and the setup wizard alike
+test('the platform gate includes win32 for the service family and setup', () => {
+  assert.equal(platformIsSupported('win32'), true)
+  assert.equal(platformIsSupported('darwin'), true)
+  assert.equal(platformIsSupported('linux'), true)
+  assert.equal(platformIsSupported('aix'), false)
+  assert.equal(daemonKindLabel('win32'), 'Scheduled Task: \\hypaware')
+})
+
+// @ref LLP 0584#supervision [tests]: the task's --supervised marker makes detectSupervisor true on win32
+test('detectSupervisor honors the HYP_SUPERVISED marker the win32 task sets', () => {
+  assert.equal(detectSupervisor({ HYP_SUPERVISED: '1' }), true)
+  assert.equal(detectSupervisor({}), false)
+  assert.equal(detectSupervisor({ HYP_SUPERVISED: '0' }), false)
+})

@@ -20,8 +20,11 @@ import { detach } from './settings.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import {
   contentItemKinds,
+  compactedMessageFromPayload,
+  compactionSummaryFromMessage,
   copyNumberAlias,
   firstString,
+  hasTextOrToolUse,
   netInputUsage,
   numberValue,
   reasoningMessageFromPayload,
@@ -36,6 +39,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { CodexRolloutItem, CodexRolloutSession } from './types.js'
+ * @import { FileHandle } from 'node:fs/promises'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -268,11 +272,9 @@ function defaultUnsupportedLocations(homeDir, gatewayCapture = false) {
 }
 
 /**
- * Scan the sessions root, project each session, and yield one
- * `ai_gateway.projected_exchange` item per session. One item per session
- * keeps the materializer's per-call dedup state and tool-call lookup whole,
- * so a conversation's tool_use → tool_result pairing and fallback id chain
- * are never split across items.
+ * Scan sessions and yield bounded projected exchanges. The materializer's
+ * shared run token keeps tool lookup and identity state across batches.
+ * @ref LLP 0583#bounded-projection [implements]: changed files stream through bounded batches
  *
  * @param {{
  *   ctx: BackfillRunContext,
@@ -343,6 +345,7 @@ async function* runCodexBackfill(args) {
   let filesRead = 0
   let filesUnchanged = 0
   let filesReadFailing = 0
+  let firstFailure = ''
   let sessionsDeferred = 0
   // Every other drop on this path is counted (ignored sessions, deferred
   // suffixes). Count this one too, so an operator can tell a session that
@@ -367,8 +370,10 @@ async function* runCodexBackfill(args) {
   for (const filePath of files) {
     if (ctx.signal?.aborted) break
     filesSeen += 1
-    /** @type {CodexRolloutSession[]} */
-    let sessions
+    let fileDeferred = 0
+    const projectedThreads = new Set()
+    const ignoredThreads = new Set()
+    const threadIds = new Set()
     /** @type {{ ino: number, size: number, mtimeMs: number, threadIds?: string[], titleRevision?: string } | undefined} */
     let fingerprint
     const failedBefore = ctx.itemsFailed ?? 0
@@ -386,9 +391,91 @@ async function* runCodexBackfill(args) {
         }
       }
       filesRead += 1
-      sessions = await parseRolloutFile(filePath)
+      for await (const parsed of parseRolloutFile(filePath, window, ctx)) {
+        const { session } = parsed
+        threadIds.add(session.threadId)
+        refreshSessionIgnores(args.ignoredSessions)
+        deliveryEvidenceSkipped += session.deliveryEvidenceSkipped ?? 0
+        // @ref LLP 0403#backfill [implements]: key on the container, not thread ID.
+        if (args.ignoredSessions?.has(session.sessionId)) {
+          if (!ignoredThreads.has(session.threadId)) sessionsIgnored += 1
+          ignoredThreads.add(session.threadId)
+          log.info('codex.backfill.session_ignore_drop', {
+            component: COMPONENT, operation: 'backfill.scan',
+            policy_source: 'session_opt_out', status: 'ignored',
+          })
+          continue
+        }
+        // @ref LLP 0050 [implements]: capture-seam drop for backfill, symmetric
+        // to the @hypaware/claude backfill skip. A session whose recorded cwd has
+        // an ancestor `.hypignore` of class `ignore` is skipped before projecting
+        // or yielding any row, so `hyp backfill` never re-imports the exact
+        // sessions ignored live (LLP 0049 R1).
+        const sessionPolicy = session.cwd ? resolver.resolve(session.cwd) : null
+        if (sessionPolicy?.class === 'ignore') {
+          if (!ignoredThreads.has(session.threadId)) sessionsIgnored += 1
+          ignoredThreads.add(session.threadId)
+          // A fail-safe clamp (declared token unimplemented) escalates to warn
+          // so an operator can tell it from an intended ignore (R3 SHOULD).
+          log[sessionPolicy.warn ? 'warn' : 'info']('codex.backfill.usage_policy_drop', {
+            component: COMPONENT,
+            operation: 'usage_policy_drop',
+            conversation_id: session.threadId,
+            class: 'ignore',
+            declared: sessionPolicy.declared,
+            governed_by: sessionPolicy.governedBy,
+            status: 'skipped',
+            ...(sessionPolicy.warn ? { warn: sessionPolicy.warn } : {}),
+          })
+          continue
+        }
+        if (parsed.deferred) fileDeferred = 1
+        // Counted only for sessions the scan keeps, so an ignored session
+        // leaves no trace of what it held.
+        for (const [type, count] of session.completedItemsUnsupported ?? []) {
+          completedUnsupported.set(type, (completedUnsupported.get(type) ?? 0) + count)
+        }
+
+        // @ref LLP 0583#bounded-projection [implements]: the streamed reader already applies settlement and the date window
+        const exchange = projectedExchangeFromSession({
+          session,
+          items: filterByWindow(session.items, window),
+          clientName,
+          messageOffset: parsed.offset,
+          identitySource: parsed.identitySource,
+        })
+        if (!exchange) continue
+        const title = titles.get(session.threadId)
+        const titleCaptured = title && parsed.final ? captureSessionTitle(exchange, title.title, { updatedAt: title.updatedAt }) : false
+
+        if (!projectedThreads.has(session.threadId)) sessionsProjected += 1
+        projectedThreads.add(session.threadId)
+        messagesProjected += exchange.messages.length
+        log.info('codex.backfill.session_projected', {
+          component: COMPONENT,
+          operation: 'backfill.project',
+          conversation_id: session.threadId,
+          message_count: exchange.messages.length,
+          identity_source: readCodexIdentitySource(exchange),
+          title_captured: titleCaptured,
+          status: 'ok',
+        })
+
+        yield projectedExchangeItem(exchange, {
+          client_name: clientName,
+          source_path: filePath,
+          // The rollout's own native identity is the thread it records, not the
+          // session container it may belong to.
+          native_id: session.threadId,
+        })
+      }
+      if (fingerprint) {
+        fingerprint.threadIds = [...threadIds]
+        fingerprint.titleRevision = titleRevision(fingerprint.threadIds)
+      }
     } catch (err) {
       filesReadFailing += 1
+      if (!firstFailure) firstFailure = `${path.basename(filePath)}: ${errMessage(err).replace(/[\r\n]/g, ' ').slice(0, 200)}`
       // The file is left unfingerprinted so the next sweep retries it and a
       // permission fix imports with no restart. Only the warn is deduplicated:
       // a sweep repeats it only when the failure changes, and the per-sweep
@@ -418,93 +505,6 @@ async function* runCodexBackfill(args) {
       })
     }
 
-    if (fingerprint) {
-      fingerprint.threadIds = sessions.map(session => session.threadId)
-      fingerprint.titleRevision = titleRevision(fingerprint.threadIds)
-    }
-    let fileDeferred = 0
-    for (const session of sessions) {
-      deliveryEvidenceSkipped += session.deliveryEvidenceSkipped ?? 0
-      // @ref LLP 0403#backfill [implements]: key on the container, not thread ID.
-      if (args.ignoredSessions?.has(session.sessionId)) {
-        sessionsIgnored += 1
-        log.info('codex.backfill.session_ignore_drop', {
-          component: COMPONENT, operation: 'backfill.scan',
-          policy_source: 'session_opt_out', status: 'ignored',
-        })
-        continue
-      }
-      // @ref LLP 0050 [implements]: capture-seam drop for backfill, symmetric
-      // to the @hypaware/claude backfill skip. A session whose recorded cwd has
-      // an ancestor `.hypignore` of class `ignore` is skipped before projecting
-      // or yielding any row, so `hyp backfill` never re-imports the exact
-      // sessions ignored live (LLP 0049 R1).
-      const sessionPolicy = session.cwd ? resolver.resolve(session.cwd) : null
-      if (sessionPolicy?.class === 'ignore') {
-        sessionsIgnored += 1
-        // A fail-safe clamp (declared token unimplemented) escalates to warn
-        // so an operator can tell it from an intended ignore (R3 SHOULD).
-        log[sessionPolicy.warn ? 'warn' : 'info']('codex.backfill.usage_policy_drop', {
-          component: COMPONENT,
-          operation: 'usage_policy_drop',
-          conversation_id: session.threadId,
-          class: 'ignore',
-          declared: sessionPolicy.declared,
-          governed_by: sessionPolicy.governedBy,
-          status: 'skipped',
-          ...(sessionPolicy.warn ? { warn: sessionPolicy.warn } : {}),
-        })
-        continue
-      }
-      // Counted only for sessions the scan keeps, so an ignored session
-      // leaves no trace of what it held.
-      for (const [type, count] of session.completedItemsUnsupported ?? []) {
-        completedUnsupported.set(type, (completedUnsupported.get(type) ?? 0) + count)
-      }
-
-      // Native lifecycle events delimit an unfinished model response. Do
-      // not persist its assistant row before a later token_count can stamp
-      // usage: durable dedupe would otherwise keep the usage-less version.
-      // A suffix left unsettled by a crashed client is never revisited by the
-      // sweep (the file stops changing, so its fingerprint keeps matching), so
-      // count it: the scan record is the only thing that can tell an operator a
-      // manual import is owed. Carried in `deferrals` so the count survives the
-      // fingerprint skip and reads as a standing level, not a one-tick edge.
-      // @ref LLP 0429#content [implements]
-      const settled = ctx.sweep && session.settledItemCount !== undefined
-        ? session.items.slice(0, session.settledItemCount)
-        : session.items
-      if (settled.length < session.items.length) fileDeferred += 1
-
-      const exchange = projectedExchangeFromSession({
-        session,
-        items: filterByWindow(settled, window),
-        clientName,
-      })
-      if (!exchange) continue
-      const title = titles.get(session.threadId)
-      const titleCaptured = title ? captureSessionTitle(exchange, title.title, { updatedAt: title.updatedAt }) : false
-
-      sessionsProjected += 1
-      messagesProjected += exchange.messages.length
-      log.info('codex.backfill.session_projected', {
-        component: COMPONENT,
-        operation: 'backfill.project',
-        conversation_id: session.threadId,
-        message_count: exchange.messages.length,
-        identity_source: readCodexIdentitySource(exchange),
-        title_captured: titleCaptured,
-        status: 'ok',
-      })
-
-      yield projectedExchangeItem(exchange, {
-        client_name: clientName,
-        source_path: filePath,
-        // The rollout's own native identity is the thread it records, not the
-        // session container it may belong to.
-        native_id: session.threadId,
-      })
-    }
     sessionsDeferred += fileDeferred
     // Remember what this file still owes, so the next tick's fingerprint skip
     // can report it without re-reading. Deleted when it settles, so a file
@@ -534,8 +534,9 @@ async function* runCodexBackfill(args) {
     completed_items_unsupported: [...completedUnsupported.values()].reduce((sum, count) => sum + count, 0),
     completed_item_unsupported_types: [...completedUnsupported.keys()].sort().join(','),
     messages_projected: messagesProjected,
-    status: 'ok',
+    status: filesReadFailing ? 'failed' : 'ok',
   })
+  if (filesReadFailing) throw new Error(`${filesReadFailing} Codex rollout file(s) could not be captured; first failure: ${firstFailure}`)
 }
 
 /**
@@ -651,21 +652,268 @@ function isRolloutFileName(name) {
 // Parsing (version-defensive)
 // ---------------------------------------------------------------------
 
+const MAX_ROLLOUT_RECORD_BYTES = 16 * 1024 * 1024
+const MAX_ROLLOUT_INDEX_ENTRIES = 100_000
+const MAX_ROLLOUT_TURN_BYTES = 8 * 1024 * 1024
+const MAX_BATCH_MESSAGES = 128
+const MAX_BATCH_BYTES = 4 * 1024 * 1024
+
 /**
- * Parse one rollout file into zero or more sessions. The legacy format is a
- * single pretty-printed JSON object; the modern format is line-delimited
- * records. Each file holds one session, so the array carries at most one
- * entry: the array shape just keeps the run loop uniform.
- *
- * @param {string} filePath
- * @returns {Promise<CodexRolloutSession[]>}
+ * Read bounded lines from the same descriptor and initial byte extent on every
+ * pass. Decode only complete lines so a chunk cannot split a UTF-8 character.
+ * @param {FileHandle} file
+ * @param {number} size
+ * @param {AbortSignal | undefined} signal
  */
-async function parseRolloutFile(filePath) {
-  const text = await fs.readFile(filePath, 'utf8')
-  const legacy = parseLegacyDoc(text, filePath)
-  if (legacy) return [legacy]
-  const modern = parseJsonlRollout(text, filePath)
-  return modern ? [modern] : []
+async function* rolloutLines(file, size, signal) {
+  let position = 0
+  let index = 0
+  let bytes = 0
+  /** @type {Buffer[]} */
+  let fragments = []
+  while (position < size) {
+    if (signal?.aborted) throw new Error('Codex rollout read aborted')
+    // Each retained fragment owns its chunk; never reuse a retained buffer.
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, size - position))
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, position)
+    if (!bytesRead) throw new Error('Codex rollout changed during read')
+    position += bytesRead
+    let start = 0
+    while (start < bytesRead) {
+      const newline = buffer.indexOf(10, start)
+      const end = newline < 0 || newline >= bytesRead ? bytesRead : newline
+      const part = buffer.subarray(start, end)
+      bytes += part.length
+      if (bytes > MAX_ROLLOUT_RECORD_BYTES) throw new Error('Codex rollout record exceeds 16 MiB limit')
+      if (part.length) fragments.push(part)
+      if (end < bytesRead) {
+        const line = fragments.length === 1 ? fragments[0] : Buffer.concat(fragments, bytes)
+        yield { text: line?.toString('utf8') ?? '', bytes, index: index++ }
+        fragments = []
+        bytes = 0
+      }
+      start = end + 1
+    }
+  }
+  if (bytes) yield { text: Buffer.concat(fragments, bytes).toString('utf8'), bytes, index }
+}
+
+/**
+ * @param {FileHandle} file
+ * @param {number} size
+ * @param {AbortSignal | undefined} signal
+ */
+async function* rolloutRecords(file, size, signal) {
+  for await (const line of rolloutLines(file, size, signal)) {
+    /** @type {unknown} */
+    let row
+    try { row = JSON.parse(line.text.trim()) } catch { continue }
+    if (isPlainObject(row)) yield { row, index: line.index, bytes: line.bytes }
+  }
+}
+
+/**
+ * Three bounded passes preserve global mirror decisions and late usage without
+ * retaining the conversation. Legacy JSON is allowed only within the line cap.
+ * @ref LLP 0583#bounded-projection [implements]: trade sequential reads for bounded conversation memory
+ * @param {string} filePath
+ * @param {ReturnType<typeof resolveWindow>} window
+ * @param {BackfillRunContext} ctx
+ */
+async function* parseRolloutFile(filePath, window, ctx) {
+  const file = await fs.open(filePath, 'r')
+  try {
+    const { size } = await file.stat()
+    /** @type {Record<string, unknown> | undefined} */
+    let metaPayload
+    /** @type {Record<string, unknown>} */
+    const context = {}
+    const rawTurns = new Set()
+    const promptTurns = new Set()
+    let turnBytes = 0
+    /** @param {Set<string>} turns @param {string} id */
+    const addTurn = (turns, id) => {
+      if (turns.has(id)) return
+      turnBytes += Buffer.byteLength(id)
+      if (turnBytes > MAX_ROLLOUT_TURN_BYTES || rawTurns.size + promptTurns.size >= MAX_ROLLOUT_INDEX_ENTRIES) {
+        throw new Error('Codex rollout turn index exceeds limit')
+      }
+      turns.add(id)
+    }
+    let first = true
+    let legacyCandidate = false
+    let sawRecord = false
+    let sawContent = false
+    let tracksLifecycle = false
+    let settledLine = -1
+    let deliveryEvidenceSkipped = 0
+    /** @type {string | undefined} */
+    let turnId
+    for await (const line of rolloutLines(file, size, ctx.signal)) {
+      const text = line.text.trim()
+      if (!text) continue
+      sawContent = true
+      if (first && text === '{') {
+        legacyCandidate = true
+        if (size <= MAX_ROLLOUT_RECORD_BYTES) {
+          // A later append cannot turn this bounded legacy probe into a
+          // whole-file read or change the snapshot being interpreted.
+          const buffer = Buffer.allocUnsafe(size)
+          let position = 0
+          while (position < size) {
+            if (ctx.signal?.aborted) throw new Error('Codex rollout read aborted')
+            const { bytesRead } = await file.read(buffer, position, size - position, position)
+            if (!bytesRead) throw new Error('Codex rollout changed during read')
+            position += bytesRead
+          }
+          const legacy = parseLegacyDoc(buffer.toString('utf8'), filePath)
+          if (legacy) {
+            yield { session: legacy, offset: 0, deferred: false, final: true, identitySource: undefined }
+            return
+          }
+        }
+      }
+      if (legacyCandidate && size > MAX_ROLLOUT_RECORD_BYTES && /^"(?:session|items)"\s*:/.test(text)) {
+        throw new Error('Legacy Codex rollout exceeds 16 MiB limit')
+      }
+      first = false
+      /** @type {unknown} */
+      let row
+      try { row = JSON.parse(text) } catch { continue }
+      if (!isPlainObject(row)) continue
+      legacyCandidate = false
+      // Single-line legacy files use the same bounded read as JSONL records.
+      if (Array.isArray(row.items)) {
+        const legacy = parseLegacyDoc(text, filePath)
+        if (legacy) yield { session: legacy, offset: 0, deferred: false, final: true, identitySource: undefined }
+        return
+      }
+      sawRecord = true
+      const payload = isPlainObject(row.payload) ? row.payload : undefined
+      if (!payload) continue
+      if (row.type === 'session_meta' && !metaPayload) metaPayload = payload
+      if (row.type === 'turn_context') {
+        // Retain only first usable fields, not every context or its prompt.
+        for (const key of ['model', 'sandbox']) {
+          if (!context[key] && stringValue(payload[key])) context[key] = payload[key]
+        }
+        if (!context.cwd && sessionMetaCwd(payload.cwd)) context.cwd = payload.cwd
+        if (!context.sandbox_policy && isPlainObject(payload.sandbox_policy)) {
+          context.sandbox_policy = { type: payload.sandbox_policy.type }
+        }
+      }
+      if (row.type === 'response_item') {
+        if (isDeliveredAssistantEvidence(row.metadata, payload)) {
+          deliveryEvidenceSkipped++
+          continue
+        }
+        if (turnId !== undefined) {
+          if (payload.type === 'message' && payload.role !== 'assistant') {
+            if (contentItemKinds(payload)?.some(kind => kind.startsWith('user.'))) addTurn(promptTurns, turnId)
+          } else if (RAW_TURN_EVIDENCE.has(stringValue(payload.type) ?? '')) addTurn(rawTurns, turnId)
+        }
+      }
+      if (row.type === 'event_msg') {
+        if (payload.type === 'task_started') {
+          tracksLifecycle = true
+          turnId = stringValue(payload.turn_id)
+        }
+        if (codexUsageFromTokenCount(payload)) settledLine = line.index
+        if (payload.type === 'task_complete' || payload.type === 'turn_aborted') {
+          settledLine = line.index
+          turnId = undefined
+        }
+      }
+    }
+    if (!sawRecord) {
+      if (sawContent) throw new Error('Codex rollout has no readable JSON records')
+      return
+    }
+    const session = buildSession({ metaPayload: metaPayload ?? {}, turnPayloads: [context], items: [], fallbackId: sessionIdFromPath(filePath) })
+    /** @type {Map<number, JsonObject>} */
+    const usageByLine = new Map()
+    /** @type {Map<string, number>} */
+    const unsupported = new Map()
+    let deferred = false
+    let hasNative = false
+    let lastAssistant = -1
+    for await (const { item, index } of selectedItems(unsupported)) {
+      if (ctx.sweep && tracksLifecycle && index > settledLine) {
+        deferred = true
+        continue
+      }
+      if (filterByWindow([item], window).length === 0) continue
+      // A checkpoint closes the pre-compaction turn even when it is opaque, so
+      // a later token_count cannot re-bill the response before it.
+      if (item.payload.type === 'compacted') lastAssistant = -1
+      if (item.usageAttributes) {
+        if (lastAssistant >= 0) {
+          if (usageByLine.size >= MAX_ROLLOUT_INDEX_ENTRIES) throw new Error('Codex rollout usage index exceeds limit')
+          usageByLine.set(lastAssistant, item.usageAttributes)
+        }
+        lastAssistant = -1
+      } else {
+        const message = projectedMessageFromItem(item)
+        if (message?.message_id) hasNative = true
+        if (message?.role === 'assistant' && !message.is_compact_summary && hasTextOrToolUse(message)) lastAssistant = index
+      }
+    }
+    const identitySource = hasNative ? 'native' : 'gateway_fallback'
+    /** @type {CodexRolloutItem[]} */
+    let batch = []
+    let batchBytes = 0
+    let count = 0
+    let offset = 0
+    for await (const { item, index, bytes } of selectedItems()) {
+      if (ctx.sweep && tracksLifecycle && index > settledLine) continue
+      if (item.usageAttributes || filterByWindow([item], window).length === 0 || !projectedMessageFromItem(item)) continue
+      if (count && (count >= MAX_BATCH_MESSAGES || batchBytes + bytes > MAX_BATCH_BYTES)) {
+        yield { session: { ...session, items: batch }, offset, deferred: false, final: false, identitySource }
+        offset += count
+        batch = []
+        batchBytes = 0
+        count = 0
+      }
+      batch.push(item)
+      const usageAttributes = usageByLine.get(index)
+      if (usageAttributes) batch.push({ payload: { type: 'token_count' }, usageAttributes, timestampMs: item.timestampMs })
+      batchBytes += bytes
+      count++
+    }
+    yield { session: { ...session, items: batch, deliveryEvidenceSkipped, completedItemsUnsupported: unsupported }, offset, deferred, final: true, identitySource }
+
+    /** @param {Map<string, number>} [counts] */
+    async function* selectedItems(counts) {
+      /** @type {string | undefined} */
+      let activeTurn
+      for await (const { row, index, bytes } of rolloutRecords(file, size, ctx.signal)) {
+        const payload = isPlainObject(row.payload) ? row.payload : undefined
+        if (!payload) continue
+        /** @type {CodexRolloutItem | undefined} */
+        let item
+        if (row.type === 'response_item' && !isDeliveredAssistantEvidence(row.metadata, payload)) {
+          item = { payload, timestampMs: timestampToMs(row.timestamp) }
+        } else if (row.type === 'compacted') {
+          // Drop the potentially large replacement snapshot here. Keep even an
+          // opaque checkpoint as a usage boundary for the carrier pass.
+          item = { payload: { type: 'compacted' }, projectedMessage: compactedMessageFromPayload(payload), timestampMs: timestampToMs(row.timestamp) }
+        } else if (row.type === 'event_msg') {
+          if (payload.type === 'task_started') activeTurn = stringValue(payload.turn_id)
+          if (payload.type === 'item_completed' && isPlainObject(payload.item)) {
+            const completedAt = numberValue(payload.completed_at_ms)
+            item = normalizeCompletedItem({ payload: payload.item,
+              timestampMs: completedAt && completedAt > 0 ? completedAt : timestampToMs(row.timestamp),
+              completed: { turnId: stringValue(payload.turn_id) ?? activeTurn ?? '', threadId: stringValue(payload.thread_id) },
+            }, session.threadId, rawTurns, promptTurns, counts)
+          }
+          const usageAttributes = codexUsageFromTokenCount(payload)
+          if (usageAttributes) item = { payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes }
+          if (payload.type === 'task_complete' || payload.type === 'turn_aborted') activeTurn = undefined
+        }
+        if (item) yield { item, index, bytes }
+      }
+    }
+  } finally { await file.close() }
 }
 
 /**
@@ -728,120 +976,6 @@ function isDeliveredAssistantEvidence(metadata, payload) {
   return payload.type === 'message' && payload.role === 'assistant'
 }
 
-/**
- * Modern rollout: line-delimited `{ timestamp, type, payload }` records:
- * one `session_meta`, zero+ `turn_context`, and the conversation's
- * `response_item`s. A `token_count` `event_msg` carries the turn's token
- * usage and is captured as a synthetic turn-boundary marker (no message). An
- * `item_completed` `event_msg` carries a completed TurnItem, which is kept for
- * a turn that recorded no model response items of its own (see
- * `completedTurnItems`). All other `event_msg` / `compacted` and unknown line
- * types are skipped. A blank or truncated line never aborts the parse.
- *
- * @param {string} text
- * @param {string} filePath
- * @returns {CodexRolloutSession | undefined}
- */
-function parseJsonlRollout(text, filePath) {
-  /** @type {Record<string, unknown> | undefined} */
-  let metaPayload
-  /** @type {Record<string, unknown>[]} */
-  const turnPayloads = []
-  /** @type {CodexRolloutItem[]} */
-  const items = []
-  let sawRecord = false
-  let tracksLifecycle = false
-  let settledItemCount = 0
-  let deliveryEvidenceSkipped = 0
-  /** @type {string | undefined} */
-  let turnId
-  /** @type {Set<string>} */
-  const rawTurns = new Set()
-  /** @type {Set<string>} */
-  const promptTurns = new Set()
-  let sawCompleted = false
-
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    /** @type {unknown} */
-    let row
-    try {
-      row = JSON.parse(trimmed)
-    } catch {
-      continue
-    }
-    if (!isPlainObject(row)) continue
-    sawRecord = true
-    const type = stringValue(row.type)
-    const payload = isPlainObject(row.payload) ? row.payload : undefined
-    if (type === 'session_meta' && payload) {
-      if (!metaPayload) metaPayload = payload
-    } else if (type === 'turn_context' && payload) {
-      turnPayloads.push(payload)
-    } else if (type === 'response_item' && payload) {
-      // Codex v0.159.0 encodes Guardian delivery evidence as assistant messages,
-      // including placeholder text for truncated sends. These are retained
-      // context, not model output, and must not become rows or usage carriers.
-      // @ref LLP 0035#one-carrier [constrained-by]: usage stays on the model's last assistant item
-      if (isDeliveredAssistantEvidence(row.metadata, payload)) {
-        deliveryEvidenceSkipped += 1
-        continue
-      }
-      if (turnId !== undefined) {
-        if (payload.type === 'message' && payload.role !== 'assistant') {
-          if (contentItemKinds(payload)?.some(kind => kind.startsWith('user.'))) promptTurns.add(turnId)
-        } else if (RAW_TURN_EVIDENCE.has(stringValue(payload.type) ?? '')) {
-          rawTurns.add(turnId)
-        }
-      }
-      items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
-    } else if (type === 'event_msg' && payload) {
-      if (payload.type === 'task_started') {
-        tracksLifecycle = true
-        turnId = stringValue(payload.turn_id)
-      }
-      if (payload.type === 'item_completed' && isPlainObject(payload.item)) {
-        sawCompleted = true
-        // Codex defaults a missing completion time to 0 and writes it back.
-        const completedAt = numberValue(payload.completed_at_ms)
-        items.push({
-          payload: payload.item,
-          timestampMs: completedAt && completedAt > 0 ? completedAt : timestampToMs(row.timestamp),
-          completed: { turnId: stringValue(payload.turn_id) ?? turnId ?? '', threadId: stringValue(payload.thread_id) },
-        })
-      }
-      // The one event_msg we keep: token_count. It is NOT a message: it is a
-      // turn-boundary marker carrying that turn's normalized usage. Its slot in
-      // the items stream is preserved (so the projector can attribute it to the
-      // preceding assistant message), but it never projects a row of its own.
-      const usageAttributes = codexUsageFromTokenCount(payload)
-      if (usageAttributes) {
-        items.push({ payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes })
-        settledItemCount = items.length
-      }
-      if (payload.type === 'task_complete' || payload.type === 'turn_aborted') {
-        settledItemCount = items.length
-        // A raw item between turns, such as a migrated turn's prompt, belongs
-        // to no turn, so it cannot suppress the turn that just ended.
-        turnId = undefined
-      }
-    }
-  }
-
-  if (!sawRecord) return undefined
-  const session = buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
-  if (sawCompleted) {
-    const kept = completedTurnItems(session, rawTurns, promptTurns, settledItemCount)
-    session.items = kept.items
-    settledItemCount = kept.settledItemCount
-    if (kept.unsupported.size > 0) session.completedItemsUnsupported = kept.unsupported
-  }
-  if (tracksLifecycle) session.settledItemCount = settledItemCount
-  if (deliveryEvidenceSkipped) session.deliveryEvidenceSkipped = deliveryEvidenceSkipped
-  return session
-}
-
 // Response items only a model response writes. A user-role message is not
 // one: Codex records harness context (AGENTS.md, environment) as user
 // messages, so its presence says nothing about whether the turn's answer was
@@ -874,58 +1008,31 @@ const KNOWN_TURN_ITEMS = new Set([
 ])
 
 /**
- * Resolve the completed TurnItems against the response items. Codex writes a
- * turn's model output as response items in every history mode, and paginated
- * history (or a migrated legacy file) also records completed TurnItems. A
- * turn with any model response item is therefore projected from those alone,
- * and its TurnItems are dropped; a turn with none is projected from its
- * TurnItems. The decision is per turn id, never by comparing text.
- *
- * Migrated mirrors carry `item-N` ids numbered per thread, which would collide
- * across threads as row identity, so those ids are dropped for the gateway's
- * fallback identity. Other native ids are kept verbatim.
- *
- * @ref LLP 0567#identity [implements]: `item-N` ids dropped, another thread's TurnItems skipped
- * @param {CodexRolloutSession} session
- * @param {Set<string>} rawTurns  turn ids with a model response item
- * @param {Set<string>} promptTurns  turn ids with the person's prompt as a raw user message
- * @param {number} settledItemCount  settled prefix length before resolution
- * @returns {{ items: CodexRolloutItem[], settledItemCount: number, unsupported: Map<string, number> }}
+ * @ref LLP 0567#dedupe [implements]: decide mirrors by the complete turn evidence, never text
+ * @param {CodexRolloutItem} item
+ * @param {string} threadId
+ * @param {Set<string>} rawTurns
+ * @param {Set<string>} promptTurns
+ * @param {Map<string, number>} [unsupported]
+ * @returns {CodexRolloutItem | undefined}
  */
-function completedTurnItems(session, rawTurns, promptTurns, settledItemCount) {
-  /** @type {CodexRolloutItem[]} */
-  const items = []
-  /** @type {Map<string, number>} */
-  const unsupported = new Map()
-  let settled = 0
-  for (let index = 0; index < session.items.length; index++) {
-    if (index === settledItemCount) settled = items.length
-    const item = session.items[index]
-    const completed = item.completed
-    if (completed) {
-      if (rawTurns.has(completed.turnId)) continue
-      if (completed.threadId && completed.threadId !== session.threadId) continue
-      const turnItemType = stringValue(item.payload.type) ?? ''
-      if (turnItemType === 'UserMessage' && promptTurns.has(completed.turnId)) continue
-      const normalize = COMPLETED_TURN_ITEMS[turnItemType]
-      if (!normalize) {
-        const key = KNOWN_TURN_ITEMS.has(turnItemType) ? turnItemType : 'other'
-        unsupported.set(key, (unsupported.get(key) ?? 0) + 1)
-        continue
-      }
-      const payload = normalize(item.payload)
-      const id = stringValue(item.payload.id)
-      if (id && !/^item-\d+$/.test(id)) payload.id = id
-      /** @type {CodexRolloutItem} */
-      const normalized = { payload, turnItemType }
-      if (item.timestampMs !== undefined) normalized.timestampMs = item.timestampMs
-      items.push(normalized)
-    } else {
-      items.push(item)
-    }
+function normalizeCompletedItem(item, threadId, rawTurns, promptTurns, unsupported) {
+  const completed = item.completed
+  if (!completed) return item
+  if (rawTurns.has(completed.turnId)) return undefined
+  if (completed.threadId && completed.threadId !== threadId) return undefined
+  const turnItemType = stringValue(item.payload.type) ?? ''
+  if (turnItemType === 'UserMessage' && promptTurns.has(completed.turnId)) return undefined
+  const normalize = COMPLETED_TURN_ITEMS[turnItemType]
+  if (!normalize) {
+    const key = KNOWN_TURN_ITEMS.has(turnItemType) ? turnItemType : 'other'
+    unsupported?.set(key, (unsupported.get(key) ?? 0) + 1)
+    return undefined
   }
-  if (settledItemCount >= session.items.length) settled = items.length
-  return { items, settledItemCount: settled, unsupported }
+  const payload = normalize(item.payload)
+  const id = stringValue(item.payload.id)
+  if (id && !/^item-\d+$/.test(id)) payload.id = id
+  return { payload, turnItemType, timestampMs: item.timestampMs }
 }
 
 /**
@@ -1010,6 +1117,8 @@ function buildSession(args) {
  *   session: CodexRolloutSession,
  *   items: CodexRolloutItem[],
  *   clientName: string,
+ *   messageOffset?: number,
+ *   identitySource?: string,
  * }} args
  * @returns {AiGatewayProjectedExchange | undefined}
  */
@@ -1026,6 +1135,10 @@ function projectedExchangeFromSession(args) {
   // message and dedupe to one row. @ref LLP 0035#per-turn
   let turnStartIndex = 0
   for (const item of items) {
+    // A checkpoint closes the pre-compaction turn even when it is opaque.
+    // Subsequent token_count can repeat the last response's usage after Codex
+    // recomputes context size; it must not re-bill that response or the summary.
+    if (item.payload.type === 'compacted') turnStartIndex = messages.length
     if (item.usageAttributes) {
       stampUsageOnLastAssistant(messages, item.usageAttributes, turnStartIndex)
       turnStartIndex = messages.length
@@ -1034,13 +1147,14 @@ function projectedExchangeFromSession(args) {
     const message = projectedMessageFromItem(item)
     if (!message) continue
     if (message.message_id) nativeIdCount += 1
+    if (args.messageOffset !== undefined) message.message_index = args.messageOffset + messages.length
     messages.push(message)
   }
   if (messages.length === 0) return undefined
 
   // Native message ids preserved verbatim when the rollout carries them;
   // otherwise the gateway computes deterministic fallback identity.
-  const identitySource = nativeIdCount > 0 ? 'native' : 'gateway_fallback'
+  const identitySource = args.identitySource ?? (nativeIdCount > 0 ? 'native' : 'gateway_fallback')
 
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
@@ -1130,7 +1244,10 @@ function projectedMessageFromItem(item) {
   let message
   switch (itemType) {
   case 'message':
-    message = messageItemToProjected(payload)
+    message = compactionSummaryFromMessage(payload) ?? messageItemToProjected(payload)
+    break
+  case 'compacted':
+    message = item.projectedMessage ?? compactedMessageFromPayload(payload)
     break
   case 'function_call':
   case 'custom_tool_call': {
@@ -1155,6 +1272,7 @@ function projectedMessageFromItem(item) {
   const nativeId = stringValue(payload.id)
   if (nativeId) message.message_id = nativeId
   if (item.timestampMs !== undefined) message.message_created_at = new Date(item.timestampMs).toISOString()
+  // The checkpoint helper recovers an id from its matching replacement item.
   // Carry the native item type as a provenance breadcrumb on the row.
   const providerType = item.turnItemType ?? itemType
   if (providerType) message.provider_type = providerType

@@ -201,9 +201,11 @@ async function materialize(item) {
  * @param {string} ignoredDir
  */
 function ignoringResolver(ignoredDir) {
-  const hypignore = path.join(ignoredDir, '.hypignore')
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over a POSIX-written fixture.
+  const marker = path.resolve(ignoredDir, '.hypignore')
   return createUsagePolicyResolver({
-    existsSync: (p) => p === hypignore,
+    existsSync: (p) => path.resolve(p) === marker,
     readFileSync: () => 'ignore\n',
   })
 }

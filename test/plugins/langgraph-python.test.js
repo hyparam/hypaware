@@ -13,12 +13,18 @@ const python = process.env.HYP_LANGGRAPH_PYTHON ?? 'python3'
 
 for (const mode of ['capture', 'privacy', 'concurrent', 'failure', 'timeout', 'bounds', 'long-session']) {
   test(`Python callback: ${mode}, bounded IPC and helper cleanup`, async t => {
-    try { await exec(python, ['--version']) } catch (error) {
-      if (error.code === 'ENOENT') { t.skip('Python is not installed'); return }
-      throw error
+    // Any probe failure means no usable python: ENOENT, and also the Windows
+    // Store alias shim, which exists but exits with an install nag.
+    try { await exec(python, ['--version']) } catch {
+      t.skip('Python is not installed')
+      return
     }
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-python-callback-'))
-    t.after(() => fs.rm(home, { recursive: true, force: true }))
+    // The failure mode kills the bridge helper while the git probes it ran
+    // with -C home for the session context can still be running. They outlive
+    // the kill, and on win32 a process whose cwd is home makes rmdir fail
+    // EBUSY until it exits. Retry over that window (about 5.5s at most).
+    t.after(() => fs.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
     const env = { ...process.env, HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_CONFIG: path.join(home, 'config.json'),
       PYTHONDONTWRITEBYTECODE: '1' }
     await fs.writeFile(env.HYP_CONFIG, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/langgraph', recording: mode !== 'privacy' }] }))

@@ -299,7 +299,7 @@ test('a restart that throws fails the restart step with the write persisted', as
   assert.equal(after.plugins[0].config.proxy_mode, true, 'the write persisted and the steps say so')
 })
 
-test('a write the filesystem refuses fails the write step and changes nothing', async (t) => {
+test('a write the filesystem refuses fails the write step and changes nothing', { skip: process.platform === 'win32' && 'chmod 0o555 does not make a directory unwritable on win32' }, async (t) => {
   const { hypHome, configPath } = await stageHome()
   const before = JSON.stringify({
     version: 2,
