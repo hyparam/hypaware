@@ -32,8 +32,11 @@ const WIN32_SKIPPED_FILES = new Set([
 ])
 
 // Windows refuses a CreateProcess command line past 32,767 characters
-// (spawnSync reports ENAMETOOLONG), and the full suite's absolute paths are
-// several times that. Headroom for the quoting spawnSync adds per argument.
+// (spawnSync reports ENAMETOOLONG). Passing paths relative to the repo root
+// (see toNodeArg) keeps the whole suite well under this, so win32 runs one
+// concurrent batch like the POSIX legs rather than several sequential ones;
+// the cap stays as a backstop for an unusually long run. Headroom for the
+// quoting spawnSync adds per argument.
 const WIN32_CMDLINE_LIMIT = 28_000
 
 if (isMain(import.meta.url, process.argv[1])) {
@@ -72,7 +75,7 @@ export function run(forwardedArgs) {
     const homeDir = path.join(temp, 'home')
     fs.mkdirSync(homeDir)
     const limit = process.platform === 'win32' ? WIN32_CMDLINE_LIMIT : Infinity
-    const batches = batchTestFiles(files, forwardedArgs, limit)
+    const batches = batchTestFiles(files.map(toNodeArg), forwardedArgs, limit)
     let status = 0
     for (const batch of batches) {
       const result = spawnSync(
@@ -107,6 +110,26 @@ export function run(forwardedArgs) {
  */
 export function buildNodeTestArgs(files, forwardedArgs = []) {
   return ['--test', ...forwardedArgs, ...files]
+}
+
+/**
+ * The argument `node --test` receives for a collected (absolute) test file: a
+ * path relative to the current directory when that is shorter and does not
+ * climb out of it, else the absolute path unchanged. The spawn below does not
+ * set `cwd`, so the child inherits this process's, and `node --test` resolves a
+ * relative arg against that same directory - identical target, far shorter
+ * command line. The whole point is win32's CreateProcess length cap: relative
+ * `test\core\x.test.js` paths keep the suite in one batch where absolute ones
+ * forced several. A caller run from outside the repo (relative would be a long
+ * `..\..\` climb) keeps the absolute path, so this never makes the line longer.
+ *
+ * @param {string} file absolute path from {@link collectTestFiles}
+ * @returns {string}
+ */
+export function toNodeArg(file) {
+  const rel = path.relative(process.cwd(), file)
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return file
+  return rel.length < file.length ? rel : file
 }
 
 /**

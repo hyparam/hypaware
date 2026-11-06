@@ -8,7 +8,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
-import { batchTestFiles, buildNodeTestArgs } from '../../scripts/run-tests.js'
+import { batchTestFiles, buildNodeTestArgs, toNodeArg } from '../../scripts/run-tests.js'
 
 test('run-tests forwards node --test flags before discovered test files', () => {
   assert.deepEqual(
@@ -33,6 +33,18 @@ test('run-tests appends discovered test files when no flags are forwarded', () =
     buildNodeTestArgs(['test/a.test.js']),
     ['--test', 'test/a.test.js'],
   )
+})
+
+test('toNodeArg shortens a file under cwd to a relative path, and only when shorter', (t) => {
+  const cwd = process.cwd()
+  const under = path.join(cwd, 'test', 'core', 'x.test.js')
+  // A file under cwd becomes the (shorter) relative path node resolves the same.
+  assert.equal(toNodeArg(under), path.relative(cwd, under))
+  assert.ok(toNodeArg(under).length < under.length)
+  // A path outside cwd (relative would climb with `..`) keeps the absolute form,
+  // so the command line is never made longer.
+  const outside = path.join(cwd, '..', 'elsewhere', 'y.test.js')
+  assert.equal(toNodeArg(path.resolve(outside)), path.resolve(outside))
 })
 
 test('run-tests keeps a single batch under an infinite command-line limit', () => {
