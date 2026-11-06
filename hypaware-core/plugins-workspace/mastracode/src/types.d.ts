@@ -2,6 +2,9 @@
  * Shared shapes for the `@hypaware/mastracode` adapter.
  */
 
+import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
+import type { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
+
 /** `MastraDbError.code`, also the `error_kind` the source reports (LLP 0586#status). */
 export type MastraDbErrorCode =
   | 'sqlite_unavailable'
@@ -101,4 +104,74 @@ export interface MastraSkipCounts {
   'data-sandbox-exit'?: number
   reasoning?: number
   unknown?: number
+}
+
+/** The database's poll watermark (LLP 0586#reconciliation). */
+export interface MastraDbWatermark {
+  /** The `mastra.db` path the entries describe; a different resolved path is a first start. */
+  path: string
+  /** `size:mtimeNs:ino` of `mastra.db` and `mastra.db-wal`, null before the first record. */
+  stat_sig: string | null
+  /** Message rowid cursor: rows above it are new. */
+  max_rowid: number
+  /** An `updatedAt`; a thread with no entry at or below it is history. Null for an empty store. */
+  floor: string | null
+}
+
+/** One thread's poll watermark entry. */
+export interface MastraThreadWatermark {
+  updated_at: string
+  message_count: number
+  max_rowid: number
+  /** The digest changed on the thread's last reconcile, so it is hashed again on the next changed tick. */
+  open: boolean
+  digest?: string
+}
+
+export interface MastraWatermarkState {
+  db: MastraDbWatermark | null
+  /** Keyed by Mastra Code thread id. */
+  threads: Record<string, MastraThreadWatermark>
+}
+
+/** One thread admitted to a tick's batch. */
+export interface MastraBatchEntry {
+  thread_id: string
+  /** The entry to record once committed, null to drop it. */
+  mark: MastraThreadWatermark | null
+  /** Absent when the thread's rows are unchanged (digest equal). */
+  snapshot?: {
+    rows: Record<string, unknown>[]
+    scope: { where: Record<string, string>, key: string }
+    columns: ColumnSpec[]
+  }
+}
+
+/** The poll's state between ticks. */
+export interface MastraPollRunner {
+  location: MastraDbLocation
+  pollIntervalMs: number
+  homeDir: string
+  stateDir: string
+  resolver: UsagePolicyResolver
+  localOnlyListPath: string
+  devRunId?: string
+  watermark: MastraWatermarkState | null
+  /** Whether `mastra.db` existed at the last tick. */
+  dbPresent: boolean
+  rowsWritten: number
+  threadsTracked: number
+  threadsPending: number
+  lastPollAt?: string
+  lastError?: string
+  lastErrorKind?: string
+  /** `SessionIgnoreSet` shared with the control plane; unset in tests that do not exercise it. */
+  ignoredSessions?: Set<string>
+  /** Directory-signature of the exclusion markers at the last refresh. */
+  exclusionsSignature?: string
+}
+
+/** Shares the running poll's runner with the backfill sweep (LLP 0586#backfill). */
+export interface MastraRunnerHolder {
+  runner?: MastraPollRunner
 }
