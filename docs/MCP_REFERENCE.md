@@ -23,7 +23,7 @@ Walk the activity graph from a node out to N hops
 | --- | --- |
 | Title | Find related sessions |
 | Auth class | `read`: listed to any caller the host admits |
-| Hints | `readOnlyHint: true` |
+| Hints | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `cli+mcp`: a CLI command and an MCP tool on every transport |
 | CLI equivalent | `hyp query graph neighbors <node>` |
 | Registered by | `@hypaware/context-graph` |
@@ -48,7 +48,7 @@ Grep stored ai_gateway_messages for a case-insensitive substring or regex, serve
 | --- | --- |
 | Title | Search session text |
 | Auth class | `read`: listed to any caller the host admits |
-| Hints | `readOnlyHint: true` |
+| Hints | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `cli+mcp`: a CLI command and an MCP tool on every transport |
 | CLI equivalent | `hyp query grep <query>` |
 | Registered by | `@hypaware/grep` |
@@ -74,7 +74,7 @@ Run a SQL query against registered datasets
 | --- | --- |
 | Title | Run a SQL query |
 | Auth class | `read`: listed to any caller the host admits |
-| Hints | `readOnlyHint: true` |
+| Hints | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `cli+mcp`: a CLI command and an MCP tool on every transport |
 | CLI equivalent | `hyp query sql <sql>` |
 | Registered by | core |
@@ -98,7 +98,7 @@ Read one recommendation: its summary, status, status history and report. Set `in
 | --- | --- |
 | Title | Read a recommendation |
 | Auth class | `read`: listed to any caller the host admits |
-| Hints | `readOnlyHint: true` |
+| Hints | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `/v1/mcp` only |
 | CLI equivalent | `hyp report get <rec-id>` |
 | Registered by | HypAware Cloud, from the shared contract |
@@ -118,7 +118,7 @@ List the recommendations in your org's published reports, summary fields only (n
 | --- | --- |
 | Title | List recommendations |
 | Auth class | `read`: listed to any caller the host admits |
-| Hints | `readOnlyHint: true` |
+| Hints | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `/v1/mcp` only |
 | CLI equivalent | `hyp report list --recommendations` |
 | Registered by | HypAware Cloud, from the shared contract |
@@ -141,7 +141,7 @@ Set one recommendation's status. After you have fixed it and checked the fix, ma
 | --- | --- |
 | Title | Set recommendation status |
 | Auth class | `write`, scope `report-publish`: listed only to a credential holding the scope; `hyp mcp serve` passes no scopes |
-| Hints | `readOnlyHint: false`, `destructiveHint: false` |
+| Hints | `readOnlyHint: false`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `/v1/mcp` only |
 | CLI equivalent | `hyp report mark <id> <state>` |
 | Registered by | HypAware Cloud, from the shared contract |

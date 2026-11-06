@@ -71,7 +71,7 @@ test('the write contract shows its scope and non-read hints', () => {
   for (const contract of write) {
     const text = entry(contract.tool)
     assert.ok(text.includes(`| Auth class | \`write\`, scope \`${contract.scope}\`:`), `${contract.tool}: scope`)
-    assert.ok(text.includes('| Hints | `readOnlyHint: false`, `destructiveHint: false` |'), `${contract.tool}: hints`)
+    assert.ok(text.includes('| Hints | `readOnlyHint: false`, `destructiveHint: false`, `openWorldHint: false` |'), `${contract.tool}: hints`)
   }
   assert.ok(entry('set_recommendation_status').includes('scope `report-publish`'))
 })

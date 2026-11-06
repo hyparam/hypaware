@@ -37,14 +37,14 @@ const HANDLE_OPERATION = 'mcp.handle_message'
  * never its hints, so no registration can advertise a hint its class
  * contradicts (a `read` claim on a verb allowed to rewrite state).
  *
- * @type {Readonly<Record<VerbAuthClass, Readonly<{ readOnlyHint: boolean, destructiveHint?: boolean }>>>}
+ * @type {Readonly<Record<VerbAuthClass, Readonly<{ readOnlyHint: boolean, destructiveHint: boolean, openWorldHint: boolean }>>>}
  * @ref LLP 0494#annotations [implements]: hints derive from the auth class, with no per-verb override
  */
 const HINTS_BY_AUTH_CLASS = Object.freeze({
-  read: Object.freeze({ readOnlyHint: true }),
+  read: Object.freeze({ readOnlyHint: true, destructiveHint: false, openWorldHint: false }),
   // A mark appends to a ledger and removes nothing, so `write` is not destructive.
-  write: Object.freeze({ readOnlyHint: false, destructiveHint: false }),
-  operator: Object.freeze({ readOnlyHint: false, destructiveHint: true }),
+  write: Object.freeze({ readOnlyHint: false, destructiveHint: false, openWorldHint: false }),
+  operator: Object.freeze({ readOnlyHint: false, destructiveHint: true, openWorldHint: true }),
 })
 
 /**
@@ -128,7 +128,7 @@ export function createMcpServer(opts) {
    * the hint table has no honest hints and is not listed.
    *
    * @param {VerbRegistration} verb
-   * @returns {{ name: string, title: string, description: string, inputSchema: object, annotations: { title: string, readOnlyHint: boolean, destructiveHint?: boolean } } | undefined}
+   * @returns {{ name: string, title: string, description: string, inputSchema: object, annotations: { title: string, readOnlyHint: boolean, destructiveHint: boolean, openWorldHint: boolean } } | undefined}
    */
   function toolEntry(verb) {
     /** @type {string | undefined} */
@@ -270,7 +270,7 @@ export function createMcpServer(opts) {
   }
 
   function listTools() {
-    /** @type {{ name: string, title: string, description: string, inputSchema: object, annotations: { title: string, readOnlyHint: boolean, destructiveHint?: boolean } }[]} */
+    /** @type {{ name: string, title: string, description: string, inputSchema: object, annotations: { title: string, readOnlyHint: boolean, destructiveHint: boolean, openWorldHint: boolean } }[]} */
     const tools = []
     for (const verb of verbs.list()) {
       const entry = toolEntry(verb)
