@@ -467,6 +467,18 @@ With the default `HYP_HOME`, start with the structured log at
 its own `~/.hyp/hypaware/processing/logs/daemon.log`. Use the paths reported for
 your installation if you configured another home.
 
+On Windows, the Scheduled Task does not capture the daemon's output, so there
+is no `daemon.out.log` or `daemon.err.log`; `daemon.log` is still written.
+Run `hyp daemon status` to see whether the daemon is running. To check the
+task itself, query it with the SID that `whoami /user` prints:
+
+```sh
+schtasks /Query /TN \hypaware\<SID> /V /FO LIST
+```
+
+Its `Status` line shows whether the task is running, and `Last Result` shows
+how the daemon last exited.
+
 An OTLP exporter refused with `421 Misdirected Request` is pointed at a name
 other than `localhost` or `127.0.0.1`; point it at one of those instead.
 [Product telemetry](PRIVACY.md#product-telemetry) has separate controls; it is

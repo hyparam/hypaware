@@ -6,7 +6,7 @@ your team can search and query them.
 
 ## Quickstart
 
-Requires Node.js 22.12 or newer on macOS or Linux.
+Requires Node.js 22.12 or newer on macOS, Linux or Windows.
 
 ```sh
 npm i -g hypaware
