@@ -27,11 +27,12 @@ treated as message content. Reasoning parts and other part types HypAware
 does not recognize are skipped.
 
 Mastra Code does not store token counts per turn. It keeps one running
-counter on each thread, which the latest Mastra Code process adds to while it
-works on that thread. HypAware carries that counter on the last part of the
+counter on each thread and adds to it after every step, including when you
+continue a thread. HypAware carries that counter on the last part of the
 thread's latest response, as the `mastracode.process_token_usage` attribute,
 and no row carries per-turn token usage. The counter is not a per-turn value,
-and it is not guaranteed to be a thread total.
+and it is not guaranteed to be a thread total: Mastra Code skips an update it
+fails to save.
 
 HypAware reads only the `mastra_threads` and `mastra_messages` tables. It
 never reads Mastra Code's `settings.json`, `auth.json`, `mastra-vectors.db`,
