@@ -109,6 +109,8 @@ export const COMMANDS = Object.freeze([
   'privacy set',
   'privacy show',
   'privacy unignore',
+  'privacy pause',
+  'privacy resume',
   'privacy unset',
   'query',
   'query graph neighbors',

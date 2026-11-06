@@ -211,6 +211,15 @@ Returning a client to `sync` affects future exports; previously withheld history
 requires a separate, confirmed `hyp sync --history codex`. Completing team setup
 can clear client-level local-only choices; review the [setup prompts](TEAM_SETUP.md#follow-the-prompts).
 
+## Pausing all recording
+
+```sh
+hyp privacy pause
+hyp privacy resume
+```
+
+While paused, nothing from any AI client on this machine is recorded. That time stays unrecorded after you resume: clients keep writing their own transcripts, and HypAware won't import turns timestamped inside a pause. AI requests still reach their providers. What was recorded before the pause still syncs. `hyp status` shows when a pause began.
+
 ## Pausing a single session
 
 Run `hyp session ignore` inside a Claude Code or Codex session to resolve its
