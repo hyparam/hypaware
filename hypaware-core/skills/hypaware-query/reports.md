@@ -41,7 +41,7 @@ discard or rename useful pages merely to fit the allowlist.
 - `hyp report get <kind> <period> <id> [path] --remote <target>` retrieves a
   published report page; take identifiers from a listing or publish receipt.
 - `hyp report get <hyprec-id> --remote <target>` retrieves one recommendation,
-  its evidence, and status. IDs are `hyprec-` plus sixteen hex characters;
+  its evidence, and status. IDs are `hyprec-` plus a ten-character token, or sixteen hex on older reports;
   legacy `rec-` identifiers are also supported.
 
 When the connected MCP lists `list_recommendations` and `get_recommendation`,
