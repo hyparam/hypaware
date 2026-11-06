@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 import nodeFs from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -8,17 +9,22 @@ import test from 'node:test'
 
 import {
   createMastracodePollRunner,
+  errorKind,
   mastraStatSig,
   mastracodeSourceStatus,
   runMastracodePollTick,
   startMastracodeSource,
   statusInputs,
 } from '../../hypaware-core/plugins-workspace/mastracode/src/source.js'
+import { MastraDbError } from '../../hypaware-core/plugins-workspace/mastracode/src/errors.js'
+import { openMastraDb, SQLITE_VERSION_SQL } from '../../hypaware-core/plugins-workspace/mastracode/src/mastra_db.js'
 import { readMastraWatermark } from '../../hypaware-core/plugins-workspace/mastracode/src/watermark.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { sessionIgnoresDir } from '../../src/core/runtime/paths.js'
 import { assistantContent, insertMessage, openWriter, rewriteMessage, textPart, updateThread } from '../helpers/mastracode_db_fixture.js'
 import { addThread, addTurn, createMastracodeHarness, mastracodePollLogs, nextUpdatedAt, texts } from '../helpers/mastracode_source_fixture.js'
+
+const require = createRequire(import.meta.url)
 
 /**
  * @ref LLP 0586#reconciliation [tests]: the stat gate on `mastra.db` and its
@@ -381,6 +387,205 @@ test('an excluded thread is not projected, an unignore recovers it, and a load e
   assert.equal(committed.length, rows, 'a store that cannot load projects nothing')
   assert.equal(JSON.stringify(readMastraWatermark(harness.dir)), before, 'nothing advances')
   assert.equal(runner.lastErrorKind, 'session_ignore_load_failed')
+})
+
+// ---------------------------------------------------------------------------
+// Status, one case per row of LLP 0586#status
+// ---------------------------------------------------------------------------
+
+/**
+ * The source's status after the runner's last tick.
+ *
+ * @ref LLP 0586#status [tests]: each row of the table from a real tick where
+ *   one can produce it; the old SQLite row from the error the open raises.
+ *
+ * @param {ReturnType<typeof createMastracodePollRunner>} runner
+ */
+function statusOf(runner) {
+  return mastracodeSourceStatus(statusInputs(runner))
+}
+
+/**
+ * Every log line serialized, for the privacy assertion: no fixture text,
+ * title, project path or database path may appear in any of them.
+ *
+ * @param {{ logs: unknown[], dir: string, dbPath: string, projectDir: string }} harness
+ * @param {string[]} markers
+ */
+function assertLogsCarryNoContent(harness, markers) {
+  const serialized = JSON.stringify(harness.logs)
+  for (const needle of [...markers, harness.dir, harness.dbPath, harness.projectDir]) {
+    assert.equal(serialized.includes(needle), false, `no log line carries ${JSON.stringify(needle)}`)
+  }
+}
+
+test('status: no database is ready with zero rows and names the path it looked at', async () => {
+  const harness = await createMastracodeHarness()
+  const absent = path.join(harness.dir, 'absent', 'mastra.db')
+  harness.ctx.env.MASTRA_DB_PATH = absent
+  const runner = createMastracodePollRunner(harness.ctx)
+  await runMastracodePollTick(runner, harness.ctx)
+  const status = statusOf(runner)
+  assert.equal(status.state, 'ready')
+  assert.equal(status.rowsWritten, 0)
+  assert.equal(status.message, `no mastracode installation detected at ${absent}`)
+  assert.equal(status.details?.db_path, absent)
+  assert.equal(status.lastError, undefined)
+  assert.equal(lastPoll(harness.logs).poll_status, 'missing')
+})
+
+test('status: a store with no traffic is ready with no threads yet; a recorded turn makes it recording', async () => {
+  const { runner, ctx, w, logs, projectDir, ...harness } = await baselined()
+  let status = statusOf(runner)
+  assert.equal(status.state, 'ready')
+  assert.equal(status.rowsWritten, 0)
+  assert.equal(status.message, `polling mastracode every ${runner.pollIntervalMs}ms, no threads yet`)
+  addThread(w, 't1', projectDir, { title: 'status-title-marker' })
+  addTurn(w, 't1', 'status-text-marker')
+  w.close()
+  await runMastracodePollTick(runner, ctx)
+  status = statusOf(runner)
+  assert.equal(status.state, 'ready')
+  assert.ok((status.rowsWritten ?? 0) > 0, 'recording')
+  assert.equal(status.message, `polling mastracode every ${runner.pollIntervalMs}ms`)
+  assert.equal(status.details?.threads_tracked, 1)
+  assert.equal(status.details?.threads_pending, 0)
+  assert.equal(typeof status.details?.last_poll_at, 'string')
+  assertLogsCarryNoContent({ logs, projectDir, ...harness }, ['status-title-marker', 'status-text-marker'])
+})
+
+// Mode 000 does not stop root, and win32 has no POSIX mode bits.
+const cannotChmod = process.platform === 'win32' || process.getuid?.() === 0
+
+test('status: a database with mode 000 is degraded permission_denied, and no log line names it', { skip: cannotChmod }, async () => {
+  const { runner, ctx, w, logs, projectDir, dbPath, ...harness } = await baselined()
+  addThread(w, 't1', projectDir, { title: 'unreadable-title-marker' })
+  addTurn(w, 't1', 'unreadable-text-marker')
+  w.close()
+  const before = JSON.stringify(readMastraWatermark(harness.dir))
+  await fs.chmod(dbPath, 0o000)
+  try {
+    await runMastracodePollTick(runner, ctx)
+  } finally {
+    await fs.chmod(dbPath, 0o644)
+  }
+  const status = statusOf(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'permission_denied')
+  assert.equal(status.message, `cannot read the mastracode database at ${dbPath}`)
+  assert.equal(status.lastError, status.message)
+  assert.equal(JSON.stringify(readMastraWatermark(harness.dir)), before, 'the watermark is left as it was')
+  const failed = logs.filter(entry => entry.message === 'mastracode.poll' && entry.level === 'error')
+  assert.equal(failed.at(-1)?.fields?.error_kind, 'permission_denied')
+  assertLogsCarryNoContent({ logs, projectDir, dbPath, ...harness }, ['unreadable-title-marker', 'unreadable-text-marker'])
+  await runMastracodePollTick(runner, ctx)
+  assert.equal(statusOf(runner).state, 'ready', 'a readable database recovers on the next tick')
+})
+
+test('status: a writer holding the lock is degraded sqlite_busy, and the next tick captures', async () => {
+  const { runner, ctx, w, logs, projectDir, committed, ...harness } = await baselined()
+  const before = JSON.stringify(readMastraWatermark(harness.dir))
+  // An exclusive-mode writer keeps its lock after the commit, so every
+  // reader's first statement is SQLITE_BUSY until it lets go.
+  w.exec('PRAGMA locking_mode = EXCLUSIVE')
+  addThread(w, 't1', projectDir)
+  addTurn(w, 't1', 'busy-text-marker')
+  await runMastracodePollTick(runner, ctx)
+  const status = statusOf(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'sqlite_busy')
+  assert.equal(status.message, 'mastracode database busy, retrying next poll')
+  assert.equal(committed.length, 0)
+  assert.equal(JSON.stringify(readMastraWatermark(harness.dir)), before, 'the watermark is left as it was')
+  w.exec('PRAGMA locking_mode = NORMAL')
+  // The lock is released on the next access after the mode change.
+  w.prepare('SELECT 1 FROM mastra_threads LIMIT 1').get()
+  w.close()
+  await runMastracodePollTick(runner, ctx)
+  assert.equal(statusOf(runner).state, 'ready')
+  assert.deepEqual(texts(committed, 't1'), ['busy-text-marker prompt', 'busy-text-marker reply'])
+  assertLogsCarryNoContent({ logs, projectDir, ...harness }, ['busy-text-marker'])
+})
+
+test('status: a missing table or column is degraded schema_unsupported and names it', async () => {
+  const { runner, ctx, w } = await baselined()
+  w.exec('ALTER TABLE mastra_threads DROP COLUMN metadata')
+  await runMastracodePollTick(runner, ctx)
+  let status = statusOf(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'schema_unsupported')
+  assert.equal(status.message, 'mastra.db has no mastra_threads.metadata column')
+  w.exec('ALTER TABLE mastra_threads ADD COLUMN metadata TEXT')
+  w.exec('DROP TABLE mastra_messages')
+  w.close()
+  await runMastracodePollTick(runner, ctx)
+  status = statusOf(runner)
+  assert.equal(status.details?.error_kind, 'schema_unsupported')
+  assert.equal(status.message, 'mastra.db has no mastra_messages table')
+})
+
+test('status: a SQLite older than 3.45 is degraded sqlite_unsupported', async () => {
+  const harness = await createMastracodeHarness()
+  const real = require('node:sqlite')
+  class OldSqlite extends real.DatabaseSync {
+    /** @param {string} sql */
+    prepare(sql) {
+      if (sql === SQLITE_VERSION_SQL) return /** @type {any} */ ({ get: () => ({ version: '3.44.2' }) })
+      return super.prepare(sql)
+    }
+  }
+  // The runner opens the real module; the status is fed the error the open
+  // raises under an older one.
+  /** @type {unknown} */
+  let raised
+  try {
+    openMastraDb(harness.dbPath, { requireFn: () => ({ DatabaseSync: OldSqlite }) })
+  } catch (err) {
+    raised = err
+  }
+  assert.ok(raised instanceof MastraDbError)
+  const runner = createMastracodePollRunner(harness.ctx)
+  const status = mastracodeSourceStatus({
+    ...statusInputs(runner),
+    dbPresent: true,
+    lastErrorKind: errorKind(raised),
+    lastError: raised.message,
+  })
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'sqlite_unsupported')
+  assert.equal(status.message, "SQLite 3.44.2 cannot read Mastra Code's JSONB metadata (needs 3.45 or newer)")
+})
+
+test('status: MASTRA_DB_URL is degraded remote_store_unsupported and opens no file', async () => {
+  const harness = await createMastracodeHarness({ env: { MASTRA_DB_URL: 'libsql://example.invalid' } })
+  const appdata = path.dirname(harness.dbPath)
+  const listed = (await fs.readdir(appdata)).sort()
+  const runner = createMastracodePollRunner(harness.ctx)
+  await runMastracodePollTick(runner, harness.ctx)
+  const status = statusOf(runner)
+  assert.equal(status.state, 'degraded')
+  assert.equal(status.details?.error_kind, 'remote_store_unsupported')
+  assert.equal(status.details?.remote_store, true)
+  assert.equal(status.details?.db_path, undefined)
+  assert.equal(status.message, 'MASTRA_DB_URL is set; remote stores are not supported')
+  assert.equal(runner.dbPresent, false, 'the local file was not even stat-ed')
+  assert.deepEqual((await fs.readdir(appdata)).sort(), listed, 'no -wal or -shm appeared, so nothing opened it')
+  assert.deepEqual(openDescriptors(harness.dbPath), [])
+  assertLogsCarryNoContent(harness, ['libsql://example.invalid'])
+})
+
+test('status: enabled = false reports capture disabled and starts no poll', async () => {
+  const harness = await createMastracodeHarness({ config: { enabled: false } })
+  const source = await startMastracodeSource(harness.ctx)
+  try {
+    const status = await source.status?.()
+    assert.equal(status?.state, 'ready')
+    assert.equal(status?.message, 'mastracode ongoing capture disabled (mastracode.enabled = false)')
+    assert.deepEqual(status?.details, { enabled: false })
+  } finally {
+    await source.stop()
+  }
+  assert.equal(mastracodePollLogs(harness.logs).length, 0, 'no tick ran')
 })
 
 // ---------------------------------------------------------------------------
