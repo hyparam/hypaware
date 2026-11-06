@@ -14,6 +14,11 @@ import { runInitWizard } from '../../src/core/cli/wizard/index.js'
 // write config, and only then have the daemon installer refuse (#975). Every
 // setup form now refuses at dispatch, before the boot and the first network
 // call, while help, status and query keep working on that machine.
+//
+// win32 is a supported setup platform since the LLP 0584 gate folded back in,
+// so the unsupported stand-in here is `aix` - a platform the daemon installer
+// genuinely has no backend for.
+const UNSUPPORTED = /** @type {NodeJS.Platform} */ ('aix')
 
 function makeBuf(isTTY = false) {
   let value = ''
@@ -107,13 +112,12 @@ test('every setup form refuses an unsupported platform before any sign-in, enrol
     const stdout = makeBuf(tty)
     const stderr = makeBuf()
     const before = await snapshot(home)
-    const { code, fetches } = await onPlatform('win32', async (fetches) => ({
+    const { code, fetches } = await onPlatform(UNSUPPORTED, async (fetches) => ({
       code: await dispatch(argv, { stdout, stderr, stdin: closedStdin(tty), env }),
       fetches,
     }))
     assert.equal(code, 1, `${label}: exit`)
-    assert.match(stderr.text(), /hyp setup: unsupported platform: win32 \(only macOS and Linux are supported\)/, `${label}: message`)
-    assert.match(stderr.text(), /on Windows, set up by hand: run 'hyp daemon install', then 'hyp client attach <client>'/, `${label}: manual path`)
+    assert.match(stderr.text(), /hyp setup: unsupported platform: aix \(only macOS, Linux and Windows are supported\)/, `${label}: message`)
     assert.deepEqual(fetches, [], `${label}: no network call`)
     assert.deepEqual(await snapshot(home), before, `${label}: no file written under HOME`)
     assert.equal(stdout.text(), '', `${label}: no wizard or guide output`)
@@ -123,8 +127,8 @@ test('every setup form refuses an unsupported platform before any sign-in, enrol
 test('a direct runInitWizard call refuses an unsupported platform before any lane runs', async () => {
   /** @type {Array<[string, object | undefined, string | undefined]>} */
   const cases = [
-    ['interactive, platform option', undefined, 'win32'],
-    ['scripted picks, platform option', { sources: ['codex'] }, 'win32'],
+    ['interactive, platform option', undefined, UNSUPPORTED],
+    ['scripted picks, platform option', { sources: ['codex'] }, UNSUPPORTED],
     ['interactive, process.platform', undefined, undefined],
   ]
   for (const [label, picks, platform] of cases) {
@@ -136,7 +140,7 @@ test('a direct runInitWizard call refuses an unsupported platform before any lan
     /** @param {string} name */
     const seam = (name) => async () => { calls.push(name); throw new Error(`${name} ran`) }
     const before = await snapshot(home)
-    const result = await onPlatform('win32', () => runInitWizard(/** @type {any} */ ({
+    const result = await onPlatform(UNSUPPORTED, () => runInitWizard(/** @type {any} */ ({
       stdout, stderr, env, ...(platform ? { platform } : {}), ...(picks ? { picks } : {}),
       gate: seam('gate'), fork: seam('fork'), express: seam('express'), pick: seam('pick'),
       configure: seam('configure'), finaleRunner: seam('finale'),
@@ -144,7 +148,7 @@ test('a direct runInitWizard call refuses an unsupported platform before any lan
     })))
     assert.deepEqual(result, { exitCode: 1 }, `${label}: result`)
     assert.deepEqual(calls, [], `${label}: no lane ran`)
-    assert.match(stderr.text(), /hyp setup: unsupported platform: win32 \(only macOS and Linux are supported\)/, `${label}: message`)
+    assert.match(stderr.text(), /hyp setup: unsupported platform: aix \(only macOS, Linux and Windows are supported\)/, `${label}: message`)
     assert.deepEqual(await snapshot(home), before, `${label}: no file written under HOME`)
     assert.equal(stdout.text(), '', `${label}: no output`)
   }
@@ -158,7 +162,7 @@ test('the direct refusal absorbs a failed stderr, synchronous or reported later'
     /** @type {string[]} */
     const calls = []
     const result = await runInitWizard(/** @type {any} */ ({
-      stdout: makeBuf(), stderr, env: {}, platform: 'win32',
+      stdout: makeBuf(), stderr, env: {}, platform: UNSUPPORTED,
       gate: async () => { calls.push('gate'); throw new Error('gate ran') },
     }))
     // An `error` the guard missed would be emitted on a later tick and fail
@@ -172,7 +176,7 @@ test('the direct refusal absorbs a failed stderr, synchronous or reported later'
 
 test('help, status and query still run on an unsupported platform', async () => {
   const { env } = await makeHome()
-  await onPlatform('win32', async () => {
+  await onPlatform(UNSUPPORTED, async () => {
     for (const argv of [['--help'], ['setup', '--help'], ['init', '--yes', '--help'], ['status'], ['query', '--help']]) {
       const stdout = makeBuf()
       const stderr = makeBuf()
@@ -185,7 +189,7 @@ test('help, status and query still run on an unsupported platform', async () => 
 })
 
 test('a supported platform is not refused', async () => {
-  for (const platform of /** @type {NodeJS.Platform[]} */ (['linux', 'darwin'])) {
+  for (const platform of /** @type {NodeJS.Platform[]} */ (['linux', 'darwin', 'win32'])) {
     const { env } = await makeHome()
     const stdout = makeBuf()
     const stderr = makeBuf()

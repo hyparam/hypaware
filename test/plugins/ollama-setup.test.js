@@ -211,7 +211,7 @@ test('organization gateway ownership refuses an inert local upstream change', as
   assert.equal(await fs.readFile(f.configPath, 'utf8'), before)
 })
 
-test('native CLI parses fresh/add/repeat/from-file without attended probes and attach is explicit/idempotent', { skip: process.platform === 'win32' && 'the spawned CLI refuses setup at the platform gate (#975); unskip when win32 setup ships' }, async t => {
+test('native CLI parses fresh/add/repeat/from-file without attended probes and attach is explicit/idempotent', async t => {
   const f = await installFixture(t)
   await fs.rm(f.configPath)
   let probes = 0

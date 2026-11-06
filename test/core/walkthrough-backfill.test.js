@@ -287,10 +287,7 @@ test('the finale reports cancelled backfill consent', async () => {
       throw new PromptCancelledError()
     },
     backfill,
-    // win32 has no daemon-install plan to render, which would read as a
-    // failed install and withhold the restart preview asserted below; the
-    // install half is not what this test pins.
-    finale: { dryRun: true, skipDaemonInstall: process.platform === 'win32' },
+    finale: { dryRun: true },
   })
 
   assert.equal(backfill.calls.length, 0, 'cancelling consent must skip the backfill run')
@@ -892,10 +889,7 @@ test('a dry run without skipDaemonRestart still previews the restart', async () 
   const stdout = makeBuf()
 
   const summary = await runPickerFinale(/** @type {any} */ ({
-    // win32 has no daemon-install plan to render, which would read as a
-    // failed install and withhold the restart preview asserted below; the
-    // install half is not what this test pins.
-    finale: { dryRun: true, skipDaemon: false, skipDaemonInstall: process.platform === 'win32' },
+    finale: { dryRun: true, skipDaemon: false },
     clientsPicked: [],
     capabilities: noGateway,
     config: { version: 2, plugins: [] },
