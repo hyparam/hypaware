@@ -277,12 +277,14 @@ async function* runClaudeBackfill(args) {
     // and filesystem messages can carry paths or record contents.
     const code = /** @type {{ code?: unknown }} */ (err)?.code
     const message = err instanceof Error ? err.message : ''
+    const errorCode = typeof code === 'string' ? code : /^opencode_ownership_[a-z_]+$/.test(message) ? message : 'unknown'
     log.error('claude.backfill.ownership_read_failed', {
       component: 'plugin.claude.backfill', operation: 'ownership_gate',
       owner_client: 'opencode', error_kind: 'ownership_read_failed', status: 'error',
-      error_code: typeof code === 'string' ? code : /^opencode_ownership_[a-z_]+$/.test(message) ? message : 'unknown',
+      error_code: errorCode,
     })
-    throw new Error('OpenCode Claude session ownership could not be read; Claude history import stopped to protect OpenCode privacy')
+    const nodeStep = errorCode === 'opencode_ownership_sqlite_unavailable' ? ' This needs Node 22.13 or newer.' : ''
+    throw new Error(`Claude history import stopped: could not read OpenCode's session list (${errorCode}), so it cannot tell OpenCode's Claude sessions from your own. The next run retries.${nodeStep}`)
   }
 
   // A current mapping can name a fork rather than its original transcript.

@@ -432,7 +432,7 @@ test('an unreadable OpenCode ownership record stops Claude import before any row
       const before = await fs.readFile(file)
       const { ctx, entries } = runContext()
       ctx.env.OPENCODE_DB = file
-      await assert.rejects(collectItems(provider.run(ctx)), /ownership could not be read/)
+      await assert.rejects(collectItems(provider.run(ctx)), /could not read OpenCode's session list/)
       assert.equal(entries.filter(entry => entry.message === 'claude.backfill.session_projected').length, 0)
       const failed = entries.find(entry => entry.message === 'claude.backfill.ownership_read_failed')?.fields
       assert.equal(failed?.error_kind, 'ownership_read_failed')
