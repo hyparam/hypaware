@@ -13,6 +13,9 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
 import { appendSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
+import { projectOpenCodeSnapshot } from '../../hypaware-core/plugins-workspace/opencode/src/projector.js'
+import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { createSourceWithholdResolver } from '../../src/core/cache/source-withhold.js'
 import { runBackfillProvider } from '../../src/core/commands/backfill.js'
 import {
   createBackfillMaterializerRegistry,
@@ -255,6 +258,147 @@ function conversationRows(sessionId) {
 function rowsByRole(rows, role) {
   return rows.filter((r) => r.role === role)
 }
+
+// Shapes observed with Agent SDK 0.3.301 and Claude Code 2.1.301 against a
+// local fixture endpoint. The shared sdk-ts entrypoint is not client provenance.
+test('OpenCode SDK transcript copies do not bypass OpenCode privacy or duplicate its native rows', async () => {
+  const env = await stageEnv()
+  try {
+    for (const entrypoint of ['sdk-ts', 'sdk-cli', undefined]) {
+      const id = `opencode-${entrypoint}`
+      const rows = conversationRows(id).map(row => ({ ...row, entrypoint }))
+      rows[1].message.content = [{ type: 'text', text: 'Sure, running it now.' }]
+      await writeTranscript(env, 'repo', id, [
+        ...rows,
+        // When present, declarations identify ownership without a tool call.
+        { type: 'api-request-shape', sessionId: id, shape: { tools: [{ name: 'mcp__opencode__read' }] } },
+      ])
+    }
+    const ordinaryIds = []
+    for (const entrypoint of ['sdk-ts', 'sdk-cli', 'sdk-py', 'cli', 'future-sdk', undefined]) {
+      const id = `ordinary-${entrypoint}`
+      ordinaryIds.push(id)
+      const ordinary = conversationRows(id).map(row => ({ ...row, entrypoint }))
+      await writeTranscript(env, 'repo', id, [
+        ...ordinary,
+        { type: 'api-request-shape', sessionId: id, shape: { tools: [{ name: 'mcp__ordinary_sdk__read' }] } },
+      ])
+    }
+    const provider = createClaudeBackfillProvider({ ...env, deriveRepo: async () => ({}) })
+    const { ctx, entries } = runContext()
+    const items = await collectItems(provider.run(ctx))
+    assert.deepEqual(items.map(item => item.provenance?.native_id).sort(), ordinaryIds.sort())
+    for (const item of items) {
+      assert.ok((await materialize(item)).every(row => row.client_name === 'claude'))
+    }
+    const native = projectOpenCodeSnapshot({
+      info: { id: 'ses_opencode', location: { directory: '/work/probe' } },
+      messages: [
+        { id: 'msg_user', type: 'user', text: 'list the files', time: { created: 1 } },
+        { id: 'msg_reply', type: 'assistant', content: [{ type: 'text', text: 'Sure, running it now.' }], time: { created: 2, completed: 3 } },
+      ],
+    })
+    assert.ok(native)
+    const nativeRows = aiGatewayRowsFromProjectedExchange(native)
+    const withhold = createSourceWithholdResolver({
+      withheldSourceIds: ['opencode'],
+      datasetAttributionColumns: new Map([['ai_gateway_messages', 'client_name']]),
+    })
+    assert.ok(nativeRows.length > 0)
+    assert.ok(nativeRows.every(row => withhold.shouldWithhold(row.client_name)))
+    assert.equal(entries.filter(entry => entry.message === 'claude.backfill.foreign_session_drop').length, 3)
+    assert.equal(entries.find(entry => entry.message === 'claude.backfill.scan_complete')?.fields?.sessions_gated, 3)
+    ctx.isPluginConfigured = () => true
+    assert.equal((await collectItems(provider.run(ctx))).length, ordinaryIds.length, 'configuring OpenCode never enables a second producer')
+  } finally { await env.cleanup() }
+})
+
+test('OpenCode tool provenance outside the requested window excludes the whole SDK session', async () => {
+  const env = await stageEnv()
+  try {
+    /** @type {Record<string, any>[]} */
+    const rows = conversationRows('opencode-tools')
+    rows[0].message = { role: 'assistant', content: [{ type: 'tool_use', name: 'mcp__opencode__read', id: 'tool-probe', input: {} }] }
+    await writeTranscript(env, 'repo', 'opencode-tools', rows)
+    // Merely mentioning a tool name in text is not an ownership claim.
+    const ordinary = conversationRows('ordinary-sdk')
+    ordinary[0].message = { role: 'user', content: 'Explain mcp__opencode__read' }
+    await writeTranscript(env, 'repo', 'ordinary-sdk', ordinary)
+    const provider = createClaudeBackfillProvider({ ...env, deriveRepo: async () => ({}) })
+    const { ctx } = runContext({ since: '2026-05-20T10:00:04.000Z' })
+    const items = await collectItems(provider.run(ctx))
+    assert.deepEqual(items.map(item => item.provenance?.native_id), ['ordinary-sdk'])
+  } finally { await env.cleanup() }
+})
+
+test('OpenCode persisted UUID ownership excludes text-only SDK sessions and refreshes each run', async () => {
+  const env = await stageEnv()
+  const { DatabaseSync } = await import('node:sqlite')
+  const data = path.join(env.homeDir, 'xdg-data')
+  await fs.mkdir(path.join(data, 'opencode'), { recursive: true })
+  const db = new DatabaseSync(path.join(data, 'opencode', 'opencode.db'))
+  try {
+    db.exec('CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const prefix = `plugin:${[...'opencode.provider.claude-agent'].map(c => c.charCodeAt(0).toString(16).padStart(4, '0')).join('')}:sessions/`
+    const save = (/** @type {string} */ id) => db.prepare('INSERT INTO kv VALUES (?, ?)').run(`${prefix}ses_${id}`, JSON.stringify({ claudeSessionID: id, history: [] }))
+    save('owned-sdk')
+    save('z-current-sdk')
+    for (const { id, parent } of [
+      { id: 'a-original-sdk', parent: undefined },
+      { id: 'm-fork-sdk', parent: 'a-original-sdk' },
+      { id: 'z-current-sdk', parent: 'm-fork-sdk' },
+      { id: 'ordinary-fork', parent: 'ordinary-sdk' },
+    ]) {
+      await writeTranscript(env, 'repo', id, conversationRows(id).map(row => ({ ...row,
+        ...(parent ? { forkedFrom: { sessionId: parent, messageUuid: row.uuid } } : {}),
+      })))
+    }
+    db.prepare('INSERT INTO kv VALUES (?, ?)').run('plugin:unrelated:sessions/ses_other', '{invalid unrelated value')
+    const older = new DatabaseSync(path.join(data, 'opencode', 'opencode-legacy.db'))
+    older.exec('CREATE TABLE session (id TEXT PRIMARY KEY)')
+    older.close()
+    for (const id of ['owned-sdk', 'later-sdk', 'ordinary-sdk']) {
+      await writeTranscript(env, 'repo', id, conversationRows(id))
+    }
+    const provider = createClaudeBackfillProvider({ ...env, deriveRepo: async () => ({}) })
+    const { ctx } = runContext()
+    ctx.env.XDG_DATA_HOME = data
+    let items = await collectItems(provider.run(ctx))
+    assert.deepEqual(items.map(item => item.provenance?.native_id), ['later-sdk', 'ordinary-fork', 'ordinary-sdk'])
+    save('later-sdk')
+    items = await collectItems(provider.run(ctx))
+    assert.deepEqual(items.map(item => item.provenance?.native_id), ['ordinary-fork', 'ordinary-sdk'])
+  } finally {
+    db.close()
+    await env.cleanup()
+  }
+})
+
+test('an unreadable OpenCode ownership record stops Claude import before any rows are yielded', async () => {
+  const env = await stageEnv()
+  const { DatabaseSync } = await import('node:sqlite')
+  const file = path.join(env.homeDir, 'custom.db')
+  const db = new DatabaseSync(file)
+  try {
+    db.exec('CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const prefix = `plugin:${[...'opencode.provider.claude-agent'].map(c => c.charCodeAt(0).toString(16).padStart(4, '0')).join('')}:sessions/`
+    await writeTranscript(env, 'repo', 'ordinary-sdk', conversationRows('ordinary-sdk'))
+    const provider = createClaudeBackfillProvider({ ...env, deriveRepo: async () => ({}) })
+    for (const value of ['{malformed', JSON.stringify({ claudeSessionID: 'owned', history: ['x'.repeat(1048576)] })]) {
+      db.prepare('INSERT OR REPLACE INTO kv VALUES (?, ?)').run(`${prefix}ses_owned`, value)
+      const before = await fs.readFile(file)
+      const { ctx, entries } = runContext()
+      ctx.env.OPENCODE_DB = file
+      await assert.rejects(collectItems(provider.run(ctx)), /ownership could not be read/)
+      assert.equal(entries.filter(entry => entry.message === 'claude.backfill.session_projected').length, 0)
+      assert.equal(entries.find(entry => entry.message === 'claude.backfill.ownership_read_failed')?.fields?.error_kind, 'ownership_read_failed')
+      assert.deepEqual(await fs.readFile(file), before, 'the ownership reader never changes OpenCode storage')
+    }
+  } finally {
+    db.close()
+    await env.cleanup()
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Tests

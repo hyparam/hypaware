@@ -92,6 +92,17 @@ export async function run({ harness, expect }) {
     'utf8'
   )
 
+  // @ref LLP 0588#single-producer [tests]: OpenCode's SDK UUID is a second
+  // identity for its native conversation, so Claude must refuse this lane.
+  const openCodeId = `opencode-sdk-${harness.devRunId}`
+  await fs.writeFile(path.join(projectsDir, `${openCodeId}.jsonl`), [
+    { type: 'user', sessionId: openCodeId, uuid: 'sdk-user', entrypoint: 'sdk-ts',
+      timestamp: userTs.toISOString(), message: { role: 'user', content: 'list the files' } },
+    { type: 'assistant', sessionId: openCodeId, uuid: 'sdk-reply', entrypoint: 'sdk-ts',
+      timestamp: assistantTs.toISOString(), message: { role: 'assistant', content: 'here they are' } },
+    { type: 'api-request-shape', sessionId: openCodeId, shape: { tools: [{ name: 'mcp__opencode__read' }] } },
+  ].map(row => JSON.stringify(row)).join('\n') + '\n')
+
   const previousHome = process.env.HOME
   process.env.HOME = fakeHome
 
@@ -196,6 +207,10 @@ export async function run({ harness, expect }) {
 
     const rows1 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 1' })
     expect.that('query: two rows for the backfilled session', rows1, (v) => Array.isArray(v) && v.length === 2)
+    const sdkRows = await queryRows({ dispatch, kernel, registry, env, expect, label: 'OpenCode ownership',
+      sql: `select count(*) as rows from ai_gateway_messages where session_id = '${openCodeId}'`,
+    })
+    expect.that('query: no Claude copy of the OpenCode SDK session', sdkRows[0], v => Number(v?.rows) === 0)
 
     const user = rows1.find((/** @type {any} */ r) => r.role === 'user')
     const assistant = rows1.find((/** @type {any} */ r) => r.role === 'assistant')
@@ -328,6 +343,9 @@ export async function run({ harness, expect }) {
     )
 
     const logs = await expect.logs()
+    expect.that('logs: OpenCode transcript ownership explains the drop', logs, v => v.some(l =>
+      l.body === 'claude.backfill.foreign_session_drop' && l.attributes?.owner_client === 'opencode'
+      && l.attributes?.session_id === openCodeId && l.attributes?.reason === 'transcript_tool_provenance'))
     expect.that('logs: a second response usage carrier was suppressed', logs, v => v.some(l =>
       l.body === 'ai_gateway.usage_carrier_retained' && Number(l.attributes?.suppressed_count) === 1))
     expect.that('logs: title capture is observable without title text', logs, v => v.some(l =>
@@ -356,8 +374,8 @@ export async function run({ harness, expect }) {
       'logs: first tick reads the transcript and second tick skips its unchanged body',
       scanLogs,
       (v) => Array.isArray(v) &&
-        v.some((l) => l.attributes?.files_read === 1 && l.attributes?.files_unchanged === 0) &&
-        v.some((l) => l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 1),
+        v.some((l) => l.attributes?.files_read === 2 && l.attributes?.files_unchanged === 0 && l.attributes?.sessions_gated === 1) &&
+        v.some((l) => l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 2),
     )
   } finally {
     if (previousHome === undefined) delete process.env.HOME
