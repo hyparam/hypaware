@@ -801,6 +801,10 @@ Crush also has no live route: pass `crush-` followed by its Crush session ID,
 as the `session_id` column of its rows shows, and HypAware reads the saved
 ignore on the next Crush poll. The same gateway rule applies, so on a Crush-only install use
 `hyp privacy ignore <dir>` on the project directory instead.
+Mastra Code has no live route either: pass `mastracode-` followed by its thread
+ID, and HypAware reads the saved ignore on the next Mastra Code poll. The same
+gateway rule applies, so on a Mastra Code-only install use
+`hyp privacy ignore <dir>` on the project directory instead.
 OpenClaw and Hermes do not support session opt-out; use
 [directory controls](PRIVACY.md#marking-directories) for them.
 
@@ -1282,6 +1286,7 @@ capture:
 | `@hypaware/antigravity` (also Antigravity Desktop) | Five minutes | Yes |
 | `@hypaware/goose` | 15 minutes | Yes |
 | `@hypaware/crush` | 15 minutes | Yes |
+| `@hypaware/mastracode` | 15 minutes | Yes |
 | `@hypaware/copilot` | One minute | No (it is Copilot's only capture lane; with `on_join: false` it skips sessions from before the daemon started) |
 
 `hyp client detach <client>` stops every client's scheduled recovery, whatever

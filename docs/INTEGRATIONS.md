@@ -39,6 +39,7 @@ collector inside the cloud environment.
 | [Grok Build](integrations/grok.md) | Supported | Your machine | Native hooks signal local session changes, plus recovery every five minutes | Yes | `grok` |
 | [Goose](integrations/goose.md) | Supported | Your machine | Goose's local session database, read-only, for the CLI and desktop app, polled every 60 seconds, plus recovery every 15 minutes | Yes | `goose` |
 | [Crush](integrations/crush.md) | Supported | Your machine | Each project's `crush.db`, read-only, found through Crush's project index, polled every 60 seconds, plus recovery every 15 minutes; no token usage | Yes | `crush` |
+| [Mastra Code](integrations/mastracode.md) | Supported | Your machine | Mastra Code's local `mastra.db`, read-only, polled every 60 seconds, plus recovery every 15 minutes; no per-turn token usage or cost | Yes | `mastracode` |
 | [Antigravity](integrations/antigravity.md) | Beta | Your machine | Antigravity CLI and Desktop local conversation stores, polled every 30 seconds, plus recovery every five minutes | Yes | `antigravity`, `antigravity-desktop` |
 
 ## Cloud agents
