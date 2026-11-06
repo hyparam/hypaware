@@ -591,12 +591,13 @@ function* walkAgentMetaFiles(dir) {
  * directly (one file per session) rather than resolving a session id.
  *
  * @param {string} filePath
+ * @param {(row: unknown) => void} [onRow] Observe native metadata before projection discards it.
  * @returns {Promise<TranscriptEntry[]>}
  */
-export async function loadTranscriptFile(filePath) {
+export async function loadTranscriptFile(filePath, onRow) {
   /** @type {TranscriptEntry[]} */
   const entries = []
-  await readTranscriptFile(filePath, entries)
+  await readTranscriptFile(filePath, entries, onRow)
   entries.sort(byTimestampAsc)
   return entries
 }
@@ -979,9 +980,10 @@ function matchesTranscriptName(name, sessionId) {
 /**
  * @param {string} filePath
  * @param {TranscriptEntry[]} entries
+ * @param {(row: unknown) => void} [onRow]
  * @returns {Promise<void>}
  */
-async function readTranscriptFile(filePath, entries) {
+async function readTranscriptFile(filePath, entries, onRow) {
   /** @type {fs.ReadStream} */
   let stream
   try {
@@ -996,6 +998,7 @@ async function readTranscriptFile(filePath, entries) {
       if (!line) continue
       let row
       try { row = JSON.parse(line) } catch { continue }
+      onRow?.(row)
       const entry = transcriptEntryFromRow(row)
       if (entry) entries.push(entry)
     }
