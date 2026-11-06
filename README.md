@@ -16,7 +16,7 @@ what went wrong, what keeps repeating, and what to fix.
 
 ## Install
 
-Requires Node.js 22.12 or newer, on macOS or Linux.
+Requires Node.js 22.12 or newer, on macOS, Linux or Windows.
 
 ```sh
 npm install -g hypaware

@@ -8,9 +8,9 @@ For the syntax and behavior of every command, see the
 ## Requirements
 
 - Node.js 22.12 or later.
-- macOS with `launchd`, or Linux with a `systemd` user service, for the
-  persistent background service. A container or CI host without one can run
-  `hyp daemon run` in the foreground instead; see
+- macOS with `launchd`, Linux with a `systemd` user service, or Windows with
+  Task Scheduler, for the persistent background service. A container or CI
+  host without one can run `hyp daemon run` in the foreground instead; see
   [CI and headless deployment](integrations/ci-and-headless.md).
 - An interactive terminal for the guided setup.
 
@@ -31,6 +31,10 @@ Setup then asks which AI clients to record, installs the background service,
 connects the clients you selected, and imports their supported session history.
 
 If a valid configuration already exists, `hyp setup` lets you reconfigure the setup.
+
+`hyp setup` runs the same way on Windows as on macOS and Linux. On any of
+them you can instead install the service with `hyp daemon install` and connect
+each client with `hyp client attach <client>`.
 
 For an unattended local installation, specify each choice:
 
@@ -88,6 +92,22 @@ Setup installs it as a per-user service. On macOS, its LaunchAgent runs while
 you are logged in. On Linux, its systemd user service requires user-session
 support; see [headless deployment](integrations/ci-and-headless.md#long-lived-headless-hosts)
 for hosts that must keep running after logout.
+
+On Windows, it is a per-user Scheduled Task, `\hypaware\<SID>`, where
+`<SID>` is your Windows security identifier. It runs as you and needs no
+administrator rights. It stops when you sign out and starts again when you
+next sign in. If the daemon crashes, Windows relaunches it within about a
+minute; a clean exit, such as the one `hyp daemon stop` asks for, leaves it
+stopped. No console window opens: the task runs the daemon through a
+generated launcher, `.hyp\hypaware\daemon-launcher.vbs` in your user
+profile (next to the `logs` directory), using `wscript`. Install writes the
+launcher, and `hyp daemon uninstall` deletes it along with the task.
+
+On Windows, `hyp daemon stop` first asks the daemon to exit cleanly. If it is
+still running after 10 seconds, stop force-ends the task and the daemon it
+launched, and says so. `hyp daemon restart` stops the daemon the same graceful
+way and then runs the task again; it force-ends the task only when the stop
+request does not land.
 
 ```sh
 hyp daemon status

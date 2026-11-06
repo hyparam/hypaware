@@ -1625,15 +1625,27 @@ Daemon commands don't activate plugins.
 ### `hyp daemon install`
 
 ```text
-hyp daemon install [--config <path>] [--bin <path>] [--force] [--dry-run [--json]]
+hyp daemon install [--config <path>] [--bin <path>] [--force] [--dry-run [--json] [--platform darwin|linux|win32]]
 ```
 
-Installs the persistent launchd or systemd user service. When invoked from an
-ephemeral `npx` path, it installs a durable global package before it writes the
-service. `--force` allows the existing CLI path if that global installation
-fails; removing that directory later can break capture. `--dry-run` renders
-the exact service definition without changing the host; add `--json` for
-structured plan output.
+Installs the persistent launchd or systemd user service, or on Windows the
+per-user Scheduled Task. When invoked from an ephemeral `npx` path, it
+installs a durable global package before it writes the service. `--force`
+allows the existing CLI path if that global installation fails; removing that
+directory later can break capture. `--dry-run` renders the exact service
+definition without changing the host; add `--json` for structured plan output.
+With `--dry-run`, `--platform darwin`, `linux` or `win32` renders the plan
+for that platform instead of this one.
+
+On success it names the service it installed, such as
+`LaunchAgent: com.hyperparam.hypaware`, `systemd unit: hypaware.service` or
+`Scheduled Task: \hypaware`, then its target and the config path. The Windows
+label names the task folder; the `target` line names the task itself,
+`\hypaware\<SID>`. On macOS and Linux it also prints the service log path. On
+Windows the task keeps no service log, so there is no `logs` line; it says
+instead that Windows restarts a crashed daemon within about a minute. A Windows install also writes the
+windowless launcher the task runs, `daemon-launcher.vbs`; `--dry-run` shows its
+content after the task definition.
 
 ```sh
 hyp daemon install --dry-run --json
@@ -1727,8 +1739,13 @@ hyp daemon status --json
 hyp daemon stop
 ```
 
-Signals the running daemon and waits up to five seconds. An already stopped
+Signals the running daemon and waits up to 10 seconds. An already stopped
 daemon succeeds. A timeout returns `1`.
+
+On Windows, when the installed task's daemon is still running after those 10
+seconds, stop force-ends the task and the daemon it launched instead of
+returning `1`. It prints a warning that the daemon was force-stopped and that
+anything it had not saved yet may be lost.
 
 ```sh
 hyp daemon stop
@@ -1742,6 +1759,10 @@ hyp daemon restart [--processing]
 
 Restarts an installed service. If no service is installed, it stops a
 foreground daemon and tells you how to relaunch or install it.
+
+On Windows the restart is graceful: it asks the daemon to exit cleanly, then
+runs the task again. It force-ends the task only when that request does not
+land.
 
 `--processing` replaces only the supervised processing daemon (recording,
 sinks, backfill and maintenance) and leaves the gateway listener, its sockets
