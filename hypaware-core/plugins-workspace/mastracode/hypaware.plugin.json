@@ -18,6 +18,18 @@
     }
   },
   "contributes": {
+    "picker": [
+      {
+        "name": "mastracode",
+        "label": "Mastra Code",
+        "summary": "Records your Mastra Code conversations and imports recent history. Makes no changes to Mastra Code.",
+        "detect": { "settings_file": ".local/share/mastracode/mastra.db" },
+        "compose": {
+          "plugin": { "name": "@hypaware/mastracode" },
+          "requires_gateway": true
+        }
+      }
+    ],
     "config_sections": [
       {
         "section": "mastracode",
