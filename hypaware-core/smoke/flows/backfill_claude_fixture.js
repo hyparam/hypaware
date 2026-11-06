@@ -92,7 +92,7 @@ export async function run({ harness, expect }) {
     'utf8'
   )
 
-  // @ref LLP 0588#single-producer [tests]: OpenCode's SDK UUID is a second
+  // @ref LLP 0589#single-producer [tests]: OpenCode's SDK UUID is a second
   // identity for its native conversation, so Claude must refuse this lane.
   const openCodeId = `opencode-sdk-${harness.devRunId}`
   await fs.writeFile(path.join(projectsDir, `${openCodeId}.jsonl`), [

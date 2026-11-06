@@ -414,7 +414,7 @@ async function* runClaudeBackfill(args) {
     }
 
     for (const [sessionId, sessionEntries] of groupBySession(entries)) {
-      // @ref LLP 0588#single-producer [implements]: OpenCode's native lane owns these turns even when its adapter is switched off
+      // @ref LLP 0589#single-producer [implements]: OpenCode's native lane owns these turns even when its adapter is switched off
       if (openCodeSessions.has(sessionId)) {
         sessionsGated += 1
         log.info('claude.backfill.foreign_session_drop', {

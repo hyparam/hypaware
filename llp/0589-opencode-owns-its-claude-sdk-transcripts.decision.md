@@ -1,4 +1,4 @@
-# LLP 0588: OpenCode owns its Claude SDK transcripts
+# LLP 0589: OpenCode owns its Claude SDK transcripts
 
 **Type:** Decision
 **Status:** Draft

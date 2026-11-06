@@ -18,7 +18,7 @@ function isOpenCodeTool(name) {
  * HypAware: its privacy switch cannot authorize a second Claude capture lane.
  * No messages or checkpoint histories leave SQLite. The primary-key range
  * visits only this provider's records, with bounded values and retained IDs.
- * @ref LLP 0588#ownership [implements]: native UUID ownership covers text-only sessions on older Claude binaries
+ * @ref LLP 0589#ownership [implements]: native UUID ownership covers text-only sessions on older Claude binaries
  * @param {string} homeDir
  * @param {Record<string, string | undefined>} env
  * @returns {Promise<Set<string>>}
@@ -77,7 +77,7 @@ export async function readOpenCodeClaudeSessions(homeDir, env) {
  * Structured provenance only, never a search through prompt or reply text.
  * Current Claude persists declarations even for text-only turns; older
  * binaries retain calls and attribution. Forks copy that same evidence.
- * @ref LLP 0588#ownership [implements]: tool provenance survives UUID changes and is independent of entrypoint
+ * @ref LLP 0589#ownership [implements]: tool provenance survives UUID changes and is independent of entrypoint
  * @param {unknown} row
  * @returns {string | undefined}
  */
