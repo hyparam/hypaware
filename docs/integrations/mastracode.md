@@ -7,14 +7,15 @@ database, `mastra.db`, read-only. Mastra Code is the `mastracode` npm package
 from mastra-ai; this integration is tested with version 0.49.0. HypAware
 polls the database every 60 seconds for new messages, and a scheduled import
 every 15 minutes brings in existing threads. It does not route Mastra Code's
-model traffic or change Mastra Code's settings, and it writes nothing in
-Mastra Code's data directory or in your projects.
+model traffic or change Mastra Code's settings or threads, and it writes
+nothing in your projects. Reading the database can leave SQLite's own index
+files beside it (see [Limits](#limits)).
 
 Mastra Code keeps every thread in one database:
 
 | Platform | Default location |
 | --- | --- |
-| Linux | `~/.local/share/mastracode/mastra.db`, or under `$XDG_DATA_HOME` |
+| Linux | `~/.local/share/mastracode/mastra.db` |
 | macOS | `~/Library/Application Support/mastracode/mastra.db` |
 | Windows | `%APPDATA%\mastracode\mastra.db` |
 
@@ -64,8 +65,10 @@ This integration installs no skills into Mastra Code.
 ### Use a different database location
 
 HypAware uses the first of these that is set: the `db_path` setting,
-`MASTRA_DB_PATH`, `MASTRA_APP_DATA_DIR`, `XDG_DATA_HOME`, then the default
-for your platform. The daemon does not see those variables when they are set
+`MASTRA_DB_PATH`, `MASTRA_APP_DATA_DIR` (as `<dir>/mastra.db`),
+`XDG_DATA_HOME` (as `<dir>/mastracode/mastra.db`), then the default for your
+platform. Each variable counts only when it is an absolute path, and
+`XDG_DATA_HOME` counts on every platform, not only Linux. The daemon does not see those variables when they are set
 only in your shell, because it runs under launchd or systemd with its own
 environment. A `hyp backfill mastracode` run from that shell does see them,
 so the two can read different databases. If you moved the database, add this
@@ -156,6 +159,9 @@ records what ran; it does not enforce Mastra Code's permissions.
 - Remote Turso and Postgres stores are not supported. When `MASTRA_DB_URL`
   is set in the daemon's environment, HypAware reads no local file and
   `hyp status` says so.
+- Reading the database can leave an empty `mastra.db-wal` and a
+  `mastra.db-shm` beside `mastra.db` until Mastra Code next closes it
+  cleanly. These are SQLite's own index files and hold no content.
 - Windows is offered in setup, but no run has validated capture there.
 - If Mastra Code changes its database schema, `hyp status` reports the
   missing table or column and HypAware records nothing until a release
