@@ -349,6 +349,33 @@ test('an entry that is not ours still refuses, however close it looks (R2)', asy
   }
 })
 
+// What detach leaves when the user added settings to our entry: no baseUrl,
+// so detach has nothing left to undo and must not be the advice. The reason
+// names the settings by path and never prints a value.
+test('a settings-only entry refuses with how to attach, not a detach loop', async () => {
+  const before = {
+    models: { providers: {
+      anthropic: { headers: { 'anthropic-workspace-id': 'wrkspc_secret' }, request: { proxy: 'p' } },
+      openai: { baseUrl: 'https://mine.example', models: [] },
+    } },
+  }
+  const staged = await stage(before)
+  try {
+    const { outcome } = await runAttach(staged)
+    assert.equal(outcome.status, 'refused')
+    const reason = outcome.status === 'refused' ? outcome.reason : ''
+    assert.match(reason, /models\.providers\.anthropic in .* holds only your own settings \(headers\.anthropic-workspace-id, request\), with no HypAware route, so HypAware will not edit it\./)
+    assert.match(reason, /copy those settings, remove models\.providers\.anthropic, attach again, then add them back/)
+    // The routed entry keeps the existing advice; only it mentions detach.
+    assert.match(reason, /models\.providers\.openai already exists/)
+    assert.equal(reason.match(/hyp client detach/g)?.length, 1)
+    assert.doesNotMatch(reason, /wrkspc_secret|'p'/)
+    assert.deepEqual(await readConfig(staged.settingsPath), before)
+  } finally {
+    await fs.rm(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
 test('attach never throws on refusal, so attach-on-join warns instead of failing', async () => {
   const staged = await stage({
     models: { providers: { openai: { baseUrl: 'https://mine.example', models: [] } } },

@@ -154,12 +154,7 @@ export function createOpenclawAttach(opts) {
 
           const existing = conflictingProviderKeys(read.value)
           if (existing.length > 0) {
-            const reason =
-              `models.providers.${existing.join(' and models.providers.')} already ` +
-              `exists in ${settingsPath} and was not written by HypAware; attach ` +
-              `refuses to merge (LLP 0167#attach-detach). ` +
-              `Remove it by hand or run 'hyp client detach ${CLIENT_NAME}' first.`
-            return refuse(span, attachCtx, logger, settingsPath, reason)
+            return refuse(span, attachCtx, logger, settingsPath, refusalReason(read.value, existing, settingsPath))
           }
 
           if (attachCtx.dryRun === true) {
@@ -253,6 +248,70 @@ function conflictingProviderKeys(config) {
       // entry carries the *old* origin and a URL check would refuse it.
       !isOwnedProviderEntry(container[key], key, MARKER_HEADER)
   )
+}
+
+/**
+ * The refusal text for the keys {@link conflictingProviderKeys} found. An
+ * entry with no `baseUrl` routes nowhere: it is what detach leaves when the
+ * user added settings to our entry (an `anthropic-workspace-id` header, say).
+ * Detach has nothing left to undo there, so pointing at it would loop; say
+ * what the entry holds and how to attach without losing it. Settings are named
+ * by path and never by value, because this reason is printed and logged.
+ *
+ * @param {Record<string, unknown>} config
+ * @param {string[]} keys
+ * @param {string} settingsPath
+ * @returns {string}
+ */
+function refusalReason(config, keys, settingsPath) {
+  const container = /** @type {Record<string, unknown>} */ (readPath(config, CONTAINER_KEYS))
+  const settingsOnly = keys.filter((key) => {
+    const entry = container[key]
+    return isPlainObject(entry) && !Object.hasOwn(entry, 'baseUrl')
+  })
+  const routed = keys.filter((key) => !settingsOnly.includes(key))
+  const parts = []
+  if (routed.length > 0) {
+    parts.push(
+      `models.providers.${routed.join(' and models.providers.')} already ` +
+      `exists in ${settingsPath} and was not written by HypAware; attach ` +
+      `refuses to merge (LLP 0167#attach-detach). ` +
+      `Remove it by hand or run 'hyp client detach ${CLIENT_NAME}' first.`
+    )
+  }
+  for (const key of settingsOnly) {
+    const names = settingNames(/** @type {Record<string, unknown>} */ (container[key]))
+    const holds = names.length > 0 ? `holds only your own settings (${names.join(', ')})` : 'is empty'
+    parts.push(
+      `models.providers.${key} in ${settingsPath} ${holds}, with no HypAware ` +
+      `route, so HypAware will not edit it. To attach, copy those settings, ` +
+      `remove models.providers.${key}, attach again, then add them back to ` +
+      `the new entry.`
+    )
+  }
+  return parts.join(' ')
+}
+
+const MAX_SETTING_NAMES = 5
+
+/**
+ * Bounded list of an entry's setting paths, headers by name.
+ * @param {Record<string, unknown>} entry
+ * @returns {string[]}
+ */
+function settingNames(entry) {
+  /** @type {string[]} */
+  const names = []
+  for (const [key, value] of Object.entries(entry)) {
+    if (key === 'headers' && isPlainObject(value) && Object.keys(value).length > 0) {
+      for (const header of Object.keys(value)) names.push(`headers.${header}`)
+    } else {
+      names.push(key)
+    }
+  }
+  const shown = names.slice(0, MAX_SETTING_NAMES).map((name) => name.slice(0, 64))
+  if (names.length > shown.length) shown.push(`${names.length - shown.length} more`)
+  return shown
 }
 
 /**

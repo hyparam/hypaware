@@ -165,7 +165,12 @@ test('json_path undo preserves user content added to an attached provider', asyn
     const before = await fs.readFile(settingsPath, 'utf8')
     const again = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
     assert.equal(again.changed, false)
-    assert.equal((await attachForReal(home)).status, 'refused')
+    const refused = await attachForReal(home)
+    assert.equal(refused.status, 'refused')
+    const reason = refused.status === 'refused' ? refused.reason : ''
+    assert.match(reason, /models\.providers\.anthropic in .* holds only your own settings \(headers\.anthropic-workspace-id, request\)/)
+    assert.match(reason, /models\.providers\.openai in .* holds only your own settings \(headers\.OpenAI-Organization, authHeader\)/)
+    assert.doesNotMatch(reason, /hyp client detach|wrkspc_test|user-secret|org-test/)
     assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
