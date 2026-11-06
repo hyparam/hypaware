@@ -193,14 +193,19 @@ async function startViaActivate(config) {
   const sources = []
   /** @type {any[]} */
   const sections = []
+  /** @type {any[]} */
+  const backfills = []
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mastracode-config-'))
   const ctx = /** @type {any} */ (makeCtx(config, { HYP_HOME: dir, MASTRA_DB_PATH: path.join(dir, 'absent', 'mastra.db') }))
   ctx.paths = { rootDir: dir, stateDir: dir, cacheDir: dir, tempDir: dir }
   ctx.log = { ...ctx.log, debug() {}, warn() {}, error() {} }
   ctx.configRegistry = { registerSection: (/** @type {any} */ s) => sections.push(s) }
   ctx.sources = { register: (/** @type {any} */ s) => sources.push(s) }
+  ctx.backfills = { register: (/** @type {any} */ b) => backfills.push(b) }
   await activate(ctx)
   assert.equal(sections.length, 1)
+  assert.equal(backfills.length, 1)
+  assert.equal(backfills[0].name, 'mastracode')
   assert.equal(sections[0].section, 'mastracode')
   assert.equal(sources.length, 1)
   assert.equal(sources[0].name, 'mastracode')
