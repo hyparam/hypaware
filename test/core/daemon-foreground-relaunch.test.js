@@ -315,6 +315,8 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
   })
   /** @type {ChildProcess | undefined} */
   let daemon
+  /** @type {ChildProcess | undefined} */
+  let stopper
   try {
     const port = await freePort()
     await fs.mkdir(hypHome, { recursive: true })
@@ -374,18 +376,28 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
     // stop through the LLP 0300 file control channel, the way a real stop
     // reaches the daemon there.
     if (process.platform === 'win32') {
-      spawn(process.execPath, [path.join(REPO_ROOT, 'bin', 'hypaware.js'), 'daemon', 'stop'], { env, stdio: 'ignore' })
+      // The stop CLI shares this HYP_HOME and keeps writing to it (pid-file
+      // reconciliation, its own dev telemetry) after the daemon has exited,
+      // so wait for it too before the cleanup removes the tree (#2918).
+      const stop = spawn(process.execPath, [path.join(REPO_ROOT, 'bin', 'hypaware.js'), 'daemon', 'stop'], { env, stdio: 'ignore' })
+      stopper = stop
+      const stopped = new Promise(resolve => stop.once('exit', resolve))
+      assert.deepEqual(await exited, { code: 0, signal: null }, describe())
+      await stopped
     } else {
       proc.kill('SIGTERM')
+      assert.deepEqual(await exited, { code: 0, signal: null }, describe())
     }
-    assert.deepEqual(await exited, { code: 0, signal: null }, describe())
     await assert.rejects(ask(gateway), 'the relaunched gateway stopped with the run')
   } finally {
     if (daemon && daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGKILL')
+    if (stopper && stopper.exitCode === null && stopper.signalCode === null) stopper.kill('SIGKILL')
     await new Promise(resolve => upstream.server.close(resolve))
     central.server.closeAllConnections()
     await new Promise(resolve => central.server.close(resolve))
-    await fs.rm(root, { recursive: true, force: true })
+    // Windows rmdir fails ENOTEMPTY while a just-exited process's handles
+    // drain; retry over that brief window, as the sibling daemon tests do.
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
