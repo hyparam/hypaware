@@ -259,6 +259,20 @@ function rowsByRole(rows, role) {
   return rows.filter((r) => r.role === role)
 }
 
+test('an OpenCode launch marker excludes the first text-only request before any SDK mapping exists', async () => {
+  const env = await stageEnv()
+  try {
+    // This is the first persisted user line, while the model is still replying.
+    // There is no tool call, declaration, fork ancestry or provider KV mapping.
+    const first = conversationRows('opencode-first')[0]
+    await writeTranscript(env, 'repo', 'opencode-first', [{ ...first, entrypoint: 'opencode' }])
+    await writeTranscript(env, 'repo', 'ordinary-sdk', [{ ...first, sessionId: 'ordinary-sdk', entrypoint: 'sdk-ts' }])
+    const provider = createClaudeBackfillProvider({ ...env, deriveRepo: async () => ({}) })
+    const { ctx } = runContext()
+    assert.deepEqual((await collectItems(provider.run(ctx))).map(item => item.provenance?.native_id), ['ordinary-sdk'])
+  } finally { await env.cleanup() }
+})
+
 // Shapes observed with Agent SDK 0.3.301 and Claude Code 2.1.301 against a
 // local fixture endpoint. The shared sdk-ts entrypoint is not client provenance.
 test('OpenCode SDK transcript copies do not bypass OpenCode privacy or duplicate its native rows', async () => {

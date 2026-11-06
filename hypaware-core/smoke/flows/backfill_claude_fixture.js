@@ -96,11 +96,8 @@ export async function run({ harness, expect }) {
   // identity for its native conversation, so Claude must refuse this lane.
   const openCodeId = `opencode-sdk-${harness.devRunId}`
   await fs.writeFile(path.join(projectsDir, `${openCodeId}.jsonl`), [
-    { type: 'user', sessionId: openCodeId, uuid: 'sdk-user', entrypoint: 'sdk-ts',
+    { type: 'user', sessionId: openCodeId, uuid: 'sdk-user', entrypoint: 'opencode',
       timestamp: userTs.toISOString(), message: { role: 'user', content: 'list the files' } },
-    { type: 'assistant', sessionId: openCodeId, uuid: 'sdk-reply', entrypoint: 'sdk-ts',
-      timestamp: assistantTs.toISOString(), message: { role: 'assistant', content: 'here they are' } },
-    { type: 'api-request-shape', sessionId: openCodeId, shape: { tools: [{ name: 'mcp__opencode__read' }] } },
   ].map(row => JSON.stringify(row)).join('\n') + '\n')
 
   const previousHome = process.env.HOME
@@ -345,7 +342,7 @@ export async function run({ harness, expect }) {
     const logs = await expect.logs()
     expect.that('logs: OpenCode transcript ownership explains the drop', logs, v => v.some(l =>
       l.body === 'claude.backfill.foreign_session_drop' && l.attributes?.owner_client === 'opencode'
-      && l.attributes?.session_id === openCodeId && l.attributes?.reason === 'transcript_tool_provenance'))
+      && l.attributes?.session_id === openCodeId && l.attributes?.reason === 'transcript_provenance'))
     expect.that('logs: a second response usage carrier was suppressed', logs, v => v.some(l =>
       l.body === 'ai_gateway.usage_carrier_retained' && Number(l.attributes?.suppressed_count) === 1))
     expect.that('logs: title capture is observable without title text', logs, v => v.some(l =>

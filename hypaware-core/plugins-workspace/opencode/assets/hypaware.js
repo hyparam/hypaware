@@ -1,5 +1,11 @@
 // HYPWARE_OPENCODE_PLUGIN v1
 
+// The Agent SDK preserves an explicit entrypoint on its very first transcript
+// line. Set it in OpenCode's process before a provider can launch Claude; a
+// saved UUID mapping arrives only after the first request has settled.
+// @ref LLP 0589#launch-provenance [implements]: provenance precedes persisted content, including text-only requests
+process.env.CLAUDE_CODE_ENTRYPOINT = 'opencode'
+
 const HYPWARE_ENDPOINT = '__HYPWARE_OPENCODE_ENDPOINT__'
 const SNAPSHOT_INTERVAL_MS = 1000
 const SNAPSHOT_TIMEOUT_MS = 5000

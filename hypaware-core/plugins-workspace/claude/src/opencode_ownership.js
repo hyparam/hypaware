@@ -75,14 +75,17 @@ export async function readOpenCodeClaudeSessions(homeDir, env) {
 
 /**
  * Structured provenance only, never a search through prompt or reply text.
- * Current Claude persists declarations even for text-only turns; older
- * binaries retain calls and attribution. Forks copy that same evidence.
+ * The managed plugin's launch marker exists from the first user line.
+ * Older unmarked sessions can retain tool declarations, calls or attribution.
+ * Forks copy that same evidence.
  * @ref LLP 0589#ownership [implements]: tool provenance survives UUID changes and is independent of entrypoint
  * @param {unknown} row
  * @returns {string | undefined}
  */
 export function openCodeTranscriptSession(row) {
   if (!isPlainObject(row) || typeof row.sessionId !== 'string') return undefined
+  // @ref LLP 0589#launch-provenance [implements]: a known launcher labels the first persisted line, before any tool or mapping exists
+  if (row.entrypoint === 'opencode') return row.sessionId
   const message = isPlainObject(row.message) ? row.message : undefined
   const shape = row.type === 'api-request-shape' && isPlainObject(row.shape) ? row.shape : undefined
   const tools = shape?.tools

@@ -15,8 +15,8 @@ user's Claude projects tree. Its `SessionRecord` stores the Claude UUID in
 namespaced KV storage. Native OpenCode capture uses different IDs, so ordinary
 part dedupe cannot merge a transcript imported by Claude with the native copy.
 
-An isolated probe with Agent SDK 0.3.301 and real Claude Code 2.1.283 and
-2.1.301, using only fixture prompts against a local fake Anthropic endpoint,
+Isolated probes with Agent SDK / Claude Code 0.3.283 / 2.1.283 and
+0.3.301 / 2.1.301, using only fixture prompts against a local fake Anthropic endpoint,
 confirmed `entrypoint: sdk-ts` for both OpenCode-shaped and ordinary SDK
 sessions. Claude backfill materialized four OpenCode-shaped rows as `claude`;
 the OpenCode source opt-out withheld none. The entrypoint is a mode, not proof
@@ -29,11 +29,30 @@ server uses that namespace. Its SDK forks copy the conversation prefix with
 new message UUIDs and `forkedFrom.sessionId` on each copied record. A real
 text-only SDK fork confirmed the ancestry survives when no tool marker exists.
 
+## Launch provenance {#launch-provenance}
+
+The managed OpenCode plugin sets the existing `CLAUDE_CODE_ENTRYPOINT`
+environment variable to `opencode` when its module loads. The SDK preserves
+an explicit value instead of substituting `sdk-ts`. Claude consequently
+stamps the first persisted user line with the launching client, before the
+first model reply, tool call, or saved provider UUID mapping. SDK forks keep
+the same value. A currently running OpenCode must restart to load the updated
+managed plugin, as the attach command already instructs.
+
+This assignment lives in OpenCode's process. It does not change the user's
+shell or standalone SDK environment. Native OpenCode snapshot frontend
+attribution still reads `OPENCODE_CLIENT`; the new value labels only the
+embedded Claude transcript. The value is not a manifest admission claim:
+Claude must refuse this producer entirely, not import a second copy labeled
+OpenCode. Shared SDK modes remain Claude's, subject to LLP 0140's existing
+fail-open rule.
+
 ## Ownership {#ownership}
 
 Extend LLP 0140 for a shared-tree session with stronger native ownership
-evidence: an exact UUID in OpenCode's Claude Agent KV namespace, or structured
-OpenCode MCP declarations, calls or attribution in the transcript. Native SDK
+evidence: the explicit OpenCode launch entrypoint, an exact UUID in OpenCode's
+Claude Agent KV namespace, or structured OpenCode MCP declarations, calls or
+attribution in the transcript. Native SDK
 fork ancestry propagates this ownership in both directions. Read a currently
 mapped transcript before its ancestors, following their filenames as the
 upstream SDK does, so an ancestor cannot be projected before its ownership is
@@ -63,21 +82,53 @@ Previously captured or exported copies are not rewritten or recalled.
 
 ## Limits and cost {#limits}
 
-The mapping records the current Claude UUID after a request settles. A
-text-only first request can lack an OpenCode marker before its first mapping
-is saved, including on Claude 2.1.301. An orphaned transcript whose mapping,
-fork links and identifying prefix are all gone has the same problem.
-That artifact is indistinguishable from ordinary SDK history. This
-change does not claim to classify it. Process-local data roots or custom DB
-paths invisible to HypAware likewise cannot supply mappings. Real OpenCode
-CLI/Desktop Claude Agent validation, including first-turn timing, remains
-needed; the hermetic smoke cannot prove upstream persistence or emission order.
+The first-turn gate no longer depends on a settled mapping or optional tool
+metadata for launches from the updated managed plugin. Older running children
+and unmarked historical artifacts still need the native UUID, fork or tool
+evidence. An orphaned unmarked transcript with none of that evidence is
+indistinguishable from ordinary SDK history; no heuristic changes its owner.
+An OpenCode instance that never loads the managed plugin cannot supply its
+launch marker. Process-local data roots or custom database paths invisible to
+HypAware likewise cannot supply historical UUID mappings. Existing captured
+or exported copies are not recalled.
 
-There is no additional transcript read or persistent ownership cache. Native
+## Real-client validation {#validation}
+
+On macOS arm64, official OpenCode CLI and Desktop 2.2.3 ran their real Claude
+Agent provider with Claude Code 2.1.301 against a local fixture Anthropic API.
+No real credentials or hosted inference were used. Desktop was exercised in
+its UI, using its isolated test profile and an empty temporary project.
+
+Before each frontend's first model reply, its native UUID mapping was absent,
+its transcript already carried `entrypoint: opencode`, and the real Claude
+import runner wrote zero rows. Both turns completed normally. Local cache
+queries held exactly the two native OpenCode sessions (nine rows, including
+metadata/idle rows) and ten output tokens, matching the two fixture replies.
+Real native session exports replayed through the importer wrote zero duplicate
+rows. With the OpenCode source withheld, the real export-read seam withheld
+all nine rows and yielded no payload. A separate real CLI session ignored by
+native session ID wrote zero rows on both capture paths.
+
+An independent ordinary SDK session in the same temporary home retained
+`sdk-ts`: its two Claude rows and five output tokens imported normally, and
+only those two rows remained eligible for export beside the withheld OpenCode
+rows. A real SDK fork also retained the explicit launch entrypoint.
+
+The unmarked OpenCode 2.2.3 / Claude 2.1.301 baseline emitted sufficient tool
+metadata for the earlier draft filter. The minimal SDK text-only probe did
+not, so the launch marker removes reliance on optional emission shape rather
+than claiming that baseline failed. OpenCode's first-turn attempt with Claude
+2.1.283 was refused by its upstream initialization-version check; no successful
+real OpenCode turn on that older binary is claimed.
+
+## CPU and memory {#cost}
+
+The launch assignment and entrypoint comparison add constant work, no I/O,
+no retry, and no retained state. There is no additional transcript read or persistent ownership cache. Native
 rows are checked while the existing parser reads them; ownership is a set
 lookup before window filtering, policy lookup, projection or git probes. The
 per-run index retains at most 65,536 IDs across at most 32 databases, visits at
 most 65,536 provider records, and refuses values over 1 MiB or 16 MiB of
 provider metadata in total. Directory discovery stops at 4,096 entries.
-Busy waiting is capped at 100 ms per database. SQLite returns only lengths and UUIDs, not
-checkpoint histories or unrelated messages. All handles close after the read.
+Busy waiting is capped at 100 ms per database. SQLite returns only lengths
+and UUIDs, not checkpoint histories or unrelated messages. All handles close after the read.

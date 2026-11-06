@@ -372,11 +372,11 @@ async function* runClaudeBackfill(args) {
     let entries
     /** @type {Map<string, Set<string>>} */
     const forks = new Map()
-    const toolOwnedSessions = new Set()
+    const transcriptOwnedSessions = new Set()
     try {
       entries = await loadTranscriptFile(filePath, row => {
         const id = openCodeTranscriptSession(row)
-        if (id) toolOwnedSessions.add(id)
+        if (id) transcriptOwnedSessions.add(id)
         if (!isPlainObject(row) || typeof row.sessionId !== 'string' || !isPlainObject(row.forkedFrom)
             || typeof row.forkedFrom.sessionId !== 'string') return
         const parent = row.forkedFrom.sessionId
@@ -400,7 +400,7 @@ async function* runClaudeBackfill(args) {
       continue
     }
 
-    for (const id of toolOwnedSessions) ownSession(id)
+    for (const id of transcriptOwnedSessions) ownSession(id)
     const pending = [...forks.keys()].filter(id => openCodeSessions.has(id))
     const reached = new Set(pending)
     while (pending.length) {
@@ -420,7 +420,7 @@ async function* runClaudeBackfill(args) {
         log.info('claude.backfill.foreign_session_drop', {
           component: 'plugin.claude.backfill', operation: 'ownership_gate',
           session_id: sessionId, owner_client: 'opencode',
-          reason: toolOwnedSessions.has(sessionId) ? 'transcript_tool_provenance' : 'native_session_ownership',
+          reason: transcriptOwnedSessions.has(sessionId) ? 'transcript_provenance' : 'native_session_ownership',
           status: 'ok',
         })
         continue
