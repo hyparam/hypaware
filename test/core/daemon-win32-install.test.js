@@ -29,7 +29,7 @@ import {
 import { planDaemonInstall, renderDaemonInstall, serviceDaemonStatus } from '../../src/core/daemon/install.js'
 import { platformIsSupported, daemonKindLabel } from '../../src/core/daemon/platform.js'
 import { detectSupervisor } from '../../src/core/update/self_update.js'
-import { runDaemonStop } from '../../src/core/commands/daemon.js'
+import { runDaemonInstall, runDaemonStop } from '../../src/core/commands/daemon.js'
 
 const SID = 'S-1-5-21-1111-2222-3333-1001'
 const BIN = 'C:\\Users\\kenny\\AppData\\Roaming\\npm\\hypaware.cmd'
@@ -120,14 +120,16 @@ test('planTaskInstall resolves the JS entry as binPath and names the task from t
 })
 
 /**
- * A BASE whose logDir is a throwaway temp dir, so installTask's real mkdir and
- * launcher write never touch the host's home. Cleaned up after the test.
+ * A BASE whose logDir sits one level inside a throwaway temp dir, so
+ * installTask's real mkdir and launcher write (beside the log dir, in its
+ * parent) never touch the host's home or the shared tmpdir root. Cleaned up
+ * after the test.
  * @param {TestContext} t
  */
 function tempBase(t) {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-task-'))
-  t.after(() => fs.rmSync(logDir, { recursive: true, force: true }))
-  return { ...BASE, logDir }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-task-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  return { ...BASE, logDir: path.join(root, 'logs') }
 }
 
 test('installTask writes UTF-16LE XML, writes the launcher, creates with /F, runs it, and polls', async (t) => {
@@ -165,6 +167,18 @@ test('a failed create surfaces as a ScheduledTaskError and never runs the task',
   })
   await assert.rejects(installTask({ ...base, schtasks: adapter, sleep: async () => {} }), /Access is denied/)
   assert.deepEqual(calls.map(c => c.verb), ['create'], 'create was attempted but run was never reached')
+})
+
+// @ref LLP 0584#exec [tests]: the launcher written at install is removed at uninstall
+test('uninstallTask removes the launcher install wrote under the same home', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-home-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const { logDir: _logDir, ...base } = BASE
+  const { adapter } = fakeSchtasks()
+  const plan = await installTask({ ...base, homeDir: home, schtasks: adapter, sleep: async () => {} })
+  assert.ok(fs.existsSync(plan.launcherPath), 'install wrote the launcher')
+  await uninstallTask({ sid: SID, homeDir: home, schtasks: adapter })
+  assert.equal(fs.existsSync(plan.launcherPath), false, 'uninstall removed the launcher')
 })
 
 test('uninstallTask deletes the task and tolerates one already gone', async () => {
@@ -304,6 +318,28 @@ test('install.js dispatches win32 through the task backend', () => {
   assert.equal(rendered.platform, 'win32')
   assert.equal(rendered.taskName, `\\hypaware\\${SID}`)
   assert.equal(rendered.serviceKind, 'Scheduled Task: \\hypaware')
+  assert.equal(rendered.launcherPath, plan.launcherPath)
+  assert.match(String(rendered.launcherContent), /--supervised/)
+})
+
+test('hyp daemon install --dry-run on win32 shows the launcher and the command it runs', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-win32-preview-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  let out = ''
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: { HOME: home },
+    stdout: { write(/** @type {string} */ c) { out += String(c); return true } },
+    stderr: { write() { return true } },
+  }))
+  const code = await runDaemonInstall(['--dry-run', '--bin', BIN, '--platform', 'win32'], ctx)
+  assert.equal(code, 0)
+  assert.match(out, /^launcher: +.*daemon-launcher\.vbs$/m)
+  // The XML's action names only wscript and the launcher; the node command
+  // line is in the launcher block printed after it.
+  const [xml, launcher] = out.split('--- launcher ---\n')
+  assert.match(xml, /--- content ---\n[\s\S]*wscript\.exe/)
+  assert.match(launcher, /WScript\.Quit shell\.Run\(".*daemon run --config .*--supervised.*", 0, True\)/)
+  assert.equal(fs.readdirSync(home).length, 0, 'the preview wrote nothing')
 })
 
 test('serviceDaemonStatus reports the win32 task state through the adapter', async () => {

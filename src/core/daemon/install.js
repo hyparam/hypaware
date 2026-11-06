@@ -87,13 +87,18 @@ export function planDaemonInstall(options) {
  */
 export function renderDaemonInstall(options) {
   const plan = planDaemonInstall(options)
-  /** @type {{ unitName?: string, plistDir?: string, unitDir?: string, taskName?: string }} */
+  /** @type {{ unitName?: string, plistDir?: string, unitDir?: string, taskName?: string, launcherPath?: string, launcherContent?: string }} */
   const platformExtras = {}
   if (plan.platform === 'linux') {
     platformExtras.unitName = plan.unitName
     platformExtras.unitDir = plan.unitDir
   } else if (plan.platform === 'win32') {
     platformExtras.taskName = plan.taskName
+    // The task XML's action is only wscript and the launcher path; the node
+    // command line the daemon runs lives in the launcher, so the preview
+    // carries it too.
+    platformExtras.launcherPath = plan.launcherPath
+    platformExtras.launcherContent = plan.launcherContent
   } else {
     platformExtras.plistDir = plan.plistDir
   }
