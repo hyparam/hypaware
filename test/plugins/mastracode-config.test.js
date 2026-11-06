@@ -156,8 +156,14 @@ test('path order: db_path, MASTRA_DB_PATH, MASTRA_APP_DATA_DIR, XDG_DATA_HOME, t
   // Each step on its own, with every other variable unset.
   assert.deepEqual(resolve(undefined, { MASTRA_APP_DATA_DIR: '/srv/appdata' }), { kind: 'local', path: '/srv/appdata/mastra.db' })
   assert.deepEqual(resolve(undefined, { MASTRA_DB_PATH: '/srv/env/mastra.db' }), { kind: 'local', path: '/srv/env/mastra.db' })
-  // An environment step outranks the platform default on every platform.
-  assert.deepEqual(resolve(undefined, { XDG_DATA_HOME: '/srv/xdg' }, 'darwin'), { kind: 'local', path: '/srv/xdg/mastracode/mastra.db' })
+  // XDG_DATA_HOME is a step only on Linux, as in Mastra Code; the MASTRA_
+  // variables outrank the platform default everywhere.
+  assert.deepEqual(resolve(undefined, { XDG_DATA_HOME: '/srv/xdg' }, 'darwin'), { kind: 'local', path: path.posix.join(HOME, 'Library', 'Application Support', 'mastracode', 'mastra.db') })
+  assert.deepEqual(
+    resolveMastraDbLocation(makeCtx(undefined, { XDG_DATA_HOME: 'C:\\xdg', APPDATA: 'C:\\Users\\fixture\\AppData\\Roaming' }), 'C:\\Users\\fixture', 'win32'),
+    { kind: 'local', path: 'C:\\Users\\fixture\\AppData\\Roaming\\mastracode\\mastra.db' }
+  )
+  assert.deepEqual(resolve(undefined, { MASTRA_APP_DATA_DIR: '/srv/appdata' }, 'darwin'), { kind: 'local', path: '/srv/appdata/mastra.db' })
 })
 
 test('a relative environment value is ignored', () => {

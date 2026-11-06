@@ -114,7 +114,7 @@ export function resolveHomeDir(ctx) {
  * file exists, because that file would be stale. Otherwise the path is the
  * first that applies: `db_path`, an absolute `$MASTRA_DB_PATH`,
  * `$MASTRA_APP_DATA_DIR/mastra.db`, `$XDG_DATA_HOME/mastracode/mastra.db`
- * (each variable only when absolute), then the platform default. Only
+ * (not on macOS or Windows; each variable only when absolute), then the platform default. Only
  * resolves; a path that does not exist is the source's to report.
  *
  * @ref LLP 0586#detect-platforms [implements]: the per-platform default
@@ -138,7 +138,11 @@ export function resolveMastraDbLocation(ctx, homeDir, platform = process.platfor
   const absolute = (value) => typeof value === 'string' && p.isAbsolute(value)
   if (absolute(env.MASTRA_DB_PATH)) return { kind: 'local', path: env.MASTRA_DB_PATH }
   if (absolute(env.MASTRA_APP_DATA_DIR)) return { kind: 'local', path: p.join(env.MASTRA_APP_DATA_DIR, 'mastra.db') }
-  if (absolute(env.XDG_DATA_HOME)) return { kind: 'local', path: p.join(env.XDG_DATA_HOME, 'mastracode', 'mastra.db') }
+  // Mastra Code reads XDG_DATA_HOME only on Linux (code-sdk getAppDataDir);
+  // macOS and Windows ignore it, so it is no step there.
+  if (platform !== 'darwin' && platform !== 'win32' && absolute(env.XDG_DATA_HOME)) {
+    return { kind: 'local', path: p.join(env.XDG_DATA_HOME, 'mastracode', 'mastra.db') }
+  }
   if (platform === 'darwin') {
     return { kind: 'local', path: p.join(homeDir, 'Library', 'Application Support', 'mastracode', 'mastra.db') }
   }

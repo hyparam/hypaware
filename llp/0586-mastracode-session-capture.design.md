@@ -281,7 +281,8 @@ The database path is the first that applies:
 1. `mastracode.db_path`;
 2. `$MASTRA_DB_PATH`;
 3. `$MASTRA_APP_DATA_DIR/mastra.db`;
-4. `$XDG_DATA_HOME/mastracode/mastra.db`;
+4. `$XDG_DATA_HOME/mastracode/mastra.db` (Linux only: Mastra Code ignores
+   it on macOS and Windows);
 5. the platform default (#context).
 
 An environment value counts only when it is set in the daemon's environment
