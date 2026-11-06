@@ -87,6 +87,7 @@ export type PickerSource =
   | 'hermes'
   | 'goose'
   | 'crush'
+  | 'mastracode'
   | 'raw-anthropic'
   | 'raw-openai'
   | 'otel'

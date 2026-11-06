@@ -14,8 +14,8 @@ import {
 /**
  * Manifest and bundling tests for `@hypaware/mastracode`.
  *
- * @ref LLP 0586#manifest [tests]: the goose manifest field for field, with
- *   no `client` or `skills` contribution.
+ * @ref LLP 0586#manifest [tests]: the goose manifest field for field, with a
+ *   picker row and no `client` or `skills` contribution.
  */
 
 const WORKSPACE = path.resolve(
@@ -42,7 +42,7 @@ test('mastracode manifest loads and validates', async () => {
   assert.equal(manifest.requires?.plugins?.['@hypaware/ai-gateway'], '^2.0.0')
 })
 
-test('mastracode contributes a config section and a source, and no client or skills', async () => {
+test('mastracode contributes a picker row, a config section and a source, and no client or skills', async () => {
   const manifest = await loadMastracode()
   const sections = (manifest.contributes?.config_sections ?? []).map((s) => /** @type {{ section: string }} */ (s).section)
   assert.deepEqual(sections, ['mastracode'])
@@ -52,6 +52,14 @@ test('mastracode contributes a config section and a source, and no client or ski
   assert.equal(contributes.datasets, undefined)
   assert.equal(contributes.client, undefined)
   assert.equal(contributes.skills, undefined)
+  // No `platforms` gate: Windows is still offered (LLP 0586#detect-platforms).
+  assert.deepEqual(manifest.contributes?.picker, [{
+    name: 'mastracode',
+    label: 'Mastra Code',
+    summary: 'Records your Mastra Code conversations and imports recent history. Makes no changes to Mastra Code.',
+    detect: { settings_file: '.local/share/mastracode/mastra.db' },
+    compose: { plugin: { name: '@hypaware/mastracode' }, requires_gateway: true },
+  }])
 })
 
 test('mastracode is bundled and default-activated beside goose and crush', () => {
