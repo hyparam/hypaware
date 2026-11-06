@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-29
 **Related:** LLP 0012, LLP 0016, LLP 0049, LLP 0066, LLP 0083
+**Extended-by:** LLP 0575 (the case probe runs on win32 too; §normalization scoped it to darwin)
 
 > The `.hypignore` capture-seam drop ([LLP 0049](./0049-hypignore-usage-policy.spec.md))
 > lives in the `@hypaware/claude` and `@hypaware/codex` adapters, the only

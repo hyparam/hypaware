@@ -52,7 +52,7 @@ import { runBackfillProvider } from '../../../src/core/commands/backfill.js'
  * due-check (`src/core/sinks/driver.js`, imported by the sweep driver),
  * not a `force: true` bypass: this is the only automated coverage, of any
  * tier, for the sweep driver's `cronMatches` wiring and the quiesce
- * filter's composition with it before the human acceptance run
+ * filter's composition with it before the manual run
  * (LLP 0173's "hermetic-smoke decision" section, LLP 0172 Section 9).
  *
  * @ref LLP 0172#45-the-quiesce-window [tests]: a file inside the default

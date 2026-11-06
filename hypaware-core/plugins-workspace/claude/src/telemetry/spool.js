@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { compareStrings } from 'hypaware/core/util'
 
-import { captureSpoolRoot } from '../../../../../src/core/capture_spool.js'
+import { captureSpoolRoot } from '../../../../../src/core/runtime/paths.js'
 
 /**
  * Where Claude Code drops the raw request/response bodies attach asks it for.

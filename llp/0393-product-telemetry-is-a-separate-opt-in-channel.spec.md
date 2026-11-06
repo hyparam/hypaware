@@ -6,6 +6,14 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-08
 **Extends:** LLP 0021, LLP 0318
+**Extended-by:** LLP 0408 (automatic organization reporting for enrolled SaaS users)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
+**Extended-by:** LLP 0450 (adds report generate to the finite command vocabulary)
+**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
+**Extended-by:** LLP 0465 (adds report save to the finite command vocabulary)
+**Extended-by:** LLP 0561 (milestones are sent; MCP tool calls, query fields and populated error codes join the vocabulary)
+**Extended-by:** LLP 0562 (delivery packs unsent CLI batches into sealed uploads and holds CLI uploads to one an hour unless full)
+**Extended-by:** hypaware-server LLP 0503#machine-enrolled (a server-repo document, not this repo's numbering: settles vendor sharing for three fields only, see #policy)
 
 ## Contract {#contract}
 
@@ -37,6 +45,14 @@ old local or organization history is never copied into that generation.
 `preview` prints the exact next queued wire payload. Vendor sharing and
 standalone registration are unavailable pending separately settled policy,
 receiver registration, credentials and retention/deletion prerequisites.
+
+> Extended-by: hypaware-server LLP 0503#machine-enrolled settles vendor
+> sharing for three fields only: `hyp_version`, `os_family` and
+> `client_names`, folded onto finite vocabularies and copied to PostHog on the
+> server's `machine_enrolled` event. The LLP 0408 enrollment consent covers
+> it; `hyp telemetry off` stops it at the source, because no batch is sent.
+> PostHog keeps the copies until Hyperparam deletes them. Any other field
+> going to a vendor needs its own request.
 
 ## Outbox {#outbox}
 
@@ -82,4 +98,6 @@ version attribution, canonicalization, nested/early dispatch, runtime arithmetic
 queue capacity/concurrent writers, restart retry, destination changes and errors.
 Benchmarks report measurements separately from targets (10 ms p95 queue append,
 1% idle CPU, 10 MiB pipeline memory). A 24-hour installed-daemon outage/idle soak
-and cross-version durable-spool acceptance remain manual release gates.
+and cross-version durable-spool behavior are not covered by automated tests.
+They were manual release gates until
+[LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md) retired them.

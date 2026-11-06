@@ -15,6 +15,7 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 import { createSinkDriver } from '../../../src/core/sinks/driver.js'
+import { PRODUCT_VERSION } from '../../../src/core/product_telemetry/collection.js'
 
 /**
  * @import { ActivePlugin } from '../../../hypaware-plugin-kernel-types.js'
@@ -192,6 +193,12 @@ export async function run({ harness, expect }) {
       (rows) => rows.length === 1
     )
     const ingestReq = ingestRequests[0]
+    // @ref LLP 0558#verification [tests]: plugin activation and the real sink carry the loaded collector version over HTTP
+    expect.that(
+      'fake server: ingest reports the loaded collector version',
+      ingestReq?.clientVersion,
+      (v) => v === PRODUCT_VERSION
+    )
     expect.that(
       'fake server: ingest content-type is application/x-ndjson',
       ingestReq?.contentType,
@@ -313,7 +320,7 @@ export async function run({ harness, expect }) {
  * smoke can assert exact contents and ordering.
  */
 async function startFakeCentralServer() {
-  /** @type {Array<{ method: string, path: string, contentType: string, authorization: string, body: string }>} */
+  /** @type {Array<{ method: string, path: string, contentType: string, authorization: string, clientVersion: string, body: string }>} */
   const received = []
 
   let nextExpiresAt = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60
@@ -330,6 +337,7 @@ async function startFakeCentralServer() {
         path: url,
         contentType: String(req.headers['content-type'] ?? ''),
         authorization: String(req.headers['authorization'] ?? ''),
+        clientVersion: String(req.headers['x-hyp-client-version'] ?? ''),
         body,
       })
 
@@ -402,7 +410,7 @@ function base64UrlEncode(buf) {
  * @param {string} dir
  * @param {string} devRunId
  */
-async function writeOtelFixturePlugin(dir, devRunId) {
+export async function writeOtelFixturePlugin(dir, devRunId) {
   await fs.mkdir(dir, { recursive: true })
   const manifest = {
     schema_version: 1,

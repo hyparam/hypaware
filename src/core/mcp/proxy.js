@@ -4,7 +4,7 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { effectiveRemotes } from '../remote/builtin_remotes.js'
+import { canonicalRemoteName, effectiveRemotes, legacyCredentialName } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, describeAuthRejection, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { isAuthStatus, mcpRequestHeaders, orgReadRefusedMessage, parseRpcResponse } from './client.js'
@@ -31,10 +31,13 @@ import { serveStdio } from './stdio.js'
  * @returns {Promise<number>}
  * @ref LLP 0034#proxy-fallback [implements]: stdio proxy injecting the 0600-stored credential; the fallback, not the primary path
  */
-export async function runMcpProxy({ target, org, ctx }) {
+export async function runMcpProxy({ target: named, org, ctx }) {
   // Built-in targets layered under the user's own `query.remotes`, exactly as
-  // the verb attach path resolves them, so `--remote hyperparam` reaches the
-  // shipped central server here too rather than reporting an unknown target.
+  // the verb attach path resolves them, so `--remote hypaware` (or its old
+  // name `hyperparam`) reaches the shipped central server here too rather than
+  // reporting an unknown target.
+  const target = canonicalRemoteName(named, ctx.config)
+  const legacyTarget = legacyCredentialName(target, ctx.config)
   // Own-key read, as on the verb attach path: an inherited Object.prototype
   // member is truthy, so a target named `constructor` walked past this refusal
   // and the probe below reported a TypeError message instead of the signpost.
@@ -57,7 +60,7 @@ export async function runMcpProxy({ target, org, ctx }) {
   // that would otherwise start. The per-message resolveAccessJwt below does the
   // session-aware refresh.
   try {
-    const probe = await resolveToken({ target, env: ctx.env, stateDir })
+    const probe = await resolveToken({ target, legacyTarget, env: ctx.env, stateDir })
     if (!probe.ok) {
       ctx.stderr.write(`hyp mcp serve: ${probe.error}\n`)
       return 2
@@ -97,7 +100,7 @@ export async function runMcpProxy({ target, org, ctx }) {
       // refreshes a near-expiry JWT, env/static tokens pass through unchanged.
       let resolved
       try {
-        resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+        resolved = await resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase })
       } catch (err) {
         return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, describeRefreshError(err, target).message)
       }
@@ -127,7 +130,7 @@ export async function runMcpProxy({ target, org, ctx }) {
       try {
         out = await attachWithRefresh({
           resolved,
-          refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+          refresh: () => resolveAccessJwt({ target, legacyTarget, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
           op,
         })
       } catch (err) {

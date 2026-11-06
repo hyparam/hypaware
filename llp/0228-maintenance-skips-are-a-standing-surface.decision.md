@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0454 (ineffective-only skips are informational)
 **Systems:** Cache, Daemon, CLI
 **Author:** Kenny / Claude
 **Date:** 2026-08-13
@@ -100,8 +101,12 @@ wrote it was this build.
 Each named partition carries its dataset, its partition tuple, its reason, and
 the one number or timestamp that reason is about (the recorded rewrite's
 data-file count, or when the spent attempt failed). Those are dataset and
-partition identifiers and kernel-side counters. Nothing from a row, a prompt,
-a credential, or a config value is anywhere near this path.
+partition identifiers and kernel-side counters. The partition tuple's values
+are the exception: they are row-derived (a captured row's `client_name`
+through `resolveSourceSegments` -> `sanitizePathSegment`, which strips only
+path-hostile bytes), which is why the write side sanitizes and clamps them
+rather than trusting them. No prompt, credential, or config value is on this
+path.
 
 <a id="reason-ids-are-span-attribute-names"></a>**The reason ids are the span
 attribute names, verbatim.** `compaction_ineffective` (LLP

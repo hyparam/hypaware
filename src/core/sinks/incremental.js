@@ -216,6 +216,11 @@ export async function openIncrementalRows(storage, partition, since) {
     get lastAfter() {
       return state.lastAfter
     },
+    // The peek already started the scan (and any redaction worker it owns),
+    // so a sink whose encoder fails before draining `rows` must release it.
+    async close() {
+      await iterator?.return?.()
+    },
   }
 }
 

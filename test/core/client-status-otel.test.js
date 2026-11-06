@@ -85,7 +85,7 @@ test('client status projects OTEL mode, listener drift, and capture health from 
 
   const stdout = buffer()
   renderClientStatusText(rows, stdout)
-  assert.match(stdout.text(), /claude: configured, attached \(otel\), local/)
+  assert.match(stdout.text(), /claude: recording, attached \(otel\), local/)
   assert.match(stdout.text(), /telemetry: http:\/\/127\.0\.0\.1:4319 -> http:\/\/127\.0\.0\.1:54321 \[endpoint drift\]/)
   assert.match(stdout.text(), /capture: gap; last event 2026-08-18T18:00:00\.000Z; last transcript activity 2026-08-18T19:00:00\.000Z \[capture gap\]/)
 })

@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-18
 **Related:** LLP 0202 (#hidden-rows: the display filter this widens, and the consequence line it corrects), LLP 0188 (#locked: why an org row is shown read-only rather than omitted), LLP 0190 (#sync-gate: the screen this changes), LLP 0031 (#status-provenance: the two-layer classification that decides "locked")
+**Extended-by:** [LLP 0370](./0370-carried-gated-row-has-no-interactive-exit.rfc.md) ("absent from every wizard screen" no longer holds for a platform-gated row the config records: the pick menu renders it checked and marked unavailable, and the express gate names it among the kept rows; the sync gate and every `hidden` row are unchanged)
 
 > Extends [LLP 0202 §hidden-rows](./0202-hidden-picker-rows.decision.md#hidden-rows)
 > from "absent from the interactive menu and from the defaults gate" to

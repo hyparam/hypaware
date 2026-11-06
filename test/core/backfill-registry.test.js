@@ -54,12 +54,6 @@ test('BackfillRegistry validates the contribution shape', () => {
   assert.throws(() => reg.register(/** @type {any} */ (provider({ plugin: '' }))), /missing plugin/)
   assert.throws(() => reg.register(/** @type {any} */ (provider({ datasets: [] }))), /datasets/)
   assert.throws(() => reg.register(/** @type {any} */ (provider({ run: undefined }))), /missing run/)
-  assert.throws(() => reg.register(/** @type {any} */ (provider({ plan: 'nope' }))), /plan must be a function/)
-})
-
-test('BackfillRegistry accepts a provider with an optional plan() hook', () => {
-  const reg = createBackfillRegistry()
-  assert.doesNotThrow(() => reg.register(provider({ async plan() { return undefined } })))
 })
 
 test('BackfillMaterializerRegistry registers, gets, lists, and rejects duplicate kinds', () => {

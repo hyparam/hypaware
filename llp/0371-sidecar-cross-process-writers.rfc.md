@@ -59,7 +59,14 @@ Affected code at `origin/master` (`aea83613`):
   those two points is budgeted at up to 400 API requests (LLP 0361), so the
   window is minutes, not microseconds.
 - `hypaware-core/plugins-workspace/github/src/cursors.js`: whole-state
-  sidecar `github-cursors.json`, atomic tmp+rename, no lock.
+  sidecar `github-cursors.json`, atomic tmp+rename. Since PR #1772 the
+  tmp+rename is taken under `withFileLock` on `github-cursors.json.lock`, and
+  the write re-reads the sidecar inside that lock to adopt a `one_time_import`
+  authorization the caller never read (LLP 0409#one-time-imports). That is the
+  narrow complement this RFC records as option C, scoped to the authorization
+  marker alone. The read-modify-write cycle still spans the whole tick, so the
+  last-writer-wins erasure of cursor advancement below is unchanged and the
+  decision this RFC requests still stands.
 - `hypaware-core/plugins-workspace/github/src/observed-repos.js`: whole-state
   sidecar `github-observed-repos.json`, same write shape. A lost write here
   converges on a later tick because the policy fingerprint re-triggers
@@ -93,7 +100,9 @@ full recovery.
   chain keyed by partition dir in a module-level `Map`. It serializes flush
   against compaction inside one daemon process (LLP 0301#requirements). It
   cannot see a second process. `src/core` does hold cross-process file
-  locks, though none a plugin can reach: `withCredentialsLock`
+  locks, and `hypaware/core/util` re-exports one to plugins as
+  `withFileLock` (`src/core/util/file_lock.js`), which `github/src/auth.js`
+  already uses for the credentials sidecar: `withCredentialsLock`
   (`src/core/remote/credentials.js`), an `O_EXCL` lock file with an
   age-stale break and a nonce-guarded release, settled by LLP 0065#d1 for
   the remote credentials store, and `acquireApplyLock`

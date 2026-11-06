@@ -2,7 +2,7 @@
 
 import { buildAttrs } from './attrs.js'
 import { getTracer } from './tracer.js'
-import { context, ROOT_CONTEXT, SpanStatusCode } from './runtime.js'
+import { context, describeThrown, ROOT_CONTEXT, SpanStatusCode } from './runtime.js'
 
 /**
  * @import { Span } from './runtime.js'
@@ -32,6 +32,11 @@ const declaredStatuses = new WeakMap()
  * in this repo write `status` late with values like `skipped` or `partial`
  * whose status codes were never argued about, and reclassifying them as a
  * side effect of one caller's need is not this helper's decision to make.
+ *
+ * A declaration holds only where the body returns. One that throws is a
+ * failure whatever it had declared. This writes the attribute eagerly, so a
+ * declared value is live on the span mid-run, but both helpers overwrite it
+ * with `failed` in their catch and the exported span never carries it.
  *
  * @ref LLP 0322#degrade-reaches-the-signals [implements]: an opt-in terminal status, so only the call site that asks is reclassified
  * @param {Span | null | undefined} span
@@ -73,10 +78,29 @@ export async function withSpan(name, attrs, fn, opts = {}) {
       }
       return result
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error))
-      span.recordException(err)
-      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message })
-      span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
+      const { err, message } = reportable(error)
+      try {
+        // The same reads, one seam later: the event takes `name`, `message`
+        // and `stack` off the value. Losing it costs the stack, not the
+        // status below or the throw.
+        span.recordException(err)
+      } catch { /* unreadable, and already rendered as far as it can be */ }
+      span.setStatus({ code: SpanStatusCode.ERROR, message })
+      // Most callers stamp `status: 'ok'` in the bag at open, and the JSONL
+      // exporters flatten the attributes, not the status code, so a failure
+      // whose code alone was updated is counted as a success by every query
+      // that filters on it (hyparam/hypaware#2342).
+      // @ref LLP 0322#degrade-reaches-the-signals [constrained-by]: that decision declined to re-read `status` on the success branch, where it would move status codes; the two writes below reconcile `status` and `error_kind` on a branch already coded ERROR, where no code moves
+      span.setAttribute('status', 'failed')
+      // `error_kind` from the bag is a default, not a verdict: a body that
+      // classified its own failure wrote a typed kind before throwing
+      // (`query.execute_sql` writes `budget_exceeded`) and the bag overwrote
+      // it (hyparam/hypaware#2364). The bag's own value is already on the
+      // span, so read the span and name a kind only when nothing else did.
+      // Unguarded: the span is this helper's own, not the thrower's value.
+      if (span.attributes.error_kind === undefined) {
+        span.setAttribute('error_kind', 'unhandled_exception')
+      }
       throw err
     } finally {
       span.end()
@@ -117,14 +141,54 @@ export async function runRoot(name, attrs, fn, opts = {}) {
         }
         return result
       } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error))
-        span.recordException(err)
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message })
-        span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
+        const { err, message } = reportable(error)
+        try {
+          span.recordException(err)
+        } catch { /* as in `withSpan`: unreadable, and the status still says what */ }
+        span.setStatus({ code: SpanStatusCode.ERROR, message })
+        // As in `withSpan`, and for the same reason: the bag stamped
+        // `status: 'ok'` at open, so a query filtering on the attribute rather
+        // than the status code counts this failure as a success
+        // (hyparam/hypaware#2342). In both helpers, because a caller cannot
+        // tell which one opened the span it holds.
+        span.setAttribute('status', 'failed')
+        // And the same `error_kind` rule: the bag's value is the default for
+        // a failure nothing named, not an overrule of the kind a body wrote
+        // before throwing (hyparam/hypaware#2364).
+        if (span.attributes.error_kind === undefined) {
+          span.setAttribute('error_kind', 'unhandled_exception')
+        }
         throw err
       } finally {
         span.end()
       }
     })
   ))
+}
+
+/**
+ * What to report, and what to rethrow, for a value the span body threw.
+ *
+ * Every way of reading that value is the thrower's to define: `message` and
+ * `stack` are own accessors a genuine `Error` can have redefined, and
+ * `instanceof` walks `[[GetPrototypeOf]]`, a `Proxy` trap. A read that throws
+ * throws out of the `catch` recording the failure, so the caller never sees
+ * the failure at all: a plugin whose `activate()` threw an `Error` with a
+ * throwing `message` getter took the whole kernel activation down that way
+ * (hyparam/hypaware#1857). So the rendering goes through `describeThrown`,
+ * which is total, and the type test sits inside a `try`.
+ *
+ * An ordinary `Error` is still rethrown by identity and anything else still
+ * wrapped carrying the rendered text, unchanged for every value that could be
+ * read in the first place.
+ *
+ * @param {unknown} error
+ * @returns {{ err: Error, message: string }}
+ */
+function reportable(error) {
+  const message = describeThrown(error)
+  try {
+    if (error instanceof Error) return { err: error, message }
+  } catch { /* the type test itself threw; nothing here can treat it as an Error */ }
+  return { err: new Error(message), message }
 }

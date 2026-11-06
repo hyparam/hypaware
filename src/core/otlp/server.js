@@ -6,15 +6,34 @@ import zlib from 'node:zlib'
 import { isControlPath } from '../control/session_ignore.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { isLoopbackHost } from '../util/loopback.js'
-import { drainRequestBody } from '../util/reject_body.js'
+import { declaresBodyOverDrainCap, drainRequestBody } from '../util/reject_body.js'
 
 /**
  * @import { IncomingMessage, Server } from 'node:http'
+ * @import { Transform } from 'node:stream'
  * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
  * @import { OtlpJsonServerOptions, OtlpSignal } from '../../../src/core/otlp/types.js'
  */
 
 const JSON_CT = { 'Content-Type': 'application/json' }
+
+/**
+ * The most a request body may decode to. Counted after gzip or deflate,
+ * because that is what the listener holds: every decoded chunk, then one
+ * contiguous copy, its string and the parsed object, all before the handler
+ * runs. Counting wire bytes instead would let a few KiB of gzip inflate to
+ * whatever the sender chose inside a daemon that runs for weeks.
+ *
+ * 64 MiB is the OTLP/HTTP specification's recommended default for the server,
+ * and the default it recommends a client hold itself to before compression.
+ * Any request past it is refused and its batch lost, whichever producer sent
+ * it: an SDK whose batches are bounded by record count rather than bytes can
+ * reach it with large records, and a client may be configured above it. A
+ * fixed bound is chosen over a config key (LLP 0478). A smaller figure sized
+ * from local samples refused a default 512-record SDK batch.
+ */
+// @ref LLP 0478#limit [implements]: the protocol's recommended limit, after decompression, fixed rather than configurable
+export const MAX_DECODED_BODY_BYTES = 64 * 1024 * 1024
 
 /**
  * The two wildcard binds, answered to as well when they arrive in `Host`.
@@ -79,9 +98,10 @@ const HOST_REFUSALS_BY_NAME = new Map()
  * @returns {Server | undefined}
  */
 function acceptingServer(req) {
-  // Node sets the accepting server on every server-side socket but does not
-  // declare it on `net.Socket`.
-  return /** @type {{ server?: Server }} */ (req.socket).server
+  // Node sets the accepting server on every server-side socket, and declares
+  // it on `net.Socket` as the wider `net.Server | null`. On a socket an
+  // http.Server accepted it is that server, and `null` where there is none.
+  return /** @type {Server | null} */ (req.socket.server) ?? undefined
 }
 
 /**
@@ -335,25 +355,37 @@ export function createOtlpJsonServer(options) {
       return
     }
 
+    // The banner and the refusals below read no body either. Answering
+    // without touching the request leaves Node's `_dump()` fallback reading
+    // whatever the sender attached to EOF, so each discards it under the
+    // drain cap, and the banner refuses a body declared past the cap outright.
     if (req.method === 'GET' && route === '/') {
+      drainRequestBody(req, res)
+      if (declaresBodyOverDrainCap(req)) {
+        respondJsonError(res, 413, 3, 'Request body too large')
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end(`${name} OTLP listener\n`)
       return
     }
 
     if (req.method !== 'POST') {
+      drainRequestBody(req, res)
       respondJsonError(res, 405, 12, 'Method not allowed')
       return
     }
 
     const signal = SIGNAL_ROUTES[route]
     if (!signal || !served.has(signal)) {
+      drainRequestBody(req, res)
       respondJsonError(res, 404, 5, 'Not found')
       return
     }
 
     const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
     if (contentType !== 'application/json') {
+      drainRequestBody(req, res)
       respondJsonError(
         res,
         415,
@@ -364,27 +396,32 @@ export function createOtlpJsonServer(options) {
     }
 
     const encoding = (req.headers['content-encoding'] || '').toLowerCase()
-    /** @type {AsyncIterable<Buffer>} */
-    let stream = req
+    /** @type {Transform | undefined} */
+    let decoder
     if (encoding === 'gzip') {
-      stream = req.pipe(zlib.createGunzip())
+      decoder = req.pipe(zlib.createGunzip())
     } else if (encoding === 'deflate') {
-      stream = req.pipe(zlib.createInflate())
+      decoder = req.pipe(zlib.createInflate())
     } else if (encoding && encoding !== 'identity') {
+      drainRequestBody(req, res)
       respondJsonError(res, 415, 3, `Unsupported Content-Encoding: ${encoding}`)
       return
     }
 
-    /** @type {Buffer[]} */
-    const chunks = []
-    try {
-      for await (const chunk of stream) chunks.push(chunk)
-    } catch (err) {
-      respondJsonError(res, 400, 3, err instanceof Error ? err.message : String(err))
+    const read = await readDecodedBody(req, decoder)
+    if (read.status === 'too_large') {
+      // The sender is still uploading, so the rest is discarded under the
+      // drain cap rather than read to whatever length the sender chose.
+      drainRequestBody(req, res)
+      respondJsonError(res, 413, 3, `Request body exceeds ${MAX_DECODED_BODY_BYTES} bytes once decoded`)
+      return
+    }
+    if (read.status === 'error') {
+      respondJsonError(res, 400, 3, read.message)
       return
     }
 
-    const body = Buffer.concat(chunks)
+    const body = read.body
     let data
     try {
       data = body.length > 0 ? JSON.parse(body.toString('utf8')) : {}
@@ -402,6 +439,64 @@ export function createOtlpJsonServer(options) {
 
     res.writeHead(200, JSON_CT)
     res.end(JSON.stringify(EMPTY_PARTIAL_SUCCESS[signal]))
+  })
+}
+
+/**
+ * Read a decoded request body under `MAX_DECODED_BODY_BYTES`. Reports
+ * `{ status: 'ok', body }`, `{ status: 'too_large' }` or
+ * `{ status: 'error', message }` (an aborted request or corrupt compression).
+ *
+ * `too_large` settles mid-upload: the decoder is detached and destroyed so it
+ * inflates nothing further, and the caller owns discarding what is left of the
+ * request (see `drainRequestBody`).
+ *
+ * @param {IncomingMessage} req
+ * @param {Transform | undefined} decoder the gzip or deflate stream `req` is piped into, if any
+ * @returns {Promise<{ status: 'ok', body: Buffer } | { status: 'too_large' } | { status: 'error', message: string }>}
+ */
+function readDecodedBody(req, decoder) {
+  const stream = decoder ?? req
+  return new Promise((resolve) => {
+    /** @type {Buffer[]} */
+    const chunks = []
+    let size = 0
+
+    /** @param {{ status: 'ok', body: Buffer } | { status: 'too_large' } | { status: 'error', message: string }} result */
+    function settle(result) {
+      stream.off('data', onData)
+      stream.off('end', onEnd)
+      resolve(result)
+    }
+    /** @param {Buffer} chunk */
+    function onData(chunk) {
+      size += chunk.length
+      if (size > MAX_DECODED_BODY_BYTES) {
+        chunks.length = 0
+        if (decoder) {
+          req.unpipe(decoder)
+          decoder.destroy()
+        }
+        settle({ status: 'too_large' })
+        return
+      }
+      chunks.push(chunk)
+    }
+    function onEnd() {
+      settle({ status: 'ok', body: Buffer.concat(chunks, size) })
+    }
+    // Kept for the stream's life: a decoder destroyed above must not throw an
+    // unhandled error into the daemon if anything is still in flight.
+    stream.on('error', (err) => {
+      settle({ status: 'error', message: err instanceof Error ? err.message : String(err) })
+    })
+    // A sender that hangs up mid-upload ends neither the request nor a decoder
+    // piped from it, which the iterator this replaced reported as an error.
+    req.once('close', () => {
+      if (!req.complete) settle({ status: 'error', message: 'request closed before its body ended' })
+    })
+    stream.on('data', onData)
+    stream.on('end', onEnd)
   })
 }
 

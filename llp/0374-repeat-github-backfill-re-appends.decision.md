@@ -10,6 +10,7 @@
 hyparam/hypaware#1330, hyparam/hypaware#1334 (acceptance condition, clause 2,
 option a)
 **Extends:** LLP 0360, LLP 0361
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Running `hyp github backfill` a second time over unchanged history writes a
 > second full set of `github_events` rows. `count(*)` grows; it is not a
@@ -112,14 +113,18 @@ its own answer to all three.
 
 ## Operator contract {#operator-contract}
 
-`docs/ACCEPTANCE.md` carries the operator-facing half:
-[`github_since_inclusivity`](../docs/ACCEPTANCE.md#github_since_inclusivity)
-states the row growth as the expected result of a repeat backfill, so a release
-reviewer measuring `count(*)` across two runs does not file it again. The same
-procedure is where the still-unconfirmed half of #1284's acceptance condition
-gets settled: whether GitHub's issues-family `since` really is inclusive of the
-boundary second. That answer needs a real token, no fixture can supply it, and
-the boundary floor is correct either way.
+> **Amended (2026-09-23)** by
+> [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md). This
+> contract used to live in a manual `github_since_inclusivity` procedure, which
+> also held the open `since` question. That procedure is retired, so the
+> contract is stated here.
+
+Row growth is the expected result of a repeat backfill, so a reviewer
+measuring `count(*)` across two runs should not file it again. The other half
+of #1284's acceptance condition is still unconfirmed: whether GitHub's
+issues-family `since` really is inclusive of the boundary second. That answer
+needs a real token, no fixture can supply it, and the boundary floor is correct
+either way.
 
 ## Consequences {#consequences}
 

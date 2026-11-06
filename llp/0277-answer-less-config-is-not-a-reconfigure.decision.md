@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-18
 **Related:** LLP 0183 (the reconfigure-seeding decision this extends), LLP 0011 (detection seeds a first run), LLP 0033 (`remote add` is a local-layer config writer), LLP 0190 (the defaults gate that goes missing), LLP 0201 (the express gate that goes missing)
+**Extended-by:** LLP 0418 (#no-forged-answer: a missing local layer is answer-less the same way), LLP 0426 (#forged-shape: one exact migration-forged document is carved out of the plugins-array rule)
 
 > The pick phase classifies "reconfigure" by whether a local config file
 > exists. `hyp remote add` creates one that holds no pick answer, so a

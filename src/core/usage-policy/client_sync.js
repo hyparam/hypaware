@@ -1,17 +1,15 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
-import path from 'node:path'
 
 import { compareStrings } from '../util/compare_strings.js'
 import { atomicWriteJson, readFileIfExists } from '../util/fs_atomic.js'
+import { usagePolicyPath } from '../runtime/paths.js'
 
 /**
  * @import { ClientSyncEntry } from '../../../src/core/usage-policy/types.js'
  */
 
-const CLIENT_SYNC_SUBDIR = 'usage-policy'
-const CLIENT_SYNC_FILENAME = 'client-sync.json'
 
 export const CLIENT_SYNC_LIST_VERSION = 1
 
@@ -56,7 +54,7 @@ export class ClientSyncListUnreadableError extends Error {
  */
 export function clientSyncListPath(stateDir) {
   if (!stateDir) throw new Error('clientSyncListPath: stateDir is required')
-  return path.join(stateDir, CLIENT_SYNC_SUBDIR, CLIENT_SYNC_FILENAME)
+  return usagePolicyPath(stateDir, 'client-sync')
 }
 
 /**

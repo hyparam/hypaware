@@ -8,7 +8,9 @@
 **Related:** LLP 0044, LLP 0045, LLP 0163, LLP 0232, LLP 0237, LLP 0239,
 LLP 0262 (the RFC this decision realizes, accepted 2026-08-17)
 **Extended-by:** LLP 0271 (#env-keys is unchanged; the keys outside it that
-outrank it are read from the process environment and named)
+outrank it are read from the process environment and named), LLP 0532
+(#version-floor is unchanged; setup asks the picked Claude Code for its
+version before writing anything)
 
 > `hyp attach claude` gains a third mode, `otel`, that merges a fixed set of
 > telemetry keys into the `env` block of `~/.claude/settings.json` and writes

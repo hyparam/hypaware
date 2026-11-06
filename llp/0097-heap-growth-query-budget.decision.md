@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-10
 **Related:** LLP 0054, LLP 0055, LLP 0056, LLP 0057, LLP 0098
+**Extended-by:** [LLP 0526](./0526-shared-forced-gc-confirmation.decision.md) (#confirm-with-gc: concurrent guards share one recent forced GC, which may pass a check but never refuse one)
 
 > How the kernel bounds query execution memory TODAY, with the pinned engine:
 > a sampled process-heap-growth guard checked inline on the scan path, refusing

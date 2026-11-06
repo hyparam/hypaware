@@ -7,6 +7,7 @@
 **Date:** 2026-06-30
 **Related:** LLP 0054, LLP 0055, LLP 0056
 **Extended-by:** LLP 0097 (Phase 0 measurements; Phases 1-3 realized kernel-side against squirreling 0.14 / icebird 0.8.13, where the engine already streams aggregates and implements `scanColumn` at the leaf)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > Turns the bounded-execution spec ([LLP 0054](./0054-bounded-query-execution.spec.md))
 > and its two decisions ([LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md),

@@ -1,0 +1,490 @@
+// @ts-check
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import os from 'node:os'
+import path from 'node:path'
+import { appendRowsToSourceTable, claimPartitionMutation, discoverCachePartitions, isPartitionMutationBusy, tryReadCursorSync } from '../../src/core/cache/partition.js'
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { createQueryRegistry } from '../../src/core/registry/datasets.js'
+import { executeQuerySql } from '../../src/core/query/sql.js'
+import { aiGatewayDatasetRegistration, AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
+import * as kit from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
+import { graphDatasetRegistration, graphTablePath, NODE_COLUMNS, EDGE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
+import { emptySource } from '../../src/core/query/index.js'
+import { projectGraph } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
+import { compactGraphTables, refreshGraphRows } from '../../hypaware-core/plugins-workspace/context-graph/src/maintenance.js'
+import { queryEvidence, queryNeighbors } from '../../hypaware-core/plugins-workspace/context-graph/src/query.js'
+import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
+import { buildEnrichmentContract } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/contract.js'
+import { enrichDatasetRegistration, enrichTablePath, COMMITTED_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/datasets.js'
+import { collectProspectRows, evidenceKeys, buildTranscript } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/propose.js'
+import { curateRequestForCluster, routeDecision } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/curate.js'
+import { validateEnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/config.js'
+
+const validated = validateEnrichConfig({})
+if (!validated.ok) throw new Error('bad fixture config')
+const cfg = validated.config
+const at = '2026-09-21T12:00:00.000Z'
+const quote = 'Review helpers now require a changed diff.'
+const source = Array.from({ length: 61 }, (_, i) => ({
+  session_id: 'review-session', message_id: `message-${i}`, part_id: `part-${i}`, message_created_at: at,
+  part_type: 'text', role: 'user', content_text: i === 60 ? quote : `Unrelated earlier passage ${i}`,
+  cwd: i === 60 ? '/private-work' : '/shared-work',
+}))
+
+/** @param {(ctx: any) => Promise<void>} run @param {any[]} rows */
+async function fixture(run, rows = source) {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graph-evidence-'))
+  try {
+    const registry = createQueryRegistry()
+    registry.registerDataset(aiGatewayDatasetRegistration())
+    registry.registerDataset(graphDatasetRegistration('node'))
+    registry.registerDataset(graphDatasetRegistration('edge'))
+    registry.registerDataset(enrichDatasetRegistration('enrichment_committed', 'committed_at'))
+    const privateDir = path.join(cacheRoot, 'private')
+    await fs.mkdir(privateDir)
+    await fs.writeFile(path.join(privateDir, '.hypignore'), '')
+    rows = rows.map(r => ({ ...r, cwd: r.cwd === '/private-work' ? privateDir : path.join(cacheRoot, 'shared') }))
+    const columns = AI_GATEWAY_SCHEMA_COLUMNS.filter(c => Object.hasOwn(rows[0], c.name))
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=test'], [...columns], rows)
+    const storage = createQueryStorageService({ cacheRoot })
+    const sql = query => executeQuerySql({ query, storage, registry, includeLocalOnly: true, refresh: 'always' })
+    await run({ registry, storage, sql })
+  } finally { await fs.rm(cacheRoot, { recursive: true, force: true }) }
+}
+
+test('late verified evidence survives T1, T2, commit, graph and two-hop source dereference', async () => {
+  await fixture(async ({ registry, storage, sql }) => {
+    const prospects = [...collectProspectRows([{ anchorKey: 'review-session', rows: source,
+      candidates: [{ type: 'Decision', label: 'Review policy', evidence: quote }] }], cfg, at).values()]
+    assert.equal(prospects.length, 1)
+    assert.deepEqual(prospects[0].source_keys, { message_id: ['message-60'], part_id: ['part-60'] })
+    const runtime = /** @type {any} */ ({ config: cfg, _completion: { provider: 'test' }, execSql: ({ query }) => sql(query) })
+    const request = await curateRequestForCluster(runtime, prospects, new Map())
+    const prompt = JSON.stringify(request.messages)
+    assert.ok(prompt.includes(quote))
+    assert.ok(!prompt.includes('Unrelated earlier passage'))
+    const routed = routeDecision(prospects[0], { type: 'Decision', label: 'Review policy', summary: '', confidence: undefined }, { index: 1, decision: 'commit' }, at)
+    assert.ok(routed.committed)
+    const contracts = [buildEnrichmentContract(kit)]
+    const legacy = { ...routed.committed, props: { summary: 'Legacy claim without a precise quote' }, source_keys: { message_id: source.map(r => r.message_id) }, committed_at: '2026-09-20T12:00:00.000Z' }
+    await storage.appendRows(enrichTablePath(storage, 'enrichment_committed'), [...COMMITTED_COLUMNS], [legacy])
+    await projectGraph({ query: registry, storage, contracts })
+    const sharedClaim = { ...routed.committed, anchor_key: 'shared-session', source_keys: { message_id: ['message-0'], part_id: ['part-0'] } }
+    await storage.appendRows(enrichTablePath(storage, 'enrichment_committed'), [...COMMITTED_COLUMNS], [routed.committed, sharedClaim])
+    await projectGraph({ query: registry, storage, contracts, refresh: true })
+    const id = kit.edgeId(kit.nodeId('Session', 'review-session'), 'produced', kit.nodeId('Decision', 'Review policy'))
+    const evidence = await queryEvidence({ query: registry, storage, kind: 'edge', id, includeLocalOnly: true })
+    assert.equal(evidence.length, 1)
+    assert.equal(evidence[0].part_id, 'part-60')
+    assert.equal(evidence[0].content_text, quote)
+    // Mixed source contexts never make the merged label or its private evidence
+    // visible to an unknown/shared caller. No implicit override at any hop.
+    assert.deepEqual(await queryEvidence({ query: registry, storage, kind: 'edge', id }), [])
+    const visibleSource = await executeQuerySql({ query: 'SELECT part_id FROM ai_gateway_messages', registry, storage })
+    assert.equal(visibleSource.rows.length, 60, 'the private part is withheld while shared parts remain visible')
+    const restricted = await executeQuerySql({ query: 'SELECT label, source_keys, props FROM node', registry, storage })
+    assert.ok(restricted.rows.every(r => r.label === null && r.source_keys === null && r.props === null))
+  })
+})
+
+test('unmatched and ambiguous claim evidence fails closed; oversized transcripts refuse', () => {
+  assert.equal(evidenceKeys(source, 'invented quote', cfg), null)
+  assert.equal(evidenceKeys(source, '', cfg), null)
+  assert.equal(evidenceKeys([...source, { ...source[60], part_id: 'another-part' }], quote, cfg), null)
+  assert.throws(() => buildTranscript([{ content_text: 'x'.repeat(2_000_001) }], cfg), /budget/)
+})
+
+test('same-batch claims for one item retain distinct evidence locators', async () => {
+  await fixture(async ({ registry, storage, sql }) => {
+    const prospects = [...collectProspectRows([{ anchorKey: 'review-session', rows: source,
+      candidates: [
+        { type: 'Decision', label: 'First claim', evidence: source[0].content_text },
+        { type: 'Decision', label: 'Second claim', evidence: quote },
+        { type: 'Decision', label: 'Repeated first claim', evidence: source[0].content_text },
+      ] }], cfg, at).values()]
+    const committed = prospects.map(p => routeDecision(p,
+      { type: 'Decision', label: String(p.label), summary: '', confidence: undefined },
+      { index: 1, decision: 'commit', item_key: 'shared-item' }, at).committed)
+    await storage.appendRows(enrichTablePath(storage, 'enrichment_committed'), [...COMMITTED_COLUMNS], committed)
+    await projectGraph({ query: registry, storage, contracts: [buildEnrichmentContract(kit)] })
+    const id = kit.nodeId('Decision', 'shared-item')
+    const graphRow = (await sql(`SELECT props FROM node WHERE node_id = '${id}'`)).rows[0]
+    const props = typeof graphRow.props === 'string' ? JSON.parse(graphRow.props) : graphRow.props
+    const evidence = await queryEvidence({ query: registry, storage, kind: 'node', id, includeLocalOnly: true })
+    assert.equal(evidence.length, 1)
+    assert.equal(evidence[0].content_text, props.evidence)
+    assert.deepEqual(await queryEvidence({ query: registry, storage, kind: 'node', id }), [])
+    await storage.appendRows(enrichTablePath(storage, 'enrichment_committed'), [...COMMITTED_COLUMNS], Array(16).fill(committed[0]))
+    assert.deepEqual(await queryEvidence({ query: registry, storage, kind: 'node', id, includeLocalOnly: true }), [], 'overflow refuses partial candidate matching')
+  })
+})
+
+test('explicit refresh repairs stale activity evidence, repeat refresh is stable, and direct dereference works', async () => {
+  const tool = { ...source[0], part_type: 'tool_call', role: 'assistant', tool_name: 'exec', tool_args: 'text(await tools.exec_command({cmd:"cat /repo/a.js /repo/b.js"}))' }
+  await fixture(async ({ registry, storage, sql }) => {
+    const contract = createAiGatewayGraphContract(kit)
+    const touched = contract.rules.find(r => r.type === 'touched')
+    assert.ok(touched)
+    const stale = /** @type {Record<string, any>} */ ({ ...touched.toRow(tool), source_keys: { session_id: tool.session_id }, projector_version: 2 })
+    await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [stale])
+    await projectGraph({ query: registry, storage, contracts: [contract] })
+    let row = (await sql(`SELECT * FROM edge WHERE edge_id = '${stale.edge_id}'`)).rows[0]
+    assert.equal(row.projector_version, 2, 'default projection still skips persisted ids')
+    await projectGraph({ query: registry, storage, contracts: [contract], refresh: true })
+    const result = await sql(`SELECT * FROM edge WHERE edge_id = '${stale.edge_id}'`)
+    assert.equal(result.rows.length, 1, 'refresh replaces rather than appending a duplicate')
+    row = result.rows[0]
+    assert.equal(row.projector_version, 4)
+    const evidence = await queryEvidence({ query: registry, storage, kind: 'edge', id: String(stale.edge_id), includeLocalOnly: true })
+    assert.equal(evidence[0].part_id, 'part-0')
+    const neighbors = await queryNeighbors({ query: registry, storage, seed: tool.session_id, edgeTypes: ['touched'], includeLocalOnly: true })
+    assert.ok(neighbors.ok)
+    assert.equal(neighbors.neighbors.length, 2)
+    assert.ok(neighbors.neighbors.every(n => n.props?.inferred_call === true && n.source_keys?.part_id === 'part-0'))
+    const parts = await discoverCachePartitions(storage.cacheRoot, { datasets: ['edge'] })
+    const before = parts.map(p => tryReadCursorSync(p.path)?.tableDir)
+    const again = await projectGraph({ query: registry, storage, contracts: [contract], refresh: true })
+    assert.equal(again.edgesWritten, 0)
+    assert.deepEqual(parts.map(p => tryReadCursorSync(p.path)?.tableDir), before, 'identical refresh does not rewrite generations')
+  }, [tool])
+})
+
+test('neighbor output limit cannot hide an over-budget neighborhood scan', async () => {
+  const { asyncRow } = await import('squirreling')
+  const batchSize = 1024
+  const columns = ['edge_id', 'src_id', 'dst_id', 'edge_type', 'props', 'source_dataset', 'source_keys']
+  const schema = { fields: columns.map((name, id) => ({ id, name, dataType: { type: 'unknown' }, nullable: true })) }
+  let scanned = 0
+  const edgeSource = {
+    columns, schema,
+    numRows: 1_000_000,
+    // Keep WHERE and LIMIT residual so the real SQL engine enforces both.
+    // Native batches avoid per-cell AsyncRow overhead racing the time budget.
+    prepareScan(request) {
+      const fields = request.columns.map(c => schema.fields[c.field])
+      return {
+        schema: { fields }, residual: { filter: request.filter, limit: request.limit, offset: request.offset }, properties: {},
+        async *batches({ signal }) {
+          for (let at = 0; at < 1_000_000; at += batchSize) {
+            signal?.throwIfAborted()
+            const length = Math.min(batchSize, 1_000_000 - at)
+            const values = fields.map(() => [])
+            for (let i = at; i < at + length; i++) {
+              const row = { edge_id: `e${i}`, src_id: 'seed', dst_id: `node-${i}`, edge_type: 'touched', props: null, source_dataset: 'ai_gateway_messages', source_keys: null }
+              fields.forEach((f, j) => values[j].push(row[f.name]))
+            }
+            scanned += length
+            yield { selection: { type: 'all', length }, columns: values.map(values => ({ type: 'values', values, length })) }
+          }
+        },
+      }
+    },
+  }
+  const nodeSource = { columns: ['node_id', 'node_type', 'natural_key', 'label'], numRows: 1,
+    scan(options) { return { appliedWhere: false, appliedLimitOffset: false, async *rows() {
+      yield asyncRow({ node_id: 'seed', node_type: 'Session', natural_key: 'seed', label: null }, options.columns)
+    } } } }
+  const registry = /** @type {any} */ ({ getDataset: name => ({ discoverPartitions: async () => [], createDataSource: async () => name === 'edge' ? edgeSource : nodeSource }), listDatasets: () => [] })
+  const storage = /** @type {any} */ ({ cacheRoot: '/tmp/graph-budget-test', pendingInfo: async () => ({ pending: false }) })
+  const result = await queryNeighbors({ query: registry, storage, seed: 'seed', limit: 1, includeLocalOnly: true })
+  assert.equal(result.ok, false)
+  assert.match(result.ok ? '' : result.error, /read budget/)
+  assert.ok(scanned > 100_000 && scanned <= 100_000 + batchSize, `bounded row scan, observed ${scanned}`)
+})
+
+test('skill evidence survives incremental scans, renders honestly, and refresh corrects legacy searches', async () => {
+  const skillFile = '/home/test/.codex/skills/review/SKILL.md'
+  const read = { ...source[0], session_id: 'skill-session', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: `cat ${skillFile}` } }
+  const search = { ...read, session_id: 'search-session', message_id: 'search', part_id: 'search#0', tool_args: { cmd: `rg pattern ${skillFile}` } }
+  await fixture(async ({ registry, storage, sql }) => {
+    const { graphNeighborsVerb } = await import('../../hypaware-core/plugins-workspace/context-graph/src/verb.js')
+    const contract = createAiGatewayGraphContract(kit)
+    const skillRule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+    assert.ok(skillRule?.toRows)
+    const fresh = /** @type {Record<string, any>} */ (skillRule.toRows(search)[0])
+    assert.deepEqual(fresh.props, { dispatch_shell_search: true })
+    const stale = { ...fresh, edge_id: fresh.edge_id, projector_version: 3, props: { dispatch_shell_read: true } }
+    await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [stale])
+    await projectGraph({ query: registry, storage, contracts: [contract] })
+    const id = kit.edgeId(kit.nodeId('Session', read.session_id), 'ran', kit.nodeId('Skill', 'review'))
+    const props = row => typeof row.props === 'string' ? JSON.parse(row.props) : row.props
+    let stored = (await sql(`SELECT * FROM edge WHERE edge_id = '${id}'`)).rows
+    assert.equal(stored.length, 1)
+    assert.deepEqual(props(stored[0]), { dispatch_file_read: true })
+    const later = { ...read, message_id: 'later', part_id: 'later#0', message_created_at: '2026-09-22T12:00:00.000Z', client_name: 'claude', tool_name: 'Skill', tool_args: { skill: 'review' } }
+    const columns = AI_GATEWAY_SCHEMA_COLUMNS.filter(c => Object.hasOwn(later, c.name))
+    await appendRowsToSourceTable(storage.cacheRoot, 'ai_gateway_messages', ['source=later'], [...columns], [later])
+    // A server-sized slice can contain only the later event. It must not erase the read.
+    const partial = { ...contract, rowFilter: { columns: ['message_id'], keep: row => row.message_id === 'later' } }
+    await projectGraph({ query: registry, storage, contracts: [partial] })
+    stored = (await sql(`SELECT * FROM edge WHERE edge_id = '${id}'`)).rows
+    assert.equal(stored.length, 1, 'updates do not append duplicate relationships')
+    assert.deepEqual(props(stored[0]), { dispatch_file_read: true, dispatch_tool: true })
+    assert.equal(new Date(stored[0].first_seen).toISOString(), at)
+    const neighbors = await queryNeighbors({ query: registry, storage, seed: read.session_id, edgeTypes: ['ran'], includeLocalOnly: true })
+    assert.ok(neighbors.ok)
+    const output = graphNeighborsVerb.render(neighbors, { json: false, format: 'json', maxCell: 10000, maxBytes: 100000 }).stdout
+    assert.match(output, /skill evidence/)
+    assert.match(output, /invocation requested; file read requested/)
+    assert.match(output, /execution and success not established/)
+    assert.doesNotMatch(output, /-ran→/)
+    const json = JSON.parse(graphNeighborsVerb.render(neighbors, { json: true, format: 'json', maxCell: 10000, maxBytes: 100000 }).stdout)
+    assert.equal(json.neighbors[0].props.dispatch_tool, true)
+    const parts = await discoverCachePartitions(storage.cacheRoot, { datasets: ['edge'] })
+    const generations = () => parts.map(p => tryReadCursorSync(p.path)?.tableDir)
+    const before = generations()
+    const again = await projectGraph({ query: registry, storage, contracts: [partial] })
+    assert.equal(again.edgesWritten, 0)
+    assert.deepEqual(generations(), before, 'unchanged evidence does not rewrite partitions')
+    const legacyView = await queryNeighbors({ query: registry, storage, seed: search.session_id, edgeTypes: ['ran'], includeLocalOnly: true })
+    assert.ok(legacyView.ok)
+    assert.match(graphNeighborsVerb.render(legacyView, { json: false, format: 'json', maxCell: 10000, maxBytes: 100000 }).stdout, /legacy file reference: read\/search unverified/)
+    await projectGraph({ query: registry, storage, contracts: [contract], refresh: true })
+    const corrected = (await sql(`SELECT * FROM edge WHERE edge_id = '${stale.edge_id}'`)).rows
+    assert.equal(corrected.length, 1)
+    assert.deepEqual(props(corrected[0]), { dispatch_shell_search: true })
+    const correctedView = await queryNeighbors({ query: registry, storage, seed: search.session_id, edgeTypes: ['ran'], includeLocalOnly: true })
+    assert.ok(correctedView.ok)
+    const correctedText = graphNeighborsVerb.render(correctedView, { json: false, format: 'json', maxCell: 10000, maxBytes: 100000 }).stdout
+    assert.match(correctedText, /file search requested/)
+    assert.doesNotMatch(correctedText, /legacy|invocation requested|file read requested/)
+  }, [read, search])
+})
+
+test('skill evidence merge folds duplicate rows awaiting compaction', async () => {
+  const read = { ...source[0], session_id: 'skill-session', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: 'cat /home/test/.codex/skills/review/SKILL.md' } }
+  const all = { dispatch_file_read: true, dispatch_tool: true, dispatch_marker: true }
+  const pairs = [
+    [{ dispatch_tool: true }, { dispatch_marker: true }],
+    [{ dispatch_marker: true }, { dispatch_tool: true }],
+    [{ dispatch_tool: true }, all],
+    [all, { dispatch_tool: true }],
+  ]
+  for (const [first, second] of pairs) {
+    await fixture(async ({ registry, storage, sql }) => {
+      const contract = createAiGatewayGraphContract(kit)
+      const skillRule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+      const fresh = /** @type {Record<string, any>} */ (skillRule?.toRows?.(read)[0])
+      // Two writers can append the same id before compaction folds it.
+      await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [{ ...fresh, props: first }])
+      await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [{ ...fresh, props: second }])
+      await projectGraph({ query: registry, storage, contracts: [contract] })
+      const stored = (await sql(`SELECT * FROM edge WHERE edge_id = '${fresh.edge_id}'`)).rows
+      assert.equal(stored.length, 1)
+      const props = typeof stored[0].props === 'string' ? JSON.parse(stored[0].props) : stored[0].props
+      assert.deepEqual(props, all, `${JSON.stringify(first)} then ${JSON.stringify(second)}`)
+    }, [read])
+  }
+})
+
+test('org-scoped projection and refresh update only registered org graph partitions', async () => {
+  const read = { ...source[0], session_id: 'scoped-session', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: 'cat /home/test/.codex/skills/review/SKILL.md' } }
+  await fixture(async ({ registry, storage }) => {
+    const contract = createAiGatewayGraphContract(kit)
+    const skillRule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+    const fresh = /** @type {Record<string, any>} */ (skillRule?.toRows?.(read)[0])
+    const current = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+    const foreign = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=other', 'graph_v1')
+    const broken = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=agno', 'graph_v1')
+    await storage.appendRowsToPartition('edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, [{ ...fresh, props: { dispatch_tool: true } }])
+    // Identical content-addressed ids can legitimately occur in two orgs.
+    await storage.appendRowsToPartition('edge', ['org=other', 'graph_v1'], EDGE_COLUMNS, [{ ...fresh, props: { dispatch_marker: true }, source_keys: { session_id: 'other-org' } }])
+    await appendRowsToSourceTable(storage.cacheRoot, 'edge', ['org=agno', 'graph_v1'], EDGE_COLUMNS, [fresh])
+    await fs.writeFile(path.join(broken, 'cursor.json'), '{ broken cursor')
+    const foreignCursor = await fs.readFile(path.join(foreign, 'cursor.json'), 'utf8')
+
+    // Mirror the server seam: graph reads and appends are physically scoped,
+    // while the storage handle's cacheRoot still names the shared cache.
+    const scoped = {
+      ...storage,
+      appendRows: async (tablePath, columns, rows) => storage.appendRowsToPartition(path.basename(path.dirname(tablePath)), ['org=current', 'graph_v1'], columns, rows),
+    }
+    const graphRegistration = dataset => ({
+      ...graphDatasetRegistration(dataset),
+      discoverPartitions: async () => {
+        const tablePath = path.join(storage.cacheRoot, 'datasets', dataset, 'org=current', 'graph_v1')
+        try { await fs.access(tablePath) } catch { return [] }
+        return [{ dataset, partition: { org: 'current' }, tablePath }]
+      },
+      createDataSource: async partitions => (partitions.length ? await storage.dataSourceForTable(partitions[0].tablePath) : null)
+        ?? emptySource((dataset === 'node' ? NODE_COLUMNS : EDGE_COLUMNS).map(c => c.name)),
+    })
+    const scopedRegistry = {
+      ...registry,
+      getDataset: name => name === 'node' || name === 'edge' ? graphRegistration(name) : registry.getDataset(name),
+    }
+    const sql = query => executeQuerySql({ query, storage: scoped, registry: scopedRegistry, includeLocalOnly: true, refresh: 'always' })
+
+    await projectGraph({ query: scopedRegistry, storage: scoped, contracts: [contract] })
+    let stored = (await sql(`SELECT props FROM edge WHERE edge_id = '${fresh.edge_id}'`)).rows
+    assert.equal(stored.length, 1)
+    const props = row => typeof row.props === 'string' ? JSON.parse(row.props) : row.props
+    assert.deepEqual(props(stored[0]), { dispatch_tool: true, dispatch_file_read: true })
+    assert.equal(tryReadCursorSync(current)?.layout, 'source-table', 'changed epoch graph is promoted by the generation swap')
+
+    await projectGraph({ query: scopedRegistry, storage: scoped, contracts: [contract], refresh: true })
+    stored = (await sql(`SELECT props FROM edge WHERE edge_id = '${fresh.edge_id}'`)).rows
+    assert.deepEqual(props(stored[0]), { dispatch_file_read: true })
+    assert.equal(await fs.readFile(path.join(foreign, 'cursor.json'), 'utf8'), foreignCursor, 'other org generation is unchanged')
+    assert.equal(await fs.readFile(path.join(broken, 'cursor.json'), 'utf8'), '{ broken cursor', 'unreadable foreign partition is untouched')
+
+    // Corruption inside the selected scope must still fail closed.
+    await fs.writeFile(path.join(current, 'cursor.json'), '{ broken own cursor')
+    await assert.rejects(projectGraph({ query: scopedRegistry, storage: scoped, contracts: [contract], refresh: true }), /unreadable partition/)
+  }, [read])
+})
+
+test('unscoped projection does not update matching evidence in a named org graph', async () => {
+  const read = { ...source[0], session_id: 'shared', role: 'assistant', part_type: 'tool_call', client_name: 'codex', tool_name: 'exec_command', tool_args: { cmd: 'cat /home/test/.codex/skills/review/SKILL.md' } }
+  await fixture(async ({ registry, storage }) => {
+    const contract = createAiGatewayGraphContract(kit)
+    const rule = contract.rules.find(r => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+    assert.ok(rule?.toRows)
+    const fresh = rule.toRows(read)[0]
+    const part = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=other', 'graph_v1')
+    await storage.appendRowsToPartition('edge', ['org=other', 'graph_v1'], [...EDGE_COLUMNS, { name: 'org', type: 'STRING' }], [{ ...fresh, org: 'other', props: { dispatch_tool: true }, source_keys: { session_id: 'shared', message_id: 'other-message', part_id: 'other-part' } }])
+    const before = await fs.readFile(path.join(part, 'cursor.json'), 'utf8')
+    await projectGraph({ query: registry, storage, contracts: [contract] })
+    assert.equal(await fs.readFile(path.join(part, 'cursor.json'), 'utf8'), before)
+  }, [read])
+})
+
+for (const fault of ['missing-cursor', 'missing-table', 'ambiguous-epoch']) {
+  test(`graph refresh refuses selected graph with ${fault}`, async () => {
+    await fixture(async ({ registry, storage }) => {
+      const fresh = { edge_id: 'e', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+      const current = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+      const other = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=other', 'graph_v1')
+      await storage.appendRowsToPartition('edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, [fresh])
+      if (fault === 'missing-cursor') await fs.unlink(path.join(current, 'cursor.json'))
+      if (fault === 'missing-table') await fs.rm(path.join(current, 'epoch=0'), { recursive: true })
+      if (fault === 'ambiguous-epoch') {
+        await storage.appendRowsToPartition('edge', ['org=other', 'graph_v1'], EDGE_COLUMNS, [fresh, { ...fresh, edge_id: 'other-org-only' }])
+        await fs.rm(path.join(current, 'epoch=0'), { recursive: true })
+        await fs.symlink(path.join(other, 'epoch=0'), path.join(current, 'epoch=0'), process.platform === 'win32' ? 'junction' : 'dir')
+        await fs.writeFile(path.join(current, 'cursor.json'), JSON.stringify({ epoch: 0, rowCount: 2, layout: 'epoch', tableDir: 'table' }))
+      }
+      const before = await fs.readFile(path.join(current, 'cursor.json'), 'utf8').catch(() => null)
+      const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org: 'current' }, tablePath: current }] }) }
+      await assert.rejects(refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] }), /graph refresh: (unreadable partition|missing table|ambiguous epoch)/)
+      assert.equal(await fs.readFile(path.join(current, 'cursor.json'), 'utf8').catch(() => null), before)
+      if (fault === 'ambiguous-epoch') await assert.rejects(fs.access(path.join(other, 'epoch=0', '.retired')))
+    })
+  })
+}
+
+test('an acknowledged append during graph publication survives epoch promotion', async () => {
+  await fixture(async ({ registry, storage }) => {
+    const fresh = { edge_id: 'e', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+    const part = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+    const append = rows => storage.appendRowsToPartition('edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, rows)
+    await append([fresh])
+    const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org: 'current' }, tablePath: part }] }) }
+    const rename = fs.rename
+    let concurrent
+    fs.rename = async function (from, to) {
+      if (!concurrent && to === path.join(part, 'cursor.json')) {
+        let guarded = false
+        try {
+          const release = claimPartitionMutation(part)
+          release()
+        } catch (error) {
+          if (!isPartitionMutationBusy(error)) throw error
+          guarded = true
+        }
+        concurrent = append([{ ...fresh, edge_id: 'acknowledged-append' }])
+        // Without a publication guard, force the append to acknowledge before
+        // rename. With the guard, it waits and appends to the new generation.
+        if (!guarded) await concurrent
+      }
+      return rename.call(fs, from, to)
+    }
+    try {
+      await refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] })
+      await concurrent
+      assert.ok(concurrent)
+      assert.equal(tryReadCursorSync(part)?.rowCount, 2)
+      const result = await executeQuerySql({ query: 'SELECT edge_id FROM edge', storage, registry: query, includeLocalOnly: true, refresh: 'never' })
+      assert.deepEqual(result.rows.map(row => row.edge_id).sort(), ['acknowledged-append', 'e'])
+    } finally { fs.rename = rename }
+  })
+})
+
+test('graph refresh preserves cross-process purge and append with an unchanged row count', async () => {
+  await fixture(async ({ registry, storage }) => {
+    const fresh = { edge_id: 'e', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+    const part = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+    await storage.appendRowsToPartition('edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, [fresh])
+    const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org: 'current' }, tablePath: part }] }) }
+    const mkdir = fsSync.mkdirSync
+    let outcome
+    fsSync.mkdirSync = function (directory, ...args) {
+      if (!outcome && String(directory).startsWith(path.join(part, 'table-'))) {
+        const script = `
+          import { purgeCache } from './src/core/cache/purge.js'
+          import { appendRowsToPartition, claimPartitionMutation, isPartitionMutationBusy } from './src/core/cache/partition.js'
+          import { EDGE_COLUMNS } from './hypaware-core/plugins-workspace/context-graph/src/datasets.js'
+          try { const release = claimPartitionMutation(${JSON.stringify(part)}); release() }
+          catch (error) { if (!isPartitionMutationBusy(error)) throw error; console.log('blocked'); process.exit(0) }
+          await purgeCache({ cacheRoot: ${JSON.stringify(storage.cacheRoot)}, target: { kind: 'all' } })
+          await appendRowsToPartition(${JSON.stringify(storage.cacheRoot)}, 'edge', ['org=current', 'graph_v1'], EDGE_COLUMNS, [${JSON.stringify({ ...fresh, edge_id: 'acknowledged-new' })}])
+          console.log('mutated')
+        `
+        const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15000 })
+        assert.equal(result.status, 0, result.stderr)
+        outcome = result.stdout.trim()
+      }
+      return mkdir.call(fsSync, directory, ...args)
+    }
+    try {
+      await refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] }).catch(error => {
+        if (!/concurrent-write/.test(error.message)) throw error
+      })
+      assert.ok(outcome)
+      const result = await executeQuerySql({ query: 'SELECT edge_id FROM edge', storage, registry: query, includeLocalOnly: true, refresh: 'never' })
+      assert.deepEqual(result.rows.map(row => row.edge_id), [outcome === 'blocked' ? 'e' : 'acknowledged-new'])
+    } finally { fsSync.mkdirSync = mkdir }
+  })
+})
+
+for (const level of ['partition', 'org']) {
+  test(`graph refresh refuses a symlinked ${level} mutation path`, async () => {
+    await fixture(async ({ registry, storage }) => {
+      const fresh = { edge_id: 'e', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+      const other = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=other', 'graph_v1')
+      const selected = path.join(storage.cacheRoot, 'datasets', 'edge', 'org=current', 'graph_v1')
+      await storage.appendRowsToPartition('edge', ['org=other', 'graph_v1'], EDGE_COLUMNS, [fresh])
+      const target = level === 'partition' ? other : path.dirname(other)
+      const link = level === 'partition' ? selected : path.dirname(selected)
+      await fs.mkdir(path.dirname(link), { recursive: true })
+      await fs.symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+      const before = await fs.readFile(path.join(other, 'cursor.json'), 'utf8')
+      const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org: 'current' }, tablePath: selected }] }) }
+      await assert.rejects(refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] }), /graph refresh: symlinked partition/)
+      assert.equal(await fs.readFile(path.join(other, 'cursor.json'), 'utf8'), before)
+    })
+  })
+}
+
+test('local compaction does not merge named-org namespaces after epoch promotion', async () => {
+  await fixture(async ({ registry, storage }) => {
+    const fresh = { edge_id: 'shared-id', edge_type: 'ran', src_id: 'a', dst_id: 'b', src_type: 'Session', dst_type: 'Skill', source_dataset: 'x', projector: 'x', projector_version: 1 }
+    const paths = []
+    for (const org of ['one', 'two']) {
+      const part = path.join(storage.cacheRoot, 'datasets', 'edge', `org=${org}`, 'graph_v1')
+      paths.push(part)
+      await storage.appendRowsToPartition('edge', [`org=${org}`, 'graph_v1'], [...EDGE_COLUMNS, { name: 'org', type: 'STRING' }], [{ ...fresh, org }])
+      const query = { ...registry, getDataset: dataset => ({ ...registry.getDataset(dataset), discoverPartitions: async () => [{ dataset, partition: { org }, tablePath: part }] }) }
+      await refreshGraphRows({ storage, query, dataset: 'edge', rows: [{ ...fresh, projector_version: 2 }] })
+      assert.equal(tryReadCursorSync(part)?.layout, 'source-table')
+    }
+    const cursors = () => Promise.all(paths.map(part => fs.readFile(path.join(part, 'cursor.json'), 'utf8')))
+    const before = await cursors()
+    await compactGraphTables({ storage })
+    assert.deepEqual(await cursors(), before, 'each organization keeps its own shared graph identity')
+  })
+})

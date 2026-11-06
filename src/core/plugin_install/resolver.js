@@ -8,7 +8,15 @@ import { applyGitSourceFlags, parseGitSource, redactRawSource } from './git_sour
  * @import { PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
  */
 
-const SCOPED_NAME_RE = /^@([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/i
+/**
+ * A scoped npm-style plugin name, `@<scope>/<name>`. Exported because it is the
+ * one token shape this repo already treats as a name and never as a path:
+ * `looksLikeLocalPath` below routes every other slash-bearing token to
+ * `local-dir` and lets a leading `@` through to the name branches. A command
+ * whose positional is a directory can refuse this shape without inventing a
+ * second, disagreeing rule for what a plugin name looks like.
+ */
+export const SCOPED_NAME_RE = /^@([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/i
 const UNSCOPED_NAME_RE = /^([a-z0-9][a-z0-9._-]*)$/i
 const GIT_PREFIX_RE = /^(github:|gitlab:|bitbucket:|git\+|git:|ssh:|https?:\/\/|file:\/\/)/i
 const FIRST_PARTY_SCOPE = '@hypaware/'
@@ -141,6 +149,10 @@ function looksLikeLocalPath(raw) {
   if (raw === '.' || raw === '..') return true
   if (raw.startsWith('./') || raw.startsWith('../') || raw.startsWith('/')) return true
   if (raw.startsWith('~/')) return true
+  // The win32 spellings of the same shapes: a drive-letter or UNC absolute
+  // path, and any backslash-joined token - a backslash is never part of a
+  // plugin name or a git URL, both of which the branches above already took.
+  if (process.platform === 'win32' && (path.isAbsolute(raw) || raw.includes('\\'))) return true
   // A token that contains a slash but no git prefix and isn't a scoped
   // npm name (which would have matched the explicit scope branches).
   if (raw.includes('/') && !raw.startsWith('@')) return true

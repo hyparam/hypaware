@@ -18,6 +18,8 @@ export interface PluginCatalogEntry {
   version: string
   metadata: PluginMetadata
   contributes: PluginContributionManifest | undefined
+  /** The manifest's `requires.plugins` names, when it declares any. */
+  requiresPlugins?: PluginName[]
 }
 
 export interface ClientDescriptor {

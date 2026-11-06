@@ -1,20 +1,8 @@
 // @ts-check
 
 import fs from 'node:fs'
-import path from 'node:path'
 
-/**
- * Resolve the directory the daemon writes its dispatch / lifecycle
- * log to: `<HYP_HOME>/hypaware/logs`. OTel logs continue to land in
- * `dev-telemetry/` (when `HYP_DEV_TELEMETRY=1`) or be exported over
- * OTLP; this file is the line-oriented sidecar a human inspects with
- * `tail -f` after `daemon run`.
- *
- * @param {string} stateRoot
- */
-export function daemonLogDir(stateRoot) {
-  return path.join(stateRoot, 'logs')
-}
+import { daemonLogDir, daemonLogPath } from '../runtime/paths.js'
 
 /**
  * @import { DaemonLogger } from '../../../src/core/daemon/types.js'
@@ -32,9 +20,9 @@ export function daemonLogDir(stateRoot) {
  */
 export function openDaemonLog({ stateRoot, runId, mode }) {
   const dir = daemonLogDir(stateRoot)
-  fs.mkdirSync(dir, { recursive: true })
-  const logPath = path.join(dir, 'daemon.log')
-  const stream = fs.createWriteStream(logPath, { flags: 'a' })
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const logPath = daemonLogPath(stateRoot)
+  const stream = fs.createWriteStream(logPath, { flags: 'a', mode: 0o600 })
 
   /**
    * @param {'info'|'warn'|'error'} level

@@ -583,23 +583,16 @@ test('a non-array iterable aliases is still accepted', () => {
 
 // Ordering. Every non-iterable would fail the shape check too, so placing
 // that check before the drain would answer `aliases: 7` in the registry's
-// words instead of the engine's. The author must still get V8's error, which
-// names the value they passed.
-//
-// Asserted as properties, never as V8's sentence: the engine's exact wording
-// is a version detail, which is why the sibling test above pins the negative
-// too. What has to hold is that the error is the engine's (no
-// `CommandRegistry.register` prefix), that it names the value passed (7) and
-// not the expression that read it (`record.aliases`), and that it is the
-// 'not iterable' diagnosis rather than some later failure.
+// words instead of the engine's. Check the diagnosis, not the whole sentence:
+// V8 names "number 7", while JavaScriptCore names "number". Both must retain
+// the native TypeError rather than a registry validation error.
 test('a non-iterable aliases keeps the boundary error the drain raises', () => {
   const commands = createCommandRegistry()
   assert.throws(
     () => commands.register(makeCommand({ name: 'bad', aliases: 7 })),
     (err) =>
       err instanceof TypeError &&
-      /\bnot iterable\b/.test(err.message) &&
-      /\b7\b/.test(err.message) &&
+      /\bnumber(?: 7)? is not iterable\b/.test(err.message) &&
       !/CommandRegistry\.register/.test(err.message) &&
       !/record\.aliases/.test(err.message)
   )
@@ -764,8 +757,13 @@ function declaredOptionalMembers(types = readFileSync(new URL('../../hypaware-pl
   // The `?` is followed by `:`, `(`, or `<`: the last is an optional method
   // that declares type parameters (`foo?<T>(x: T): T`), which `tsc` accepts
   // and which the two-character form would drop with nothing said.
+  //
+  // What follows the `?` may open on the next line (`hidden?` / `: boolean`),
+  // because `tsc` accepts that too and a same-line gap drops the member with
+  // nothing said. Only that gap crosses lines: the name and its `?` still share
+  // one, so the split shape above, whose `?` opens a line, is refused as before.
   const declared = []
-  for (const match of body.matchAll(/(?:^|[;,{])[ \t]*(?:readonly[ \t]+)?([^\n;,?:{]*?)[ \t]*\?[ \t]*[:(<]/gm)) {
+  for (const match of body.matchAll(/(?:^|[;,{])[ \t]*(?:readonly[ \t]+)?([^\n;,?:{]*?)[ \t]*\?\s*[:(<]/gm)) {
     const spelled = types.slice(bodyStart + match.index, bodyStart + match.index + match[0].length).trim()
     assert.match(match[1], /^[A-Za-z_$][\w$]*$/, `an optional member of CommandRegistration is not a bare identifier (${JSON.stringify(spelled)}): a quoted or computed name is blanked by the mask before the member reader runs, so the parse cannot name it`)
     declared.push(match[1])
@@ -878,6 +876,17 @@ test('the interface parse fails closed on an optional whose name is not on its l
   const conditional = ['export interface CommandRegistration {', '  x: A extends B', '    ? (c: D) => E', '    : F', '  hidden?: boolean', '}'].join('\n')
   assert.throws(() => declaredOptionalMembers(split), /not a bare identifier/)
   assert.throws(() => declaredOptionalMembers(conditional), /not a bare identifier/)
+})
+
+// The complement of the shape above: the name and its `?` share a line and
+// only the type, parameter list, or type-parameter list opens on the next.
+// `tsc --strict` accepts all three, and nothing on either line is ambiguous,
+// so each is read as the member it is rather than dropped with nothing said.
+test('the interface parse reads an optional whose type opens on the next line', () => {
+  const next = (name, rest) => ['export interface CommandRegistration {', `  ${name}?`, `    ${rest}`, '}'].join('\n')
+  assert.deepEqual(declaredOptionalMembers(next('hidden', ': boolean')), ['hidden'])
+  assert.deepEqual(declaredOptionalMembers(next('foo', '<T>(x: T): void')), ['foo'])
+  assert.deepEqual(declaredOptionalMembers(next('bar', '(x: string): void')), ['bar'])
 })
 
 // A quoted member name is legal TypeScript and is the one member spelling the

@@ -1,4 +1,4 @@
-import type { JsonObject } from '../../../../hypaware-plugin-kernel-types.d.ts'
+import type { AiGatewayProjectedMessage, JsonObject } from '../../../../hypaware-plugin-kernel-types.d.ts'
 
 /**
  * One Codex rollout session recovered from a `~/.codex/sessions/**` file.
@@ -45,10 +45,22 @@ export interface CodexRolloutSession {
   model?: string
   /** Configured upstream provider (`session_meta.model_provider`). */
   modelProvider?: string
+  /** Base instructions recorded by Codex, not a reconstruction of every request. */
+  systemText?: string
   /** Launch source label, e.g. `vscode` (`session_meta.source`). */
   source?: string
   /** Ordered response items recovered from the rollout. */
   items: CodexRolloutItem[]
+  /** Stable prefix through the last usage/completion event when native lifecycle events exist. */
+  settledItemCount?: number
+  /** Guardian Code Mode delivery-evidence records dropped before projection. Absent when none were. */
+  deliveryEvidenceSkipped?: number
+  /**
+   * Completed TurnItems with no projection, by TurnItem type (`other` for a
+   * type Codex did not define), in turns projected from TurnItems. Absent when
+   * none were.
+   */
+  completedItemsUnsupported?: Map<string, number>
 }
 
 /** One recovered rollout response item plus its envelope timestamp. */
@@ -57,6 +69,8 @@ export interface CodexRolloutItem {
   payload: Record<string, unknown>
   /** Envelope timestamp in epoch millis, when present (modern JSONL only). */
   timestampMs?: number
+  /** A checkpoint reduced during parsing, so its replacement snapshot can be freed. */
+  projectedMessage?: AiGatewayProjectedMessage
   /**
    * Per-turn token usage recovered from a `token_count` event_msg, already
    * normalized into the gateway's `{ usage: {...} }` attributes shape. Present
@@ -65,6 +79,13 @@ export interface CodexRolloutItem {
    * message rather than projecting a message of its own.
    */
   usageAttributes?: JsonObject
+  /**
+   * Set while parsing on an `item_completed` TurnItem, before it is resolved
+   * against the turn's response items: the turn and thread it completed in.
+   */
+  completed?: { turnId: string, threadId?: string }
+  /** The TurnItem type a normalized completed item came from, e.g. `AgentMessage`. */
+  turnItemType?: string
 }
 
 /**
@@ -130,6 +151,8 @@ export type CodexAttachResult = { changed: true; prevValue?: string }
 
 export interface CodexDetachOptions {
   configPath?: string
+  /** Report what the undo would do without writing it. */
+  dryRun?: boolean
 }
 
 export type CodexDetachResult =

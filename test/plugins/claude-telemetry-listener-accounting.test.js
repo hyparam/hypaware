@@ -216,6 +216,161 @@ test('usage from an earlier batch survives a failed write and lands on the retry
   }
 })
 
+// Two POSTs can be in flight at once: one parked on its awaited write while
+// the next projects. Before this fix the failed batch restored the whole
+// pre-projection index, so an entry the overlapping POST claimed in the
+// meantime came back and a later response naming the same `request_id`
+// carried those tokens and that cost a second time.
+test('a failed batch puts back only its own claims, not an overlapping POST\'s', async () => {
+  const REQUEST_B = 'req_011Ce8sjpb8Uzvot2JMvFkKf'
+  /** @type {any[]} */
+  const written = []
+  /** @type {() => void} */
+  let releaseFirst = () => {}
+  /** @type {() => void} */
+  let firstParked = () => {}
+  const parked = new Promise((resolve) => { firstParked = () => resolve(undefined) })
+  let attempt = 0
+  const listener = await startListener({
+    recordProjectedExchange: async (projection) => {
+      attempt += 1
+      if (attempt === 1) {
+        // Hold the first batch inside its write until the second has run.
+        await new Promise((resolve) => {
+          releaseFirst = () => resolve(undefined)
+          firstParked()
+        })
+        throw new Error('dataset unavailable')
+      }
+      written.push(projection)
+      return { rowsWritten: 1, rowsSkipped: 0 }
+    },
+  })
+  /** @param {any} projection */
+  const assistantOf = (projection) => projection.messages.find((/** @type {any} */ m) => m.role === 'assistant')
+  /**
+   * @param {string} requestId
+   * @param {string} uuid
+   */
+  const response = (requestId, uuid) => envelope([
+    record('assistant_response', {
+      response: 'This is a spike repo.',
+      request_id: requestId,
+      'message.uuid': uuid,
+      model: 'claude-haiku-4-5-20251001',
+    }, '2026-08-17T19:30:31.009Z'),
+  ])
+  try {
+    await appendSessionContext(listener.stateFile, {
+      session_id: SESSION,
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: listener.hypHome,
+      ts: '2026-08-17T19:30:00.000Z',
+    })
+    // Both requests' usage waits in the index before either response arrives.
+    const usageFlush = await listener.post(envelope([
+      record('api_request', {
+        model: 'claude-haiku-4-5-20251001',
+        input_tokens: 73,
+        output_tokens: 113,
+        cost_usd: 0.0047732,
+        duration_ms: 1842,
+        request_id: REQUEST_ID,
+      }, '2026-08-17T19:30:31.009Z'),
+      record('api_request', {
+        model: 'claude-haiku-4-5-20251001',
+        input_tokens: 5,
+        output_tokens: 7,
+        cost_usd: 0.0001,
+        duration_ms: 90,
+        request_id: REQUEST_B,
+      }, '2026-08-17T19:30:31.009Z'),
+    ]))
+    assert.equal(usageFlush.status, 200)
+
+    // The first response claims REQUEST_ID and parks in its write.
+    const failing = response(REQUEST_ID, ASSISTANT_UUID)
+    const failed = listener.post(failing)
+    await parked
+
+    // Meanwhile the second claims REQUEST_B and lands.
+    const overlapping = await listener.post(response(REQUEST_B, '1a2b3c4d-0000-4000-8000-000000000001'))
+    assert.equal(overlapping.status, 200)
+    assert.deepEqual(assistantOf(written[0]).attributes?.usage, { input_tokens: 5, output_tokens: 7 })
+
+    releaseFirst()
+    assert.equal((await failed).status, 500)
+
+    // REQUEST_B was carried by a row that landed, so a later response naming
+    // it must not find its usage again.
+    const repeat = await listener.post(response(REQUEST_B, '1a2b3c4d-0000-4000-8000-000000000002'))
+    assert.equal(repeat.status, 200)
+    assert.equal(
+      assistantOf(written[1]).attributes?.usage,
+      undefined,
+      'the failed batch must not put back what the overlapping POST claimed'
+    )
+    assert.equal(assistantOf(written[1]).attributes?.claude?.cost_usd, undefined)
+
+    // The failed batch's own claim still comes back for its retry.
+    const retried = await listener.post(failing)
+    assert.equal(retried.status, 200)
+    assert.deepEqual(assistantOf(written[2]).attributes?.usage, { input_tokens: 73, output_tokens: 113 })
+    assert.equal(assistantOf(written[2]).attributes?.claude?.cost_usd, 0.0047732)
+  } finally {
+    await listener.cleanup()
+  }
+})
+
+// With no write failure there is nothing to restore: each claim is spent by
+// the row that carried it, and the same `request_id` named again finds nothing.
+test('a successful batch keeps its claims spent', async () => {
+  /** @type {any[]} */
+  const written = []
+  const listener = await startListener({
+    recordProjectedExchange: async (projection) => {
+      written.push(projection)
+      return { rowsWritten: 1, rowsSkipped: 0 }
+    },
+  })
+  try {
+    await appendSessionContext(listener.stateFile, {
+      session_id: SESSION,
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: listener.hypHome,
+      ts: '2026-08-17T19:30:00.000Z',
+    })
+    const usageFlush = await listener.post(envelope([
+      record('api_request', {
+        model: 'claude-haiku-4-5-20251001',
+        input_tokens: 73,
+        output_tokens: 113,
+        cost_usd: 0.0047732,
+        duration_ms: 1842,
+        request_id: REQUEST_ID,
+      }, '2026-08-17T19:30:31.009Z'),
+    ]))
+    assert.equal(usageFlush.status, 200)
+    for (const uuid of [ASSISTANT_UUID, '1a2b3c4d-0000-4000-8000-000000000003']) {
+      const res = await listener.post(envelope([
+        record('assistant_response', {
+          response: 'This is a spike repo.',
+          request_id: REQUEST_ID,
+          'message.uuid': uuid,
+          model: 'claude-haiku-4-5-20251001',
+        }, '2026-08-17T19:30:31.009Z'),
+      ]))
+      assert.equal(res.status, 200)
+    }
+    const usage = written.map((p) => p.messages.find((/** @type {any} */ m) => m.role === 'assistant').attributes?.usage)
+    assert.deepEqual(usage, [{ input_tokens: 73, output_tokens: 113 }, undefined])
+  } finally {
+    await listener.cleanup()
+  }
+})
+
 // The drop arm deletes bodies the read path never accounted for, so before
 // this fix `spool_bytes` stayed at its pre-drop value until the next sweep
 // (up to a minute), and `hyp status` reported bytes for content that had

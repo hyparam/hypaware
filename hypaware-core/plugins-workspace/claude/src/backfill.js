@@ -1,6 +1,8 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
+import { captureSessionTitle } from '../../../../src/core/backfill/session_title.js'
+import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
 import {
   assignTranscriptIdentity,
@@ -11,6 +13,7 @@ import {
   loadTranscriptFile,
   walkTranscriptRoots,
   withToolUseResult,
+  withTurnOrigin,
 } from './transcripts.js'
 import { createSessionContextReader, pickLatestMatching } from './session_context.js'
 import { deriveRepoFromCwd } from './git_repo.js'
@@ -130,6 +133,7 @@ export function createClaudeBackfillProvider(opts) {
         extraProjectsDirs: desktop3pDirs,
         stateFile,
         clientName,
+        pluginName,
         deriveRepo,
         resolver,
         sweepFingerprints,
@@ -182,6 +186,7 @@ function resolveSweepCron(config) {
  *   extraProjectsDirs?: string[],
  *   stateFile: string,
  *   clientName: string,
+ *   pluginName: string,
  *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  *   resolver: UsagePolicyResolver,
  *   sweepFingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
@@ -190,8 +195,9 @@ function resolveSweepCron(config) {
  * @returns {AsyncGenerator<BackfillItem>}
  */
 async function* runClaudeBackfill(args) {
-  const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, deriveRepo, resolver, sweepFingerprints } = args
+  const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, pluginName, deriveRepo, resolver, sweepFingerprints } = args
   const { ignoredSessions } = args
+  refreshSessionIgnores(ignoredSessions)
   const log = ctx.log
   const window = resolveWindow(ctx)
   // Many sessions share a cwd (the same repo, often the same checkout), and
@@ -379,7 +385,7 @@ async function* runClaudeBackfill(args) {
       const owners = ctx.entrypointOwners ?? new Map()
       const owned = inContainer
         ? classifyContainerSession(DESKTOP_3P_CONTAINER_OWNER, ctx.isPluginConfigured)
-        : classifyTranscriptEntrypoint(entrypoint, owners, clientName)
+        : classifyTranscriptEntrypoint(entrypoint, owners, clientName, ctx.isPluginDetached?.(pluginName) !== true)
       if (!owned.import) {
         sessionsGated += 1
         log.info('claude.backfill.entrypoint_not_configured', {
@@ -412,6 +418,22 @@ async function* runClaudeBackfill(args) {
       })
       if (!exchange) continue
 
+      // @ref LLP 0556#updates: title records have no timestamp and must be
+      // read from the whole file, including records outside the message window.
+      let title
+      let titleRevision = 0
+      for (const entry of sessionEntries) {
+        if (!entry.session_title) continue
+        titleRevision++
+        if (entry.session_title_kind === 'custom-title' || title?.kind !== 'custom-title') {
+          title = { value: entry.session_title, kind: entry.session_title_kind, revision: titleRevision }
+        }
+      }
+      const titleCaptured = title ? captureSessionTitle(exchange, title.value, {
+        updatedAt: new Date((fingerprint ?? await transcriptFingerprint(filePath)).mtimeMs).toISOString(),
+        revision: String(title.revision),
+      }) : false
+
       sessionsProjected += 1
       messagesProjected += exchange.messages.length
       log.info('claude.backfill.session_projected', {
@@ -419,6 +441,7 @@ async function* runClaudeBackfill(args) {
         operation: 'backfill.project',
         session_id: sessionId,
         message_count: exchange.messages.length,
+        title_captured: titleCaptured,
         status: 'ok',
       })
 
@@ -531,11 +554,12 @@ function groupBySession(entries) {
  *   record: SessionContextRecord | undefined,
  *   agentMeta: Map<string, { tool_use_id: string }>,
  *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
+ *   usageCarrier?: 'first' | 'last',
  * }} args
  * @returns {Promise<AiGatewayProjectedExchange | undefined>}
  */
-async function projectedExchangeFromEntries(args) {
-  const { sessionId, entries, clientName, record, agentMeta, deriveRepo } = args
+export async function projectedExchangeFromEntries(args) {
+  const { sessionId, entries, clientName, record, agentMeta, deriveRepo, usageCarrier = 'last' } = args
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = []
   /** @type {string | undefined} */
@@ -545,14 +569,15 @@ async function projectedExchangeFromEntries(args) {
   /** @type {string | undefined} */
   let transcriptCwd
   // Usage is a response-level (per API message) figure that Claude Code
-  // duplicates onto every block line of an assistant turn. Record the last
-  // block line per API message id so usage is stamped on only that one block:
+  // duplicates onto every block line of an assistant turn. By default record
+  // the last block per API message id so usage is stamped on only one block:
   // matching the live projector, so each response contributes usage to exactly
   // one row and live/backfill dedupe onto the same row. @ref LLP 0035#one-carrier
   /** @type {Map<string, number>} */
-  const lastBlockIndexByMessageId = new Map()
+  const usageIndexByMessageId = new Map()
   entries.forEach((entry, index) => {
-    if (entry.messageId) lastBlockIndexByMessageId.set(entry.messageId, index)
+    // @ref LLP 0553#usage-carrier: NanoClaw's append-only lane needs a stable carrier before the final block arrives
+    if (entry.messageId && (usageCarrier === 'last' || !usageIndexByMessageId.has(entry.messageId))) usageIndexByMessageId.set(entry.messageId, index)
   })
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index]
@@ -561,8 +586,8 @@ async function projectedExchangeFromEntries(args) {
     // pre-0032 session carries.
     if (!transcriptCwd && entry.cwd) transcriptCwd = entry.cwd
     // A line with no API message id is its own single-block message → keep its
-    // usage; otherwise only the last block of the message carries it.
-    const stampUsage = !entry.messageId || lastBlockIndexByMessageId.get(entry.messageId) === index
+    // usage; otherwise only the selected block of the message carries it.
+    const stampUsage = !entry.messageId || usageIndexByMessageId.get(entry.messageId) === index
     const message = projectedMessageFromEntry(entry, agentMeta, stampUsage)
     if (!message) continue
     messages.push(message)
@@ -664,7 +689,7 @@ function projectedMessageFromEntry(entry, agentMeta, stampUsage) {
   // subagent's `claude.spawned_by_tool_use_id` above survives. @ref LLP 0035#one-carrier
   const usageAttrs = stampUsage ? anthropicMessageAttributes(entry) : undefined
   if (usageAttrs) message.attributes = { ...(message.attributes ?? {}), ...usageAttrs }
-  message.attributes = /** @type {any} */ (withToolUseResult(message.attributes, entry))
+  message.attributes = /** @type {any} */ (withTurnOrigin(withToolUseResult(message.attributes, entry), entry))
   if (entry.timestampMs !== undefined) message.message_created_at = new Date(entry.timestampMs).toISOString()
   return message
 }

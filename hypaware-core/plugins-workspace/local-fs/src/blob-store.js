@@ -109,13 +109,13 @@ export function createLocalFsBlobStore({ baseDir }) {
     async putObject(input) {
       const dest = resolveSafePath(input.key)
       const dir = path.dirname(dest)
-      await fs.mkdir(dir, { recursive: true })
+      await fs.mkdir(dir, { recursive: true, mode: 0o700 })
       const bytes = await materializeBody(input.body)
       if (input.ifNoneMatch === '*') {
         // Conditional create: use O_EXCL so a concurrent writer cannot
         // race past us. node:fs/promises maps O_EXCL via `flag: 'wx'`.
         try {
-          const handle = await fs.open(dest, 'wx')
+          const handle = await fs.open(dest, 'wx', 0o600)
           try {
             await handle.writeFile(bytes)
           } finally {
@@ -133,7 +133,7 @@ export function createLocalFsBlobStore({ baseDir }) {
           throw err
         }
       } else {
-        await fs.writeFile(dest, bytes)
+        await fs.writeFile(dest, bytes, { mode: 0o600 })
       }
       return { key: input.key }
     },
@@ -157,16 +157,19 @@ export function createLocalFsBlobStore({ baseDir }) {
           await handle.close()
           return null
         }
+        // @ref LLP 0452#range-contract [implements]: local reads honor the same single-range contract as S3 without buffering the file
+        const range = input.range === undefined ? undefined : byteRange(input.range, stat.size)
         // Stream off the held FileHandle so the read uses an already-open
         // fd. The lazy `createReadStream(src)` form races a concurrent
         // unlink: the stream's async open can fire after the file is
         // gone, raising an unhandled ENOENT on consumers that discard the
         // body. With a handle the open is settled at await time and the
         // unlink-after-open is benign on POSIX.
-        const stream = handle.createReadStream({ autoClose: true })
+        const stream = handle.createReadStream({ autoClose: true, ...range })
         return {
           body: stream,
-          contentLength: stat.size,
+          contentLength: range ? range.end - range.start + 1 : stat.size,
+          ...(range ? { contentRange: `bytes ${range.start}-${range.end}/${stat.size}` } : {}),
         }
       } catch (err) {
         await handle.close().catch(() => {})
@@ -243,6 +246,33 @@ export function createLocalFsBlobStore({ baseDir }) {
       }
     },
   }
+}
+
+/** Resolve one HTTP byte range to the inclusive offsets Node streams use.
+ * @param {string} value
+ * @param {number} size
+ */
+function byteRange(value, size) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value)
+  const first = match?.[1] ? Number(match[1]) : undefined
+  const last = match?.[2] ? Number(match[2]) : undefined
+  if (!match || (first === undefined && last === undefined)
+    || (first !== undefined && !Number.isSafeInteger(first))
+    || (last !== undefined && !Number.isSafeInteger(last))) {
+    throw new Error('local-fs blob-store: invalid byte range')
+  }
+  const start = first ?? Math.max(0, size - /** @type {number} */ (last))
+  const end = first === undefined ? size - 1 : Math.min(last ?? size - 1, size - 1)
+  if (start >= size || end < start || size === 0) {
+    // `blob_range_unsatisfiable` is the token the s3 provider gives a 416,
+    // so a ranged reader branches on one kind across both. `code` stays for
+    // callers that already match the S3 error name.
+    throw Object.assign(new Error('local-fs blob-store: unsatisfiable byte range'), {
+      code: 'InvalidRange',
+      errorKind: 'blob_range_unsatisfiable',
+    })
+  }
+  return { start, end }
 }
 
 /**

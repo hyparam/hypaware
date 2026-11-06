@@ -8,6 +8,15 @@ import { parseCommandArgv } from './verb_codec.js'
  */
 
 /**
+ * The states a recommendation can be marked with, spelled as the server's
+ * recommendation-status RFC spells them. A copy so a typo is refused at the
+ * gate before bytes move; the server stays the owner of the vocabulary.
+ *
+ * @ref LLP 0461#states-are-the-servers [constrained-by]: the CLI repeats the server's states, it does not define them
+ */
+export const RECOMMENDATION_STATES = ['open', 'in_progress', 'applied', 'dismissed']
+
+/**
  * One argument-validation contract for the core command set.
  *
  * Before this module a command either declared a schema and rejected
@@ -39,8 +48,8 @@ export const CORE_COMMAND_ARGS = {
     schema: { type: 'object', properties: {} },
   },
   'status': {
-    usage: 'hyp status [--json]',
-    schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },
+    usage: 'hyp status [--verbose] [--json]',
+    schema: { type: 'object', properties: { json: { type: 'boolean', default: false }, verbose: { type: 'boolean', default: false } } },
   },
   'client status': {
     usage: 'hyp client status [client] [--json]',
@@ -54,18 +63,17 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'ask': {
-    usage: 'hyp ask ["question"] [--list]',
+    usage: 'hyp ask ["question"]',
     schema: {
       type: 'object',
       properties: {
         question: { type: 'string', greedy: true },
-        list: { type: 'boolean', default: false },
       },
       positional: ['question'],
     },
   },
-  'client history providers': {
-    usage: 'hyp client history providers [--json]',
+  'backfill list': {
+    usage: 'hyp backfill list [--json]',
     schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },
   },
   'daemon status': {
@@ -115,10 +123,17 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'query schema': {
-    usage: 'hyp query schema <dataset>',
+    usage: 'hyp query schema <dataset> [--format <fmt>] [--json] [--output <file>] [--remote [<target>] [--org <label|*>]]',
     schema: {
       type: 'object',
-      properties: { dataset: { type: 'string' } },
+      properties: {
+        dataset: { type: 'string' },
+        format: { type: 'string', enum: ['table', 'json', 'jsonl', 'markdown'], default: 'table' },
+        json: { type: 'boolean', default: false },
+        output: { type: 'string' },
+        remote: { type: 'string' },
+        org: { type: 'string' },
+      },
       positional: ['dataset'],
       required: ['dataset'],
     },
@@ -160,7 +175,7 @@ export const CORE_COMMAND_ARGS = {
   'remote login': {
     // `<name>` in the old line, but a bare `hyp remote login` signs in to
     // the default target (LLP 0062 #bare-remote), so the target is optional.
-    usage: 'hyp remote login [name] [--token-file <path>] [--org <org>] [--host <label>] [--browser] [--no-browser] [--no-forward] [--no-daemon]',
+    usage: 'hyp remote login [name] [--token-file <path>] [--org <org>] [--host <label>] [--browser] [--no-browser] [--no-forward] [--no-daemon] [--force]',
     schema: {
       type: 'object',
       properties: {
@@ -172,6 +187,7 @@ export const CORE_COMMAND_ARGS = {
         'no-browser': { type: 'boolean', default: false },
         'no-forward': { type: 'boolean', default: false },
         'no-daemon': { type: 'boolean', default: false },
+        force: { type: 'boolean', default: false },
       },
       positional: ['name'],
     },
@@ -179,34 +195,70 @@ export const CORE_COMMAND_ARGS = {
   'remote mint': {
     // Bare `hyp remote mint` mints against the default target, the same
     // resolution as bare `remote login` (LLP 0062 #bare-remote).
-    usage: 'hyp remote mint [name] [--label <label>] [--expires-days <n>]',
+    usage: 'hyp remote mint [name] [--scope query] [--label <label>] [--expires-days <n>]',
     schema: {
       type: 'object',
       properties: {
         name: { type: 'string' },
+        // `query` is a CLI word, not a server scope: it selects the agent
+        // token mint, whose scope is the session's own.
+        scope: { type: 'string', enum: ['query'] },
         label: { type: 'string' },
-        // The expiry bound and its 365-day default are declared here, not
-        // re-checked in the runner: the schema is the whole surface of the
-        // command, so a bad value fails at the gate with the usage line like
-        // every other argument error.
-        'expires-days': { type: 'integer', minimum: 1, default: 365 },
+        // The expiry bound is declared here, not re-checked in the runner: the
+        // schema is the whole surface of the command, so a bad value fails at
+        // the gate with the usage line like every other argument error.
+        // @ref LLP 0494#cli-mint [implements]: no schema default, so the runner can tell a given --expires-days from none; the enrollment branch applies its own 365 days and the agent mint sends nothing
+        'expires-days': { type: 'integer', minimum: 1 },
       },
       positional: ['name'],
     },
   },
-  'report render': {
-    usage: 'hyp report render [<dir>] [--no-refresh-assets]',
+  'remote tokens': {
+    usage: 'hyp remote tokens [name] [--json]',
     schema: {
       type: 'object',
       properties: {
-        dir: { type: 'string' },
-        'no-refresh-assets': { type: 'boolean', default: false },
+        name: { type: 'string' },
+        json: { type: 'boolean', default: false },
       },
-      positional: ['dir'],
+      positional: ['name'],
+    },
+  },
+  'remote tokens revoke': {
+    usage: 'hyp remote tokens revoke <jti> [--remote <name>]',
+    schema: {
+      type: 'object',
+      properties: {
+        jti: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['jti'],
+      required: ['jti'],
+    },
+  },
+  'report generate': {
+    usage: 'hyp report generate [instructions]',
+    schema: {
+      type: 'object',
+      properties: { instructions: { type: 'string' } },
+      positional: ['instructions'],
+    },
+  },
+  'report save': {
+    usage: 'hyp report save <dir> [--keep]',
+    schema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string' },
+        // The default moves: the folder the skill drafted in the caller's
+        // directory is the clutter the store exists to end. `--keep` leaves it.
+        keep: { type: 'boolean', default: false },
+      },
+      positional: ['source'],
     },
   },
   'report publish': {
-    usage: 'hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]',
+    usage: 'hyp report publish <file-or-dir-or-saved-name> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -220,23 +272,60 @@ export const CORE_COMMAND_ARGS = {
       positional: ['source'],
     },
   },
-  'report list': {
-    usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]',
+  'report recommend': {
+    usage: 'hyp report recommend <file.md> [--title <title>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
+        source: { type: 'string' },
+        title: { type: 'string' },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['source'],
+    },
+  },
+  'report list': {
+    usage: 'hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        // Saved reports only, no remote read. The remote's selectors and
+        // filters have no local meaning, so the handler refuses them together.
+        local: { type: 'boolean', default: false },
         kind: { type: 'string' },
         period: { type: 'string' },
         limit: { type: 'string' },
         before: { type: 'string' },
+        // The flat form: the recommendations themselves, across reports. A
+        // status filter implies it, since only that route joins status.
+        recommendations: { type: 'boolean', default: false },
+        status: { type: 'array', items: { type: 'string', enum: RECOMMENDATION_STATES } },
         org: { type: 'string' },
         json: { type: 'boolean', default: false },
         remote: { type: 'string' },
       },
     },
   },
+  'report mark': {
+    usage: 'hyp report mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        state: { type: 'string', enum: RECOMMENDATION_STATES },
+        reason: { type: 'string' },
+        // Repeatable; the codec also splits one value on commas, so a URL
+        // that carries a literal comma must percent-encode it.
+        link: { type: 'array', items: { type: 'string' } },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['id', 'state'],
+    },
+  },
   'report get': {
-    usage: 'hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]',
+    usage: 'hyp report get <kind> <period> <id> [path] | <rec-id> [--output <file>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -252,6 +341,23 @@ export const CORE_COMMAND_ARGS = {
         remote: { type: 'string' },
       },
       positional: ['kind', 'period', 'id', 'path'],
+    },
+  },
+  'report fix': {
+    usage: 'hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        // The picker's filters, the listing's own: they narrow which reports
+        // the recommendations are drawn from when no id is given.
+        kind: { type: 'string' },
+        period: { type: 'string' },
+        limit: { type: 'string' },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['id'],
     },
   },
   'report delete': {
@@ -318,4 +424,30 @@ export function parseCoreCommandArgv(name, argv, ctx) {
     return { ok: false, code: 2 }
   }
   return { ok: true, params: parsed.params }
+}
+
+/**
+ * The refusal a bundled `hyp setup <preset>` owes for argv it cannot honor:
+ * a setup choice its fixed plugin list never reads (`--client`, `--source`,
+ * `--export`, `--retention-days`, `--bin`), `--from-file`, or a positional.
+ * Each would otherwise be dropped while the preset reports a successful
+ * write (#2468). The preset calls this before any write or backup. It is not
+ * applied in `runInit`, because a third-party preset may honor these and
+ * reads its own argv.
+ *
+ * @param {string[]} argv the argv after the preset name
+ * @param {string} preset
+ * @returns {string | null} the stderr line, or null when nothing is refused
+ */
+export function presetUnhonoredArgError(argv, preset) {
+  for (const token of argv) {
+    if (/^--from-file(=|$)/.test(token)) {
+      return `hyp setup: --from-file is not supported with preset '${preset}'; run hyp setup --from-file <path> without a preset name`
+    }
+    if (/^--(client|source|export|retention-days|bin)(=|$)/.test(token)) {
+      return `hyp setup: ${token.split('=')[0]} is not supported with preset '${preset}'; run hyp setup --yes without a preset name to set it`
+    }
+    if (!token.startsWith('-')) return `hyp setup: unexpected argument '${token}' after preset '${preset}'`
+  }
+  return null
 }

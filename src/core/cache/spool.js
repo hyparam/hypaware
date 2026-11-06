@@ -1,5 +1,6 @@
 // @ts-check
 
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
@@ -7,8 +8,8 @@ import { noteProductPending, noteProductPipeline } from '../product_telemetry/cl
 
 import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { isPartitionMutationBusy, withPartitionMutationLock } from './partition.js'
 import { isConfirmedSymlink } from './paths.js'
-import { createIngestSeqAllocator } from './ingest-seq.js'
 import { readProgress, removeProgress, streamFlushFile, streamSpoolLines, writeProgress } from './streaming-reader.js'
 
 /**
@@ -36,6 +37,22 @@ const FLUSH_FAILURE_FILE = 'last-flush-failure.json'
 // The writer's bound and the reader's. The stamp is a file on disk, so a build
 // that reads one it did not write cannot rely on the writer having clamped it.
 const FLUSH_FAILURE_MESSAGE_MAX = 512
+// The cross-process drain claim is keyed inside the spool, so its lock
+// directory (`.drain.mutation-lock`) sits beside the files it guards. Every
+// reader of the spool lists regular files by name, so a directory is
+// invisible to them. A holder keeps the claim for a whole drain, which can
+// take seconds, so the wait is longer than the seq counter's.
+const DRAIN_CLAIM_KEY = 'drain'
+const DRAIN_CLAIM_RETRY_LIMIT = 600
+const DRAIN_CLAIM_RETRY_DELAY_MS = 50
+// An append publishes `.append-<pid>-<uuid>`, holding the inode of the
+// `active.jsonl` it opened, for exactly as long as it holds that file open. A
+// drain in another process reads it before unlinking a rotated file. Not a
+// lock: nothing waits on it, so a stuck writer cannot stall a rotation.
+const APPEND_MARKER_PREFIX = '.append-'
+// Each retry needs another process to rotate between this process's open and
+// its own check, so the bound is never reached by a working spool.
+const APPEND_OPEN_RETRY_LIMIT = 8
 
 /**
  * @param {{
@@ -47,14 +64,10 @@ const FLUSH_FAILURE_MESSAGE_MAX = 512
  * @returns {CacheSpool}
  */
 export function createCacheSpool(args) {
-  /** @type {Map<string, { writeLock: Promise<unknown>, flushLock: Promise<unknown> }>} */
+  /** @type {Map<string, { writeLock: Promise<unknown>, flushLock: Promise<unknown>, ownMarkers: Set<string>, ownerOnly: boolean }>} */
   const states = new Map()
   /** @type {Set<string>} */
   const knownTables = new Set()
-  // One cache-global allocator shared across every table's flush, so a seq is
-  // monotonic across the whole cache (and thus strictly increasing within each
-  // destination partition, which can receive rows from more than one spool path).
-  const seqAllocator = createIngestSeqAllocator({ cacheRoot: args.cacheRoot })
 
   /**
    * @param {string} tablePath
@@ -63,7 +76,14 @@ export function createCacheSpool(args) {
     knownTables.add(tablePath)
     let state = states.get(tablePath)
     if (!state) {
-      state = { writeLock: Promise.resolve(), flushLock: Promise.resolve() }
+      // `ownMarkers` names the append markers this instance has on disk for
+      // the table. Its appends and rotations share the write lock above, so
+      // none of them can span one of its rotations; a marker from any other
+      // instance can, even one in this process.
+      // `ownerOnly` records that this instance has already set the active
+      // file's mode once, so the repair costs one fchmod per table per
+      // instance and nothing per append.
+      state = { writeLock: Promise.resolve(), flushLock: Promise.resolve(), ownMarkers: new Set(), ownerOnly: false }
       states.set(tablePath, state)
     }
     return state
@@ -105,24 +125,54 @@ export function createCacheSpool(args) {
    * @param {{ rowCount: number, chunkCount: number, bytesWritten: number, malformedCount: number, droppedCount: number }} totals
    */
   async function drainFlushFiles(tablePath, files, totals) {
+    if (files.length === 0) return
+    const dir = spoolDir(tablePath)
+    // Listed after the rotation that made the newest of `files`. An append in
+    // another process that can still write into one of them published its
+    // marker before that rotation, so it is listed here or already finished
+    // writing, and a finished write is in the bytes read below.
+    // @ref LLP 0514#hold-the-file [implements]: a rotated file a live foreign append still holds is drained but not unlinked
+    const appends = foreignAppendMarkers(dir, stateFor(tablePath).ownMarkers)
     for (const filePath of files) {
-      const progress = await readProgress(filePath)
-      const startOffset = progress?.byteOffset ?? 0
-      const batchId = `flush-${Date.now()}-${process.pid}`
       let fileMalformed = 0
+      let held = false
+      for (;;) {
+        const before = appends && appends.length > 0 ? await fs.stat(filePath, { bigint: true }) : null
+        const progress = await readProgress(filePath)
+        const startOffset = progress?.byteOffset ?? 0
+        const batchId = `flush-${Date.now()}-${process.pid}`
 
-      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
-        const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
-        noteProductPipeline('write', { rows: batch.chunk.rows.length - (written.droppedCount ?? 0), bytes: written.bytesWritten })
-        totals.rowCount += batch.chunk.rows.length
-        totals.chunkCount += 1
-        totals.bytesWritten += written.bytesWritten
-        totals.droppedCount += written.droppedCount ?? 0
-        fileMalformed += batch.malformedCount
-        await writeProgress(filePath, batch.resumeOffset)
+        for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit })) {
+          const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
+          noteProductPipeline('write', { rows: batch.chunk.rows.length - (written.droppedCount ?? 0), bytes: written.bytesWritten })
+          totals.rowCount += batch.chunk.rows.length
+          totals.chunkCount += 1
+          totals.bytesWritten += written.bytesWritten
+          totals.droppedCount += written.droppedCount ?? 0
+          fileMalformed += batch.malformedCount
+          await writeProgress(filePath, batch.resumeOffset)
+        }
+
+        // The markers could not be listed, so no writer can be ruled out:
+        // the rows are committed, and a later pass unlinks the file.
+        if (!appends) {
+          held = true
+          break
+        }
+        if (!before) break
+        // Still open in a live writer: keep the file and its progress, and a
+        // later pass resumes from there once the writer lets go.
+        if (appendWritingInto(dir, appends, before.ino)) {
+          held = true
+          break
+        }
+        // Every listed writer has let go, but one may have finished after the
+        // read above reached the end. Its bytes are on disk by now.
+        if ((await fs.stat(filePath, { bigint: true })).size === before.size) break
       }
 
       totals.malformedCount += fileMalformed
+      if (held) continue
       await removeProgress(filePath)
       await fs.rm(filePath, { force: true })
     }
@@ -208,11 +258,18 @@ export function createCacheSpool(args) {
       const bytesWritten = Buffer.byteLength(line, 'utf8')
       const result = await withWriteLock(tablePath, async () => {
         const dir = spoolDir(tablePath)
-        await fs.mkdir(dir, { recursive: true })
-        // Opened `a+` rather than `a`: writes still append, and the read
-        // side is what lets a failed append verify the tail is its own
-        // bytes before truncating them (see `discardTail`).
-        const handle = await fs.open(path.join(dir, ACTIVE_FILE), 'a+')
+        await fs.mkdir(dir, { recursive: true, mode: 0o700 })
+        const state = stateFor(tablePath)
+        const { handle, marker } = await openActiveFile(dir, state.ownMarkers)
+        // A new active file is created 0600. One left by an earlier version
+        // keeps the mode it was created with until it rotates, so it is
+        // tightened through this descriptor the first time this instance
+        // opens it. A file it cannot change (another owner) is left as is.
+        // @ref LLP 0569#new-files [implements]: the existing active spool file is repaired once per table, not per append
+        if (!state.ownerOnly) {
+          state.ownerOnly = true
+          await handle.chmod(0o600).catch(() => undefined)
+        }
         // An append either lands in the spool or it does not, and the
         // outcome says which. Callers read a rejection as "nothing landed"
         // and re-derive what to write from the spool - `dedupeStoredPartIds`
@@ -234,7 +291,7 @@ export function createCacheSpool(args) {
             // `writeFile` can fail with a prefix of the line already in the
             // file; that remnant has no trailing newline, so leaving it
             // would also swallow the NEXT record into one malformed line.
-            const retained = await discardTail(handle, startSize, line)
+            const retained = await discardTail(handle, path.join(dir, ACTIVE_FILE), startSize, line)
             // The rollback can find the whole line already written and be
             // refused the truncate that would take it back: an fsync and an
             // ftruncate can fail on the same device. The record is complete
@@ -252,6 +309,8 @@ export function createCacheSpool(args) {
           // the outcome: on the failure path above the original error
           // stays the one that propagates.
           await handle.close().catch(() => undefined)
+          await fs.rm(marker, { force: true }).catch(() => undefined)
+          state.ownMarkers.delete(marker)
         }
         return { bytesWritten, pendingBytes: pendingBytesSync(tablePath) }
       })
@@ -263,7 +322,13 @@ export function createCacheSpool(args) {
     async flushTable(tablePath, opts = {}) {
       return withFlushLock(tablePath, async () => {
         try {
-          const result = await runFlush(tablePath, opts)
+          // No spool means nothing was spooled before this call, so there is
+          // nothing this flush owes. Running the pass anyway would drain,
+          // without a claim, a spool another process creates meanwhile.
+          // @ref LLP 0513#drain-claim [implements]: a missing spool is an idle flush, never an unclaimed drain
+          const result = fsSync.existsSync(spoolDir(tablePath))
+            ? await withDrainClaim(tablePath, () => runFlush(tablePath, opts))
+            : { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: 0, malformedCount: 0, droppedCount: 0, reason: opts.reason ?? 'manual' }
           // Any completed attempt retires the stamp, including one that found
           // nothing to move: the stamp asserts that the last attempt failed,
           // and this one did not.
@@ -476,13 +541,14 @@ function* rowsFromSpoolLine(line) {
  * costing its own rows and costing the next record as well.
  *
  * @param {FileHandle} handle
+ * @param {string} activePath
  * @param {number} startSize
  * @param {string} line
  * @returns {Promise<boolean>} true when the rollback left the whole record
  *   in the spool intact, so a later flush will commit it and the append
  *   must not be reported as failed
  */
-async function discardTail(handle, startSize, line) {
+async function discardTail(handle, activePath, startSize, line) {
   try {
     const { size } = await handle.stat()
     const written = size - startSize
@@ -491,19 +557,30 @@ async function discardTail(handle, startSize, line) {
     const tail = Buffer.alloc(written)
     const { bytesRead } = await handle.read(tail, 0, written, startSize)
     if (bytesRead !== written || !tail.equals(expected.subarray(0, written))) return false
+    // win32 refuses ftruncate through an append-mode handle (EPERM, always),
+    // so there the trim goes through a fresh write handle on the same path.
+    // The per-table write lock and the byte compare above hold either way;
+    // the fresh handle carries only the truncate and the sync behind it. An
+    // open the device refuses leaves the append handle to take the truncate
+    // refusal below, the branch that path was already on.
+    const trimmer = process.platform === 'win32' ? await fs.open(activePath, 'r+').catch(() => null) : null
     try {
-      await handle.truncate(startSize)
-    } catch {
-      // A whole line is already terminated and already committable: there
-      // is nothing to repair, and nothing for the caller to replay.
-      if (written === expected.length) return true
-      // Terminate the remnant so the flush reader drops that line alone
-      // instead of concatenating it with whatever is appended next.
-      await handle.writeFile('\n', 'utf8')
+      try {
+        await (trimmer ?? handle).truncate(startSize)
+      } catch {
+        // A whole line is already terminated and already committable: there
+        // is nothing to repair, and nothing for the caller to replay.
+        if (written === expected.length) return true
+        // Terminate the remnant so the flush reader drops that line alone
+        // instead of concatenating it with whatever is appended next.
+        await handle.writeFile('\n', 'utf8')
+        return false
+      }
+      await (trimmer ?? handle).sync()
       return false
+    } finally {
+      await trimmer?.close().catch(() => undefined)
     }
-    await handle.sync()
-    return false
   } catch {
     /* the write path is already failing; the tail stays as it is */
     return false
@@ -545,6 +622,183 @@ function reportPlantedSpoolDir(tablePath, dir) {
       spool_dir: dir,
     })
   } catch { /* a flush must not fail on a logger provider that is not installed */ }
+}
+
+/**
+ * Run one flush pass holding the table's cross-process drain claim, so one
+ * process at a time lists, rotates and drains its rotated files. The
+ * in-process flush lock cannot see a second process: a daemon flush and a
+ * `hyp query --refresh always` could each read the same `flush-*.jsonl`
+ * before either removed it, and both committed it (issue #2580).
+ *
+ * A busy claim is waited out, never skipped. A forced flush resolves only
+ * once everything spooled before it is committed, and the holder may be
+ * committing exactly those rows, so returning early would break that
+ * contract. When the wait runs out the busy error surfaces as a failed flush
+ * and the rows stay in the spool for the next attempt. The guard reclaims a
+ * dead holder's claim on the next attempt, so a killed flusher does not
+ * wedge the drain.
+ *
+ * @ref LLP 0513#drain-claim [implements]: one process drains a table's spool at a time, and a busy claim is waited out
+ * @template T
+ * @param {string} tablePath
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function withDrainClaim(tablePath, fn) {
+  const dir = spoolDir(tablePath)
+  // A planted spool is refused by `listFlushFiles`, and the claim must not
+  // create its lock through it.
+  if (isConfirmedSymlink(dir)) return fn()
+  let entered = false
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await withPartitionMutationLock(path.join(dir, DRAIN_CLAIM_KEY), () => {
+        entered = true
+        return fn()
+      })
+    } catch (error) {
+      // A busy error from inside the pass (a partition guard or the seq
+      // counter) belongs to that pass, not to the claim, and is not retried.
+      if (entered || !isPartitionMutationBusy(error) || attempt >= DRAIN_CLAIM_RETRY_LIMIT) throw error
+      await new Promise(resolve => setTimeout(resolve, DRAIN_CLAIM_RETRY_DELAY_MS))
+    }
+  }
+}
+
+/**
+ * Open `active.jsonl` for append and publish the append's marker, naming the
+ * inode it opened, before anything is written. The inode is in the marker's
+ * name, `.append-<pid>-<ino>-<uuid>`, not its content, so no drain can see a
+ * marker that does not yet say which file it holds.
+ *
+ * The marker has to be visible before a rotation can move the file, or a
+ * drain in another process could list the spool, find no writer, and unlink
+ * the file this append is about to write into (issue #2654). So the inode is
+ * checked against the path after the marker exists: a match means any later
+ * rename comes after the marker, and a mismatch means a rotation got in first,
+ * so this handle is closed unwritten and the open is retried on the new file.
+ *
+ * @ref LLP 0514#marker [implements]: the marker exists before the append can write, and names the file it will write into
+ * @param {string} dir
+ * @param {Set<string>} own the calling instance's markers; the new one is added before it exists on disk
+ * @returns {Promise<{ handle: FileHandle, marker: string }>}
+ */
+async function openActiveFile(dir, own) {
+  const active = path.join(dir, ACTIVE_FILE)
+  for (let attempt = 0; ; attempt++) {
+    // Opened `a+` rather than `a`: writes still append, and the read
+    // side is what lets a failed append verify the tail is its own
+    // bytes before truncating them (see `discardTail`).
+    const handle = await fs.open(active, 'a+', 0o600)
+    let marker = ''
+    let current = false
+    try {
+      const { ino } = await handle.stat({ bigint: true })
+      marker = path.join(dir, `${APPEND_MARKER_PREFIX}${process.pid}-${ino}-${randomUUID()}`)
+      own.add(marker)
+      await fs.writeFile(marker, '', { flag: 'wx', mode: 0o600 })
+      current = await fs.stat(active, { bigint: true }).then((stat) => stat.ino === ino, () => false)
+    } catch (err) {
+      await handle.close().catch(() => undefined)
+      if (marker) await fs.rm(marker, { force: true }).catch(() => undefined)
+      own.delete(marker)
+      throw err
+    }
+    if (current) return { handle, marker }
+    await handle.close().catch(() => undefined)
+    await fs.rm(marker, { force: true }).catch(() => undefined)
+    own.delete(marker)
+    if (attempt >= APPEND_OPEN_RETRY_LIMIT) {
+      throw new Error(`spool active file kept rotating under an append (${dir})`)
+    }
+  }
+}
+
+/**
+ * The append markers in `dir` that belong to a live writer other than the
+ * calling instance, whose own appends never span its own rotation (they run
+ * under the same write lock). Another instance in this process has its own
+ * lock, so only `own` is skipped, never this pid. A marker whose process is
+ * gone is removed here: a killed append writes nothing more, so it holds no
+ * file. Null when the spool cannot be listed, which rules no writer out.
+ *
+ * @ref LLP 0514#dead-writers [implements]: a dead pid's marker is cleared on sight, so a killed writer cannot hold a file forever
+ * @param {string} dir
+ * @param {Set<string>} own
+ * @returns {string[] | null}
+ */
+function foreignAppendMarkers(dir, own) {
+  /** @type {string[]} */
+  let names
+  try {
+    names = fsSync.readdirSync(dir)
+  } catch {
+    return null
+  }
+  /** @type {string[]} */
+  const live = []
+  for (const name of names) {
+    if (!name.startsWith(APPEND_MARKER_PREFIX)) continue
+    const pid = Number(name.slice(APPEND_MARKER_PREFIX.length).split('-')[0])
+    if (!Number.isSafeInteger(pid) || pid <= 0 || own.has(path.join(dir, name))) continue
+    if (!processAlive(pid)) {
+      try { fsSync.unlinkSync(path.join(dir, name)) } catch { /* already gone */ }
+      continue
+    }
+    live.push(name)
+  }
+  return live
+}
+
+/**
+ * Whether one of the listed markers is a live append holding the file with
+ * inode `ino`, read from the marker's name. A marker gone since the listing
+ * belongs to an append that has finished, so its bytes are on disk. A name
+ * this code did not write names no file and holds nothing.
+ *
+ * @param {string} dir
+ * @param {string[]} names
+ * @param {bigint} ino
+ */
+function appendWritingInto(dir, names, ino) {
+  const wanted = String(ino)
+  for (const name of names) {
+    const [pid, recorded] = name.slice(APPEND_MARKER_PREFIX.length).split('-')
+    if (recorded !== wanted) continue
+    if (markerGone(path.join(dir, name))) continue
+    if (processAlive(Number(pid))) return true
+  }
+  return false
+}
+
+/**
+ * Whether the marker at `file` is gone. Only ENOENT says so: any other
+ * failure to stat it (EACCES, EIO) leaves the marker counted, so a fault
+ * keeps the file rather than unlinking it under a live writer.
+ *
+ * @param {string} file
+ */
+function markerGone(file) {
+  try {
+    fsSync.lstatSync(file)
+    return false
+  } catch (err) {
+    return /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT'
+  }
+}
+
+/**
+ * @param {number} pid
+ */
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    // EPERM is a live process this user cannot signal.
+    return /** @type {NodeJS.ErrnoException} */ (err).code !== 'ESRCH'
+  }
 }
 
 /**
@@ -741,7 +995,7 @@ async function readLastFlushAt(tablePath) {
 async function writeFlushFailure(tablePath, err) {
   const message = err instanceof Error ? err.message : String(err)
   try {
-    await fs.mkdir(spoolDir(tablePath), { recursive: true })
+    await fs.mkdir(spoolDir(tablePath), { recursive: true, mode: 0o700 })
     await atomicWriteJson(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), {
       failedAt: new Date().toISOString(),
       errorMessage: message.slice(0, FLUSH_FAILURE_MESSAGE_MAX),

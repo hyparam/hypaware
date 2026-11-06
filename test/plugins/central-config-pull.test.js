@@ -8,6 +8,7 @@ import {
   createConfigPullLoop,
 } from '../../hypaware-core/plugins-workspace/central/src/config_client.js'
 import { parseRetryAfter } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
+import { PRODUCT_VERSION } from '../../src/core/product_telemetry/collection.js'
 
 function makeLog() {
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
@@ -103,6 +104,7 @@ test('start pulls immediately; a 200 confirms the poll and stages the document w
   assert.equal(requests.length, 1)
   assert.ok(requests[0].url.endsWith('/v1/config'))
   assert.equal(requests[0].headers.authorization, 'Bearer jwt-1')
+  assert.equal(requests[0].headers['x-hyp-client-version'], PRODUCT_VERSION)
   // No running config etag → no If-None-Match (first 200 must happen).
   assert.equal('if-none-match' in requests[0].headers, false)
   assert.equal(control.confirms, 1)
@@ -134,6 +136,7 @@ test('401 refreshes the JWT and retries once; a second 401 escalates without sta
   await loop.stop()
   assert.equal(identityClient.refreshes, 1)
   assert.equal(ok.requests.length, 2)
+  assert.ok(ok.requests.every(request => request.headers['x-hyp-client-version'] === PRODUCT_VERSION))
   assert.equal(control.confirms, 1)
 
   const identity2 = makeIdentity()

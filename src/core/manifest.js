@@ -227,10 +227,10 @@ function validateCommandContributions(commands) {
 
 /**
  * Recognized `PickerDetectProbe` variant keys. Exactly one must be
- * present, carrying a non-empty string path.
+ * present, carrying a path, extension identifier, or dependency names.
  * @ref LLP 0130#picker-block: the declarative picker probe variants.
  */
-const PICKER_PROBE_KEYS = ['settings_file', 'app_bundle', 'path']
+const PICKER_PROBE_KEYS = ['settings_file', 'app_bundle', 'path', 'vscode_extension', 'project_dependencies']
 
 /**
  * Validate `contributes.picker`. It is optional; when present it must be
@@ -287,8 +287,7 @@ function validatePickerContributions(picker) {
 
 /**
  * Validate a single `PickerDetectProbe`: a plain object carrying exactly
- * one recognized variant key (`settings_file` / `app_bundle` / `path`)
- * whose value is a non-empty string.
+ * one recognized variant key and its corresponding data.
  *
  * @param {unknown} detect
  * @returns {{ ok: true } | { ok: false, errorKind: ManifestErrorKind, message: string }}
@@ -304,7 +303,13 @@ function validatePickerProbe(detect) {
       `contributes.picker detect must set exactly one of ${PICKER_PROBE_KEYS.join(', ')}`
     )
   }
-  if (!isNonEmptyString(d[present[0]])) {
+  if (present[0] === 'project_dependencies') {
+    const deps = d.project_dependencies
+    if (!isPlainObject(deps) || Object.keys(deps).length === 0 ||
+      Object.entries(deps).some(([key, value]) => !['npm', 'python'].includes(key) || !isNonEmptyString(value))) {
+      return invalid('contributes.picker detect.project_dependencies must name npm and/or python dependencies')
+    }
+  } else if (!isNonEmptyString(d[present[0]])) {
     return invalid(`contributes.picker detect.${present[0]} must be a non-empty string`)
   }
   return { ok: true }

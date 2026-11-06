@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/droid",
+  "version": "1.0.0",
+  "description": "Factory Droid native transcript capture through hooks and bounded recovery.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "network",
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_state"
+  ],
+  "contributes": {
+    "client": {
+      "name": "droid",
+      "skill_dir": ".factory/skills",
+      "attach_probe": {
+        "format": "json",
+        "settings_file": ".factory/hooks.json",
+        "marker_key": "_hypaware"
+      }
+    },
+    "picker": [
+      {
+        "name": "droid",
+        "label": "Factory Droid",
+        "summary": "Records Factory Droid conversations and imports recent history. Setup adds HypAware hooks.",
+        "detect": {
+          "settings_file": ".factory/settings.json"
+        },
+        "compose": {
+          "plugin": {
+            "name": "@hypaware/droid"
+          }
+        }
+      }
+    ],
+    "sources": [
+      {
+        "name": "droid"
+      }
+    ],
+    "commands": [
+      {
+        "name": "session ignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)"
+      },
+      {
+        "name": "session unignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Resume recording this AI session"
+      },
+      {
+        "name": "session status",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Report whether this AI session is being dropped right now (fails closed)"
+      }
+    ],
+    "skills": [
+      {
+        "name": "hypaware-query",
+        "clients": [
+          "droid"
+        ]
+      },
+      {
+        "name": "hypaware-reference",
+        "clients": [
+          "droid"
+        ]
+      },
+      {
+        "name": "hypaware-privacy",
+        "clients": [
+          "droid"
+        ]
+      },
+      {
+        "name": "hypaware-report",
+        "clients": [
+          "droid"
+        ]
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "droid",
+        "summary": "Factory Droid listener, attach and scheduled session recovery."
+      }
+    ]
+  }
+}

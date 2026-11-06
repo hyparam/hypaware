@@ -29,12 +29,14 @@ export function requireGithubRuntime() {
 
 /**
  * Build a GitHub client for the current config. Authentication is resolved by
- * the client from the configured environment or the local GitHub CLI store.
+ * the client from the environment, selected local OAuth, or legacy GitHub CLI.
  *
  * @param {GithubRuntime} rt
+ * @param {AbortSignal} [signal] the capture invocation the client serves; a
+ *   fresh client per invocation keeps one stop from reaching another run
  * @returns {GithubClient}
  */
-export function getClient(rt) {
-  if (rt.clientFactory) return rt.clientFactory()
-  return createGithubClient({ tokenEnv: rt.config.token_env, env: rt.env, log: rt.log })
+export function getClient(rt, signal) {
+  if (rt.clientFactory) return rt.clientFactory({ signal })
+  return createGithubClient({ tokenEnv: rt.config.token_env, env: rt.env, log: rt.log, stateDir: rt.stateDir, signal })
 }

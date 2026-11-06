@@ -309,6 +309,30 @@ install is a host packaging defect, and close the question.
    Active, so the answer lands as a new document with a forward-ref on
    0353, not as an edit to it.
 
+## Disposition of #1215 item 1 {#disposition}
+
+Recorded from the [2026-10-05 triage decision on
+#1215](https://github.com/hyparam/hypaware/issues/1215#issuecomment-6003725610).
+It takes a limited form of Option 1 and does not change this document's
+status.
+
+- The nominal `GrepQueryError` contract stands. A host injecting
+  `ctx.search` must construct its refusals from the same exported
+  `GrepQueryError` constructor, from the same module instance, as the verb
+  that recognises them.
+- No `Symbol.for` brand, no name matching, and no new type-guard API is
+  added to cover a duplicate `hypaware` install.
+- The known degradation is accepted. Under a duplicate install, a backend
+  refusal reaches the CLI as exit 1 rather than exit 2, with its message
+  intact.
+
+Against `#decision-needs`: the exit-2 property is given up for the
+duplicate-install topology (1); recognition does not change (2);
+enforcement stays with the host, and the kernel hands it nothing new to
+assert with (3); the requirement is a documented contract line in this
+record (4); and since `#refusals` is unchanged, nothing extends or
+supersedes LLP 0353 (5).
+
 ## What this document does not open {#not-opened}
 
 - The seam's argument shape, the local adapter closure, the limit clamp

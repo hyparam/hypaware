@@ -69,6 +69,12 @@ test('classifyAwsError uses .Code when .name is missing', () => {
   assert.equal(classifyAwsError({ Code: 'SlowDown' }), 's3_throttled')
 })
 
+test('classifyAwsError maps InvalidRange and HTTP 416 to blob_range_unsatisfiable', () => {
+  assert.equal(classifyAwsError({ name: 'InvalidRange', $metadata: { httpStatusCode: 416 } }), 'blob_range_unsatisfiable')
+  assert.equal(classifyAwsError({ Code: 'InvalidRange' }), 'blob_range_unsatisfiable')
+  assert.equal(classifyAwsError({ name: 'S3ServiceException', $metadata: { httpStatusCode: 416 } }), 'blob_range_unsatisfiable')
+})
+
 test('classifyAwsError falls back to s3_put_failed for unknown errors', () => {
   assert.equal(classifyAwsError(new Error('some non-AWS thing exploded')), 's3_put_failed')
   assert.equal(classifyAwsError({ name: 'TotallyUnknownError' }), 's3_put_failed')
@@ -92,6 +98,7 @@ test('describeS3ErrorKind returns a non-empty diagnostic for every error kind', 
     's3_put_failed',
     's3_throttled',
     'encoder_failed',
+    'blob_range_unsatisfiable',
   ]
   for (const kind of allKinds) {
     const description = describeS3ErrorKind(kind)

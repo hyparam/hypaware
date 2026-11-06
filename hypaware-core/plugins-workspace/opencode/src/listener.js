@@ -3,13 +3,14 @@
 import http from 'node:http'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
+import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { SESSION_IGNORE_ROUTE, createControlHandler, isControlPath } from '../../../../src/core/control/session_ignore.js'
 import { isMisdirectedHost, listenAndResolve, requestUrlOf } from '../../../../src/core/otlp/server.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
-import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
+import { declaresBodyOverDrainCap, drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_writer.js'
 import { opencodeListenPort } from './config.js'
-import { projectOpenCodeSnapshot } from './projector.js'
+import { openCodeSessionCwd, projectOpenCodeSnapshot } from './projector.js'
 
 /**
  * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
@@ -81,6 +82,14 @@ export function createStartOpenCodeSource(deps) {
         return
       }
       if (req.method === 'GET' && url.pathname === '/') {
+        // Readiness reads no body. Left untouched, Node's `_dump()` fallback
+        // still reads whatever the sender attaches to EOF, so a body the drain
+        // cap would cut is refused outright and any other is discarded under it.
+        if (declaresBodyOverDrainCap(req)) {
+          rejectJson(req, res, 413, { error: 'request body too large' })
+          return
+        }
+        drainRequestBody(req, res)
         sendJson(res, 200, { name: 'hypaware/opencode', status: 'ready' })
         return
       }
@@ -154,7 +163,8 @@ export function createStartOpenCodeSource(deps) {
             listener_started_at: startedAt,
           },
         }
-        if (state.lastError) status.lastError = state.lastError
+        const error = sessionIgnoreLoadError(ignoredSessions) ?? state.lastError
+        if (error) status.lastError = error
         return status
       },
       async stop() {
@@ -192,16 +202,14 @@ async function receiveSnapshot(req, res, deps) {
         deps.state.lastEventAt = new Date().toISOString()
         const session = raw && typeof raw === 'object' ? raw.session : undefined
         const sessionId = session && typeof session === 'object' && typeof session.id === 'string' ? session.id : undefined
-        if (sessionId && deps.ignoredSessions.has(sessionId)) {
+        if (sessionIgnoreLoadError(deps.ignoredSessions) || (sessionId && deps.ignoredSessions.has(sessionId))) {
           deps.state.sessionDrops += 1
           span.setAttribute('status', 'skipped')
           span.setAttribute('error_kind', 'session_ignored')
           sendJson(res, 202, { status: 'skipped', reason: 'session_ignored' })
           return
         }
-        const cwd = session && typeof session === 'object' && typeof session.directory === 'string'
-          ? session.directory
-          : undefined
+        const cwd = openCodeSessionCwd(session)
         if (!cwd) {
           deps.state.missingCwd += 1
           deps.ctx.log.warn('opencode.snapshot.missing_cwd', {

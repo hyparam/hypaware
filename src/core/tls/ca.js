@@ -8,6 +8,7 @@ import tls from 'node:tls'
 
 import { atomicWriteFile, errCode, sanitizeLabel } from 'hypaware/core/util'
 import { generateKeyPair, mintCertificate, readNameConstraints } from './x509.js'
+import { stateRootFromEnv, tlsDir } from '../runtime/paths.js'
 
 /**
  * The machine-local certificate authority that proxy-mode capture terminates
@@ -38,7 +39,6 @@ import { generateKeyPair, mintCertificate, readNameConstraints } from './x509.js
  * @ref LLP 0235#client-scoped-trust: trust is scoped to the attached client's own settings file, which is why proxy mode needs no privileged install step
  */
 
-const CA_DIR_NAME = 'tls'
 const CA_KEY_FILE = 'ca-key.pem'
 const CA_CERT_FILE = 'ca-cert.pem'
 
@@ -98,8 +98,7 @@ export const INTERCEPT_PROVIDER_HOSTS = Object.freeze([
  * @returns {string}
  */
 export function defaultStateRoot(env = process.env, homeDir = os.homedir()) {
-  const hypHome = env.HYP_HOME || path.join(homeDir, '.hyp')
-  return path.join(hypHome, 'hypaware')
+  return stateRootFromEnv(env, homeDir)
 }
 
 /**
@@ -109,7 +108,7 @@ export function defaultStateRoot(env = process.env, homeDir = os.homedir()) {
  * @returns {{ dir: string, keyPath: string, certPath: string }}
  */
 export function caPaths(stateRoot) {
-  const dir = path.join(stateRoot, CA_DIR_NAME)
+  const dir = tlsDir(stateRoot)
   return {
     dir,
     keyPath: path.join(dir, CA_KEY_FILE),

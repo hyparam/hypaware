@@ -19,6 +19,15 @@ export const LAUNCH_LABEL = 'com.hyperparam.hypaware'
 export const SYSTEMD_UNIT_BASE = 'hypaware'
 
 /**
+ * Task Scheduler folder the per-user Windows daemon task lives in. The task
+ * itself is `\<WIN32_TASK_FOLDER>\<SID>`: the library is machine-wide with no
+ * per-user domain (unlike `launchctl … gui/<uid>` / `systemctl --user`), so
+ * the user's SID keys the leaf to keep two users on one machine apart.
+ * @ref LLP 0584#naming [implements]: the task is keyed per-user by SID
+ */
+export const WIN32_TASK_FOLDER = 'hypaware'
+
+/**
  * Default directory for daemon stdout/stderr logs: `~/.hyp/hypaware/logs`.
  *
  * @param {string} [homeDir]
@@ -99,15 +108,41 @@ export function unitFileName(label = SYSTEMD_UNIT_BASE) {
 export function daemonKindLabel(platform = process.platform) {
   if (platform === 'darwin') return `LaunchAgent: ${LAUNCH_LABEL}`
   if (platform === 'linux') return `systemd unit: ${unitFileName(SYSTEMD_UNIT_BASE)}`
+  if (platform === 'win32') return `Scheduled Task: \\${WIN32_TASK_FOLDER}`
   return `daemon (${platform})`
 }
 
 /**
+ * Whether the daemon service family (`hyp daemon install / uninstall / start /
+ * stop / restart / status`) is supported on `platform`. win32 joined macOS and
+ * Linux once the Scheduled Task backend landed (LLP 0584): the gate LLP 0300
+ * named as "falling only with a Windows service installer".
+ *
+ * This is deliberately wider than {@link setupPlatformIsSupported}: the service
+ * family opens on win32 now, while the full `hyp setup` wizard stays gated for
+ * a focused follow-up (LLP 0584 #gate).
+ *
  * @param {NodeJS.Platform} [platform]
  * @returns {boolean}
- * @ref LLP 0017#install-global-package-then-service-manager [constrained-by]: V1 service install targets macOS launchd + Linux systemd only
+ * @ref LLP 0584#task [implements]: the per-user Scheduled Task backend lets this gate include win32
  */
 export function platformIsSupported(platform = process.platform) {
+  return platform === 'darwin' || platform === 'linux' || platform === 'win32'
+}
+
+/**
+ * Whether the guided `hyp setup` onboarding wizard runs on `platform`. Still
+ * macOS/Linux only: LLP 0584 opened the daemon service family on win32 but
+ * deliberately left the wizard - first-look, the attach cascade, skills,
+ * backfill, the finale - gated for its own pass, since that interactive
+ * surface has never run end-to-end on Windows. A Windows user onboards with
+ * `hyp daemon install` and `hyp client attach <x>` until that follow-up.
+ *
+ * @param {NodeJS.Platform} [platform]
+ * @returns {boolean}
+ * @ref LLP 0584#gate [implements]: the installer opens; the setup wizard does not, yet
+ */
+export function setupPlatformIsSupported(platform = process.platform) {
   return platform === 'darwin' || platform === 'linux'
 }
 
@@ -121,8 +156,10 @@ export function platformIsSupported(platform = process.platform) {
  *
  * The remediation prints only where it can work. `hyp daemon install` is the
  * fix on a platform with a service manager; on one without, no run of it
- * would finish, so the note says the machine captures nothing instead of
- * naming a command that cannot help (#978).
+ * would finish, so the note names the missing service instead of a command
+ * that cannot help (#978). It stops there: `hyp daemon run --foreground`
+ * still captures on such a platform, so claiming nothing can be captured
+ * would be an absolute the CLI itself disproves (#1381).
  *
  * Here rather than beside either caller: it branches on `platformIsSupported`,
  * and this is the leaf both lanes reach without closing an import cycle.
@@ -135,5 +172,25 @@ export function daemonIncompleteNote(platform, context) {
   const lead = context ? `${context}, but ` : ''
   return platformIsSupported(platform)
     ? `note: ${lead}the daemon install did not finish - run 'hyp daemon install'\n`
-    : `note: ${lead}${platform} has no background service to install - nothing is captured on this machine\n`
+    : `note: ${lead}${platform} has no background service to install\n`
+}
+
+/**
+ * What setup prints when it refuses a platform with no service manager, or
+ * `undefined` when the platform is supported (#975). Here for the same reason
+ * as `daemonIncompleteNote`: dispatch refuses every CLI setup form and the
+ * wizard refuses a direct `runInitWizard` call, and this leaf is reachable
+ * from both without an import cycle.
+ *
+ * @param {NodeJS.Platform} platform
+ * @returns {string | undefined}
+ */
+export function setupUnsupportedNote(platform) {
+  if (setupPlatformIsSupported(platform)) return undefined
+  const note = `hyp setup: unsupported platform: ${platform} (only macOS and Linux are supported)\n`
+    + '  nothing was changed: no sign-in, enrollment or config write happened\n'
+  // @ref LLP 0584#gate: the daemon runs on win32 even though setup does not, so point at the manual path
+  return platform === 'win32'
+    ? note + "  on Windows, set up by hand: run 'hyp daemon install', then 'hyp client attach <client>'\n"
+    : note
 }

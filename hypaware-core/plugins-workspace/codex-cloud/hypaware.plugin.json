@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/codex-cloud",
+  "version": "0.1.0",
+  "description": "Beta local collection of hosted Codex Cloud and ChatGPT Work chats through an existing Codex ChatGPT login.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22.12",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_state",
+    "network"
+  ],
+  "requires": {
+    "capabilities": {
+      "hypaware.ai-gateway": "^2.0.0"
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "name": "codex-cloud connect",
+        "summary": "Connect cloud chats to the existing local ChatGPT login (beta)"
+      },
+      {
+        "name": "codex-cloud disconnect",
+        "summary": "Stop collecting connected cloud chats"
+      },
+      {
+        "name": "codex-cloud status",
+        "summary": "Show the local cloud chat selection"
+      }
+    ],
+    "picker": [
+      {
+        "name": "codex-cloud",
+        "label": "Codex Cloud (beta)",
+        "summary": "Records hosted Codex coding chats using your existing Codex ChatGPT login. Imports existing history.",
+        "compose": {
+          "plugin": {
+            "name": "@hypaware/codex-cloud",
+            "config": {}
+          },
+          "requires_gateway": true
+        },
+        "detect": {
+          "settings_file": ".codex/config.toml"
+        }
+      },
+      {
+        "name": "chatgpt-work",
+        "label": "ChatGPT Work (beta)",
+        "summary": "Records Work web and mobile chats together using your existing Codex ChatGPT login.",
+        "compose": {
+          "plugin": {
+            "name": "@hypaware/codex-cloud",
+            "config": {}
+          },
+          "requires_gateway": true
+        }
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "codex-cloud",
+        "summary": "Hosted chat backfill policy (on_join, window_days, sweep_cron)."
+      }
+    ]
+  }
+}

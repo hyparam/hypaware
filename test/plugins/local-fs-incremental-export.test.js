@@ -180,8 +180,11 @@ test('local-fs incremental export: ranged filename, watermark advance, skip-empt
   const dir = path.join(exportsDir, 'out')
 
   // Tick 1: two new rows ⇒ one blob named with [0,2].
-  const r1 = await sink.exportBatch({ batchId: 'b1', partitions: [partition()] }, {})
+  const progress = []
+  const opts = { onProgress: (delta) => progress.push(delta) }
+  const r1 = await sink.exportBatch({ batchId: 'b1', partitions: [partition()] }, opts)
   assert.equal(r1.status, 'exported')
+  assert.deepEqual(progress, [{ rows: 2, bytes: r1.bytesWritten }])
   assert.equal(r1.partitionsExported, 1)
   let blobs = await listBlobs(dir)
   assert.deepEqual(blobs, ['all.0-2.jsonl'], 'first blob embeds [sinceSeq=0, lastSeq=2]')
@@ -192,14 +195,18 @@ test('local-fs incremental export: ranged filename, watermark advance, skip-empt
   assert.equal(wm.exportedRowCount, 2)
 
   // Tick 2: no new rows ⇒ no new blob (skip-empty), watermark unchanged.
-  const r2 = await sink.exportBatch({ batchId: 'b2', partitions: [partition()] }, {})
+  const r2 = await sink.exportBatch({ batchId: 'b2', partitions: [partition()] }, opts)
+  assert.equal(progress.length, 1, 'an empty export reports no acknowledged rows')
   assert.equal(r2.partitionsExported, 0, 'no new rows ⇒ nothing exported')
   blobs = await listBlobs(dir)
   assert.deepEqual(blobs, ['all.0-2.jsonl'], 'no second blob written')
 
-  // Tick 3: append a row ⇒ a new blob covering only (2, 5].
+  // Tick 3: append a row ⇒ a new blob covering only (2, 5]. Called with no
+  // options at all, which the progress report must tolerate: the export
+  // contract requires the argument, but reading a field off it is new here,
+  // and a bare read would turn an omitted argument into a failed batch.
   rows.push({ _seq: 5, id: 'c' })
-  const r3 = await sink.exportBatch({ batchId: 'b3', partitions: [partition()] }, {})
+  const r3 = await sink.exportBatch({ batchId: 'b3', partitions: [partition()] }, /** @type {any} */ (undefined))
   assert.equal(r3.partitionsExported, 1)
   blobs = await listBlobs(dir)
   assert.deepEqual(blobs, ['all.0-2.jsonl', 'all.2-5.jsonl'], 'second blob embeds [sinceSeq=2, lastSeq=5]')
@@ -236,4 +243,31 @@ test('local-fs drop-only tick: no blob is written, but the watermark advances pa
   assert.equal(wm.exportedRowCount, 0, 'a withheld row is never counted as exported')
 
   await sink.close()
+})
+
+test('local-fs export directories and blobs are owner-only whatever the umask (LLP 0569)', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async (t) => {
+  const base = await tmpDir()
+  const stateDir = await tmpDir()
+  t.after(() => fs.rm(base, { recursive: true, force: true }))
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
+  const exportsDir = path.join(base, 'exports')
+
+  const previous = process.umask(0o000)
+  try {
+    const sink = await buildSink({ rows: [{ _seq: 1, id: 'a' }], exportsDir, stateDir })
+    const r = await sink.exportBatch({ batchId: 'b1', partitions: [partition()] })
+    assert.equal(r.status, 'exported')
+  } finally {
+    process.umask(previous)
+  }
+
+  /** @param {string} p */
+  const modeOf = async (p) => (await fs.stat(p)).mode & 0o777
+  const dir = path.join(exportsDir, 'out')
+  assert.equal(await modeOf(exportsDir), 0o700, 'exports base dir')
+  assert.equal(await modeOf(dir), 0o700, 'sink dir')
+  assert.equal(await modeOf(path.join(dir, DATASET)), 0o700, 'dataset dir')
+  assert.equal(await modeOf(path.join(dir, DATASET, 'all')), 0o700, 'partition dir')
+  const [blob] = await listBlobs(dir)
+  assert.equal(await modeOf(path.join(dir, DATASET, 'all', blob)), 0o600, 'exported blob')
 })

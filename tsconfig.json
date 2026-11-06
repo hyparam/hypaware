@@ -21,7 +21,6 @@
     "test"
   ],
   "exclude": [
-    "hypaware-core/plugins-workspace/*/skills",
-    "src/core/reports/assets"
+    "hypaware-core/plugins-workspace/*/skills"
   ]
 }

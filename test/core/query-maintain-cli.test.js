@@ -119,7 +119,7 @@ test('hyp query maintain writes a stderr line when the walk loses a partition', 
     assert.equal(exitCode, 1, 'a degraded tick must still exit non-zero')
     assert.match(
       stderr.text(),
-      /^hyp query maintain: 1 partition\(s\) failed; the walk continued$/m,
+      /^hyp query maintain: 1 partition\(s\) failed\b/m,
       'a caller that only captures stderr must see the walk lost a partition'
     )
   } finally {

@@ -28,8 +28,9 @@ const SWEEP_OPERATION = 'backfill.sweep'
  * `already_running` at it. Nothing recovers that short of a daemon restart, so
  * the wait carries a bound.
  *
- * Six times the tightest cadence any shipped contribution sweeps on (every
- * five minutes), so a slow cold scan that outruns its own interval is not what
+ * Comfortably clear of the tightest cadence any shipped contribution sweeps
+ * on (Codex, every minute; every other shipped sweep is every five), so a
+ * slow cold scan that outruns its own interval is not what
  * this clips: in practice only a run with no settlement left in it reaches the
  * bound. The run cannot be cancelled, so an abandoned provider keeps its
  * `inFlight` entry until its promise really settles, the same rule
@@ -375,9 +376,10 @@ export function createBackfillSweepDriver(opts) {
   /**
    * @param {BackfillSweepProviderIdentity} identity
    * @param {string} devRunId
-   * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }} result
+   * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string }} result
    */
   function logSettled(identity, devRunId, result) {
+    reportOutcome(identity, result.ok)
     log.info('backfill.sweep_finished', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
@@ -385,7 +387,7 @@ export function createBackfillSweepDriver(opts) {
       [Attr.DEV_RUN_ID]: devRunId,
       provider: identity.name,
       status: result.ok ? 'ok' : 'failed',
-      ...(result.ok ? {} : { [Attr.ERROR_KIND]: 'provider_run_failed' }),
+      ...(result.ok ? {} : { [Attr.ERROR_KIND]: result.errorKind ?? 'provider_run_failed' }),
       items_seen: result.scanned,
       rows_written: result.rowsWritten,
       rows_skipped: result.skipped,
@@ -401,6 +403,7 @@ export function createBackfillSweepDriver(opts) {
    * @param {string} devRunId
    */
   function logAbandoned(identity, devRunId) {
+    reportOutcome(identity, false)
     log.warn('backfill.sweep_queue_abandoned', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
@@ -419,6 +422,7 @@ export function createBackfillSweepDriver(opts) {
    * @param {unknown} err
    */
   function logFailed(identity, devRunId, err) {
+    reportOutcome(identity, false)
     log.error('backfill.sweep_failed', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
@@ -429,6 +433,21 @@ export function createBackfillSweepDriver(opts) {
       status: 'failed',
       error: describeThrown(err),
     })
+  }
+
+  /**
+   * Bookkeeping must not turn a handled run into an unhandled rejection.
+   * @ref LLP 0583#failures [implements]: publish only the latest provider outcome
+   * @param {BackfillSweepProviderIdentity} identity
+   * @param {boolean} ok
+   */
+  function reportOutcome(identity, ok) {
+    try { opts.onResult?.(identity, ok) } catch {
+      log.warn('backfill.sweep_status_failed', {
+        [Attr.COMPONENT]: SWEEP_COMPONENT, [Attr.OPERATION]: SWEEP_OPERATION,
+        provider: identity.name, status: 'failed', [Attr.ERROR_KIND]: 'status_update_failed',
+      })
+    }
   }
 
   return { tick }

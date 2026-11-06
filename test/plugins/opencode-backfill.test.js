@@ -6,7 +6,47 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createOpenCodeBackfillProvider } from '../../hypaware-core/plugins-workspace/opencode/src/backfill.js'
+import { createOpenCodeBackfillProvider, createOpenCodeCommandRunner, runOpenCode } from '../../hypaware-core/plugins-workspace/opencode/src/backfill.js'
+
+test('real CLI command selection lists global metadata, including children, on each major', async () => {
+  for (const major of [1, 2]) {
+    const calls = []
+    const run = createOpenCodeCommandRunner(async args => {
+      calls.push(args)
+      if (args[0] === '--version') return major === 1 ? 'opencode v1.18.22\n' : 'opencode v2.2.4\n'
+      if (args[0] === 'db') return JSON.stringify([{ id: 'ses_child', directory: '/other/repo', updated: 1000 }])
+      if (args[0] === 'api') return JSON.stringify({ data: [{ id: 'ses_child', parentID: 'ses_parent', location: { directory: '/other/repo' }, time: { updated: 1000 } }], cursor: {} })
+      return '{}'
+    })
+    const listed = JSON.parse(await run(['session', 'list'], 10000))
+    assert.equal(listed[0].id, 'ses_child')
+    assert.equal(listed[0].directory, '/other/repo')
+    await run(['export', 'ses_child'], 60000)
+    assert.equal(calls.filter(args => args[0] === '--version').length, 1)
+    // A failed export's warning names the command that actually ran.
+    assert.equal(run.commandLine(['export', 'ses_child']), major === 1 ? 'opencode export ses_child' : 'opencode session export ses_child')
+    if (major === 1) {
+      assert.match(calls[1][1], /FROM session ORDER BY.*LIMIT 1000/)
+      assert.doesNotMatch(calls[1][1], /WHERE|parent_id|project_id/)
+      assert.deepEqual(calls[2], ['export', 'ses_child'])
+    } else {
+      assert.deepEqual(calls[1], ['api', 'session.list', '--param', 'limit=1000', '--param', 'order=desc'])
+      assert.deepEqual(calls[2], ['session', 'export', 'ses_child'])
+    }
+  }
+  // 1.0 through 1.2 have no `db` command; they keep the project-scoped list.
+  const legacyCalls = []
+  const legacy = createOpenCodeCommandRunner(async args => {
+    legacyCalls.push(args)
+    return args[0] === '--version' ? '1.2.27\n' : '[]'
+  })
+  await legacy(['session', 'list', '--format', 'json', '--max-count', '1000'], 10000)
+  assert.deepEqual(legacyCalls[1], ['session', 'list', '--format', 'json', '--max-count', '1000'])
+  const unsupported = createOpenCodeCommandRunner(async () => 'opencode v3.0.0\n')
+  await assert.rejects(unsupported(['session', 'list'], 10000), {
+    message: 'Unsupported OpenCode version opencode v3.0.0: history import supports OpenCode 1.x and 2.x.',
+  })
+})
 
 /**
  * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -268,7 +308,13 @@ test('OpenCode backfill reports no history rather than a failure when the CLI is
 
   const { items, events } = await collect(provider.run(ctx))
   assert.deepEqual(items, [])
-  assert.deepEqual(events, [])
+  // Ok is not "empty": the note tells setup and `hyp backfill` the import
+  // could not run, and how to retry once PATH is fixed.
+  assert.deepEqual(events.map((e) => e.event), ['import_unavailable'])
+  assert.equal(events[0].attributes?.reason, 'opencode_cli_absent')
+  assert.match(String(events[0].attributes?.note), /opencode was not found on PATH/)
+  assert.match(String(events[0].attributes?.note), /live capture is unaffected/)
+  assert.match(String(events[0].attributes?.note), /hyp backfill opencode/)
   assert.deepEqual(logged.map((l) => l.event), ['opencode.backfill.cli_absent'])
   assert.equal(logged[0].attrs.status, 'ok')
   assert.equal(logged[0].attrs.reason, 'opencode_cli_absent')
@@ -282,4 +328,100 @@ test('OpenCode backfill still fails when the list command runs and errors', asyn
     async runCommand() { throw new Error('opencode exited with code 1') },
   })
   await assert.rejects(collect(provider.run(runContext())), /exited with code 1/)
+})
+
+/**
+ * Put a real `opencode` on PATH that starts and never exits. The timeout has
+ * to kill an actual child for the two tests below to mean anything: a fake
+ * `runCommand` that rejects with a timeout error would only prove the test
+ * wrote one.
+ *
+ * @returns {Promise<() => Promise<void>>} restores PATH and removes the shim
+ */
+async function hangingOpenCodeOnPath() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-opencode-hang-'))
+  if (process.platform === 'win32') {
+    // A pure-batch spin: the runner drives this through cmd.exe, whose kill
+    // reaches only cmd itself, and anything cmd spawned (sleep, ping) would
+    // be a grandchild holding the stdout pipe open past the kill - execFile
+    // settles only once every stdio stream closes.
+    await fs.writeFile(path.join(root, 'opencode.cmd'), '@ECHO OFF\r\n:loop\r\ngoto loop\r\n')
+  } else {
+    const bin = path.join(root, 'opencode')
+    // `exec` so the signal reaches the sleep itself, leaving no orphan holding
+    // the stdout pipe open past the kill.
+    await fs.writeFile(bin, '#!/bin/sh\nexec sleep 30\n', 'utf8')
+    await fs.chmod(bin, 0o755)
+  }
+  const priorPath = process.env.PATH
+  process.env.PATH = `${root}${path.delimiter}${priorPath ?? ''}`
+  return async () => {
+    process.env.PATH = priorPath
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}
+
+// An `opencode` child that starts and never exits used to park the daemon's
+// scheduled sweep forever: the promise never settled, and `ctx.signal` is only
+// read between sessions, so the abort was not observed either. Both tests run
+// the real runner against a real hung child and shorten only the wait, then
+// assert the budget the call site chose alongside.
+test('a hung OpenCode session listing is killed on its budget and fails the run', async () => {
+  const restore = await hangingOpenCodeOnPath()
+  /** @type {number[]} */
+  const budgets = []
+  try {
+    const provider = createOpenCodeBackfillProvider({
+      runCommand(args, timeoutMs) {
+        budgets.push(timeoutMs)
+        return runOpenCode(args, 300)
+      },
+    })
+    await assert.rejects(
+      collect(provider.run(runContext())),
+      /opencode session list --format json --max-count 1000 timed out after 300ms/,
+    )
+    assert.deepEqual(budgets, [10_000])
+  } finally {
+    await restore()
+  }
+})
+
+test('a hung OpenCode export is killed on its budget and warns past the session', async () => {
+  const restore = await hangingOpenCodeOnPath()
+  /** @type {number[]} */
+  const budgets = []
+  /** @type {{ event: string, attrs: Record<string, any> }[]} */
+  const warnings = []
+  try {
+    const provider = createOpenCodeBackfillProvider({
+      exactSessionIds: ['ses_hangs', 'ses_hangs_too'],
+      runCommand(args, timeoutMs) {
+        budgets.push(timeoutMs)
+        return runOpenCode(args, 300)
+      },
+    })
+    const ctx = runContext()
+    ctx.log = /** @type {any} */ ({
+      info() {},
+      debug() {},
+      error() {},
+      warn(/** @type {string} */ event, /** @type {any} */ attrs) { warnings.push({ event, attrs }) },
+    })
+
+    const { items } = await collect(provider.run(ctx))
+
+    assert.deepEqual(items, [])
+    assert.deepEqual(budgets, [60_000, 60_000])
+    assert.deepEqual(warnings.map((w) => w.event), [
+      'opencode.backfill.session_read_failed',
+      'opencode.backfill.session_read_failed',
+    ])
+    assert.deepEqual(warnings.map((w) => w.attrs.session_id), ['ses_hangs', 'ses_hangs_too'])
+    assert.equal(warnings[0].attrs.error_kind, 'session_read_failed')
+    assert.equal(warnings[0].attrs.source_path, 'opencode export ses_hangs')
+    assert.match(warnings[0].attrs.error, /opencode export ses_hangs timed out after 300ms/)
+  } finally {
+    await restore()
+  }
 })

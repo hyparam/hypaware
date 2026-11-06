@@ -1,5 +1,6 @@
 // @ts-check
 
+import { sessionIgnoreLoadError } from './session_ignore_store.js'
 import { drainRequestBody } from '../util/reject_body.js'
 
 /**
@@ -42,6 +43,12 @@ export const SESSION_IGNORE_ROUTE = 'ignore/session'
  * `drainRequestBody`.
  */
 const MAX_BODY_BYTES = 64 * 1024
+
+// A media-type refusal is always counted, but logged at most this often. The
+// route is unauthenticated and reachable by the browser page the gate exists
+// to refuse, so a line per refusal would trade blocked set growth for
+// unbounded growth in `logs`. Same posture as the opencode snapshot route.
+const REFUSED_MEDIA_TYPE_LOG_INTERVAL_MS = 60 * 1000
 
 /**
  * Recognize the reserved `/_hypaware/` local control prefix. Uses the same
@@ -104,6 +111,8 @@ export function createControlHandler(opts) {
   const log = opts.log
   const logEvent = opts.logEvent ?? 'aigw.control.ignore_session'
   const logFields = opts.logFields ?? { component: 'ai-gateway' }
+  let refusedMediaTypes = 0
+  let refusedMediaTypeLoggedAt = -Infinity
 
   /**
    * @param {IncomingMessage} req
@@ -114,6 +123,13 @@ export function createControlHandler(opts) {
     if (url.pathname !== SESSION_IGNORE_CONTROL_PATH) {
       drainRequestBody(req, res)
       sendJson(res, 404, { error: 'unknown control path', path: url.pathname })
+      return
+    }
+
+    const loadError = sessionIgnoreLoadError(ignoredSessions)
+    if (loadError) {
+      drainRequestBody(req, res)
+      sendJson(res, 503, { error: loadError })
       return
     }
 
@@ -149,6 +165,30 @@ export function createControlHandler(opts) {
       return
     }
 
+    // A body that is not declared JSON is refused before it is read, so a
+    // browser page cannot reach the mutation as a CORS simple request
+    // (`text/plain`, form, or multipart need no preflight). Media-type
+    // parameters such as `charset` and letter case are accepted.
+    // @ref LLP 0507#json-only [implements]: POST/DELETE require application/json, 415 otherwise
+    const mediaType = (req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+    if (mediaType !== 'application/json') {
+      drainRequestBody(req, res)
+      refusedMediaTypes += 1
+      const now = Date.now()
+      if (now - refusedMediaTypeLoggedAt >= REFUSED_MEDIA_TYPE_LOG_INTERVAL_MS) {
+        refusedMediaTypeLoggedAt = now
+        log?.warn?.('session_ignore_unsupported_media_type', {
+          ...logFields, operation: 'ignore_session', method, status: 'refused',
+          error_kind: 'unsupported_media_type', media_type: mediaType.slice(0, 64) || 'none',
+          // Every refusal since the handler was built, so a burst the
+          // interval swallowed is still legible from one line.
+          rejected_total: refusedMediaTypes,
+        })
+      }
+      sendJson(res, 415, { error: 'content-type must be application/json' })
+      return
+    }
+
     readJsonBody(req, (result) => {
       if (result.status === 'too_large') {
         // The sender is still uploading, so the rest is discarded under the
@@ -168,12 +208,21 @@ export function createControlHandler(opts) {
       }
 
       let ignored
-      if (method === 'POST') {
-        ignoredSessions.add(sessionId)
-        ignored = true
-      } else {
-        ignoredSessions.delete(sessionId)
-        ignored = false
+      try {
+        if (method === 'POST') {
+          ignoredSessions.add(sessionId)
+          ignored = true
+        } else {
+          ignoredSessions.delete(sessionId)
+          ignored = false
+        }
+      } catch {
+        log?.error?.('session_ignore_persistence_failed', {
+          ...logFields, operation: 'ignore_session', method, status: 'error',
+          error_kind: 'session_ignore_persistence_failed',
+        })
+        sendJson(res, 500, { error: 'could not save session exclusion' })
+        return
       }
       const total = ignoredSessions.size
       log?.info?.(logEvent, {

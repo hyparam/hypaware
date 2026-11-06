@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { daemonRunDir } from './pid.js'
+import { daemonRunDir } from '../runtime/paths.js'
 
 /**
  * Signal-free control channel for the running daemon: request files under

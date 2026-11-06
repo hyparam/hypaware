@@ -15,7 +15,7 @@ this backstop exists for does not arise there and the late drop does not run on
 that path; it stands unchanged for the live proxy and for transcript backfill),
 LLP 0286 (#endpoints-evicted-last: session-context compaction pins a session's
 session-start record, so the at-or-before selection this doc specifies still
-has a record to find once the file is over cap)
+has a record to find once the file is over cap), LLP 0444 (SQLite transcript storage and explicit storage-failure privacy handling)
 
 > When a Claude exchange raced past the capture seam with `cwd = null` (the
 > session-start hook record had not landed yet), the flush-time settlement

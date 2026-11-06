@@ -1,6 +1,6 @@
 // @ts-check
 
-import { runGithub, runGithubBackfill, runGithubSync } from './commands.js'
+import { runGithub, runGithubBackfill, runGithubSync, runGithubLogin, runGithubLogout, runGithubStatus } from './commands.js'
 import { validateGithubConfig } from './config.js'
 import { githubEventsDatasetRegistration } from './dataset.js'
 import { createGithubGraphContract } from './graph_contract.js'
@@ -76,7 +76,10 @@ export async function activate(ctx) {
     start: startGithubSource,
   })
 
-  ctx.commands.register({ name: 'github', plugin: PLUGIN_NAME, summary: 'GitHub capture', usage: 'hyp github <backfill|sync>', run: runGithub })
+  ctx.commands.register({ name: 'github', plugin: PLUGIN_NAME, summary: 'GitHub capture and authentication', usage: 'hyp github <login|logout|status|backfill|sync>', run: runGithub })
+  ctx.commands.register({ name: 'github login', plugin: PLUGIN_NAME, summary: 'Sign in with a GitHub device code', usage: 'hyp github login [--no-browser]', run: runGithubLogin })
+  ctx.commands.register({ name: 'github logout', plugin: PLUGIN_NAME, summary: 'Remove local GitHub OAuth tokens', usage: 'hyp github logout', run: runGithubLogout })
+  ctx.commands.register({ name: 'github status', plugin: PLUGIN_NAME, summary: 'Verify GitHub authentication and show its source', usage: 'hyp github status', run: runGithubStatus })
   ctx.commands.register({ name: 'github backfill', plugin: PLUGIN_NAME, summary: 'Pull full history into github_events', usage: 'hyp github backfill [owner/repo ...]', run: runGithubBackfill })
   ctx.commands.register({ name: 'github sync', plugin: PLUGIN_NAME, summary: 'Run one poll tick now', usage: 'hyp github sync', run: runGithubSync })
 

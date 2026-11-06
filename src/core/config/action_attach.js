@@ -12,7 +12,8 @@ import {
 } from '../runtime/client_assets.js'
 import { readInstalledAssets } from './action_reconciler.js'
 import { isActionRefused } from './action_refusal.js'
-import { readAttachPolicy } from './attach_policy.js'
+import { readAttachPolicy, readCodexCaptureMode } from './attach_policy.js'
+import { isEntryRecording, readRecordingStateFromDiskSync } from './client_recording.js'
 import {
   CLAUDE_SETTINGS_MARKER_SCHEMA,
   detachClientFromDisk,
@@ -29,6 +30,7 @@ import {
  *   DesiredAction,
  * } from './types.d.ts'
  * @import { MaterializeClientAssetsOptions } from '../../../src/core/runtime/types.js'
+ * @import { SourceSnapshot } from '../../../src/core/daemon/types.js'
  * @import { JsonObject } from '../../../hypaware-plugin-kernel-types.d.ts'
  */
 
@@ -102,12 +104,18 @@ export function createAttachHandler(opts = {}) {
           .map((p) => [p.name, p])
       )
 
+      // Read fresh: the daemon booted on an older copy of the config, and a
+      // `hyp client detach` since then must not be undone by this pass.
+      // @ref LLP 0466#reattach-paths [implements]: no automatic path re-attaches a detached client
+      const { detached } = readRecordingStateFromDiskSync({ env: ctx.env })
+
       /** @type {DesiredAction[]} */
       const desired = []
       for (const descriptor of descriptors.values()) {
         const entry = byPluginName.get(descriptor.plugin)
         // Plugin absent from config or explicitly disabled → not a target.
         if (!entry || entry.enabled === false) continue
+        if (!isEntryRecording(entry) || detached.has(descriptor.plugin)) continue
         // Default-on: only an explicit `on_join: false` opts out.
         if (readAttachPolicy(entry).onJoin === false) continue
         // Attach-eligibility requires reverse-capability. reverse() undoes the
@@ -219,10 +227,21 @@ export function createAttachHandler(opts = {}) {
         detail.mode = 'otel'
         detail.settings_schema = CLAUDE_SETTINGS_MARKER_SCHEMA
       }
+      if (client === 'codex') detail.mode = readCodexCaptureMode(ctx.config.plugins)
       if (parsed) {
         if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
         if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
-        if (client !== 'claude' && typeof parsed.mode === 'string') detail.mode = parsed.mode
+        if (client !== 'claude' && client !== 'codex' && typeof parsed.mode === 'string') detail.mode = parsed.mode
+      }
+      // The telemetry port Claude's settings now name: the adapter's report
+      // when it parsed, else the port this boot's listener bound, so a parse
+      // miss cannot leave the fresh marker stale and re-attach every pass.
+      // @ref LLP 0577#reattach [implements]: the marker records the port the attach wrote, so a moved listener is a forward gap
+      if (client === 'claude') {
+        const port = isListenPort(parsed?.telemetry_port)
+          ? parsed?.telemetry_port
+          : boundTelemetryPort(action, ctx)
+        if (port !== undefined) detail.telemetry_port = port
       }
       // The undo record for the copies: reverse() removes exactly these paths,
       // so a user's own `hyp skills install` (which records no marker) survives
@@ -297,6 +316,17 @@ export function createAttachHandler(opts = {}) {
      * this hook is consulted again from the fresh marker the retry writes
      * (LLP 0364).
      *
+     * **The telemetry port**, for `claude` only. An OTEL attach writes the
+     * listener's port into Claude's settings and nothing rewrites it, while
+     * the listener may later bind another one (the per-uid default of LLP
+     * 0577, a configured `telemetry.listen_port`, or an ephemeral fallback).
+     * A marker whose recorded port differs from the port this boot's
+     * listener bound is stale, so the reconciler re-attaches and the attach
+     * writes the bound port. No bound port threaded (a CLI boot, or no
+     * listener started): nothing to compare, stay current. A marker from
+     * before this key recorded no port: stale exactly once, which records one
+     * and self-heals.
+     *
      * **A client that declares `requiresEndpoint: false`** attaches by writing
      * a managed file rather than by pointing at a bound port, so the endpoint
      * key above does not apply and is skipped for it: its marker stays current
@@ -310,6 +340,7 @@ export function createAttachHandler(opts = {}) {
      * @ref LLP 0107#currency [implements]: a done attach whose asset set has changed is not current, so an org adding a plugin later re-materializes without a re-login
      * @ref LLP 0138#currency [implements]: the recorded digest is the freshness key, compared against what the live registries would produce
      * @ref LLP 0306#endpoint-free-clients [implements]: an endpoint-free client's marker is not staled by a port that moved
+     * @ref LLP 0577#reattach [implements]: a claude marker whose telemetry port differs from the bound listener port is not current
      */
     isCurrent(marker, action, ctx) {
       const client = attachActionClient(action)
@@ -324,6 +355,8 @@ export function createAttachHandler(opts = {}) {
       // migration that releases the proxy settings and writes the OTEL block.
       // @ref LLP 0262#migration [implements]: attachment mode drift is a forward gap even when the gateway port did not move
       if (client === 'claude' && marker.mode !== 'otel') return false
+      // @ref LLP 0429#migration [implements]: a proxy-era Codex marker must release its route even at an unchanged port
+      if (client === 'codex' && marker.mode !== readCodexCaptureMode(ctx.config.plugins)) return false
       // Claude Code 2.1.257 rejects the legacy `_hypaware.managed.hooks`
       // marker even though endpoint, mode, and assets are otherwise current.
       // A missing schema token is therefore a forward gap that reaches the
@@ -332,6 +365,12 @@ export function createAttachHandler(opts = {}) {
         client === 'claude' &&
         marker.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA
       ) return false
+      // Settings naming a telemetry port the listener no longer binds send
+      // Claude Code's events nowhere, or to another user's daemon (LLP 0577).
+      if (client === 'claude') {
+        const bound = boundTelemetryPort(action, ctx)
+        if (bound !== undefined && marker.telemetry_port !== bound) return false
+      }
       const assetsKey = attachedAssetsKey(client, ctx)
       if (assetsKey === undefined) return true
       return marker.assets_key === assetsKey
@@ -521,6 +560,48 @@ export const attachHandler = createAttachHandler()
 function attachActionClient(action) {
   const client = (action.params ?? {}).client
   return typeof client === 'string' && client.length > 0 ? client : action.requestKey
+}
+
+/**
+ * The port each plugin's telemetry listener bound, read from the daemon's
+ * source snapshots. A listener advertises itself by carrying the
+ * `last_event_at` detail, the same rule `hyp status` uses to find it; only a
+ * started one with a valid `listen_port` counts, first per plugin.
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {Map<string, number>}
+ */
+export function telemetryListenPorts(sources) {
+  /** @type {Map<string, number>} */
+  const ports = new Map()
+  for (const source of sources ?? []) {
+    if (!source || source.state !== 'started' || ports.has(source.plugin)) continue
+    const details = source.details
+    if (typeof details !== 'object' || details === null || !('last_event_at' in details)) continue
+    const port = /** @type {Record<string, unknown>} */ (details).listen_port
+    if (isListenPort(port)) ports.set(source.plugin, port)
+  }
+  return ports
+}
+
+/**
+ * The port the attach action's plugin listener bound this boot, if known.
+ *
+ * @param {DesiredAction} action
+ * @param {ActionContext} ctx
+ * @returns {number | undefined}
+ */
+function boundTelemetryPort(action, ctx) {
+  const plugin = (action.params ?? {}).plugin
+  return typeof plugin === 'string' ? ctx.telemetryPorts?.get(plugin) : undefined
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is number}
+ */
+function isListenPort(value) {
+  return Number.isInteger(value) && /** @type {number} */ (value) >= 1 && /** @type {number} */ (value) <= 65535
 }
 
 /**

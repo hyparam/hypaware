@@ -2,15 +2,25 @@
 
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import fs from 'node:fs'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { setGatewayProcessTransport } from '../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
+import { bootKernel } from '../../src/core/runtime/boot.js'
+import { activate } from '../../hypaware-core/plugins-workspace/ai-gateway/src/index.js'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { createGatewayState, createAiGatewayApi } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { ollamaNativeRoute } from '../../hypaware-core/plugins-workspace/ollama/src/setup.js'
 import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
+import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
+import { createOllamaExchangeProjector } from '../../hypaware-core/plugins-workspace/ollama/src/projector.js'
+
+/** @import { LogRecord } from '../../src/core/observability/types.js' */
 
 // A source with an empty routing table binds no listener at all, so a test
 // that needs a live port must give it something to route even when it only
@@ -438,12 +448,12 @@ function fakeCtx(config, logged) {
   })
 }
 
-/** @param {string} body */
+/** @param {string | (() => string)} body */
 async function startEchoUpstream(body) {
   const server = http.createServer((req, res) => {
     req.resume()
     res.writeHead(200, { 'content-type': 'text/plain' })
-    res.end(body)
+    res.end(typeof body === 'function' ? body() : body)
   })
   await new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -496,6 +506,7 @@ test('a failure after the append does not roll the dedupe back onto rows that la
   /** @type {Record<string, unknown>[]} */
   const appended = []
   const ctx = /** @type {any} */ ({
+    env: { HOME: path.join(os.tmpdir(), 'post-append-fixture'), HYP_HOME: path.join(os.tmpdir(), 'post-append-fixture') },
     config: {
       listen: '127.0.0.1:0',
       upstreams: [{ name: 'anthropic', base_url: upstream.url, path_prefix: '/v1/messages', provider: 'anthropic' }],
@@ -553,3 +564,265 @@ test('a failure after the append does not roll the dedupe back onto rows that la
 async function settleFinalizers() {
   for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve))
 }
+
+// @ref LLP 0469#exchange-scope [tests]: source append failure cannot retain snapshot identity or trigger history reads
+test('source appends independent exchange snapshots and reports append failure without seeding', async (t) => {
+  /** @type {LogRecord[]} */
+  const sourceLogs = []
+  // Append failures use getLogger('sources'), independently of ctx.log.
+  const loggerProvider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (records) => { sourceLogs.push(...records) } }],
+  })
+  logs.setGlobalLoggerProvider(loggerProvider)
+  t.after(() => loggerProvider.shutdown())
+  const upstream = await startEchoUpstream('snapshot-ok')
+  const state = createGatewayState()
+  state.projectors.push({
+    name: 'snapshot', _seq: 0, match: () => true,
+    project: (input) => ({
+      provider: 'native', session_id: input.exchange_id, request_id: input.exchange_id,
+      messages: [0, 1].map((index) => ({
+        role: index === 0 ? 'user' : 'assistant', content: 'same text',
+        message_id: `${input.exchange_id}:${index}`,
+        previous_message_id: index === 0 ? [] : [`${input.exchange_id}:0`],
+      })),
+    }),
+  })
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const ctx = fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+  }, logged)
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  let appends = 0
+  let discoveries = 0
+  ctx.storage.discoverCachePartitions = async () => { discoveries++; return [] }
+  ctx.storage.readRows = async function* () { throw new Error('unexpected seed read') }
+  ctx.storage.appendRows = async (_path, _columns, rows) => {
+    if (++appends === 1) throw new Error('snapshot append failed')
+    appended.push(...rows)
+  }
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status)
+    const status = await source.status()
+    assert.ok(status.details)
+    const url = `http://${status.details.host}:${status.details.port}/snapshot`
+    for (let i = 0; i < 20; i++) {
+      const response = await fetch(url, { method: 'POST', body: 'same request' })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'snapshot-ok', 'append failure never changes upstream traffic')
+      await settleFinalizers()
+    }
+    assert.equal(appends, 20, 'all finalized exchanges reach append, including the failed first exchange')
+    assert.equal(appended.length, 38)
+    assert.equal(new Set(appended.map((row) => row.session_id)).size, 19)
+    assert.equal(new Set(appended.map((row) => row.part_id)).size, 38)
+    for (let i = 0; i < appended.length; i += 2) {
+      assert.deepEqual(appended[i].previous_message_id, [])
+      assert.deepEqual(appended[i + 1].previous_message_id, [appended[i].message_id])
+      assert.equal(appended[i].request_id, appended[i + 1].request_id)
+    }
+    assert.equal(discoveries, 0, 'success and append failure both bypass committed history')
+    const failures = sourceLogs.filter((record) => record.body === 'aigw.exchange_write_failed')
+    assert.equal(failures.length, 1)
+    assert.equal(failures[0].loggerName, 'hypaware.sources')
+    assert.equal(failures[0].severityText, 'ERROR')
+    assert.deepEqual(failures[0].attributes, {
+      hyp_component: 'sources', hyp_plugin: '@hypaware/ai-gateway',
+      upstream: 'echo', error: 'snapshot append failed',
+      ...(process.env.DEV_RUN_ID ? { dev_run_id: process.env.DEV_RUN_ID } : {}),
+    }, 'failure diagnostic carries only component/plugin/upstream/error and optional run ID, no wire payload')
+    assert.equal(logged.filter((entry) => entry.event === 'aigw.exchange').length, 19)
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+// @ref LLP 0475#t1 [tests]: actual adapter admission and append failure keep forwarded native bytes intact without history reads
+test('Ollama generate source omits media and survives failed append; controls/unsupported captures do not append', async () => {
+  let wire = JSON.stringify({ model: 'fixture', response: 'native answer', done: true, done_reason: 'stop', eval_count: 2 })
+  const upstream = await startEchoUpstream(() => wire)
+  const state = createGatewayState()
+  state.projectors.push({ ...createOllamaExchangeProjector(), _seq: 0 })
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const ctx = fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', provider: 'ollama', base_url: upstream.url, path_prefix: '/api/generate' }] }, logged)
+  const recordingHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ollama-source-policy-'))
+  ctx.env.HYP_CONFIG = path.join(recordingHome, 'config.json')
+  fs.writeFileSync(ctx.env.HYP_CONFIG, JSON.stringify({ plugins: [{ name: '@hypaware/ollama' }] }))
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  let attempts = 0
+  ctx.storage.discoverCachePartitions = async () => { throw new Error('unexpected history discovery') }
+  ctx.storage.readRows = async function* () { throw new Error('unexpected history read') }
+  ctx.storage.appendRows = async (_path, _columns, rows) => {
+    if (++attempts === 1) throw new Error('fixture append failure')
+    appended.push(...rows)
+  }
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status)
+    const status = await source.status()
+    assert.ok(status.details)
+    const url = `http://${status.details.host}:${status.details.port}/api/generate`
+    for (let index = 0; index < 21; index++) {
+      const response = await fetch(url, { method: 'POST', headers: { 'x-hyp-dev-run-id': 'ollama-source-t1' }, body: JSON.stringify({ model: 'fixture', prompt: 'same supplied prompt', images: ['SECRET_MEDIA'], stream: false, think: index === 20 }) })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), wire)
+      await settleFinalizers()
+    }
+    assert.equal(attempts, 20)
+    assert.equal(appended.length, 57)
+    assert.equal(new Set(appended.map(row => row.session_id)).size, 19)
+    assert.equal(new Set(appended.map(row => row.part_id)).size, 57)
+    for (let index = 0; index < appended.length; index += 3) {
+      assert.deepEqual(appended[index].previous_message_id, [])
+      assert.deepEqual(appended[index + 2].previous_message_id, [appended[index].message_id])
+      assert.equal(appended[index + 1].part_type, 'image')
+      assert.equal(appended[index + 1].content_text, undefined)
+      assert.equal(/** @type {any} */ (appended[index + 2].attributes).usage.output_tokens, 2)
+      assert.equal(/** @type {any} */ (appended[index].attributes).dev_run_id, 'ollama-source-t1')
+    }
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_projected').length, 20)
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_dropped').length, 1)
+    wire = JSON.stringify({ response: '', done: true, done_reason: 'load' })
+    const control = await fetch(url, { method: 'POST', body: JSON.stringify({ model: 'fixture', prompt: '', think: false }) })
+    assert.equal(await control.text(), wire)
+    await settleFinalizers()
+    assert.equal(attempts, 20, 'load-only traffic never attempts append')
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_control').length, 1)
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_dropped').length, 1)
+    assert.doesNotMatch(JSON.stringify(appended), /SECRET_MEDIA/)
+    assert.doesNotMatch(JSON.stringify(logged.filter(entry => entry.event.startsWith('plugin.ollama.'))), /SECRET_MEDIA|same supplied prompt|native answer/)
+  } finally {
+    await source.stop()
+    await upstream.close()
+    fs.rmSync(recordingHome, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0403#storage [tests]: damaged privacy state must not strand attached clients.
+for (const mode of ['inline', 'gateway']) for (const damage of ['corrupt', 'oversized', 'unreadable']) {
+  test(`gateway forwards without capture when exclusions are ${damage} (${mode})`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-ignore-damage-'))
+    const upstream = await startEchoUpstream('provider-answer')
+    let source
+    try {
+      const store = new SessionIgnoreSet(path.join(root, 'hypaware'))
+      store.add('private')
+      const marker = path.join(store.directory, fs.readdirSync(store.directory)[0])
+      if (damage === 'unreadable') {
+        fs.renameSync(store.directory, `${store.directory}-saved`)
+        fs.writeFileSync(store.directory, 'not a directory')
+      } else fs.writeFileSync(marker, damage === 'corrupt' ? 'broken json' : 'x'.repeat(65537))
+      let startedCapture = 0
+      if (mode === 'gateway') setGatewayProcessTransport({
+        role: 'gateway',
+        recorder: {
+          startExchange() { startedCapture++; throw new Error('must not start capture') },
+          async drain() {},
+        },
+      })
+      const logged = []
+      const ctx = fakeCtx({ listen: '127.0.0.1:0' }, logged)
+      ctx.env.HYP_HOME = root
+      const registrations = new Map()
+      let api
+      ctx.provideCapability = (_name, _version, value) => { api = value }
+      ctx.sources = { register: item => registrations.set(item.name, item) }
+      ctx.commands = { get() {}, register() {} }
+      ctx.query = { getDataset() {}, registerDataset() {} }
+      ctx.backfillMaterializers = { get() {}, register() {} }
+      let projected = 0
+      let appended = 0
+      ctx.storage.appendRows = async () => { appended++ }
+      await activate(ctx)
+      api.registerUpstreamPreset({ name: 'echo', base_url: upstream.url, path_prefix: '/' })
+      api.registerExchangeProjector({ name: 'probe', match: () => true, project() { projected++; return undefined } })
+      source = await registrations.get('ai-gateway').start(ctx)
+      const status = await source.status()
+      const url = `http://${status.details.host}:${status.details.port}`
+      const response = await fetch(`${url}/v1/messages`, { method: 'POST', body: 'private content without session ID' })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'provider-answer')
+      await settleFinalizers()
+      assert.equal(projected, 0)
+      assert.equal(appended, 0)
+      assert.equal(startedCapture, 0)
+      assert.match(status.lastError, /session exclusions.*capture.*disabled/i)
+      assert.ok(logged.some(item => item.event === 'session_ignore_load_failed'))
+      for (const method of ['GET', 'POST', 'DELETE']) {
+        const receipt = await fetch(`${url}/_hypaware/ignore/session?session_id=private`, {
+          method, ...(method === 'GET' ? {} : { body: JSON.stringify({ session_id: 'private' }) }),
+        })
+        assert.equal(receipt.status, 503, method)
+        assert.match(/** @type {any} */ (await receipt.json()).error, /session exclusions/i)
+      }
+    } finally {
+      await source?.stop()
+      setGatewayProcessTransport(undefined)
+      await upstream.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+
+test('damaged exclusions do not prevent gateway or adapter activation in a real kernel boot', async () => {
+  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ignore-adapter-boot-'))
+  try {
+    const store = new SessionIgnoreSet(path.join(hypHome, 'hypaware'))
+    store.add('private')
+    fs.writeFileSync(path.join(store.directory, fs.readdirSync(store.directory)[0]), 'broken json')
+    const names = ['@hypaware/ai-gateway', '@hypaware/claude', '@hypaware/codex', '@hypaware/opencode']
+    const boot = await bootKernel({ hypHome, runId: 'ignore-adapter-boot', bootProfile: { activate: names } })
+    for (const name of names) {
+      const result = boot.activations.find(item => item.plugin.name === name)
+      assert.ok(result?.ok, `${name} activates with unreadable exclusions`)
+    }
+  } finally { fs.rmSync(hypHome, { recursive: true, force: true }) }
+})
+
+test('alias transport facts come from the bound generation, clear on failed reload/stop, and exclude unsafe URLs', async () => {
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamAlias('ollama-native', 'ollama', ollamaNativeRoute())
+  const config = (base_url) => fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', base_url, path_prefix: '/api/chat' }] })
+  const source = await createStartSource(state)(config('http://localhost:21500/service/'))
+  assert.ok(source.status && source.reload)
+  try {
+    const first = await source.status()
+    assert.ok(first.details?.port)
+    assert.deepEqual(first.details.upstream_aliases, [{ name: 'ollama-native', canonical: 'ollama', path_prefix: '/ollama', base_url: 'http://localhost:21500/service/' }])
+    await source.reload(config('http://localhost:21501/changed'))
+    const next = await source.status()
+    assert.deepEqual(next.details?.upstream_aliases, [{ name: 'ollama-native', canonical: 'ollama', path_prefix: '/ollama', base_url: 'http://localhost:21501/changed' }])
+    await source.reload(config('http://user:private-token@localhost:21501/changed?secret=x'))
+    const unsafe = await source.status()
+    assert.deepEqual(unsafe.details?.upstream_aliases, [])
+    assert.equal(JSON.stringify(unsafe).includes('private-token'), false)
+    await assert.rejects(source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', base_url: 'http://localhost:21501' }, { name: 'ollama-native', base_url: 'http://localhost:2' }] })), /collision/)
+    const failed = await source.status()
+    assert.equal(failed.details?.listening, false)
+    assert.deepEqual(failed.details?.upstream_aliases, [])
+    assert.equal(state.listen, undefined)
+  } finally { await source.stop() }
+  assert.deepEqual((await source.status()).details?.upstream_aliases, [])
+})
+
+test('processing-only desired aliases never report live compiled transport facts', async () => {
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamAlias('ollama-native', 'ollama', ollamaNativeRoute())
+  setGatewayProcessTransport({ role: 'processing', endpoint: { host: '127.0.0.1', port: 21522 }, receive() { return async () => {} } })
+  let source
+  try {
+    source = await createStartSource(state)(fakeCtx({ upstreams: [{ name: 'ollama', base_url: 'http://localhost:21500/service/' }] }))
+    assert.ok(source.status)
+    assert.equal((await source.status()).details?.port, 21522)
+    assert.deepEqual((await source.status()).details?.upstream_aliases, [])
+  } finally { await source?.stop(); setGatewayProcessTransport(undefined) }
+})

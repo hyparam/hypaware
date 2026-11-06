@@ -21,8 +21,8 @@ import { evaluateCwdClassification } from '../../../../src/core/usage-policy/cla
  * The cwd comes from the hook event when one is supplied on stdin, else from
  * the command context's cwd - Codex does not always hand a hook a JSON event.
  *
- * Like every client hook, this MUST never interrupt the client: on an
- * unenrolled machine, a non-interactive run, an already-classified folder, or
+ * Like every client hook, this MUST never interrupt the client: on a
+ * machine that forwards nowhere, a non-interactive run, an already-classified folder, or
  * any lookup error it prints nothing and exits 0.
  *
  * @ref LLP 0106 [implements]: Codex "force" degrades to a first-prompt nag; same decision, copy, and verbs as Claude

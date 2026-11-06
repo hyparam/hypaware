@@ -27,6 +27,7 @@ export interface NodeSpec {
 }
 
 export interface EdgeSpec {
+  props?: Record<string, unknown>
   type: string
   srcType: string
   srcKey: string

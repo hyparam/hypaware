@@ -2,13 +2,14 @@
 
 import { execFile } from 'node:child_process'
 import path from 'node:path'
+import { readGithubAuth, resolveGithubOAuth } from './auth.js'
 
 /**
  * Thin GitHub REST client. Three things it guarantees, all from the credential
  * posture (LLP 0360 / LLP 0028):
  *
- *   1. The token comes from the configured env var, or from the local `gh`
- *      credential store when that env var is absent. It is never logged.
+ *   1. The token comes from the configured env var, selected local OAuth, or
+ *      legacy `gh`. OAuth failures never fall through. Tokens are never logged.
  *   2. Error paths never copy the response **body** (which can echo a token or
  *      sensitive content) into the thrown error or logs - only status + the
  *      query-less path.
@@ -18,7 +19,7 @@ import path from 'node:path'
  *
  * `fetchImpl` is injectable so tests drive the client without a network.
  *
- * @import { GithubActor, GithubClient, GithubCommit, GithubComment, GithubIssue, GithubPage, GithubPull, GithubReview, HypError, PluginLogger } from './types.js'
+ * @import { GithubActor, GithubClient, GithubCommit, GithubComment, GithubIssue, GithubPage, GithubPull, GithubReview, GithubRequestBudget, HypError, PluginLogger } from './types.js'
  */
 
 const API_BASE = 'https://api.github.com'
@@ -26,6 +27,9 @@ const API_VERSION = '2022-11-28'
 const PER_PAGE = 100
 /** The explicit all-visible inventory is normalized into small strings. */
 const MAX_PAGES = 50
+/** Same-origin redirects followed before a renamed or transferred repo errors. */
+const MAX_REDIRECTS = 3
+const REDIRECT_STATUSES = new Set([301, 302, 307, 308])
 /** GitHub embeds at most this many entries in a single commit's `files`. */
 const COMMIT_FILES_CAP = 300
 
@@ -34,22 +38,45 @@ const COMMIT_FILES_CAP = 300
  * @param {string} opts.tokenEnv  the env-var NAME the token is read from
  * @param {NodeJS.ProcessEnv} opts.env
  * @param {PluginLogger} opts.log
+ * @param {string} [opts.stateDir]
  * @param {typeof fetch} [opts.fetchImpl]
  * @param {string} [opts.baseUrl]
  * @param {() => Promise<string>} [opts.ghToken] test seam for `gh auth token`
  * @param {(file: string, args: string[], options: Record<string, unknown>, callback: (err: NodeJS.ErrnoException | null, stdout: string) => void) => void} [opts.execFileImpl]
+ * @param {AbortSignal} [opts.signal] the one capture invocation this client
+ *   serves. Once it aborts, every request, body read and credential lookup
+ *   ends with `github_capture_cancelled` and no further request is sent.
  * @returns {GithubClient}
  */
-export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = API_BASE, ghToken, execFileImpl }) {
+export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, baseUrl = API_BASE, ghToken, execFileImpl, signal }) {
   const doFetch = fetchImpl ?? fetch
   /** @type {Promise<string> | null} */
   let resolvedToken = null
+  /** @type {{ generation: string, refreshToken?: string, error: unknown } | null} */
+  let oauthFailure = null
 
   async function token() {
     const fromEnv = env[tokenEnv]?.trim()
     if (fromEnv) return fromEnv
+    // Check before even a cached gh token: login/logout must take effect in a
+    // running client, and selected OAuth failures never select another identity.
+    if (stateDir) {
+      const selected = readGithubAuth(stateDir)
+      if (oauthFailure && selected?.generation === oauthFailure.generation && selected?.refresh_token === oauthFailure.refreshToken) throw oauthFailure.error
+      try {
+        const oauth = await resolveGithubOAuth(stateDir, { fetchImpl, signal })
+        if (oauth !== null) return oauth
+      } catch (error) {
+        // One failed refresh per short-lived capture client, rather than one
+        // per repository. A new tick retries; a new login is visible at once.
+        // A refresh this client's own stop cut short is not a credential
+        // verdict, so it is never remembered as one.
+        if (selected && !signal?.aborted) oauthFailure = { generation: selected.generation, refreshToken: selected.refresh_token, error }
+        throw error
+      }
+    }
     if (!resolvedToken) {
-      const resolveGhToken = ghToken ?? (() => tokenFromGh(env, execFileImpl))
+      const resolveGhToken = ghToken ?? (() => tokenFromGh(env, execFileImpl, signal))
       // Cache the resolved token, never the failure. `gh auth token` fails for
       // ordinary transient reasons (gh not yet on PATH under launchd, a
       // credential store still locked after login), and a retained rejected
@@ -75,7 +102,8 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
    * response body on a non-OK status.
    *
    * @param {string} pathAndQuery  e.g. `/repos/o/r/commits?since=...`
-   * @param {{ etag?: string }} [opts]
+   * @param {{ etag?: string, budget?: GithubRequestBudget }} [opts]  the caller
+   *   spent `budget` on the first request; every redirect hop spends its own unit
    * @returns {Promise<{ notModified: true } | { notModified: false, data: unknown, next: string | null, etag: string | null }>}
    */
   async function request(pathAndQuery, opts = {}) {
@@ -84,7 +112,16 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     // var means not spawning `gh auth token` (a subprocess with a 10s timeout)
     // on behalf of a URL we are about to throw away.
     const url = resolveUrl(baseUrl, pathAndQuery)
-    const authToken = await token()
+    if (signal?.aborted) throw captureCancelled()
+    let authToken
+    try {
+      authToken = await token()
+    } catch (err) {
+      // A stop that interrupts an OAuth refresh or `gh auth token` surfaces
+      // there as an auth failure; report it as the stop it was.
+      if (signal?.aborted) throw captureCancelled()
+      throw err
+    }
     /** @type {Record<string, string>} */
     const headers = {
       Accept: 'application/vnd.github+json',
@@ -94,13 +131,51 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     headers.Authorization = `Bearer ${authToken}`
     if (opts.etag) headers['If-None-Match'] = opts.etag
 
-    const res = await doFetch(url, { headers })
+    let res
+    let target = url
+    try {
+      // Never let fetch follow a redirect on a credential-bearing request: the
+      // token must not be re-sent to a Location the server chose. A renamed or
+      // transferred repository answers 301 to `/repositories/<id>/...` on the
+      // same API origin, so follow a Location only when it passes the same
+      // origin pin as a continuation, for a few hops. Anything else keeps the
+      // status and reports `GitHub API 301` below.
+      for (let hop = 0; ; hop++) {
+        // The caller's stop rides the same fetch signal as the timeout, so it
+        // ends the response-body read below as well as the request.
+        const timeout = AbortSignal.timeout(30_000)
+        res = await doFetch(target, { headers, redirect: 'manual', signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
+        if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECTS) break
+        const next = sameOriginLocation(baseUrl, res.headers.get('location'))
+        if (next === null) break
+        // The redirect body is never read, and an unread body holds its socket
+        // until the per-hop timeout rather than until the next hop starts.
+        await res.body?.cancel().catch(() => {})
+        // @ref LLP 0361#budget [implements]: a redirect hop is a physical request, charged to the same tick allowance
+        if (opts.budget && !opts.budget.take()) throw budgetExhausted()
+        target = next
+      }
+    } catch (cause) {
+      if (/** @type {HypError} */ (cause)?.hypErrorKind === 'github_budget_exhausted') throw cause
+      if (signal?.aborted) throw captureCancelled()
+      // Carry a diagnosis without echoing anything server-controlled: an
+      // errno code or error name is a runtime constant, while messages can
+      // embed URLs or upstream text.
+      const code = /** @type {{ cause?: { code?: unknown } }} */ (cause)?.cause?.code
+      const name = /** @type {{ name?: unknown }} */ (cause)?.name
+      const tag = typeof code === 'string' ? code : name === 'TimeoutError' || name === 'AbortError' ? name : null
+      const err = /** @type {HypError} */ (new Error(`GitHub API request failed or timed out${tag ? ` (${tag})` : ''}`))
+      err.hypErrorKind = 'github_network_error'
+      throw err
+    }
 
     if (res.status === 304) return { notModified: true }
     if (!res.ok) {
       // No body, no token, no query string - just status + the path.
-      const safePath = pathOf(url)
-      const err = /** @type {HypError} */ (new Error(`GitHub API ${res.status} for GET ${safePath}`))
+      const safePath = pathOf(target)
+      const hint = res.status === 401 ? '; check the configured token or run `hyp github login` again'
+        : res.status >= 300 && res.status < 400 ? '; redirects are not followed - the repository may have been renamed or transferred' : ''
+      const err = /** @type {HypError} */ (new Error(`GitHub API ${res.status} for GET ${safePath}${hint}`))
       err.hypErrorKind = 'github_api_error'
       err.status = res.status
       throw err
@@ -116,7 +191,15 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     // across ticks.
     const link = parseNextLink(res.headers.get('link'))
     const next = link === null ? null : resolveUrl(baseUrl, link)
-    const data = await res.json()
+    let data
+    try {
+      data = await res.json()
+    } catch {
+      if (signal?.aborted) throw captureCancelled()
+      const err = /** @type {HypError} */ (new Error('GitHub API response was unreadable or timed out'))
+      err.hypErrorKind = 'github_response_error'
+      throw err
+    }
     return { notModified: false, data, next, etag }
   }
 
@@ -128,10 +211,11 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
    * @param {string} url
    * @param {(row: Record<string, unknown>) => T | null} project
    * @param {string} [etag]
+   * @param {GithubRequestBudget} [budget]
    * @returns {Promise<GithubPage<T>>}
    */
-  async function listingPage(url, project, etag) {
-    const result = await request(url, { etag })
+  async function listingPage(url, project, etag, budget) {
+    const result = await request(url, { etag, budget })
     if (result.notModified) return { items: [], next: null, notModified: true }
     /** @type {T[]} */
     const items = []
@@ -161,36 +245,36 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
       return repos
     },
 
-    async listIssuesPage(owner, repo, since, page) {
+    async listIssuesPage(owner, repo, since, page, budget) {
       const q = sinceQuery(since)
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/issues?state=all&per_page=${PER_PAGE}${q}`
-      return listingPage(url, issueOf)
+      return listingPage(url, issueOf, undefined, budget)
     },
 
-    async listPullRequestsPage(owner, repo, etag, page) {
+    async listPullRequestsPage(owner, repo, etag, page, budget) {
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls?state=all&sort=updated&direction=desc&per_page=${PER_PAGE}`
-      return listingPage(url, pullOf, page ? undefined : etag)
+      return listingPage(url, pullOf, page ? undefined : etag, budget)
     },
 
-    async listPullRequestFilesPage(owner, repo, number, page) {
+    async listPullRequestFilesPage(owner, repo, number, page, budget) {
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/files?per_page=${PER_PAGE}`
-      return listingPage(url, filename)
+      return listingPage(url, filename, undefined, budget)
     },
 
-    async listPullRequestReviewsPage(owner, repo, number, page) {
+    async listPullRequestReviewsPage(owner, repo, number, page, budget) {
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/reviews?per_page=${PER_PAGE}`
-      return listingPage(url, reviewOf)
+      return listingPage(url, reviewOf, undefined, budget)
     },
 
-    async listPullRequestCommitsPage(owner, repo, number, page) {
+    async listPullRequestCommitsPage(owner, repo, number, page, budget) {
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/commits?per_page=${PER_PAGE}`
-      return listingPage(url, commitOf)
+      return listingPage(url, commitOf, undefined, budget)
     },
 
-    async listCommitsPage(owner, repo, since, page) {
+    async listCommitsPage(owner, repo, since, page, budget) {
       const q = sinceQuery(since)
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/commits?per_page=${PER_PAGE}${q}`
-      return listingPage(url, commitOf)
+      return listingPage(url, commitOf, undefined, budget)
     },
 
     // Changed files come from the single-commit resource, which is not a
@@ -199,8 +283,8 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     // touching more files silently loses the remainder. Say so in the log
     // rather than reporting a short list as complete, matching the
     // `github.listing_truncated` signal the all-visible enumeration emits.
-    async listCommitFilesPage(owner, repo, sha, page) {
-      const result = await request(page ?? `/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}`)
+    async listCommitFilesPage(owner, repo, sha, page, budget) {
+      const result = await request(page ?? `/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}`, { budget })
       if (result.notModified) return { items: [], next: null, notModified: true }
       const data = /** @type {Record<string, unknown>} */ (result.data)
       const files = Array.isArray(data.files) ? /** @type {Record<string, unknown>[]} */ (data.files) : []
@@ -211,10 +295,10 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
       return { items, next: result.next, etag: result.etag }
     },
 
-    async listIssueCommentsPage(owner, repo, since, page) {
+    async listIssueCommentsPage(owner, repo, since, page, budget) {
       const q = sinceQuery(since)
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/issues/comments?per_page=${PER_PAGE}${q}`
-      return listingPage(url, commentOf)
+      return listingPage(url, commentOf, undefined, budget)
     },
   }
 }
@@ -226,22 +310,26 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {(file: string, args: string[], options: Record<string, unknown>, callback: (err: NodeJS.ErrnoException | null, stdout: string) => void) => void} [execFileImpl]
+ * @param {AbortSignal} [signal] kills the subprocess when the caller stops
  * @returns {Promise<string>}
  */
 // @ref LLP 0360#authentication [implements]: reuse local gh credentials without persisting or logging them
-function tokenFromGh(env, execFileImpl = /** @type {any} */ (execFile)) {
+export function tokenFromGh(env, execFileImpl = /** @type {any} */ (execFile), signal) {
   return new Promise((resolve, reject) => {
     execFileImpl('gh', ['auth', 'token'], {
       encoding: 'utf8',
       timeout: 10_000,
       maxBuffer: 64 * 1024,
       windowsHide: true,
+      ...(signal ? { signal } : {}),
       env: {
         ...env,
         PATH: githubCliPath(env),
       },
     }, (err, stdout) => {
-      if (err) return reject(authUnavailable())
+      // An empty stdout on exit 0 is as unusable as a failure: guarding here
+      // covers every caller, not only the capture client's own token().
+      if (err || !stdout.trim()) return reject(authUnavailable())
       resolve(stdout)
     })
   })
@@ -303,6 +391,22 @@ function resolveUrl(baseUrl, pathAndQuery) {
   return url.href
 }
 
+/**
+ * A redirect target on the configured API origin, or null when absent or foreign.
+ *
+ * @param {string} baseUrl
+ * @param {string | null} location
+ * @returns {string | null}
+ */
+function sameOriginLocation(baseUrl, location) {
+  if (!location) return null
+  try {
+    return resolveUrl(baseUrl, location)
+  } catch {
+    return null
+  }
+}
+
 /** @param {URL | null} url @returns {HypError} */
 function foreignOrigin(url) {
   // Origin only. The path and query of an untrusted URL stay out of the error,
@@ -313,9 +417,35 @@ function foreignOrigin(url) {
   return err
 }
 
+/**
+ * The tick's request allowance ran out before a redirect hop could be sent.
+ * Nothing from the page was returned, so the caller's durable work still names
+ * the page it asked for and the next tick requests it again.
+ *
+ * @returns {HypError}
+ */
+function budgetExhausted() {
+  const err = /** @type {HypError} */ (new Error('GitHub request budget exhausted before a redirect was followed'))
+  err.hypErrorKind = 'github_budget_exhausted'
+  return err
+}
+
+/**
+ * The capture invocation this client serves was stopped. Not a network,
+ * response or credential failure: capture ends the tick on it instead of
+ * recording it against a repository and moving on to the next.
+ *
+ * @returns {HypError}
+ */
+export function captureCancelled() {
+  const err = /** @type {HypError} */ (new Error('GitHub capture cancelled'))
+  err.hypErrorKind = 'github_capture_cancelled'
+  return err
+}
+
 /** @returns {HypError} */
 function authUnavailable() {
-  const err = /** @type {HypError} */ (new Error('GitHub authentication unavailable: set the configured token env var or run `gh auth login`'))
+  const err = /** @type {HypError} */ (new Error('GitHub authentication unavailable: run `hyp github login` or set the configured token env var (legacy `gh auth login` is also supported)'))
   err.hypErrorKind = 'github_auth_unavailable'
   return err
 }

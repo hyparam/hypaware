@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { IdentityClient } from '../../hypaware-core/plugins-workspace/central/src/identity_client.js'
+import { writeLoginSeed } from '../../src/core/remote/gateway_seed.js'
 
 const DAY = 24 * 60 * 60
 
@@ -151,6 +152,59 @@ test('re-pointed at a different central URL with no token refuses to load the ol
   // Never reused the old gateway identity against the new server.
   assert.equal(second.calls.bootstrap, 0)
   assert.equal(second.calls.refresh, 0)
+})
+
+test('re-pointed at another path on the same host with no token refuses to load the old identity', async () => {
+  const persistedPath = tmpIdentityPath()
+  const first = makeFetch()
+  await new IdentityClient({
+    centralUrl: 'https://central.example/tenant-a', bootstrapToken: 'token-a', persistedPath, fetchFn: first.fetchFn, now,
+  }).acquire()
+
+  const second = makeFetch()
+  await assert.rejects(
+    new IdentityClient({
+      centralUrl: 'https://central.example/tenant-b', persistedPath, fetchFn: second.fetchFn, now,
+    }).acquire(),
+    /central URL mismatch/
+  )
+  assert.equal(second.calls.bootstrap, 0)
+})
+
+test('a login seed re-pointed at another path on the same host re-bootstraps with the new token', async () => {
+  const persistedPath = tmpIdentityPath()
+  writeLoginSeed({
+    persistedPath,
+    centralUrl: 'https://central.example/tenant-a',
+    jwt: fakeJwt('gw-login'),
+    expiresAt: NOW_SEC + 30 * DAY,
+    gatewayId: 'gw-login',
+  })
+
+  const second = makeFetch()
+  const source = await new IdentityClient({
+    centralUrl: 'https://central.example/tenant-b', bootstrapToken: 'token-b', persistedPath, fetchFn: second.fetchFn, now,
+  }).acquire()
+  assert.equal(source, 'bootstrapped')
+  assert.equal(second.calls.bootstrap, 1)
+  const after = JSON.parse(fs.readFileSync(persistedPath, 'utf8'))
+  assert.equal(after.central_url, 'https://central.example/tenant-b')
+})
+
+test('an identity minted under the built-in old host loads when config names the new host', async () => {
+  const persistedPath = tmpIdentityPath()
+  const first = makeFetch()
+  await new IdentityClient({
+    centralUrl: 'https://hypaware.hyperparam.app', bootstrapToken: 'token-a', persistedPath, fetchFn: first.fetchFn, now,
+  }).acquire()
+
+  // Same token still configured: the alias is not a re-point, so no re-mint.
+  const second = makeFetch()
+  const source = await new IdentityClient({
+    centralUrl: 'https://api.hypaware.ai/', bootstrapToken: 'token-a', persistedPath, fetchFn: second.fetchFn, now,
+  }).acquire()
+  assert.equal(source, 'loaded')
+  assert.equal(second.calls.bootstrap, 0)
 })
 
 test('reboot at the same URL with no token still loads (no false mismatch)', async () => {

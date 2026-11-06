@@ -116,11 +116,11 @@ test('a stray bracket is part of the name, not punctuation to strip', () => {
 // Only the self-updater has a reason to pass it, and the reason is a `URL`
 // re-serialization no socket and no `Host` header produces. A new caller is a
 // decision to make on purpose, so it fails here first rather than silently.
-test('only the self-updater asks for the hex-mapped form', () => {
+test('only URL-based self-updater trust and Ollama self-target refusal ask for the hex-mapped form', () => {
   const root = path.resolve(import.meta.dirname, '..', '..')
   const sources = trackedFiles(root, new Set(['.js']))
     .filter(f => !f.startsWith('test/') && f !== 'src/core/util/loopback.js')
   const askers = sources.filter(f => fs.readFileSync(path.join(root, f), 'utf8').includes('hexMappedIpv4'))
-  assert.deepEqual(askers, ['src/core/update/self_update.js'],
+  assert.deepEqual(askers, ['hypaware-core/plugins-workspace/ollama/src/setup.js', 'src/core/update/self_update.js'],
     'a new caller of the hex-mapped opt-in: read why it is off by default at src/core/util/loopback.js before adding one here')
 })

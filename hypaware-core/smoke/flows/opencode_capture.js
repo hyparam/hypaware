@@ -400,7 +400,11 @@ const exportsById = ${JSON.stringify({
     [fixtures.exported.info.id]: fixtures.exported,
     [fixtures.ignoredExport.info.id]: fixtures.ignoredExport,
   })}
-if (args[0] === 'session' && args[1] === 'list') {
+if (args[0] === '--version') {
+  process.stdout.write('1.19.5\\n')
+  process.exit(0)
+}
+if (args[0] === 'db') {
   process.stdout.write(JSON.stringify(sessions))
   process.exit(0)
 }

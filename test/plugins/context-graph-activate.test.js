@@ -43,8 +43,8 @@ test('activate provides the context-graph capability and registers node/edge dat
   assert.equal(verbs[0].authClass, 'read')
 
   // The group describes itself, so `hyp graph --help` and `hyp query graph
-  // --help` both open with what the graph is and that projection runs on
-  // demand, rather than a bare table. LLP 0248 keeps `graph project|compact`
+  // --help` both open with what the graph is and when it projects.
+  // LLP 0248 keeps `graph project|compact`
   // as direct operations while the journey moved to `query graph neighbors`,
   // so both prefixes need the description.
   // @ref LLP 0214#d2 [tests]: a plugin namespace registers a group description
@@ -55,6 +55,8 @@ test('activate provides the context-graph capability and registers node/edge dat
   for (const group of groups) {
     assert.match(group.help, /hyp graph project/)
     assert.match(group.help, /GitHub capture projects its data automatically/)
+    assert.match(group.help, /projected locally after startup/)
+    assert.match(group.help, /five minutes/)
     assert.match(group.help, /hyp query graph neighbors/)
   }
 

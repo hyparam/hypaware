@@ -447,9 +447,11 @@ function nullCwdRow(f) {
  * @param {string} ignoredRoot
  */
 function resolverIgnoring(ignoredRoot) {
-  const marker = path.join(ignoredRoot, '.hypignore')
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over the POSIX-written fixture.
+  const marker = path.resolve(path.join(ignoredRoot, '.hypignore'))
   return createUsagePolicyResolver({
-    existsSync: (p) => p === marker,
+    existsSync: (p) => path.resolve(p) === marker,
     readFileSync: () => 'ignore\n',
   })
 }

@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0449 (mutable local transcript reconciliation)
 **Systems:** Sources, Plugins, Cache
 **Author:** Phil / Claude
 **Date:** 2026-07-20

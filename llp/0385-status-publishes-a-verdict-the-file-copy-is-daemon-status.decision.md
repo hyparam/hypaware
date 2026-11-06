@@ -21,6 +21,8 @@ and [LLP 0384](./0384-a-stopping-snapshot-that-stopped-ageing-is-a-stop-that-nev
 (the other two readings of a dead daemon's terminal snapshot);
 hyparam/hypaware#1416, hyparam/hypaware#1410, PR #1412
 
+**Extended-by:** [LLP 0455](./0455-compact-status.spec.md) (compact text view, per-client sharing labels, and verbose details; collector and JSON verdicts unchanged).
+
 > The #1410 fix gave the `status.json` fallback a liveness gate: with the daemon
 > gone, a snapshot's `started` source renders `stopped`. `renderStatusJson`
 > emits the same array, so `hyp status --json` changed with the text plane, and

@@ -70,7 +70,7 @@ function runGate(dir) {
   return { status: run.status, output: `${run.stdout ?? ''}${run.stderr ?? ''}` }
 }
 
-test('the ref hygiene gate reports a result on a tree missing a tracked file', () => {
+test('the ref hygiene gate reports a result on a tree missing a tracked file', { skip: process.platform === 'win32' && 'the git shim is a #!/bin/sh script, and a cmd.exe shim cannot emit the NUL-terminated phantom entry on win32' }, () => {
   assert.ok(!fs.existsSync(path.join(REPO_ROOT, PHANTOM)), `${PHANTOM} must not exist`)
   const dir = shimDir()
   try {

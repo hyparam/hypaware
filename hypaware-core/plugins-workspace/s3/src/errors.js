@@ -66,6 +66,11 @@ export function classifyAwsError(err) {
   ) {
     return 's3_throttled'
   }
+  // An unsatisfiable range is a GET failure, not a put one, and it shares
+  // its token with local-fs so a ranged reader can branch on it portably.
+  if (name === 'InvalidRange' || code === 'InvalidRange' || status === 416) {
+    return 'blob_range_unsatisfiable'
+  }
   return 's3_put_failed'
 }
 
@@ -97,6 +102,8 @@ export function describeS3ErrorKind(errorKind) {
       return 'S3 throttled (SlowDown / 503)'
     case 'encoder_failed':
       return 'Encoder failed to produce blob bytes'
+    case 'blob_range_unsatisfiable':
+      return 'S3 GetObject byte range is unsatisfiable (InvalidRange / 416)'
     default:
       return 'unknown S3 error'
   }

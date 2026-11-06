@@ -434,6 +434,95 @@ test('project() emits no assistant row for a cut Anthropic stream that carried n
   assert.ok(!matchKeys(projection).includes(EMPTY_ASSISTANT_MATCH_KEY))
 })
 
+// Issue #595: a stream cut after `content_block_start` seeded a text block but
+// before its first `text_delta` leaves `[{type: 'text', text: ''}]`, which is
+// no more content than `[]`. Only that exact placeholder counts as empty; any
+// block carrying something else keeps the row.
+/**
+ * @param {Record<string, unknown>[]} blocks content blocks each opened by a
+ *   `content_block_start`
+ * @param {Record<string, unknown>[]} [after] events after the block starts
+ */
+function anthropicStreamWith(blocks, after = []) {
+  return project({
+    is_sse: true,
+    request_headers: headers(undefined),
+    request_body: JSON.stringify(ANTHROPIC_REQUEST),
+    response_body: null,
+    stream_events: sseEvents([
+      { type: 'message_start', message: { id: 'msg_595', role: 'assistant', model: 'claude-sonnet-4-5', content: [] } },
+      ...blocks.map((content_block, index) => ({ type: 'content_block_start', index, content_block })),
+      ...after,
+    ]),
+  })
+}
+
+test('project() emits no assistant row for a cut Anthropic stream holding only empty text placeholders', async () => {
+  for (const blocks of [
+    [{ type: 'text', text: '' }],
+    [{ type: 'text', text: '' }, { type: 'text', text: '' }],
+  ]) {
+    const projection = await anthropicStreamWith(blocks)
+    assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user'], JSON.stringify(blocks))
+    assert.ok(!matchKeys(projection).includes(wireMatchKey('assistant', blocks)))
+  }
+})
+
+test('project() keeps a cut Anthropic row whose blocks carry anything beyond an empty text placeholder', async () => {
+  /** @type {Array<[string, Record<string, unknown>[]]>} */
+  const kept = [
+    ['whitespace text', [{ type: 'text', text: ' ' }]],
+    ['a metadata-bearing text block', [{ type: 'text', text: '', citations: [] }]],
+    ['a tool-only turn', [{ type: 'tool_use', id: 'tu_595', name: 'now', input: {} }]],
+    ['an empty thinking block', [{ type: 'thinking', thinking: '' }]],
+    ['mixed empty text and a tool call', [{ type: 'text', text: '' }, { type: 'tool_use', id: 'tu_596', name: 'now', input: {} }]],
+  ]
+  for (const [name, blocks] of kept) {
+    const projection = await anthropicStreamWith(blocks)
+    const assistant = projection.messages.at(-1)
+    assert.equal(assistant.role, 'assistant', name)
+    assert.equal(assistant.content.length, blocks.length, name)
+  }
+})
+
+test('project() keeps an empty-then-filled cut Anthropic turn and a terminal one holding a placeholder', async () => {
+  const filled = await anthropicStreamWith([{ type: 'text', text: '' }], [
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+  ])
+  assert.deepEqual(filled.messages.at(-1).content, [{ type: 'text', text: 'partial' }])
+
+  const terminal = await anthropicStreamWith([{ type: 'text', text: '' }], [
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 0 } },
+    { type: 'message_stop' },
+  ])
+  const assistant = terminal.messages.at(-1)
+  assert.equal(assistant.role, 'assistant')
+  assert.deepEqual(assistant.content, [{ type: 'text', text: '' }])
+  assert.equal(assistant.stop_reason, 'end_turn')
+})
+
+test('project() keeps a request-history assistant turn holding an empty text placeholder', async () => {
+  const projection = await project({
+    is_sse: true,
+    request_headers: headers(undefined),
+    request_body: JSON.stringify({
+      ...ANTHROPIC_REQUEST,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', content: [{ type: 'text', text: '' }] },
+        { role: 'user', content: [{ type: 'text', text: 'again' }] },
+      ],
+    }),
+    response_body: null,
+    stream_events: sseEvents([
+      { type: 'message_start', message: { id: 'msg_597', role: 'assistant', model: 'claude-sonnet-4-5', content: [] } },
+    ]),
+  })
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant', 'user'])
+  assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: '' }])
+})
+
 // The floor is "cut AND empty", not "empty": a response that reached its
 // terminal event and genuinely produced nothing is a real answer the row set
 // must keep, on either wire.

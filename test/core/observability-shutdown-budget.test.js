@@ -32,6 +32,7 @@ import { pathToFileURL } from 'node:url'
 import { installObservability, readObservabilityEnv, getLogger, SHUTDOWN_BUDGET_MS } from '../../src/core/observability/index.js'
 import { OTLP_EXPORT_TIMEOUT_MS } from '../../src/core/observability/otlp_exporters.js'
 import { DAEMON_STOP_TIMEOUT_MS } from '../../src/core/daemon/runtime.js'
+import { STOP_DEADLINE_MS } from '../../src/core/daemon/gateway.js'
 
 /**
  * Capture everything written to `process.stderr` while `fn` runs. The
@@ -338,4 +339,14 @@ test('a hang on every channel costs one budget, not one per channel', async () =
 test('the telemetry shutdown ceiling leaves the daemon stop window room for the rest of the stop', () => {
   assert.ok(SHUTDOWN_BUDGET_MS * 2 <= DAEMON_STOP_TIMEOUT_MS,
     `telemetry may spend at most half the stop window (ceiling=${SHUTDOWN_BUDGET_MS}ms, window=${DAEMON_STOP_TIMEOUT_MS}ms)`)
+})
+
+// The gateway's forced exit is the longest a stop that reaches it can run
+// before the telemetry close on the way out of `bin/hypaware.js`, so the two
+// together have to fit the window `hyp daemon stop` waits.
+//
+// @ref LLP 0520#window [tests]: the gateway's forced exit and the telemetry ceiling fit the stop window together
+test('the gateway forced exit and the telemetry ceiling fit inside the daemon stop window', () => {
+  assert.ok(STOP_DEADLINE_MS + SHUTDOWN_BUDGET_MS <= DAEMON_STOP_TIMEOUT_MS,
+    `deadline=${STOP_DEADLINE_MS}ms + ceiling=${SHUTDOWN_BUDGET_MS}ms must fit window=${DAEMON_STOP_TIMEOUT_MS}ms`)
 })

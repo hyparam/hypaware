@@ -48,6 +48,8 @@ export interface ContractRule {
   /** Declarative filter; only valid with `columns`. */
   where?: RulePredicate
   toRow(row: Record<string, unknown>): GraphRow | null
+  /** Optional bounded fan-out; engine prefers this over toRow. */
+  toRows?(row: Record<string, unknown>): GraphRow[]
 }
 
 /**
@@ -133,8 +135,8 @@ export interface ContractRegistry {
  */
 export interface ContextGraphCapability {
   registerContract(contract: Contract): void
-  /** Project only contracts registered for this source dataset. */
-  project(sourceDataset: string): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
+  /** Project only contracts registered for this source dataset. An aborted `signal` stops its reads and starts no write. */
+  project(sourceDataset: string, options?: { signal?: AbortSignal }): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
   kit: {
     nodeId(type: string, naturalKey: string): string
     edgeId(srcId: string, type: string, dstId: string): string
@@ -155,6 +157,10 @@ export interface GraphNode {
 
 /** An edge as the traversal reads it: endpoints and relation type. */
 export interface GraphEdge {
+  edge_id?: string
+  props?: Record<string, unknown> | null
+  source_dataset?: string
+  source_keys?: Record<string, unknown> | null
   src_id: string
   dst_id: string
   edge_type: string
@@ -165,6 +171,10 @@ export type Direction = 'out' | 'in' | 'both'
 
 /** One reached node, tagged with how (and from where) the walk arrived. */
 export interface Neighbor {
+  edge_id?: string
+  props?: Record<string, unknown> | null
+  source_dataset?: string
+  source_keys?: Record<string, unknown> | null
   hop: number
   edge_type: string
   direction: 'out' | 'in'
@@ -179,7 +189,9 @@ export interface TraversalOk {
   neighbors: Neighbor[]
   reachable: number
   truncated: boolean
+  /** For queryNeighbors: visited node ids including the seed, not the corpus size. */
   totalNodes: number
+  /** For queryNeighbors: distinct edges examined, not the corpus size. */
   totalEdges: number
 }
 

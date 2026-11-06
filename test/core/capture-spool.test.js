@@ -17,10 +17,10 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
-  captureSpoolRoot,
   isCaptureSpoolDir,
   sweepCaptureSpool,
 } from '../../src/core/capture_spool.js'
+import { captureSpoolRoot } from '../../src/core/runtime/paths.js'
 import { claudeBodySpoolDir } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/spool.js'
 
 /** @param {string} prefix */

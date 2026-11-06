@@ -144,7 +144,7 @@ test('hypaware.plugin.json declares the bundled-graph-source shape (LLP 0005/036
   assert.deepEqual(manifest.contributes.datasets.map((/** @type {{name:string}} */ d) => d.name), ['github_events'])
   assert.deepEqual(manifest.contributes.config_sections.map((/** @type {{section:string}} */ s) => s.section), ['github'])
   assert.deepEqual(manifest.contributes.sources.map((/** @type {{name:string}} */ s) => s.name), ['github'])
-  assert.deepEqual(manifest.contributes.commands.map((/** @type {{name:string}} */ c) => c.name).sort(), ['github', 'github backfill', 'github sync'])
+  assert.deepEqual(manifest.contributes.commands.map((/** @type {{name:string}} */ c) => c.name).sort(), ['github', 'github backfill', 'github login', 'github logout', 'github status', 'github sync'])
 })
 
 test('GitHub ships in the bundle but never activates by default', () => {

@@ -6,6 +6,12 @@
 **Author:** Phil / Claude
 **Date:** 2026-09-08
 **Related:** LLP 0027, LLP 0252, LLP 0254 (narrowed here), LLP 0262
+**Extended-by:** [LLP 0435](./0435-tool-ids-resolve-the-owning-thread.decision.md)
+(a body-derived tool row resolves its thread by tool id, retiring this doc's
+closing consequence that a subagent's never settles);
+[LLP 0560](./0560-otel-prompt-rows-take-provenance-at-flush.decision.md)
+(the same flush pass also stamps an event-derived user-prompt row with its
+line's provenance, without touching the identity #scope-of-0254 keeps final)
 **Tracker:** hyparam/hypaware#1464
 
 > LLP 0254 retired flush-time settlement on the OTEL path because events carry
@@ -83,3 +89,5 @@ late, and only for the blocks a body carries.
 - A subagent's body-derived rows are attributed by `agent.name` while the
   transcript scopes by `agentId`, so they do not match a transcript line and
   stay on the fallback id. They already did; this decision does not change it.
+  (Retired by [LLP 0435 #tool-id-first](./0435-tool-ids-resolve-the-owning-thread.decision.md#tool-id-first):
+  the tool id joins the two sides without the agent scope, so they do settle.)

@@ -424,6 +424,8 @@ test('hyp attach --dry-run never clears a refused marker', async () => {
       'a dry run must leave the marker store exactly as it found it'
     )
     assert.equal(readClientActionStatus({ stateRoot }).byKind.attach?.claude?.status, 'refused')
+    // Nor does it take the key lock: a dry run creates no lock files (LLP 0523).
+    assert.equal(fs.existsSync(path.join(stateRoot, 'config-control', 'client-action-locks')), false)
   } finally {
     await fsp.rm(home, { recursive: true, force: true })
   }

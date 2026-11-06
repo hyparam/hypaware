@@ -121,3 +121,12 @@ export interface OpenclawSessionIndex {
   ordinalIndex: Map<string, Array<{ timestampMs: number, value: OpenclawSessionMessage }>>
   positions: Array<{ role: string, ordinal: number }>
 }
+
+/** A native session, independent of its JSONL or SQLite storage. */
+export interface OpenclawSessionSource {
+  path: string
+  agentId: string
+  mtimeMs: number
+  sqlitePath?: string
+  sessionId?: string
+}

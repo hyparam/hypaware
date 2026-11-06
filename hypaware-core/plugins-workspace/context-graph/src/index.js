@@ -60,13 +60,14 @@ export async function activate(ctx) {
   /** @type {ContextGraphCapability} */
   const capability = {
     registerContract: (contract) => registry.register(contract),
-    async project(sourceDataset) {
+    async project(sourceDataset, options) {
       const contracts = registry.list().filter((c) => c.sourceDataset === sourceDataset)
       if (contracts.length === 0) throw new Error(`graph project: no contract registered for source '${sourceDataset}'`)
       return projectGraph({
         query: ctx.query,
         storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
         contracts,
+        signal: options?.signal,
       })
     },
     kit: { nodeId, edgeId, makeRowBuilders },
@@ -94,8 +95,9 @@ export async function activate(ctx) {
     'connect to the apps, models, tools, files, skills, programs, repos, and',
     'commits they touched.',
     '',
-    'GitHub capture projects its data automatically. Run `hyp graph project`',
-    'to build all sources, including newly recorded sessions, before querying.',
+    'GitHub capture projects its data automatically. While the daemon runs,',
+    'recorded AI sessions are projected locally after startup and checked every',
+    'five minutes. Run `hyp graph project` to build all sources immediately.',
     'Projection is idempotent, so re-running it is safe.',
     '',
     'Two ways to read it, and they answer different questions:',
@@ -115,17 +117,18 @@ export async function activate(ctx) {
     category: 'additional',
     audience: 'operator',
     summary: 'Project every registered source contract into the node/edge activity graph',
-    usage: 'hyp graph project [--source <dataset>] [--dry-run]',
+    usage: 'hyp graph project [--source <dataset>] [--refresh] [--dry-run]',
     help: [
       'Reads every registered source contract and writes the node/edge tables.',
       'Idempotent: running it twice over unchanged recordings changes nothing,',
-      'so re-projecting is always safe and is the fix for a stale answer.',
+      'Existing identities keep their properties unless --refresh is supplied.',
       '',
       'Prints `N node(s), M edge(s) - wrote ...` on success. An empty graph',
       'after a successful run means there are no recordings to project yet,',
       'not that the projection failed.',
       '',
       '  --source <dataset>  project only this source dataset',
+      '  --refresh           replace matching projector rows with current evidence',
       '  --dry-run           report what would be written, write nothing',
     ].join('\n'),
     run: runGraphProject,

@@ -212,6 +212,41 @@ test('re-settle sweep sends fallback rows to the hook in byte-bounded batches', 
   }
 })
 
+// @ref LLP 0568#seam [tests]: the compaction re-settle is a write path too
+test('content a re-settle hook writes is redacted before the rewritten generation commits', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+
+    // Built at runtime so no literal here looks like a live credential.
+    const secret = 'gh' + 'p_' + 'aB3'.repeat(12)
+    await maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      getSettleHook: () => async (batch) => batch.map(row => ({ ...upgradedRow(row, 'u-assist'), content_text: `token ${secret}` })),
+    })
+
+    const partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
+    /** @type {unknown[]} */
+    const texts = []
+    for (const part of partitions) {
+      for await (const row of storage.readRows(part.path, ['part_id', 'content_text'])) texts.push(row.content_text)
+    }
+    assert.deepEqual(texts, ['token [REDACTED]'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('an early fallback batch collapses onto a native twin later in scan order', async () => {
   const env = await stageEnv()
   try {
@@ -279,6 +314,62 @@ test('a later settle batch collapses onto an upgraded key emitted by an earlier 
 
     assert.deepEqual(batchSizes, [1, 1], 'the fallbacks settle in separate bounded batches')
     assert.deepEqual(await readPartIds(storage, tablePath), ['shared-native#0'], 'the earlier upgraded survivor wins')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0027#re-settle-sweep [tests]: "A row whose identity did not change
+// is never dropped." The settle pass hands back a FRESH OBJECT for work that
+// leaves identity alone - a relinked predecessor (LLP 0440), a late-resolved
+// cwd, a spawned_by stamp - so a new object is not evidence of an upgrade.
+// Only a moved part identity is, and a row that never moved has no native
+// twin to collapse onto.
+test('a relink-only fallback row is not dropped as a twin of an already-emitted row', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    /** @type {ColumnSpec[]} */
+    const columns = [...COLUMNS, { name: 'previous_message_id', type: 'JSON', nullable: true }]
+    // Two committed rows under the SAME fallback identity, which the
+    // projector's per-state dedupe does not prevent across a restart.
+    // Neither has a native twin, so the sweep has nothing to collapse.
+    const rows = ['ex-first', 'ex-second'].map((exchangeId) => ({
+      ...fallbackRow(),
+      previous_message_id: ['fallbackhash16aa'],
+      attributes: {
+        gateway: { identity_source: 'gateway_fallback', exchange_id: exchangeId },
+      },
+    }))
+    await storage.appendRows(tablePath, columns, rows)
+    await storage.flushTable(tablePath, { force: true })
+
+    await maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      // The transcript match misses, so identity stands; the predecessor it
+      // names settled in an earlier sweep, so its link is rewritten in place.
+      getSettleHook: () => async (batch) => batch.map((row) => ({ ...row, previous_message_id: ['u-pred'] })),
+    })
+
+    const survivors = await readRows(storage, tablePath)
+    assert.deepEqual(
+      survivors.map((row) => parseAttrs(row.attributes)?.gateway?.exchange_id).sort(),
+      ['ex-first', 'ex-second'],
+      'a relink leaves part_id where it was, so neither row is an upgraded twin of the other'
+    )
+    assert.deepEqual(
+      await readPartIds(storage, tablePath),
+      ['fallbackhash16ab#0', 'fallbackhash16ab#0'],
+      'fixture invariant: one part identity for both rows, unmoved by the relink'
+    )
   } finally {
     await env.cleanup()
   }

@@ -1,13 +1,22 @@
 // @ts-check
 
+import { STRICT_SHORT_FLAGS, argvToParams } from '../../../../src/core/cli/verb_codec.js'
 import { compactGraphTables } from './maintenance.js'
 import { projectGraph } from './project.js'
 import { requireGraphRuntime } from './runtime.js'
 
 /**
- * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, VerbInputSchema } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  */
+
+/** @type {VerbInputSchema} */
+const COMPACT_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    'dry-run': { type: 'boolean', default: false },
+  },
+}
 
 /**
  * `hyp graph project` - run the T0 projection over every registered source
@@ -23,7 +32,7 @@ export async function runGraphProject(argv, ctx) {
     ctx.stderr.write(`hyp graph project: ${parsed.error}\n`)
     return 2
   }
-  const { source, dryRun } = parsed
+  const { source, dryRun, refresh } = parsed
   try {
     const { registry } = requireGraphRuntime()
     const contracts = source
@@ -45,6 +54,7 @@ export async function runGraphProject(argv, ctx) {
       contracts,
       config: ctx.config,
       dryRun,
+      refresh,
     })
     if (dryRun) {
       ctx.stdout.write(`graph project (dry-run): ${r.nodes} node(s), ${r.edges} edge(s) would be projected\n`)
@@ -70,16 +80,19 @@ export async function runGraphProject(argv, ctx) {
  * for the same reason.
  *
  * @param {string[]} argv
- * @returns {{ ok: true, source: string | undefined, dryRun: boolean } | { ok: false, error: string }}
+ * @returns {{ ok: true, source: string | undefined, dryRun: boolean, refresh: boolean } | { ok: false, error: string }}
  */
 function parseProjectArgv(argv) {
   /** @type {string | undefined} */
   let source
   let dryRun = false
+  let refresh = false
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
-    if (token === '--dry-run') {
+    if (token === '--refresh') {
+      refresh = true
+    } else if (token === '--dry-run') {
       dryRun = true
     } else if (token === '--source') {
       const value = argv[i + 1]
@@ -99,7 +112,7 @@ function parseProjectArgv(argv) {
     }
   }
 
-  return { ok: true, source, dryRun }
+  return { ok: true, source, dryRun, refresh }
 }
 
 /**
@@ -111,7 +124,16 @@ function parseProjectArgv(argv) {
  * @returns {Promise<number>}
  */
 export async function runGraphCompact(argv, ctx) {
-  const dryRun = argv.includes('--dry-run')
+  // Read argv through the CLI codec: a bare `argv.includes('--dry-run')`
+  // missed `--dry-run=true` and ignored unknown flags, so a preview request
+  // ran the real rewrite (issue #2565). Anything the codec refuses exits 2
+  // before any partition is touched.
+  const parsed = argvToParams(COMPACT_INPUT_SCHEMA, argv, STRICT_SHORT_FLAGS)
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp graph compact: ${parsed.error}\n`)
+    return 2
+  }
+  const dryRun = parsed.params['dry-run'] === true
   try {
     const r = await compactGraphTables({
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),

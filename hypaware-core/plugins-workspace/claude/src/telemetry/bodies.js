@@ -54,6 +54,31 @@ const GAP_BLOCK_TYPES = new Set([
 const removing = new Set()
 
 /**
+ * In-flight `readFile`s of a spool file, keyed by absolute path, shared by
+ * every overlapping caller naming the same `body_ref`. Without this, two
+ * overlapping reads each issue their own `readFile`, and the one that
+ * resolves second can reach the filesystem only after the first has already
+ * read, classified, and (for an unparseable body) deleted the file: that
+ * `readFile` sees ENOENT for a file that was never legitimately missing, so
+ * it counts as `missing` instead of `unparseable`, and `removing` (which
+ * only arbitrates the *delete*) cannot catch it because by then the delete
+ * has already settled. Sharing the read removes that second `readFile`
+ * outright for every caller that overlaps the first: they all get the exact
+ * same bytes or the exact same rejection, decided once, before `removing`
+ * ever needs to arbitrate anything.
+ *
+ * An entry stays until every caller holding it has finished classifying, and
+ * for an unparseable body that includes the owner's `unlink`, so a caller that
+ * arrives while the delete is still in flight shares the bytes instead of
+ * reading a file that is about to go (issue #2053). Each entry counts its
+ * `users`; the last one out drops it, on every exit path, so the map never
+ * outgrows the reads in flight. A caller that arrives after the last one has
+ * left never overlapped the read, and reads for itself.
+ * @type {Map<string, { read: Promise<Buffer>, users: number }>}
+ */
+const reading = new Map()
+
+/**
  * Read the spooled body files a batch of events references.
  *
  * Only files inside the spool directory are touched: `body_ref` arrives
@@ -95,64 +120,92 @@ export async function loadSpooledBodies(events, opts) {
   let unparseableBytes = 0
   /** @type {string[]} */
   const refused = []
+  // Every in-spool ref this call has already classified. `bodies` cannot be the
+  // dedup on its own: a ref that does not parse never lands there, so a batch
+  // naming one twice reads it again after this call's own `unlink` took it off
+  // the disk, and counts `missing` for the very ref the same result calls
+  // `unparseable`. The shared `reading` entry does not cover it either: this
+  // call leaves it once the first occurrence is classified, so it is gone by
+  // the time a later occurrence in the same batch asks for it.
+  /** @type {Set<string>} */
+  const seen = new Set()
 
   const spoolRoot = path.resolve(opts.spoolDir)
   for (const event of events) {
     if (!BODY_EVENT_NAMES.includes(event.name)) continue
     const ref = stringValue(event.attributes.body_ref)
-    if (!ref || bodies.has(ref)) continue
+    if (!ref || seen.has(ref)) continue
     const file = path.resolve(ref)
     if (!file.startsWith(spoolRoot + path.sep)) {
       refused.push(ref)
       continue
     }
-    /** @type {Buffer} */
-    let raw
+    seen.add(ref)
+    // Claimed synchronously, before any `await`: whichever overlapping call
+    // for this `file` runs first creates and stores the read; a second call
+    // arriving before the last holder leaves finds the same entry in the map
+    // and reuses it instead of racing its own `readFile` against the first
+    // call's eventual `unlink`.
+    let entry = reading.get(file)
+    if (!entry) {
+      entry = { read: fs.readFile(file), users: 0 }
+      reading.set(file, entry)
+    }
+    entry.users += 1
+    const pending = entry.read
     try {
-      raw = await fs.readFile(file)
-    } catch {
-      // Already projected, already evicted, or never written: the
-      // content is recoverable from the transcript either way.
-      // @ref LLP 0253#eviction-degrades [implements]: an evicted body is not an
-      //   error; the failure mode is "captured later, with less detail"
-      missing += 1
-      continue
-    }
-    const body = parseMaybeJson(raw.toString('utf8'))
-    if (!isPlainObject(body)) {
-      unparseable += 1
-      // An overlapping read already owns this removal (see `removing`): it
-      // reports the bytes, or reports nothing if the file would not go.
-      if (removing.has(file)) continue
-      removing.add(file)
+      /** @type {Buffer} */
+      let raw
       try {
-        // `unlink`, not `fs.rm(..., { force: true })`: a forced remove RESOLVES
-        // for a path that is already gone, and the bytes below are only ours to
-        // report if this call is the one that took the file off the disk.
-        await fs.unlink(file)
-        // Sized only once the file is gone: one that is still there (EPERM, a
-        // read-only spool) is still spooled, so subtracting its bytes would
-        // publish a spool smaller than the one the next sweep finds.
-        // @ref LLP 0257#status-and-health [implements]: S16 - `spool_bytes` is
-        //   the spool's current size, so a deletion only the reader can see has
-        //   to be sized for the caller
-        unparseableBytes += raw.length
+        raw = await pending
       } catch {
-        // Already gone, or not removable at all: either way this batch has no
-        // byte movement to report, and the content is recoverable from
-        // transcript backfill.
-      } finally {
-        removing.delete(file)
+        // Already projected, already evicted, or never written: the
+        // content is recoverable from the transcript either way.
+        // @ref LLP 0253#eviction-degrades [implements]: an evicted body is not an
+        //   error; the failure mode is "captured later, with less detail"
+        missing += 1
+        continue
       }
-      continue
+      const body = parseMaybeJson(raw.toString('utf8'))
+      if (!isPlainObject(body)) {
+        unparseable += 1
+        // An overlapping read already owns this removal (see `removing`): it
+        // reports the bytes, or reports nothing if the file would not go.
+        if (removing.has(file)) continue
+        removing.add(file)
+        try {
+          // `unlink`, not `fs.rm(..., { force: true })`: a forced remove RESOLVES
+          // for a path that is already gone, and the bytes below are only ours to
+          // report if this call is the one that took the file off the disk.
+          await fs.unlink(file)
+          // Sized only once the file is gone: one that is still there (EPERM, a
+          // read-only spool) is still spooled, so subtracting its bytes would
+          // publish a spool smaller than the one the next sweep finds.
+          // @ref LLP 0257#status-and-health [implements]: S16 - `spool_bytes` is
+          //   the spool's current size, so a deletion only the reader can see has
+          //   to be sized for the caller
+          unparseableBytes += raw.length
+        } catch {
+          // Already gone, or not removable at all: either way this batch has no
+          // byte movement to report, and the content is recoverable from
+          // transcript backfill.
+        } finally {
+          removing.delete(file)
+        }
+        continue
+      }
+      bodies.set(ref, {
+        kind: event.name === 'api_request_body' ? 'request' : 'response',
+        file,
+        body,
+      })
+      consumedFiles.push(file)
+      consumedBytes += raw.length
+    } finally {
+      // Every exit leaves here, the owner's only after its `unlink` settled.
+      entry.users -= 1
+      if (entry.users === 0 && reading.get(file) === entry) reading.delete(file)
     }
-    bodies.set(ref, {
-      kind: event.name === 'api_request_body' ? 'request' : 'response',
-      file,
-      body,
-    })
-    consumedFiles.push(file)
-    consumedBytes += raw.length
   }
 
   return { bodies, consumedFiles, consumedBytes, missing, unparseable, unparseableBytes, refused }

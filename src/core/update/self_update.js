@@ -8,12 +8,13 @@
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { isEphemeralBinPath } from '../cli/global_install.js'
 import { warningsRecordBootFailure } from '../daemon/boot_failure.js'
-import { daemonRunDir, processIsAlive, readPidFile } from '../daemon/pid.js'
+import { processIsAlive, readPidFile } from '../daemon/pid.js'
+import { daemonRunDir, localConfigPath, selfUpdateStatePath, stateRootFromEnv, statusFilePath } from '../runtime/paths.js'
 import { LAUNCH_LABEL } from '../daemon/platform.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { isLoopbackHost } from '../util/loopback.js'
@@ -37,15 +38,23 @@ const PROBE_TIMEOUT_MS = 5000
 export const NPM_TIMEOUT_MS = 120_000
 // How long a timed-out npm gets to honor SIGTERM before SIGKILL.
 export const NPM_KILL_GRACE_MS = 5000
+// How long the new install's entrypoint gets to print its version before
+// the apply is judged broken and rolled back.
+export const PREFLIGHT_TIMEOUT_MS = 30_000
+// The longest a live holder can legitimately hold the apply lock.
+// `applySelfUpdate` runs the prefix query, the install and the preflight,
+// then either the skills install or the rollback, never both. Every
+// command is bounded by its timeout plus the SIGKILL grace `runCommand`
+// gives it, so the worst path is three npm-length commands and one
+// preflight: 410s.
+const APPLY_LONGEST_HOLD_MS =
+  3 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS) + (PREFLIGHT_TIMEOUT_MS + NPM_KILL_GRACE_MS)
 // An apply lock this old belonged to a process that died mid-install;
-// honoring it forever would wedge updates permanently. The floor is the
-// longest a live holder can legitimately hold it: `applySelfUpdate` runs
-// up to three npm commands (prefix, install, and the rollback install)
-// plus the preflight, each bounded by its own timeout, which is about
-// 390s of the 500s here. Reclaiming a lock its owner still holds starts
-// the second concurrent `npm install -g` this lock exists to prevent, so
-// erring long costs a slower recovery and erring short costs the machine.
-export const APPLY_LOCK_STALE_MS = 4 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS)
+// honoring it forever would wedge updates permanently. Reclaiming a lock
+// its owner still holds starts the second concurrent `npm install -g` this
+// lock exists to prevent, so erring long costs a slower recovery and
+// erring short costs the machine: twice the longest legitimate hold.
+export const APPLY_LOCK_STALE_MS = 2 * APPLY_LONGEST_HOLD_MS
 const DAILY_CHECK_MS = 24 * 60 * 60 * 1000
 // One hour when the previous boot never reached healthy: a machine
 // stuck on a broken release re-probes eagerly so it jumps to the fix
@@ -59,16 +68,6 @@ const EAGER_CHECK_MS = 60 * 60 * 1000
  */
 export const SELF_UPDATE_RESTART_EXIT_CODE = 75
 
-/**
- * Must equal `CONFIG_BASENAME` in `src/core/config/schema.js`.
- * Duplicated rather than imported for the same reason as the exit code
- * above; a test asserts the two stay in sync.
- */
-const CONFIG_BASENAME = 'hypaware-config.json'
-
-// How long the new install's entrypoint gets to print its version before
-// the apply is judged broken and rolled back.
-export const PREFLIGHT_TIMEOUT_MS = 30_000
 // How many consecutive boots on a freshly installed version may fail to
 // reach the kernel before the pre-boot lane reinstalls the version it
 // replaced. One is not enough: the first relaunch after a power loss
@@ -86,7 +85,7 @@ const NPM_DETAIL_CHARS = 600
  *
  * Presence of `XPC_SERVICE_NAME` is not the test: macOS sets it in every
  * process launchd spawned, including terminals (`0`) and GUI apps
- * (`application.<bundle>...`), so a hand-run `hyp daemon run --foreground`
+ * (`application.<bundle>...`), so a hand-run `hyp daemon run`
  * carries one too. Only the daemon's own label counts. systemd sets
  * `INVOCATION_ID` for the services it runs and for nothing interactive.
  *
@@ -95,6 +94,14 @@ const NPM_DETAIL_CHARS = 600
  * @returns {boolean}
  */
 export function detectSupervisor(env) {
+  // win32 has no manager-set signal to sniff (Task Scheduler sets no
+  // equivalent of XPC_SERVICE_NAME / INVOCATION_ID), so the installed task's
+  // own command line carries the marker: `daemon run --supervised` sets this
+  // on the daemon's env before any lane reads it (`runDaemonRun`). Authored by
+  // us, so unambiguous - unlike XPC_SERVICE_NAME, which macOS also sets in
+  // plain terminals (the false positive the two arms below guard against).
+  // @ref LLP 0584#supervision [implements]: the task marks the process it starts so detectSupervisor is true on win32
+  if (env.HYP_SUPERVISED === '1') return true
   const xpc = env.XPC_SERVICE_NAME
   if (typeof xpc === 'string' && (xpc === LAUNCH_LABEL || xpc.startsWith(LAUNCH_LABEL + '.'))) return true
   return typeof env.INVOCATION_ID === 'string' && env.INVOCATION_ID !== ''
@@ -116,7 +123,7 @@ export function detectSupervisor(env) {
 function resolveLocalConfigPath(opts) {
   if (opts.configPath) return path.resolve(opts.configPath)
   if (opts.env.HYP_CONFIG) return path.resolve(opts.env.HYP_CONFIG)
-  return path.join(path.dirname(opts.stateRoot), CONFIG_BASENAME)
+  return localConfigPath(path.dirname(opts.stateRoot))
 }
 
 /**
@@ -153,16 +160,7 @@ export function readLocalConfigAutoUpdate(opts) {
  * @returns {string}
  */
 export function selfUpdateStateRoot(env) {
-  const hypHome = env.HYP_HOME || path.join(os.homedir(), '.hyp')
-  return path.join(hypHome, 'hypaware')
-}
-
-/**
- * @param {string} stateRoot
- * @returns {string}
- */
-export function selfUpdateStatePath(stateRoot) {
-  return path.join(daemonRunDir(stateRoot), 'self-update.json')
+  return stateRootFromEnv(env)
 }
 
 /**
@@ -416,6 +414,46 @@ function registryOrigin(raw) {
  * checkout would create a second, skewed install beside the one
  * actually running.
  *
+ * A copy inside some project's `node_modules` is that second install one tree
+ * over: `npm install -g` lands beside it and never replaces it. Telling it from
+ * a global root takes more than "is there a `node_modules` segment", which both
+ * have; what separates them is the manifest beside the outermost one, which a
+ * project carries and `<prefix>/lib` does not. That is exactly the question
+ * `isEphemeralBinPath` asks, so it is reused rather than restated, and the
+ * module it lives in imports no kernel code, so the pre-boot lane stays as
+ * import-light as it was.
+ *
+ * A pnpm or yarn GLOBAL root answers the same way, because those two managers
+ * do write a manifest beside theirs (issue #1625), so `project-local` is the
+ * verdict for a whole install and not only for a dependency. That takes nothing
+ * an apply would have given them: `applySelfUpdate` compares the root against
+ * npm's own prefix, so it refused those roots before this change too. What it
+ * does take is the degraded line that refusal used to leave on `hyp status`,
+ * which named the repair (`npm install -g`) while it was there. `hyp update`
+ * still probes from anywhere and still names it, which is the surface
+ * #cli-surface reserves for the manual lane, and it is the same silence a
+ * checkout and an npx cache have had from the text line all along. Separating
+ * those roots from a project's tree needs a heuristic neither predicate has,
+ * and #1625 settled that as out of scope for this one.
+ *
+ * `applySelfUpdate` refuses this root anyway (it compares against npm's prefix),
+ * so what the verdict buys is everything around that refusal: no daily registry
+ * probe, no `npm config get prefix` spawned to ask what the path already
+ * answers, and no sticky `apply_failed` error putting a permanent
+ * "self-update: degraded" line on `hyp status` for a machine with nothing wrong
+ * with it (issue #1622).
+ *
+ * One lane it does stop that no later refusal would have: the restart-only
+ * hand-over. `npm install` in the project moves the root ahead of the code the
+ * daemon loaded at boot, and read as `global-candidate` that reached
+ * LLP 0365 #running-version-is-tracked, which restarts the daemon onto a version
+ * already on disk and so costs neither a probe nor an install. This root is now
+ * as silent there as a source checkout, whose tree moves ahead the same way and
+ * which has never had that lane, so such a daemon stays on the code it booted
+ * until someone restarts it. Reaching that lane at all takes `hyp daemon install`
+ * having pinned a supervised service to this tree, which is the lane issue #1622
+ * is still open for, so the question is left with that one.
+ *
  * @ref LLP 0309#global-install-only [implements]: provenance guard on the running package root
  * @param {{ packageRoot?: string, env?: NodeJS.ProcessEnv }} [opts]
  * @returns {SelfInstallProvenance}
@@ -429,6 +467,7 @@ export function classifySelfProvenance(opts = {}) {
   if (cache && root.startsWith(path.join(cache, '_npx') + path.sep)) return 'npx'
   if (fs.existsSync(path.join(root, '.git'))) return 'checkout'
   if (!segments.includes('node_modules')) return 'checkout'
+  if (isEphemeralBinPath(root, env)) return 'project-local'
   return 'global-candidate'
 }
 
@@ -467,7 +506,10 @@ export async function fetchLatestVersion(opts) {
     if (!res.ok) throw new Error(`registry responded ${res.status}`)
     const body = /** @type {{ version?: unknown } | null} */ (await res.json())
     const version = body && typeof body === 'object' ? body.version : undefined
-    if (typeof version !== 'string' || !parseSemver(version)) {
+    // parseSemver matches a prefix; the allowlist pins the whole string,
+    // because this value is later interpolated into `npm install -g
+    // name@version`, which runs through a shell on win32.
+    if (typeof version !== 'string' || !parseSemver(version) || !/^[0-9A-Za-z.+-]+$/.test(version)) {
       throw new Error('registry response had no parseable version')
     }
     return version
@@ -514,7 +556,7 @@ export function shouldCheckNow({ state, nowMs, eager, jitter }) {
  */
 export function previousBootLooksStuck(stateRoot) {
   try {
-    const raw = readFileIfExistsSync(path.join(daemonRunDir(stateRoot), 'status.json'))
+    const raw = readFileIfExistsSync(statusFilePath(stateRoot))
     if (!raw) return false
     const parsed = JSON.parse(raw)
     if (parsed?.state === 'starting') return true
@@ -582,6 +624,8 @@ export function withNodeBinOnPath(env) {
  *   previousVersion?: string,
  *   packageRoot?: string,
  *   env?: NodeJS.ProcessEnv,
+ *   configPath?: string,
+ *   skipSkillsInstall?: boolean,
  *   runner?: CommandRunner,
  *   platform?: NodeJS.Platform,
  *   log?: (event: string, fields?: Record<string, unknown>) => void,
@@ -623,7 +667,37 @@ export async function applySelfUpdate(opts) {
   }
 
   const preflight = await runPreflight({ globalRoot, version: opts.version, env, run })
-  if (preflight.ok) return { applied: true }
+  if (preflight.ok) {
+    // `--attached` is the new release's flag: a rollback installs whatever
+    // the update replaced, and a release predating LLP 0458 refuses the flag
+    // outright, so this lane (which runs only when the boot is already
+    // failing) would report its own argv as a failed step. The skip leaves
+    // the assets on disk for `hyp skills install` or the next upgrade.
+    // @ref LLP 0457#update-installs [constrained-by]: this lane declines 0457's post-preflight installer, leaving the rolled-back-from version's assets over older code, and 0457's own recovery paths (attach, hyp skills install, the next upgrade) are what close that mismatch
+    // @ref LLP 0458#attached-only [constrained-by]: the flag is the new package's, so a rollback onto an older one does not use it
+    // @ref LLP 0535#rollback-skip [implements]: the permanent, decided exception; the skipped event is the whole explanation, with no version gate
+    if (opts.skipSkillsInstall) {
+      log('self_update.skills_install_skipped', { reason: 'rollback', version: opts.version })
+      return { applied: true }
+    }
+    // @ref LLP 0458#attached-only [implements]: the new package probes current attachments before using the shared installer
+    try {
+      const skills = await run(process.execPath, [path.join(globalRoot, 'bin', 'hypaware.js'), 'skills', 'install', '--attached'], {
+        env: { ...env, ...(opts.configPath ? { HYP_CONFIG: opts.configPath } : {}) },
+        timeoutMs: NPM_TIMEOUT_MS,
+      })
+      const event = skills.exitCode !== 0 ? 'self_update.skills_install_failed'
+        : skills.stderr.trim() ? 'self_update.skills_install_warning' : 'self_update.skills_installed'
+      log(event, { exit_code: skills.exitCode, detail: npmDetail(skills) })
+    } catch (err) {
+      log('self_update.skills_install_failed', {
+        detail: redactUrls(err instanceof Error ? err.message : String(err)).slice(-NPM_DETAIL_CHARS),
+      })
+    }
+    // A helper install failure must not strand a healthy new package before
+    // its restart. The warning names the failed step; skills install retries it.
+    return { applied: true }
+  }
   const reason = preflight.inconclusive ? 'preflight_inconclusive' : 'preflight_failed'
   log('self_update.preflight_failed', { error_kind: reason, latest_version: opts.version, detail: preflight.detail })
   if (!opts.previousVersion || opts.previousVersion === opts.version) {
@@ -822,13 +896,22 @@ export async function runSelfUpdatePass(opts = {}) {
     }
 
     const supervised = opts.supervised ?? detectSupervisor(env)
+    // The refusal below is recorded for `hyp status`, and cleared here, on
+    // the first pass a supervised daemon makes, rather than on its next
+    // refusal: a replacement daemon under a service manager may not reach
+    // that gate for a day. Only the automatic lanes speak for the daemon;
+    // `hyp update` runs in a terminal, whose environment says nothing
+    // about it.
+    if (!opts.force && supervised && state.refusal !== undefined) {
+      writeSelfUpdateState(stateRoot, { refusal: undefined })
+    }
     if (!opts.force) {
       const stuck = previousBootLooksStuck(stateRoot)
       // Before the TTL gate: a version this updater installed that cannot
       // boot is undone on the spot, not on tomorrow's schedule. Only under
       // a supervisor, for the same reason an apply is: the rollback
       // installs and then exits for a relaunch, and a hand-run
-      // `hyp daemon run --foreground` has nothing to relaunch it, so the
+      // `hyp daemon run` has nothing to relaunch it, so the
       // operator would get a silent downgrade and no daemon.
       // @ref LLP 0365#restart-needs-a-supervisor [constrained-by]: the rollback installs and exits, so it is gated like any other apply
       const rollback = supervised
@@ -988,6 +1071,8 @@ export async function runSelfUpdatePass(opts = {}) {
         ...(probeFailed ? {} : { latest_version: latest }),
         running_version: identity.version,
       })
+      // @ref LLP 0539#record [implements]: the refusal is recorded state the status line reads, not a probe error
+      if (state.refusal !== 'unsupervised') writeSelfUpdateState(stateRoot, { refusal: 'unsupervised' })
       return probeFailed
         ? { action: 'checked', reason: 'unsupervised' }
         : { action: 'checked', reason: 'unsupervised', latest }
@@ -1068,6 +1153,7 @@ export async function runSelfUpdatePass(opts = {}) {
         version: latest,
         previousVersion: identity.version,
         packageRoot: opts.packageRoot,
+        configPath: resolveLocalConfigPath({ stateRoot, env, configPath: opts.configPath }),
         // Untouched: the only override that reaches here is one the probe
         // believed, so npm resolving the tarball through it is the same
         // answer this pass already used for the version. An untrusted one
@@ -1180,7 +1266,7 @@ async function maybeRollBack({ stateRoot, stuck, packageRoot, env, runner, nowMs
   /** @type {Awaited<ReturnType<typeof applySelfUpdate>>} */
   let back
   try {
-    back = await applySelfUpdate({ name: identity.name, version: last.from, packageRoot, env, runner, log })
+    back = await applySelfUpdate({ name: identity.name, version: last.from, packageRoot, env, runner, log, skipSkillsInstall: true })
   } finally {
     releaseLock()
   }
@@ -1242,12 +1328,16 @@ export function describeSelfUpdate(opts) {
     ? undefined
     : Boolean(state.available && state.latest_version &&
       compareSemver(state.latest_version, identity.version) > 0)
-  // The daemon records what it loaded at boot; it only means something
-  // while that daemon is alive, so a leftover from a stopped one is not
-  // read as a stale daemon.
-  const runningVersion = typeof state.running_version === 'string' && daemonIsAlive(opts.stateRoot)
+  // The daemon records what it loaded at boot, and the refusal it last
+  // made; both only mean something while that daemon is alive, so a
+  // leftover from a stopped one is not read as a stale daemon or as a
+  // refusal nobody is making.
+  const alive = (typeof state.running_version === 'string' || state.refusal === 'unsupervised') &&
+    daemonIsAlive(opts.stateRoot)
+  const runningVersion = alive && typeof state.running_version === 'string'
     ? state.running_version
     : undefined
+  const refusal = alive && state.refusal === 'unsupervised' ? state.refusal : undefined
   // Gated on provenance, unlike every other comparison here: this one
   // reads `identity.version` as "the version installed on this machine",
   // which it only is when the process rendering status IS that install. A
@@ -1280,6 +1370,7 @@ export function describeSelfUpdate(opts) {
     auto_update: autoUpdate,
     provenance,
     ...(runningVersion !== undefined ? { running_version: runningVersion } : {}),
+    ...(refusal ? { refusal } : {}),
     ...(state.held_version ? { held_version: state.held_version } : {}),
     ...(state.checked_at ? { checked_at: state.checked_at } : {}),
     ...(state.latest_version ? { latest_version: state.latest_version } : {}),
@@ -1357,6 +1448,13 @@ export function describeSelfUpdate(opts) {
       json,
     }
   }
+  if (available && state.latest_version && refusal) {
+    return {
+      line: `self-update: ${state.latest_version} available (running ${identity.version}), but automatic ` +
+        "updates are unavailable because this daemon is not running under a service manager; run 'hyp update'",
+      json,
+    }
+  }
   if (available && state.latest_version) {
     return { line: `self-update: ${state.latest_version} available (running ${identity.version})`, json }
   }
@@ -1393,15 +1491,23 @@ function probeFailureIsEntrenched(state, nowMs) {
 function runCommand(cmd, args, opts) {
   const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : NPM_TIMEOUT_MS
   return new Promise((resolve) => {
+    // On Windows npm is npm.cmd, and spawn without a shell refuses `.cmd`
+    // targets with EINVAL (Node's CVE-2024-27980 fix). A shell means the
+    // arguments are not escaped, so callers may pass only fixed, bare
+    // tokens (fetchLatestVersion pins the version to one). Only npm gets
+    // the shell: the node preflight and skills runs pass process.execPath,
+    // which the shell would split at the space in C:\Program Files.
     const child = spawn(cmd, args, {
       env: opts.env,
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32' && cmd === 'npm',
+      windowsHide: true,
     })
-    /** @type {Buffer[]} */
-    const stdoutChunks = []
-    /** @type {Buffer[]} */
-    const stderrChunks = []
+    // Keep only a bounded tail: skill installation loads plugins, whose
+    // diagnostics must not grow the updater's memory for the child's lifetime.
+    let stdout = ''
+    let stderr = ''
     let settled = false
     // Two-stage kill: an npm that ignores SIGTERM would otherwise leave
     // this promise pending forever, and the daemon's `selfUpdateInFlight`
@@ -1422,12 +1528,12 @@ function runCommand(cmd, args, opts) {
       clearTimeout(timer)
       resolve({
         exitCode,
-        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        stdout,
+        stderr,
       })
     }
-    child.stdout?.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)))
-    child.stderr?.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)))
+    child.stdout?.setEncoding('utf8').on('data', (chunk) => { stdout = (stdout + chunk).slice(-64 * 1024) })
+    child.stderr?.setEncoding('utf8').on('data', (chunk) => { stderr = (stderr + chunk).slice(-64 * 1024) })
     child.on('error', () => finish(-1))
     child.on('close', (code) => finish(code ?? -1))
   })

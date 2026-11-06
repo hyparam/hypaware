@@ -44,6 +44,26 @@ export function textBlocksFromContent(content) {
 }
 
 /**
+ * Codex labels every content block of a `message` item in
+ * `internal_chat_message_metadata_passthrough.content_item_kinds`:
+ * `user.text` / `user.image` are what the person submitted; everything
+ * else under the same user role (`agents_md.instructions`,
+ * `environments.environment_context`, `plugins.recommendations`,
+ * `shell.user_command`, ...) is harness-injected. Returned verbatim so a
+ * row can be classified without a text-prefix rule; `undefined` when the
+ * item carries no usable list (older rollouts, non-Codex producers).
+ *
+ * @param {Record<string, unknown>} item  a `message` response item
+ * @returns {string[] | undefined}
+ */
+export function contentItemKinds(item) {
+  const meta = item.internal_chat_message_metadata_passthrough
+  if (!isPlainObject(meta) || !Array.isArray(meta.content_item_kinds)) return undefined
+  const kinds = meta.content_item_kinds.filter((kind) => typeof kind === 'string')
+  return kinds.length > 0 ? kinds : undefined
+}
+
+/**
  * `function_call` (arguments as a JSON string) and `custom_tool_call`
  * (input string) both become a `tool_use` block keyed on the Codex
  * `call_id`, so the gateway can pair it with the matching output.
@@ -147,6 +167,129 @@ export function reasoningText(value) {
   return parts.length > 0 ? parts.join('\n') : undefined
 }
 
+// Codex's compact/summary_prefix.md predates the native content classification.
+// Keep the complete prefix: a generic mention of a summary is not evidence.
+const COMPACTION_SUMMARY_PREFIX = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:'
+const COMPACTION_SUMMARY_KIND = 'compaction.summary'
+
+/**
+ * Recognize Codex's injected plaintext summary message, including replay in a
+ * later request. This is separate from reasoning.summary and opaque Responses
+ * compaction/compaction_summary/context_compaction items, which have no portable
+ * text. Native classification comes from Codex's context/compaction_summary.rs.
+ *
+ * @param {Record<string, unknown>} payload
+ * @returns {AiGatewayProjectedMessage | undefined}
+ */
+export function compactionSummaryFromMessage(payload) {
+  const metadata = isPlainObject(payload.internal_chat_message_metadata_passthrough)
+    ? payload.internal_chat_message_metadata_passthrough : undefined
+  const kinds = metadata?.content_item_kinds
+  const classified = Array.isArray(kinds) && kinds.includes(COMPACTION_SUMMARY_KIND)
+  const first = Array.isArray(payload.content) ? payload.content[0] : payload.content
+  const firstText = typeof first === 'string' ? first : isPlainObject(first) ? stringValue(first.text) : undefined
+  if (!classified && !firstText?.startsWith(COMPACTION_SUMMARY_PREFIX + '\n')) return undefined
+  const content = classified && Array.isArray(payload.content)
+    ? payload.content.filter((_, i) => kinds[i] === COMPACTION_SUMMARY_KIND)
+    : payload.content
+  const text = textBlocksFromContent(content).map((block) => block.text).join('\n')
+  return summaryMessage(payload, text)
+}
+
+/**
+ * A rollout `compacted` checkpoint has a plaintext `message` for local
+ * compaction. replacement_history is a snapshot, never new conversation rows:
+ * consult it only for the matching summary's identity. An empty message (remote
+ * compaction) does not authorize importing an older retained summary or decoding
+ * encrypted_content. Never copy the snapshot or its usage into compact_metadata.
+ *
+ * @param {Record<string, unknown>} payload
+ * @returns {AiGatewayProjectedMessage | undefined}
+ */
+export function compactedMessageFromPayload(payload) {
+  const text = stringValue(payload.message)
+  if (!text?.trim()) return undefined
+  let native = payload
+  const history = payload.replacement_history
+  if (Array.isArray(history)) {
+    for (let i = history.length - 1; i >= 0; i--) {
+      const item = history[i]
+      if (!isPlainObject(item) || item.type !== 'message') continue
+      if (!textContentEquals(item.content, text)) continue
+      native = item
+      break
+    }
+  }
+  const message = summaryMessage(native, text)
+  if (!message) return undefined
+  message.provider_type = 'compacted'
+  /** @type {JsonObject} */
+  const metadata = {}
+  for (const key of ['compaction_response_id', 'first_window_id', 'previous_window_id', 'window_id']) {
+    setIfString(metadata, key, stringValue(payload[key]))
+  }
+  copyNumberAlias(payload, metadata, 'window_number', 'window_number')
+  if (Object.keys(metadata).length > 0) message.compact_metadata = metadata
+  return message
+}
+
+/** Compare snapshot text without allocating copies of retained prompts.
+ * @param {unknown} content
+ * @param {string} text
+ */
+function textContentEquals(content, text) {
+  if (typeof content === 'string') return content === text
+  if (!Array.isArray(content)) return false
+  let offset = 0
+  let sawText = false
+  for (const block of content) {
+    const part = typeof block === 'string' ? block : isPlainObject(block)
+      ? stringValue(block.text) ?? stringValue(block.input_text) ?? stringValue(block.output_text) : undefined
+    if (!part) continue
+    if (sawText) {
+      if (text[offset] !== '\n') return false
+      offset += 1
+    }
+    if (!text.startsWith(part, offset)) return false
+    offset += part.length
+    sawText = true
+  }
+  return sawText && offset === text.length
+}
+
+/**
+ * Preserve the native summary identity on both capture lanes. Older checkpoints
+ * have no id, so their user-role text hashes identically to the next input replay.
+ *
+ * @param {Record<string, unknown>} payload
+ * @param {string} text
+ * @returns {AiGatewayProjectedMessage | undefined}
+ */
+function summaryMessage(payload, text) {
+  if (!text.trim()) return undefined
+  /** @type {AiGatewayProjectedMessage} */
+  const message = {
+    role: stringValue(payload.role) ?? 'user',
+    content: [{ type: 'text', text }],
+    is_compact_summary: true,
+    provider_type: 'message',
+    provider_subtype: COMPACTION_SUMMARY_KIND,
+  }
+  const id = stringValue(payload.id)
+  if (id) message.message_id = id
+  const kinds = contentItemKinds(payload)
+  if (kinds) message.attributes = { codex: { content_item_kinds: kinds } }
+  const metadata = payload.internal_chat_message_metadata_passthrough
+  if (isPlainObject(metadata)) {
+    const createTime = numberValue(metadata.create_time)
+    if (createTime !== undefined) {
+      const date = new Date(createTime * 1000)
+      if (Number.isFinite(date.getTime())) message.message_created_at = date.toISOString()
+    }
+  }
+  return message
+}
+
 // ---------------------------------------------------------------------
 // Usage (LLP 0035)
 // ---------------------------------------------------------------------
@@ -183,8 +326,8 @@ export function netInputUsage(grossInput, cachedInput) {
  * One carrier per response keeps a SUM over rows honest, and because
  * live and backfill share this exact function they fold usage onto the
  * same logical row and dedupe to one. Reasoning-only (thinking)
- * messages are skipped; if no eligible message exists (e.g. windowed
- * out) the usage is dropped rather than mis-attributed.
+ * messages and historical compaction summaries are skipped; if no eligible
+ * message exists (e.g. windowed out) usage is dropped rather than mis-attributed.
  * @ref LLP 0035#one-carrier
  *
  * @param {AiGatewayProjectedMessage[]} messages
@@ -195,7 +338,7 @@ export function stampUsageOnLastAssistant(messages, usageAttributes, startIndex 
   if (!usageAttributes) return
   for (let i = messages.length - 1; i >= startIndex; i--) {
     const message = messages[i]
-    if (message.role !== 'assistant' || !hasTextOrToolUse(message)) continue
+    if (message.role !== 'assistant' || message.is_compact_summary || !hasTextOrToolUse(message)) continue
     message.attributes = mergeJsonObjects(message.attributes, usageAttributes)
     return
   }

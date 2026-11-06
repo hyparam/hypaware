@@ -311,6 +311,8 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage, watermark
             })
           } catch (err) {
             throw tagError(err, 'encoder_failed')
+          } finally {
+            await reader.close()
           }
           // Embed [sinceSeq, lastSeq] so a crash-retry re-PUTs the same object
           // key (idempotent overwrite): the blob sink's server-ledger stand-in.

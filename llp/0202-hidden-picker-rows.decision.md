@@ -7,6 +7,7 @@
 **Date:** 2026-08-07
 **Extended-by:** [LLP 0276](./0276-hidden-rows-stay-off-the-sync-gate.decision.md) (§hidden-rows below: "absent from the interactive menu and from the defaults gate" widens to every wizard screen - the sync gate's locked rows go through the same display filter; §consequences' "the sync/opt-out menu is unchanged" is superseded, having been written before the locked rows were added to that gate)
 **Extended-by:** [LLP 0297](./0297-claude-desktop-leaves-onboarding.decision.md) (§hidden-rows below: `claude-desktop` sets `hidden` too, so "No other row does" no longer holds; §carry-through: the "collects nothing the menu can show" test is a proxy for a derivative read-back, and a hidden row that reads back off plugins of its own carries without it)
+**Extended-by:** [LLP 0370](./0370-carried-gated-row-has-no-interactive-exit.rfc.md) (§carry-through and §hidden-rows below, for platform-gated rows only: a gated row the config records renders on the pick menu, checked and marked unavailable, so it is the user's keep-or-remove choice and never carries; a `hidden` row is unchanged)
 **Related:** LLP 0130 (#picker-block: the manifest-sourced row contract this extends), LLP 0012 (#source-kinds: the raw proxy source class), LLP 0183 (#seed-from-config: the read-back this has to stay compatible with), LLP 0192 (#fail-closed: what the ids are load-bearing for), LLP 0190 (#pick-gate: the two screens a hidden row must stay out of)
 
 > Extends [LLP 0130 §picker-block](./0130-declarative-picker-descriptors.decision.md#picker-block)

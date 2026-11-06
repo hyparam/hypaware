@@ -423,13 +423,61 @@ test('native visibility drops an entirely withheld batch and propagates policy f
   await assert.rejects(async () => { for await (const _ of scan.batches({ signal: controller.signal })) {} }, /query cancelled/)
 })
 
-test('content-suppressing sources retain the row path even when native batches are available', async () => {
+test('sources mixing cwd and content suppression retain the row path', async () => {
   const rows = [{ id: 1, cwd: null, msg: 'secret' }]
   const native = nativeSource(rows, { type: 'all', length: 1 })
   const source = { ...native, scan: /** @type {ScannableDataSource} */ (memorySource(rows)).scan,
     prepareScan() { throw new Error('content suppression must use the row path') } }
   const out = await run({ source, extras: { localOnlyContentColumns: ['msg'] }, sql: "SELECT id FROM t WHERE msg = 'secret'" })
   assert.deepEqual(out.rows, [])
+})
+
+// @ref LLP 0431#native-suppression [tests]: graph-shaped sources stay native without leaking predicate matches, decoding content or losing deletes
+test('cwd-less native suppression agrees with row semantics across predicates, ranges and deletes', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-native-suppression-'))
+  const rows = [{ id: 1, msg: 'deleted' }, { id: 2, msg: 'secret' }, { id: 3, msg: 'other' }]
+  try {
+    await appendRowsToTable(root, [
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'msg', type: 'STRING', nullable: false },
+    ], rows)
+    await deleteMatchingRows(root, row => Number(row.id) === 1, { columns: ['id'] })
+    const original = await dataSourceForTable(root)
+    assert.ok(original?.prepareScan)
+    const prepare = original.prepareScan.bind(original)
+    const source = { ...original, scan() { throw new Error('suppression fell back to rows') },
+      prepareScan(request) {
+        const contentRequested = request.columns.some(demand => original.schema?.fields.find(f => f.id === demand.field)?.name === 'msg')
+        if (contentRequested) assert.equal(request.filter, undefined, 'content predicates cannot reach the source')
+        assert.equal(request.limit, undefined)
+        assert.equal(request.offset, undefined)
+        const inner = prepare(request)
+        return { ...inner, async *batches(options) {
+          for await (const batch of inner.batches(options)) {
+            yield { ...batch, columns: batch.columns.map((column, i) => inner.schema.fields[i].name === 'msg'
+              ? { read() { throw new Error('suppressed content must not be decoded') } } : column) }
+          }
+        } }
+      },
+    }
+    for (const sql of [
+      'SELECT id, msg FROM t ORDER BY id',
+      "SELECT id FROM t WHERE msg = 'secret'",
+      "SELECT id FROM t WHERE msg = 'other' OR id = 2",
+      'SELECT id, msg FROM t WHERE msg IS NULL ORDER BY id LIMIT 1 OFFSET 1',
+      'SELECT id FROM t WHERE msg IS NOT NULL',
+      'SELECT COUNT(*) AS n, COUNT(msg) AS visible FROM t',
+      'SELECT id FROM t WHERE id > 1 ORDER BY id LIMIT 1 OFFSET 1',
+      'SELECT msg, COUNT(*) AS n FROM t GROUP BY msg',
+    ]) {
+      const extras = { localOnlyContentColumns: ['msg'] }
+      const native = await run({ source, extras, sql })
+      const legacy = await run({ rows: rows.slice(1), extras, sql })
+      assert.deepEqual(native.rows.map(row => 'id' in row ? { ...row, id: Number(row.id) } : row), legacy.rows, sql)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })
 
 test('native visibility composes with real Iceberg position deletes and multiple partitions', async () => {

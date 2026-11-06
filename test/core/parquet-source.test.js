@@ -124,6 +124,26 @@ async function run(source, query) {
 
 // --- pushdown conversion -----------------------------------------------------
 
+test('boolean truth predicates fall back to the engine through parquet scans', async () => {
+  const source = await parquetSourceFromRows([
+    { name: 'id', type: 'INT64', nullable: false },
+    { name: 'flag', type: 'BOOLEAN', nullable: true },
+  ], [{ id: 1, flag: true }, { id: 2, flag: false }, { id: 3, flag: null }])
+  for (const [predicate, ids] of [
+    ['flag IS TRUE', [1]],
+    ['flag IS NOT TRUE', [2, 3]],
+    ['flag IS FALSE', [2]],
+    ['flag IS NOT FALSE', [1, 3]],
+    ['id > 1 AND flag IS NOT TRUE', [2, 3]],
+    ['id = 1 OR flag IS FALSE', [1, 2]],
+    ['NOT (flag IS TRUE)', [2, 3]],
+  ]) {
+    const query = `SELECT id FROM t WHERE ${predicate} ORDER BY id`
+    assert.equal(whereToParquetFilter(whereOf(query)), undefined, query)
+    assert.deepEqual((await run(source, query)).map(row => Number(row.id)), ids, query)
+  }
+})
+
 // Integer literals stay plain numbers: hyparquet >= 1.28.2 compares them to
 // bigint-decoded INT64 columns through `equals()`, and its bloom hashing
 // rejects a bigint for INT32/FLOAT/DOUBLE, so coercing would cost pruning.
@@ -170,15 +190,16 @@ test('whereToParquetFilter handles AND / OR / NOT', () => {
 })
 
 test('whereToParquetFilter handles IN / NOT IN / IS NULL', () => {
-  // $in never matches a null cell, so it pushes bare; $nin, like $ne, is
-  // true on one, so it carries the guard
+  // Lists push as equality comparisons, since hyparquet's $in/$nin also
+  // search array elements; $ne is true on a null cell, so NOT IN carries
+  // the guard
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (1, 2)')),
-    { id: { $in: [1, 2] } }
+    { $or: [{ id: { $eq: 1 } }, { id: { $eq: 2 } }] }
   )
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id NOT IN (1, 2)')),
-    { $and: [{ id: { $ne: null } }, { id: { $nin: [1, 2] } }] }
+    { $and: [{ id: { $ne: null } }, { id: { $ne: 1 } }, { id: { $ne: 2 } }] }
   )
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name IS NULL')), { name: { $eq: null } })
   assert.deepEqual(whereToParquetFilter(whereOf('SELECT * FROM t WHERE name IS NOT NULL')), { name: { $ne: null } })
@@ -262,7 +283,7 @@ test('whereToParquetFilter handles NULL members of an IN list', () => {
   // it is dropped: same rows, and the leaf keeps its statistics pruning.
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (1, NULL)')),
-    { id: { $in: [1] } }
+    { $or: [{ id: { $eq: 1 } }] }
   )
   assert.deepEqual(
     whereToParquetFilter(whereOf('SELECT * FROM t WHERE id IN (NULL)')),

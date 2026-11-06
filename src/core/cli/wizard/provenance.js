@@ -48,6 +48,9 @@ export function classifyClientProvenance(clientName, layered, catalog) {
   const inEffective = (layered.effective?.plugins ?? []).some((p) => p.name === plugin)
   if (!inEffective) return 'absent'
 
+  // @ref LLP 0511#onboarding: a team can enable the plugin, but cannot grant hosted account access.
+  if (plugin === '@hypaware/codex-cloud') return 'local'
+
   const inCentral = (layered.centralConfig?.plugins ?? []).some((p) => p.name === plugin)
   return inCentral ? 'central' : 'local'
 }

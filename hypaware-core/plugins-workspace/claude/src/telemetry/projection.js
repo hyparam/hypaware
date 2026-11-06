@@ -2,6 +2,7 @@
 
 import { BODY_EVENT_NAMES, requestBodyFacts, spooledBodyGapMessages } from './bodies.js'
 import { matchKey } from '../transcripts.js'
+import { sha256Hex } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage } from '../../../../../hypaware-plugin-kernel-types.js'
@@ -49,9 +50,9 @@ export const SESSION_BODY_FACTS_LIMIT = 64
 /**
  * Split a batch of events into one projected exchange per session.
  *
- * The event stream is the spine: `user_prompt` and `assistant_response`
- * each carry their own `message.uuid`, so a row's identity is known when
- * it is written and no settlement pass has anything to repair.
+ * The event stream supplies the content. A prompt's uuid is native identity;
+ * an assistant event's uuid is only a response anchor until settlement
+ * confirms which native text block its content describes.
  * `api_request` carries no content and no uuid; it is the usage record
  * for the `request_id` an `assistant_response` names, and is folded onto
  * that message's `attributes.usage` rather than becoming a row of its
@@ -68,10 +69,8 @@ export const SESSION_BODY_FACTS_LIMIT = 64
  * so within a session the projected order follows the body's canonical
  * message ordering, which is one of the things events do not carry.
  *
- * @ref LLP 0252#events-first [implements]: each content event is projected
- *   once, from the event that carries it, with `message.uuid` as the identity
- * @ref LLP 0254#identity-at-ingest [implements]: native identity, so no
- *   settlement enricher runs on the rows a content event produces
+ * @ref LLP 0559#assistant-identity [implements]: prompt identity is native;
+ *   assistant text is provisional until its native content agrees
  * @ref LLP 0389#match-key-on-bodies [implements]: a block only a body carries
  *   has no uuid, so it is stamped with the match-key and does settle
  * @param {ClaudeTelemetryEvent[]} events
@@ -332,8 +331,17 @@ function messageFromEvent(event, usageByRequestId) {
 
   const response = stringAttr(event, 'response')
   if (!response || !uuid) return undefined
+  // @ref LLP 0559#assistant-identity: an event uuid can name a tool block of
+  // the response. Keep it as evidence, never as the text block's identity.
+  const key = matchKey('assistant', response)
+  const scope = requestId ?? uuid
   /** @type {AiGatewayProjectedMessage} */
-  const message = { role: 'assistant', content: response, message_id: uuid, provider_uuid: uuid }
+  const message = {
+    role: 'assistant', content: response,
+    message_id: sha256Hex(`${stringAttr(event, 'session.id')}:${scope}:${key}`).slice(0, 16),
+    raw_frame: { type: 'assistant_response', uuid },
+    attributes: { gateway: { identity_source: 'gateway_fallback' }, claude: { match_key: key } },
+  }
   if (event.timestamp) message.message_created_at = event.timestamp
   if (promptId) message.prompt_id = promptId
   if (requestId) message.request_id = requestId
@@ -346,7 +354,8 @@ function messageFromEvent(event, usageByRequestId) {
   // record and nothing is left here.
   const usage = requestId ? usageByRequestId.get(requestId) : undefined
   if (usage) {
-    message.attributes = /** @type {any} */ (usage)
+    message.attributes = /** @type {any} */ ({ ...message.attributes, ...usage })
+    foldClaudeAttributes(message, { match_key: key })
     if (requestId) usageByRequestId.delete(requestId)
   }
   return message
@@ -384,8 +393,10 @@ function trimUsageIndex(index) {
  * would have carried it failed, so the exporter's retry re-projects against
  * the same inputs and its rows still get their tokens and cost.
  *
- * `snapshot` is the index as it stood before projection ran. A key missing
- * from `index` now was either claimed by an assistant message (whose row
+ * `consumed` is what the batch's projection took out of the index: the
+ * entries of the pre-projection index missing right after it ran, taken
+ * before any awaited write so a concurrent batch's claims are not among
+ * them. A consumed key was either claimed by an assistant message (whose row
  * never landed, so it has to come back) or evicted by the cap (which does
  * not), and the two are indistinguishable from here. So both come back and
  * the cap is re-applied: during a sustained write outage nothing is ever
@@ -395,10 +406,10 @@ function trimUsageIndex(index) {
  * alone, so an `api_request` whose response has not arrived yet still waits.
  *
  * @param {Map<string, Record<string, unknown>>} index
- * @param {Map<string, Record<string, unknown>>} snapshot
+ * @param {Map<string, Record<string, unknown>>} consumed
  */
-export function restoreUnclaimedUsage(index, snapshot) {
-  for (const [requestId, usage] of snapshot) {
+export function restoreUnclaimedUsage(index, consumed) {
+  for (const [requestId, usage] of consumed) {
     if (!index.has(requestId)) index.set(requestId, usage)
   }
   trimUsageIndex(index)

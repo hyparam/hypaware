@@ -142,9 +142,11 @@ function endedSessionMessages() {
  * @param {string[]} ignoredRoots
  */
 function fakeResolver(ignoredRoots = []) {
-  const markers = new Set(ignoredRoots.map((root) => path.join(root, '.hypignore')))
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over POSIX-written fixtures.
+  const markers = new Set(ignoredRoots.map((root) => path.resolve(root, '.hypignore')))
   return createUsagePolicyResolver({
-    existsSync: (p) => markers.has(p),
+    existsSync: (p) => markers.has(path.resolve(p)),
     readFileSync: () => 'ignore\n',
   })
 }
@@ -160,6 +162,38 @@ function noopDeriveRepo() {
 function throwingDeriveRepo() {
   return async () => { throw new Error('deriveRepo must not be called for this session') }
 }
+
+test('local sessions recover the creating surface while preserving raw source and cwd policy', async () => {
+  for (const createdSource of ['cli', 'tui', 'desktop', 'acp', '', null, undefined]) {
+    const session = { ...openInteractiveSession(), source: 'local', created_source: createdSource }
+    const item = await projectHermesSession({
+      session, messages: openInteractiveMessages(), resolver: fakeResolver(), deriveRepo: noopDeriveRepo(),
+    })
+    const exchange = /** @type {any} */ (item?.value)
+    assert.equal(exchange.entrypoint, createdSource || 'local')
+    assert.deepEqual(exchange.attributes.hermes, { source: 'local' })
+    assert.equal(exchange.cwd, session.cwd)
+    assert.ok(session.cwd)
+    assert.equal(await projectHermesSession({
+      session, messages: openInteractiveMessages(), resolver: fakeResolver([session.cwd]),
+      deriveRepo: throwingDeriveRepo(),
+    }), undefined)
+  }
+})
+
+test('created_source never overrides legacy or channel sources or their policy scope', async () => {
+  for (const source of ['cli', 'tool', 'oneshot', 'telegram']) {
+    const session = { ...openInteractiveSession(), source, created_source: 'desktop' }
+    const item = await projectHermesSession({
+      session, messages: openInteractiveMessages(), resolver: fakeResolver(), homeDir: HOME_DIR,
+      deriveRepo: source === 'telegram' ? throwingDeriveRepo() : noopDeriveRepo(),
+    })
+    const exchange = /** @type {any} */ (item?.value)
+    assert.equal(exchange.entrypoint, source)
+    assert.deepEqual(exchange.attributes.hermes, source === 'telegram' ? { source, real_cwd: session.cwd } : { source })
+    assert.equal(exchange.cwd, source === 'telegram' ? channelScopePath(source, HOME_DIR) : session.cwd)
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Golden projection (T1 fixture, open interactive session)
@@ -403,7 +437,7 @@ test('an interactive session with NULL cwd records unconditionally (no scope to 
 // A session with no messages and no end yields nothing to write
 // ---------------------------------------------------------------------------
 
-test('a session with no messages and no end yields undefined', async () => {
+test('an empty session yields a snapshot so previously captured rows can be removed', async () => {
   const session = openInteractiveSession()
   const item = await projectHermesSession({
     session,
@@ -411,7 +445,8 @@ test('a session with no messages and no end yields undefined', async () => {
     deriveRepo: noopDeriveRepo(),
     resolver: fakeResolver(),
   })
-  assert.equal(item, undefined)
+  assert.deepEqual(item?.value.messages, [])
+  assert.equal(item?.reconcile?.where.session_id, 'hermes-1')
 })
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Usage-Policy
 **Author:** Phil / Claude
 **Date:** 2026-07-30
-**Related:** LLP 0049, LLP 0050, LLP 0069, LLP 0083
+**Related:** LLP 0049, LLP 0050, LLP 0069, LLP 0083, LLP 0506
 
 > The Codex live projector reports
 > `plugin.codex.usage_policy_workspace_cwd_refused` only when the substituted
@@ -167,6 +167,11 @@ of a second resolver lookup and of graph-bridge identity for genuinely multi-roo
 sessions ([LLP 0032 §capture](./0032-github-llm-graph-bridge.decision.md#capture)),
 is a privacy-relevant default that this document does not take. It is split out
 of #481 (which this PR closes) and stays open under **#492**.
+
+**Extended-by:
+[LLP 0506](./0506-codex-enrichment-needs-a-covering-unignored-workspace.decision.md#decision)** -
+decided: enrichment from a key that resolves `ignore`, or that does not cover
+the resolved `cwd`, is withheld.
 
 ## Corrections to LLP 0083 {#corrections-0083}
 

@@ -1,7 +1,8 @@
 # LLP 0387: In the compact join lane, R1a is satisfied by an adjacent pair
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0437](./0437-wizard-screen-model.rfc.md) (#recap: the compact sign-in prints no forwarding line; the wizard's recap states what syncs)
 **Systems:** CLI, Onboarding, Usage-Policy
 **Generated-by:** neutral
 **Author:** Phil / Claude
@@ -11,6 +12,10 @@
 the server and to name `hyp remote list`. This decision records how the
 compact lane, whose privacy block is one line that does neither on its own,
 meets that requirement)
+**Extended-by:** [LLP 0412](./0412-compact-sign-in-drops-the-lookup-pointer.decision.md)
+(#compact-lookup-dropped: the compact forwarding line no longer carries the
+`hyp remote list` lookup, so the pair satisfies R1a's name and no-URL
+clauses but not its lookup clause)
 **Related:** LLP 0063 (#d3: the sign-in is the accepting act, so these lines
 are consent surfaces rather than prompts), LLP 0101 (#no-release: the hold
 runs to its absolute deadline, which is what the compact line states),

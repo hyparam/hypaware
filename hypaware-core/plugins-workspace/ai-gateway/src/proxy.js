@@ -5,6 +5,7 @@ import https from 'node:https'
 import tls from 'node:tls'
 
 import { isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { VERIFY_PATH } from '../../../../src/core/control/client_recording.js'
 import { isMisdirectedHost } from '../../../../src/core/otlp/server.js'
 import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
@@ -36,6 +37,21 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ])
+
+// Keep the reserved namespace scan bounded by registered aliases, with no
+// retained request data and no extra full-table scan on ordinary routes.
+/** @type {WeakMap<CompiledUpstream[], CompiledUpstream[]>} */
+const aliasesByRoutingTable = new WeakMap()
+
+// How long stop() lets an in-flight response finish before it cuts every
+// connection. An SSE stream never ends on its own, so without a bound a
+// graceful stop waits for the client and the service manager SIGKILLs the
+// daemon instead (#610). Kept under the gateway's own forced-exit deadline
+// (src/core/daemon/gateway.js STOP_DEADLINE_MS) so the cut streams still have
+// time to finalize before the process goes.
+// @ref LLP 0038#lifecycle-and-operator-behavior [implements]: an indefinitely open stream cannot strand service restart
+// @ref LLP 0520#grace [implements]: five seconds of network drainage, measured once from the first stop
+export const STOP_GRACE_MS = 5_000
 
 /**
  * Start the HTTP proxy listener. Returns the bound host/port and a
@@ -70,10 +86,22 @@ export async function startProxy(opts) {
   }
   /** @type {Set<Promise<void>>} */
   const pendingFinalizers = new Set()
+  // `stopping` is set when stop() begins, `cut` when its grace runs out and
+  // it closes every connection, so a stream ended by either is recorded as
+  // the gateway stopping rather than as the client walking away.
+  const lifecycle = { stopping: false, cut: false }
 
   const server = http.createServer((req, res) => {
-    handleRequest(upstreams, opts, pendingFinalizers, req, res)
+    res.once('finish', closeIdleIfStopping)
+    handleRequest(upstreams, opts, pendingFinalizers, lifecycle, req, res)
   })
+  // A kept-alive socket whose response finishes while stop() drains goes idle
+  // and nothing closes it, so the stop would wait out the whole grace for a
+  // turn that already completed. Deferred a turn so Node has released the
+  // socket from the response first.
+  function closeIdleIfStopping() {
+    if (lifecycle.stopping) setImmediate(() => server.closeIdleConnections())
+  }
 
   // The second front door. Installed when proxy mode is serving, and also when
   // it merely *might* have a client pointed at it (`tunnelOnly`).
@@ -128,6 +156,9 @@ export async function startProxy(opts) {
 
   const address = server.address()
   const boundPort = address && typeof address === 'object' ? address.port : requestedPort
+  const graceMs = opts.stopGraceMs ?? STOP_GRACE_MS
+  /** @type {Promise<void> | undefined} */
+  let stopping
   return {
     host,
     port: boundPort,
@@ -136,16 +167,32 @@ export async function startProxy(opts) {
     // past `host`/`port`/`stop`.
     server,
     stopped,
-    async stop() {
-      // Destroy hijacked tunnel sockets first: `server.close()` stops
-      // accepting but waits on connections it knows about, and a CONNECT
-      // socket is no longer one of them. Without this, stop() blocks until
-      // every peer gives up.
-      frontDoor?.close()
-      await new Promise((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve(undefined)))
-      })
-      await Promise.allSettled(Array.from(pendingFinalizers))
+    stop() {
+      // One drain per proxy: a second or concurrent stop() waits on the first.
+      stopping ??= (async () => {
+        lifecycle.stopping = true
+        // Destroy hijacked tunnel sockets first: `server.close()` stops
+        // accepting but waits on connections it knows about, and a CONNECT
+        // socket is no longer one of them. Without this, stop() blocks until
+        // every peer gives up.
+        frontDoor?.close()
+        /** @type {ReturnType<typeof setTimeout> | undefined} */
+        let grace
+        await new Promise((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve(undefined)))
+          // Idle keep-alive sockets go now; a response still streaming gets
+          // the grace, then is cut so the close above can complete.
+          server.closeIdleConnections()
+          grace = setTimeout(() => {
+            lifecycle.cut = true
+            server.closeAllConnections()
+          }, graceMs)
+        }).finally(() => clearTimeout(grace))
+        // Every recorded exchange registered its settle promise when it was
+        // forwarded, so the streams cut above are in this snapshot too.
+        await Promise.allSettled(Array.from(pendingFinalizers))
+      })()
+      return stopping
     },
   }
 }
@@ -337,10 +384,11 @@ export function createChainedAgent(upstreamProxy) {
  * @param {CompiledUpstream[]} upstreams
  * @param {ProxyOptions} opts
  * @param {Set<Promise<void>>} pendingFinalizers
+ * @param {{ stopping: boolean, cut: boolean }} lifecycle
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
-function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
+function handleRequest(upstreams, opts, pendingFinalizers, lifecycle, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
 
@@ -428,6 +476,11 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // anything that can make the client fetch a URL. `hyp session ignore` talks
   // to `http://127.0.0.1:<port>` directly and is unaffected.
   // @ref LLP 0247#the-control-surface-never-answers-absolute-form [implements]
+  // @ref LLP 0476#control [constrained-by]: verification is a direct local operation, never a proxied or tunneled receipt
+  if ((proxyMode || absoluteForm) && parsedUrl.pathname === VERIFY_PATH) {
+    rejectJson(req, res, 403, { error: 'verification requires direct local control' })
+    return
+  }
   if (!proxyMode && !absoluteForm && isControlPath(parsedUrl.pathname)) {
     if (typeof opts.onControlRequest === 'function') {
       opts.onControlRequest(req, res, parsedUrl)
@@ -490,8 +543,11 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // captured-where-possible.
   // @ref LLP 0247#degraded-listeners-forward-it-blind [implements]: no live interception means no capture, matching the blind tunnels beside it
   const absoluteFormBlind = absoluteForm && !opts.interception
+  // @ref LLP 0474#routes [implements]: alias discovery narrows capture before raw admission; it cannot override blind/path policy
+  // @ref LLP 0234#recording-is-opt-in-per-path [constrained-by]: capture predicates only narrow existing eligibility
   const recording = !absoluteFormBlind && ((!proxyMode && !absoluteForm)
     || shouldRecordProxyExchange(upstream, parsedUrl.pathname))
+    && matchesCapture(upstream, req.method ?? 'GET', parsedUrl.pathname, req.headers)
 
   const isHttps = upstream.baseUrl.protocol === 'https:'
   const lib = isHttps ? https : http
@@ -534,21 +590,23 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   let upstreamEnded = false
   let failed = false
   let finalized = false
+  /** @type {() => void} */
+  let settle = () => {}
   function finalizeOnce() {
     if (finalized) return
     finalized = true
     // A pass-through exchange produced no row and was never handed to the
     // recorder, so there is nothing to settle.
-    if (!recording) return
+    if (!recording || ('recording' in exchange && exchange.recording === false)) {
+      settle()
+      return
+    }
     // The guard above is the narrowing: only a real recorder exchange reaches
     // here, so the null stand-in is never handed to the settle path.
     const recorded = /** @type {Exchange} */ (exchange)
-    const pending = Promise.resolve(opts.onExchangeFinished(recorded))
+    Promise.resolve(opts.onExchangeFinished(recorded))
       .catch(() => undefined)
-      .finally(() => {
-        pendingFinalizers.delete(pending)
-      })
-    pendingFinalizers.add(pending)
+      .finally(settle)
   }
 
   const upstreamReq = lib.request({
@@ -573,11 +631,26 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       finalizeOnce()
     })
     upstreamRes.on('error', (err) => {
+      // pipe() neither ends nor destroys `res` when its source errors, so a
+      // mid-stream upstream drop would leave the client waiting on its own
+      // idle timeout. Destroy it so the client sees the drop and can retry.
+      res.destroy(err)
       exchange.setError(err)
       finalizeOnce()
     })
     upstreamRes.pipe(res)
   })
+  // Registered as soon as the exchange is forwarded, not when it finalizes,
+  // so a stop() that snapshots the set while a cut stream is still closing
+  // waits for that stream's row too.
+  if (recording) {
+    const pending = new Promise((resolve) => {
+      settle = () => resolve(undefined)
+    }).then(() => {
+      pendingFinalizers.delete(pending)
+    })
+    pendingFinalizers.add(pending)
+  }
 
   upstreamReq.on('error', (err) => {
     failed = true
@@ -604,7 +677,10 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   res.on('close', () => {
     if (!failed && !upstreamReq.destroyed) upstreamReq.destroy()
     if (!finalized && !upstreamEnded) {
-      exchange.setError('client_aborted')
+      // A tunnel socket is destroyed the moment stop() begins; any other
+      // connection only when the stop grace ran out.
+      const byStop = lifecycle.cut || (proxyMode && lifecycle.stopping)
+      exchange.setError(byStop ? 'gateway_stopped' : 'client_aborted')
       finalizeOnce()
     }
   })
@@ -626,6 +702,11 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
  */
 export function matchUpstream(upstreams, method, pathname, headers) {
   const routeInput = buildRouteInput(method, pathname, headers)
+  // @ref LLP 0474#routes [implements]: an alias reserves its namespace even when its allowlist rejects a request
+  const alias = (aliasesByRoutingTable.get(upstreams) ?? upstreams).find(u => u.aliasOf && u.prefix && pathMatchesPrefix(pathname, u.prefix))
+  if (alias) {
+    try { return alias.match?.(routeInput) === true ? alias : undefined } catch { return undefined }
+  }
   for (const u of upstreams) {
     if (typeof u.match === 'function') {
       let matched
@@ -640,6 +721,12 @@ export function matchUpstream(upstreams, method, pathname, headers) {
     if (u.prefix && pathMatchesPrefix(pathname, u.prefix)) return u
   }
   return undefined
+}
+
+/** @param {CompiledUpstream} upstream @param {string} method @param {string} pathname @param {IncomingHttpHeaders} headers */
+function matchesCapture(upstream, method, pathname, headers) {
+  if (!upstream.captureMatch) return true
+  try { return upstream.captureMatch(buildRouteInput(method, pathname, headers)) === true } catch { return false }
 }
 
 /**
@@ -789,8 +876,20 @@ export function compileUpstreams(upstreams) {
     if (u.provider) compiled.provider = u.provider
     if (u.rewrite) compiled.rewrite = compileRewrite(u.name, u.rewrite, u.path_prefix)
     if (u.record_prefix) compiled.recordPrefix = u.record_prefix
+    if (u.aliasOf) compiled.aliasOf = u.aliasOf
+    if (u.captureMatch) compiled.captureMatch = u.captureMatch
     out.push(compiled)
   }
+  const aliases = out.filter(u => u.aliasOf)
+  for (const alias of aliases) {
+    for (const other of out) {
+      if (other === alias || !other.prefix || other.prefix === '/') continue
+      if (pathMatchesPrefix(other.prefix, alias.prefix ?? '/') || pathMatchesPrefix(alias.prefix ?? '/', other.prefix)) {
+        throw new Error(`ai-gateway: alias '${alias.name}' namespace conflicts with upstream '${other.name}'`)
+      }
+    }
+  }
+  aliasesByRoutingTable.set(out, aliases)
   return out.sort((a, b) => {
     if (a.priority !== b.priority) return b.priority - a.priority
     const aRank = prefixRank(a.prefix)

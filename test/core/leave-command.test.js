@@ -60,7 +60,7 @@ test('leave when not connected is a friendly no-op', async () => {
   const { stdout, opts } = await makeDispatchOpts()
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to a HypAware server/)
 })
 
 test('leave after join removes the seed and reports the server', async () => {
@@ -74,7 +74,7 @@ test('leave after join removes the seed and reports the server', async () => {
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
 
-  assert.match(stdout.text(), /leaving https:\/\/central\.example/)
+  assert.match(stdout.text(), /leaving central\.example\n/)
   assert.match(stdout.text(), /removed the central config layer/)
   assert.match(stdout.text(), /left https:\/\/central\.example/)
   assert.match(stdout.text(), /kept: query sessions/)
@@ -101,7 +101,10 @@ test('leave clears an applied central slot, not just the seed', async () => {
   }
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(applied, null, 2) + '\n')
   await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1\n')
-  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  // The pointer the apply engine writes on this host: a symlink on POSIX,
+  // a regular pointer file on win32 (LLP 0580).
+  if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
+  else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
@@ -109,6 +112,27 @@ test('leave clears an applied central slot, not just the seed', async () => {
   assert.equal(resolveCentralLayerPath({ stateRoot }), null)
   await assert.rejects(fs.lstat(path.join(controlDir, 'active')))
   await assert.rejects(fs.stat(path.join(controlDir, 'config.a.json')))
+})
+
+test('leave names the neutral destination when the central layer carries no sink URL (#2236)', async () => {
+  const { stateRoot, stdout, opts } = await makeDispatchOpts()
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  const applied = {
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { identity: {} } } },
+  }
+  await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(applied, null, 2) + '\n')
+  // The pointer the apply engine writes on this host: a symlink on POSIX,
+  // a regular pointer file on win32 (LLP 0580).
+  if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json\n')
+  else await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+
+  const code = await dispatch(['leave'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /leaving your HypAware server\n/)
+  assert.doesNotMatch(stdout.text(), /\bcloud\b/)
 })
 
 test('leave reverses org-driven attaches and drops the forward identity', async () => {
@@ -187,7 +211,8 @@ test('leave never edits the local layer, and says so when a local central sink e
   const localPath = path.join(home, 'hypaware-config.json')
   const localConfig = {
     version: 2,
-    plugins: [{ name: '@hypaware/central' }],
+    // An upgraded config isolates leave from the separately tested migration.
+    plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/grep' }],
     sinks: {
       central: {
         plugin: '@hypaware/central',
@@ -201,7 +226,7 @@ test('leave never edits the local layer, and says so when a local central sink e
   // the hand-authored sink instead of leaving the user mystified.
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to a HypAware server/)
   assert.match(stdout.text(), /local config defines a '@hypaware\/central' sink \('central'\)/)
   assert.match(stdout.text(), /never edits the local layer/)
 
@@ -249,7 +274,7 @@ test('leave is idempotent: a second leave is the not-connected no-op', async () 
   )
   assert.equal(await dispatch(['leave'], opts), 0)
   assert.equal(await dispatch(['leave'], opts), 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to a HypAware server/)
 })
 
 test('leave tears down a central layer whose active-slot pointer does not resolve (#623)', async () => {
@@ -258,11 +283,17 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
   // follow, so keying leave's "nothing to do" on the resolved path alone would
   // make that advice a dead end: the gate would refuse forever and leave would
   // claim there is nothing to disconnect.
-  for (const [name, writePointer] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
-    ['a regular file where the pointer symlink should be', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
-    ['a pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
-    ['a pointer that is a symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
-  ])) {
+  // On win32 a regular pointer file is the written representation (LLP 0580),
+  // so the unresolvable shape there is a file naming no slot; the symlink
+  // shapes stay POSIX-only.
+  const shapes = /** @type {[string, (dir: string) => Promise<unknown>][]} */ (process.platform === 'win32'
+    ? [['a pointer file naming neither slot', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.c.json\n')]]
+    : [
+      ['a regular file where the pointer symlink should be', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
+      ['a pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
+      ['a pointer that is a symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
+    ])
+  for (const [name, writePointer] of shapes) {
     const { stateRoot, stdout, opts } = await makeDispatchOpts()
     const controlDir = path.join(stateRoot, 'config-control')
     await fs.mkdir(controlDir, { recursive: true })
@@ -277,14 +308,14 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
 
     const code = await dispatch(['leave'], opts)
     assert.equal(code, 0, `${name}: ${stdout.text()}`)
-    assert.doesNotMatch(stdout.text(), /not connected to a central server/, name)
+    assert.doesNotMatch(stdout.text(), /not connected to a HypAware server/, name)
     assert.match(stdout.text(), /removed the central config layer/, name)
     await assert.rejects(fs.lstat(path.join(controlDir, 'active')), /ENOENT/, name)
     await assert.rejects(fs.stat(path.join(controlDir, 'config.a.json')), /ENOENT/, name)
   }
 })
 
-test('leave reports a central layer it cannot remove instead of throwing (#623)', async () => {
+test('leave reports a central layer it cannot remove instead of throwing (#623)', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a directory unremovable on win32' }, async () => {
   // An unreadable control directory is one of the states the D4 gate refuses
   // on, so leave has to reach its later steps and name the problem rather than
   // aborting on an uncaught EACCES.
@@ -334,7 +365,7 @@ test('leave still tears down when only a stale attach marker survives a prior pa
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
-  assert.doesNotMatch(stdout.text(), /not connected to a central server/)
+  assert.doesNotMatch(stdout.text(), /not connected to a HypAware server/)
   // The stranded attach is reversed on the re-run, marker and all.
   const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
   assert.equal('_hypaware' in settings, false)
@@ -568,6 +599,17 @@ test('leave help exits 0 and rejects unknown arguments', async () => {
     assert.equal(await dispatch(['leave', '--help'], opts), 0)
     assert.match(stdout.text(), /usage: hyp leave/)
     assert.match(stdout.text(), /Keeps query sessions/)
+  }
+  {
+    // A help flag that is not the first token misses dispatch's registry
+    // render and reaches `runLeave`'s own help block, so that copy states the
+    // enrollment premise in the same server vocabulary the registered help
+    // uses; a self-hosted reader must not be told they left "the cloud"
+    // (#2222).
+    const { stdout, opts } = await makeDispatchOpts()
+    assert.equal(await dispatch(['leave', 'x', '--help'], opts), 0)
+    assert.match(stdout.text(), /a HypAware server/)
+    assert.doesNotMatch(stdout.text(), /\bcloud\b/)
   }
   {
     const { stderr, opts } = await makeDispatchOpts()

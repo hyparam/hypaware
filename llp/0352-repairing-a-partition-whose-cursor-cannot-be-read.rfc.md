@@ -197,6 +197,17 @@ the same question about partitions a pass could not enforce. That is three
 call sites wanting one vocabulary, which argues for one answer rather than
 three fields invented separately. PR #1173 deliberately added none of them.
 
+Since this was written, PR #2043 shipped a skipped-partition vocabulary for a
+different cause: a partition whose cross-process mutation guard another
+process held. `PurgeSummary.partitionsSkipped` is an array of
+`{ partition, error }` entries, `runPurge` names each on stderr, the `--json`
+result carries the array, and a nonzero skip count makes the run
+`incomplete` with exit status 1. That covers guard contention only. An
+unreadable cursor still reads as an empty partition during discovery and is
+not among the entries, so the gap this question names is still open. Whatever
+answers it should extend `partitionsSkipped` rather than invent a competing
+field.
+
 Note that this is the *report*, not the deletion. Whether a purge may delete
 through a cursor nobody could read is Question 1's territory and LLP 0344
 Option 4's; a purge that cannot resolve the table cannot delete from it
@@ -230,6 +241,12 @@ either way.
    `RetentionResult` and the purge summary use it, and `hyp status` states
    it once. Costs the most and settles the most, and it is the option LLP
    0344 #failing-partition and #unreadable-cursor both point at.
+
+Options 3 and 4 are no longer hypothetical in shape: `partitionsSkipped`
+already names partitions (as `{ partition, error }` entries rather than a
+string array) and already fails the run, for guard contention. Choosing
+either for unreadable cursors means adding entries to that field with their
+own `error`, and Option 5 means retention adopting the same shape.
 
 ### What a decision needs to say
 
@@ -427,3 +444,5 @@ area again, its name belongs on that issue.
   the head each was verified at.
 - hyparam/hypaware#1170 and PR #1173: the destruction that made the append
   refuse.
+- PR #2043: `PurgeSummary.partitionsSkipped`, the shipped skipped-partition
+  vocabulary for guard contention that #purge-report builds on.

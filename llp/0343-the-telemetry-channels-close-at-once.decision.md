@@ -17,6 +17,7 @@ unordered one; the dev flush, the dev budget, and the flush-before-close order
 now three at once rather than three in a row), LLP 0300 (#posix-keeps-signals:
 the SIGTERM that starts the window this has to fit inside),
 hyparam/hypaware#1153
+**Extended-by:** LLP 0520 (#stop-window: the window is now 10s so a five-second gateway grace fits; the #alternatives refusal to raise it is superseded by LLP 0520#why)
 
 > LLP 0339 raised the non-dev shutdown budget above the OTLP export timeout and
 > recorded, as a deliberate cost, that a shutdown with every channel's close

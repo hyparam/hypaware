@@ -4,6 +4,8 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { performance } from 'node:perf_hooks'
 import crypto from 'node:crypto'
 
+import { normalizeValue } from './attrs.js'
+
 export const SpanStatusCode = Object.freeze({
   UNSET: 0,
   OK: 1,
@@ -267,9 +269,16 @@ export class Span {
     return this._context
   }
 
-  /** @param {string} key @param {unknown} value */
+  /**
+   * A body's write takes the same value bound as the opening bag: without it
+   * an object, `NaN` or oversized string written mid-span reached the
+   * exporter as-is (hyparam/hypaware#2376). Keys are left as written.
+   *
+   * @param {string} key @param {unknown} value
+   */
   setAttribute(key, value) {
-    if (value !== undefined) this.attributes[key] = value
+    const normalized = normalizeValue(value)
+    if (normalized !== undefined) this.attributes[key] = normalized
     return this
   }
 
@@ -613,11 +622,24 @@ export function reportTelemetryFailure({ channel, source, key = source, error, r
  * be convertible to a string: `String(Object.create(null))` is a `TypeError`,
  * and one thrown from here would escape the guard that called us.
  *
+ * Total by structure, not by assertion: every read sits inside a `try`, the
+ * `instanceof` included, because it walks `[[GetPrototypeOf]]` and so runs a
+ * `Proxy` trap, and `message` is an own accessor a genuine `Error` can have
+ * redefined. They are two `try`s so a type test that traps still leaves the
+ * coercion its turn (which renders a genuine `Error` as `name: message`), and
+ * the last fallback consults the value not at all. Catches that render a value
+ * some other code threw share this rather than repeating the bare
+ * `err instanceof Error ? err.message : String(err)` idiom, which is itself a
+ * throw in exactly those catches (hyparam/hypaware#1558, #1857).
+ *
  * @param {unknown} error
+ * @returns {string}
  */
-function describeThrown(error) {
+export function describeThrown(error) {
   try {
     if (error instanceof Error && typeof error.message === 'string') return error.message
+  } catch { /* the type test or the accessor threw; the coercion still gets its turn */ }
+  try {
     return String(error)
   } catch {
     return 'a value that cannot be described'

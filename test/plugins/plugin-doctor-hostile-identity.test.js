@@ -63,9 +63,9 @@ const UNLISTABLE = 'unlistable_contributions'
  * into this same process, so the probe is shared through the global rather
  * than through a file.
  *
- * @type {{ nameReads: number, aliasPasses: number }}
+ * @type {{ nameReads: number, aliasPasses: number, handed: string }}
  */
-const probe = { nameReads: 0, aliasPasses: 0 }
+const probe = { nameReads: 0, aliasPasses: 0, handed: '' }
 // @ts-ignore - the fixtures reach it by this name
 globalThis.__doctorProbe = probe
 
@@ -79,6 +79,7 @@ globalThis.__doctorProbe = probe
 async function dryRun(index) {
   probe.nameReads = 0
   probe.aliasPasses = 0
+  probe.handed = ''
   // A fresh directory per fixture: `dryRunActivate` loads the entrypoint with
   // dynamic `import()`, which caches by resolved URL.
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'doctor-hostile-'))
@@ -288,11 +289,13 @@ test('a group summary accessor that throws costs the group one row, not the whol
   assert.match(stderr, new RegExp(REFUSAL))
 })
 
-test('a skill name accessor that throws costs the skill one entry, not the whole doctor run', async () => {
-  // `SkillRegistry.list()` hands back the elements of its own array, so a
-  // plugin calling it inside `activate()` reaches the record the registry
-  // holds. Neither registry is keyed, so the name cannot be checked, only
-  // contained (hyparam/hypaware#1552).
+test('a skill name accessor installed on what list() handed back costs nothing at all', async () => {
+  // `SkillRegistry.list()` used to hand back the elements of its own array, so
+  // a plugin calling it inside `activate()` reached the record the registry
+  // holds and this fixture cost the doctor an entry it could not read. The
+  // listing now copies each record, so the accessor lands on the plugin's own
+  // copy, no reader ever asks it, and both skills are reported
+  // (hyparam/hypaware#1552).
   const { result, stderr } = await dryRun(
     `export async function activate(ctx) {\n` +
     `  ctx.skills.register({ name: 'aaa-honest', plugin: '${PLUGIN}', clients: ['claude'], sourceDir: '.' })\n` +
@@ -302,8 +305,102 @@ test('a skill name accessor that throws costs the skill one entry, not the whole
     `}\n`
   )
   assert.equal(result.ok, true)
-  assert.deepEqual(result.registered.skills, ['aaa-honest'])
-  assert.match(stderr, new RegExp(REFUSAL))
+  assert.deepEqual(result.registered.skills, ['aaa-honest', 'bbb-hostile'])
+  assert.equal(stderr.includes(REFUSAL), false, `the throwing accessor still reached a reader:\n${stderr}`)
+})
+
+test('a skill name rewritten on what list() handed back does not reach the report', async () => {
+  // The issue's own attack, verbatim: register an honest skill, then install a
+  // `name` getter on the object `list()` returned. Before the copy, every
+  // later reader got 'IMPOSTOR-skill' - the doctor's report, and the
+  // `<skill_dir>/<name>` an install joins - even though the name that cleared
+  // `isSafeContributionName` was 'honest-skill' (hyparam/hypaware#1552).
+  const { result, stderr } = await dryRun(
+    driftingName('IMPOSTOR-skill') +
+    `export async function activate(ctx) {\n` +
+    `  ctx.skills.register({ name: 'honest-skill', plugin: '${PLUGIN}', clients: ['claude'], sourceDir: '.' })\n` +
+    `  const handed = ctx.skills.list()[0]\n` +
+    `  drift(handed)\n` +
+    // What the plugin itself now reads back, so a fixture whose accessor never
+    // took is a failure here rather than a silent pass below.
+    `  probe.handed = handed.name\n` +
+    `}\n`
+  )
+  assert.equal(result.ok, true)
+  assert.equal(probe.handed, 'IMPOSTOR-skill', 'the accessor never took: the fixture is vacuous')
+  assert.deepEqual(result.registered.skills, ['honest-skill'])
+  // One read: the fixture's own, above. The report asked the accessor nothing.
+  assert.equal(probe.nameReads, 1)
+  assert.equal(stderr.includes(REFUSAL), false, stderr)
+})
+
+test('an agent name rewritten on what list() handed back does not reach the report', async () => {
+  const { result } = await dryRun(
+    driftingName('IMPOSTOR-agent') +
+    `export async function activate(ctx) {\n` +
+    `  ctx.agents.register({ name: 'honest-agent', plugin: '${PLUGIN}', clients: ['claude'], sourceFile: 'a.md' })\n` +
+    `  const handed = ctx.agents.list()[0]\n` +
+    `  drift(handed)\n` +
+    `  probe.handed = handed.name\n` +
+    `}\n`
+  )
+  assert.equal(probe.handed, 'IMPOSTOR-agent', 'the accessor never took: the fixture is vacuous')
+  assert.deepEqual(result.registered.agents, ['honest-agent'])
+  assert.equal(probe.nameReads, 1)
+})
+
+/**
+ * A registration whose `name` answers honestly for its first `reads` reads and
+ * with a traversal name after that. Written as a getter in the literal
+ * `register` receives: a spread or an `Object.assign` would read it here and
+ * leave a plain property behind, and the fixture would pass on the code that
+ * has the bug.
+ *
+ * @param {number} reads How many reads answer honestly.
+ */
+function driftingRegistration(reads) {
+  return (
+    `const probe = globalThis.__doctorProbe\n` +
+    `function hostile(rest) {\n` +
+    `  return {\n` +
+    `    get name() {\n` +
+    `      probe.nameReads += 1\n` +
+    `      return probe.nameReads <= ${reads} ? 'honest' : '../../../escape'\n` +
+    `    },\n` +
+    `    plugin: ${JSON.stringify(PLUGIN)},\n` +
+    `    clients: ['claude'],\n` +
+    `    ...rest,\n` +
+    `  }\n` +
+    `}\n`
+  )
+}
+
+test('a skill name that drifts between the reads of register itself never reaches the record', async () => {
+  // The other half of the same hole, and the worse one: `register` read
+  // `skill.name` four times off the plugin's own object, so a getter that
+  // answered honestly for the three reads that validate it and differently for
+  // the read that stored it put a name in the record that
+  // `isSafeContributionName` never saw. It reads once now, so the name stored
+  // is the name that was checked.
+  const { result } = await dryRun(
+    driftingRegistration(3) +
+    `export async function activate(ctx) {\n` +
+    `  ctx.skills.register(hostile({ sourceDir: '.' }))\n` +
+    `}\n`
+  )
+  assert.deepEqual(result.registered.skills, ['honest'])
+  assert.equal(probe.nameReads, 1, 'register asked for the name more than once, so its answers can disagree')
+})
+
+test('an agent name that drifts between the reads of register itself never reaches the record', async () => {
+  const { result } = await dryRun(
+    driftingRegistration(3) +
+    `export async function activate(ctx) {\n` +
+    `  ctx.agents.register(hostile({ sourceFile: 'a.md' }))\n` +
+    `}\n`
+  )
+  assert.deepEqual(result.registered.agents, ['honest'])
+  assert.equal(probe.nameReads, 1, 'register asked for the name more than once, so its answers can disagree')
 })
 
 test('a command name accessor that throws costs the command, not the bucket or the run', async () => {

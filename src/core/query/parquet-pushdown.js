@@ -1,5 +1,12 @@
 // @ts-check
 
+import { whereToParquetFilter as icebirdWhereToParquetFilter } from 'icebird/src/sql/whereFilter.js'
+
+/**
+ * @import { ExprNode } from 'squirreling'
+ * @import { ParquetQueryFilter } from 'hyparquet'
+ */
+
 // icebird's converter, re-exported rather than reimplemented. This module and
 // `icebird/src/sql/whereFilter.js` both began as ports of the Hyperparam app's
 // `lib/tools/parquetPushdownFilter.ts` and drifted in opposite directions:
@@ -21,5 +28,8 @@
 // `Array.prototype.includes`, so plain-number literals match bigint-decoded
 // INT64 columns and the old `coerceBigInt` shim is unnecessary.
 //
+// Icebird 0.9.2 pins an older AST without IS [NOT] TRUE/FALSE. Its converter
+// safely declines those unary operators, including inside compound predicates.
+// Widen only the type boundary; retain the same function and fallback behavior.
 // @ref LLP 0222 [implements]: one pushdown converter for the whole stack, owned by icebird
-export { whereToParquetFilter } from 'icebird/src/sql/whereFilter.js'
+export const whereToParquetFilter = /** @type {(where: ExprNode | undefined, options?: { allowPartial?: boolean }) => ParquetQueryFilter | undefined} */ (icebirdWhereToParquetFilter)

@@ -114,7 +114,7 @@ const LOCAL_ONLY_LIST_VERSION_V2 = 2
  * @param {(dir: string) => boolean} [deps.caseInsensitiveVolume] per-volume
  *   case-sensitivity verdict for an entry's directory; defaults to
  *   {@link createVolumeCaseProbe}, which is inert (constant `false`, no
- *   syscall) off darwin. Injected so the folding logic can be exercised for a
+ *   syscall) off darwin and win32. Injected so the folding logic can be exercised for a
  *   case-insensitive volume on a host that has none
  * @param {(name: string, fields?: Record<string, unknown>) => void} [deps.logEvent]
  * @returns {UsagePolicyResolver}

@@ -10,6 +10,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 import { resolveEntrypointOwners } from '../backfill/entrypoint_owner.js'
 import { resolveConfigPath } from '../runtime/boot.js'
+import { readRecordingStateFromDisk } from '../config/client_recording.js'
 import { loadClientDescriptors } from '../daemon/status.js'
 
 /**
@@ -21,9 +22,11 @@ import { loadClientDescriptors } from '../daemon/status.js'
  * landing rows in the exact same per-source Iceberg tables.
  */
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
+// Bound on a provider's `import_unavailable` note carried into the output.
+const MAX_NOTE_LENGTH = 240
 
 /**
- * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BackfillProviderResult, BackfillRunnerContext } from '../../../src/core/commands/types.js'
  * @import { EntrypointOwners } from '../../../src/core/backfill/types.js'
  */
@@ -150,7 +153,7 @@ export async function runBackfill(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runBackfillList(argv, ctx) {
-  const parsed = parseCoreCommandArgv('client history providers', argv, ctx)
+  const parsed = parseCoreCommandArgv('backfill list', argv, ctx)
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
   const providers = ctx.backfills.list()
@@ -190,107 +193,6 @@ export async function runBackfillList(argv, ctx) {
 }
 
 /**
- * `hyp backfill plan [provider...] [--retention-days <n>] [--json]`
- *
- * Calls each selected provider's `plan()` hook (if present) and prints
- * the consolidated plan. Providers without a `plan()` implementation
- * are listed but contribute no plan body.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-export async function runBackfillPlan(argv, ctx) {
-  const parsed = parsePlanArgv(argv)
-  if (parsed.error !== undefined) {
-    ctx.stderr.write(`hyp backfill plan: ${parsed.error}\n`)
-    return 2
-  }
-
-  const devRunId = ctx.env.DEV_RUN_ID ?? `bf-${randomUUID()}`
-  const retentionDays = resolveRetentionDays({
-    flag: parsed.retentionDays,
-    config: ctx.config,
-  })
-
-  const selected = selectProviders({
-    requested: parsed.providers,
-    available: ctx.backfills.list(),
-    activePlugins: ctx.config.plugins ?? [],
-  })
-
-  if (selected.unknown.length > 0) {
-    ctx.stderr.write(
-      `hyp backfill plan: unknown provider(s): ${selected.unknown.join(', ')}\n`
-    )
-    return 1
-  }
-
-  return withSpan(
-    'backfill.plan',
-    {
-      [Attr.COMPONENT]: 'backfill',
-      [Attr.OPERATION]: 'backfill.plan',
-      [Attr.DEV_RUN_ID]: devRunId,
-      provider_count: selected.providers.length,
-      retention_days: retentionDays ?? 0,
-      status: 'ok',
-    },
-    async () => {
-      /** @type {Array<{ provider: string, plugin: string, datasets: string[], plan: BackfillPlan | undefined }>} */
-      const results = []
-      // The same ownership map and configured-plugin predicate the run gets.
-      // Both are declared on `BackfillPlanContext`, so a provider that
-      // consults them while planning must see what the run will see, or
-      // `hyp backfill plan` estimates over sessions the run then gates out.
-      // Resolved once, and only when some selected provider actually plans.
-      /** @type {Awaited<ReturnType<typeof resolveOwnersForRun>> | undefined} */
-      let owners
-      for (const provider of selected.providers) {
-        if (typeof provider.plan !== 'function') {
-          results.push({ provider: provider.name, plugin: provider.plugin, datasets: provider.datasets, plan: undefined })
-          continue
-        }
-        if (owners === undefined) {
-          owners = await resolveOwnersForRun(ctx, getLogger('backfill'))
-        }
-        const planCtx = buildPlanContext({
-          env: ctx.env,
-          storage: ctx.storage,
-          retentionDays,
-          entrypointOwners: owners.entrypointOwners,
-          isPluginConfigured: owners.isPluginConfigured,
-        })
-        try {
-          const plan = await provider.plan(planCtx)
-          results.push({
-            provider: provider.name,
-            plugin: provider.plugin,
-            datasets: provider.datasets,
-            plan,
-          })
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          ctx.stderr.write(`hyp backfill plan: ${provider.name}: ${message}\n`)
-          results.push({
-            provider: provider.name,
-            plugin: provider.plugin,
-            datasets: provider.datasets,
-            plan: undefined,
-          })
-        }
-      }
-      if (parsed.json) {
-        ctx.stdout.write(JSON.stringify({ run_id: devRunId, providers: results }, null, 2) + '\n')
-      } else {
-        renderPlanText({ results, retentionDays, stdout: ctx.stdout })
-      }
-      return 0
-    },
-    { component: 'backfill' }
-  )
-}
-
-/**
  * Run a single registered backfill provider end-to-end and return a
  * compact result. Shares the exact scan → materialize → write → flush
  * path (and per-provider telemetry) as `hyp backfill <provider>`, so
@@ -311,7 +213,7 @@ export async function runBackfillPlan(argv, ctx) {
  *   devRunId?: string,
  *   sweep?: boolean,
  * }} args
- * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>}
+ * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string, note?: string }>}
  */
 export async function runBackfillProvider(args) {
   const { ctx, provider: providerName, dryRun } = args
@@ -335,6 +237,8 @@ export async function runBackfillProvider(args) {
     scanned: result.items_seen,
     rowsWritten: result.rows_written,
     skipped: result.rows_skipped,
+    ...(result.error_kind ? { errorKind: result.error_kind } : {}),
+    ...(result.note ? { note: result.note } : {}),
   }
 }
 
@@ -349,12 +253,18 @@ function deriveBackfillExitCode(results) {
 }
 
 /**
+ * Record the first failure of a run and the step it came from. The kind is
+ * taken here rather than derived at the `backfill.provider_finish` span,
+ * which can see only that something failed (issue #2255).
+ *
  * @param {BackfillProviderResult} result
  * @param {string} error
+ * @param {string} errorKind
  */
-function markProviderFailed(result, error) {
+function markProviderFailed(result, error, errorKind) {
   result.status = 'failed'
   result.error ??= error
+  result.error_kind ??= errorKind
 }
 
 /**
@@ -370,9 +280,10 @@ function markProviderFailed(result, error) {
  * @param {BackfillRunContext} runCtx
  * @param {BackfillProviderResult} result
  * @param {string} error
+ * @param {string} errorKind
  */
-function markItemFailed(runCtx, result, error) {
-  markProviderFailed(result, error)
+function markItemFailed(runCtx, result, error, errorKind) {
+  markProviderFailed(result, error, errorKind)
   runCtx.itemsFailed = (runCtx.itemsFailed ?? 0) + 1
 }
 
@@ -440,6 +351,24 @@ async function runProvider(args) {
       // @ref LLP 0140#manifest-declares-ownership [implements]: the runner resolves entrypoint ownership from the catalog and hands providers the resolved map
       const owners = await resolveOwnersForRun(ctx, log)
 
+      // A detached client is not recorded, by the sweep or by anything else
+      // that runs its provider. A provider that classifies sessions by
+      // transcript entrypoint (Claude's, which also carries Desktop) runs on:
+      // its classifier drops the detached client's sessions one by one, so a
+      // still-recording client sharing the tree keeps its lane.
+      // @ref LLP 0466#runner-gate [implements]: the runner, not each plugin, skips a detached client's provider
+      if (owners.providerDetached?.(provider) === true) {
+        log.info('backfill.provider_not_recording', {
+          [Attr.COMPONENT]: 'backfill',
+          [Attr.OPERATION]: 'backfill.provider_start',
+          [Attr.PLUGIN]: provider.plugin,
+          provider: provider.name,
+          reason: 'client_detached',
+          status: 'ok',
+        })
+        return result
+      }
+
       const runCtx = buildRunContext({
         env: ctx.env,
         storage: ctx.storage,
@@ -451,8 +380,15 @@ async function runProvider(args) {
         log,
         entrypointOwners: owners.entrypointOwners,
         isPluginConfigured: owners.isPluginConfigured,
+        isPluginDetached: owners.isPluginDetached,
       })
 
+      // The step in flight when the loop throws, so a materializer or storage
+      // write that throws is traced to itself and not to the provider's
+      // iterator (issue #2262). Read off the loop rather than tagged onto the
+      // thrown value, which may be a primitive or frozen. The run still aborts.
+      /** @type {'provider_run_failed' | 'materialize_failed' | 'write_failed'} */
+      let failingStep = 'provider_run_failed'
       try {
         for await (const yielded of provider.run(runCtx)) {
           if (isEvent(yielded)) {
@@ -478,7 +414,7 @@ async function runProvider(args) {
               kind: yielded.kind,
               [Attr.DATASET]: yielded.dataset,
             })
-            markItemFailed(runCtx, result, `missing materializer for kind ${yielded.kind}`)
+            markItemFailed(runCtx, result, `missing materializer for kind ${yielded.kind}`, 'materializer_missing')
             result.rows_skipped += 1
             continue
           }
@@ -493,7 +429,8 @@ async function runProvider(args) {
             markItemFailed(
               runCtx,
               result,
-              `materializer for kind ${yielded.kind} targets dataset ${materializer.dataset}, not ${yielded.dataset}`
+              `materializer for kind ${yielded.kind} targets dataset ${materializer.dataset}, not ${yielded.dataset}`,
+              'dataset_mismatch'
             )
             result.rows_skipped += 1
             continue
@@ -506,6 +443,7 @@ async function runProvider(args) {
             continue
           }
 
+          failingStep = 'materialize_failed'
           const rows = await materializeItem({
             materializer,
             item: yielded,
@@ -516,27 +454,55 @@ async function runProvider(args) {
             runToken,
             sweep,
           })
-          if (!Array.isArray(rows) || rows.length === 0) {
+          failingStep = 'provider_run_failed'
+          if (!Array.isArray(rows) || (rows.length === 0 && !yielded.reconcile)) {
             result.rows_skipped += 1
             continue
           }
           result.sessions_seen += 1
+          failingStep = 'write_failed'
           const written = await writeRows({
             rows,
             dataset: yielded.dataset,
+            reconcile: yielded.reconcile,
             provider: provider.name,
             devRunId,
             ctx,
             log,
           })
+          failingStep = 'provider_run_failed'
           result.rows_written += written.rowsWritten
           if (written.status === 'failed') {
-            markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`)
+            markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`, 'dataset_not_registered')
           }
         }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        markProviderFailed(result, message, failingStep)
+        log.error('backfill.provider_error', {
+          [Attr.COMPONENT]: 'backfill',
+          provider: provider.name,
+          error_kind: failingStep,
+          error: message,
+        })
+      }
 
-        if (!dryRun) {
-          for (const dataset of datasetsTouched) {
+      // Outside the scan's try, so a provider that throws mid-stream still
+      // makes the rows it already appended queryable instead of leaving them
+      // invisible until some later natural flush. The provider is already
+      // marked failed, and `markProviderFailed` keeps the first error, so a
+      // throwing flush cannot mask the provider's.
+      //
+      // The guard is per dataset, not around the loop: a provider may touch
+      // several datasets, and aborting at the first failing one would strand
+      // the rest behind it in exactly the delayed-visibility state this flush
+      // exists to prevent.
+      // @ref LLP 0333#every-table-before-failure [constrained-by]: every
+      //   touched table gets its forced-flush attempt before the failure is
+      //   declared; strictness constrains the outcome, not the abort order
+      if (!dryRun) {
+        for (const dataset of datasetsTouched) {
+          try {
             await flushDataset({
               dataset,
               provider: provider.name,
@@ -544,17 +510,18 @@ async function runProvider(args) {
               ctx,
               log,
             })
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            markProviderFailed(result, message, 'flush_failed')
+            log.error('backfill.flush_error', {
+              [Attr.COMPONENT]: 'backfill',
+              provider: provider.name,
+              [Attr.DATASET]: dataset,
+              error_kind: 'flush_failed',
+              error: message,
+            })
           }
         }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        markProviderFailed(result, message)
-        log.error('backfill.provider_error', {
-          [Attr.COMPONENT]: 'backfill',
-          provider: provider.name,
-          error_kind: 'provider_run_failed',
-          error: message,
-        })
       }
 
       const finalStatus = result.status === 'ok' ? 'ok' : 'failed'
@@ -571,7 +538,7 @@ async function runProvider(args) {
           rows_skipped: result.rows_skipped,
           sessions_seen: result.sessions_seen,
           status: finalStatus,
-          ...(result.error ? { error_kind: 'provider_run_failed' } : {}),
+          ...(result.error_kind ? { error_kind: result.error_kind } : {}),
         },
         async () => {},
         { component: 'backfill' }
@@ -633,6 +600,7 @@ async function materializeItem(args) {
  *
  * @param {{
  *   rows: Record<string, unknown>[],
+ *   reconcile?: BackfillItem['reconcile'],
  *   dataset: string,
  *   provider: string,
  *   devRunId: string,
@@ -675,6 +643,11 @@ async function writeRows(args) {
       // path plus the dataset's schema columns.
       const tablePath = ctx.storage.cacheTablePath(dataset, [BACKFILL_PARTITION_SEGMENT])
       const schemaColumns = registered.schema?.columns ?? []
+      if (args.reconcile) {
+        if (!ctx.storage.reconcileRows) throw new Error('This capture requires local snapshot reconciliation support')
+        const count = await ctx.storage.reconcileRows(dataset, schemaColumns, rows, args.reconcile)
+        return { rowsWritten: count, status: 'ok' }
+      }
       await ctx.storage.appendRows(tablePath, schemaColumns, rows)
       return { rowsWritten: rows.length, status: 'ok' }
     },
@@ -752,6 +725,10 @@ function handleEvent(args) {
     })
     return
   }
+  // @ref LLP 0538#note [implements]: the first note only, capped, so a provider cannot grow the result
+  if (event.event === 'import_unavailable' && typeof event.attributes?.note === 'string') {
+    result.note ??= event.attributes.note.slice(0, MAX_NOTE_LENGTH)
+  }
   log.info(`backfill.event.${event.event}`, {
     [Attr.COMPONENT]: 'backfill',
     [Attr.DEV_RUN_ID]: devRunId,
@@ -772,6 +749,7 @@ function handleEvent(args) {
  *   log: PluginLogger,
  *   entrypointOwners?: EntrypointOwners,
  *   isPluginConfigured?: (plugin: PluginName) => boolean,
+ *   isPluginDetached?: (plugin: PluginName) => boolean,
  * }} args
  * @returns {BackfillRunContext}
  */
@@ -786,6 +764,7 @@ function buildRunContext(args) {
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
     ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
     ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
+    ...(args.isPluginDetached !== undefined ? { isPluginDetached: args.isPluginDetached } : {}),
     ...(args.sweep !== undefined ? { sweep: args.sweep } : {}),
     dryRun: args.dryRun,
     itemsFailed: 0,
@@ -794,7 +773,7 @@ function buildRunContext(args) {
 }
 
 /**
- * Resolve the entrypoint-ownership map for one provider run or plan, plus
+ * Resolve the entrypoint-ownership map for one provider run, plus
  * the configured-plugin predicate it was built with. The predicate travels
  * separately because container-root admission keys on it alone: an owners
  * map only has entries for plugins that declare `transcript_entrypoints`
@@ -811,18 +790,33 @@ function buildRunContext(args) {
  *
  * @param {BackfillRunnerContext} ctx
  * @param {PluginLogger} log
- * @returns {Promise<{ entrypointOwners: EntrypointOwners, isPluginConfigured?: (plugin: PluginName) => boolean }>}
+ * A detached client (`recording: false`, LLP 0466) counts as not configured
+ * here, so its claimed entrypoints and its container close exactly the way an
+ * unconfigured client's do. The switch is read fresh, so a daemon that booted
+ * before the detach honors it on its next run.
+ *
+ * @returns {Promise<{ entrypointOwners: EntrypointOwners, isPluginConfigured?: (plugin: PluginName) => boolean, isPluginDetached?: (plugin: PluginName) => boolean, providerDetached?: (provider: BackfillContribution) => boolean }>}
  */
 async function resolveOwnersForRun(ctx, log) {
   try {
     const { stateDir, hypHome } = readObservabilityEnv(ctx.env)
     const descriptors = await loadClientDescriptors({ stateDir })
     const configured = await resolveConfiguredPlugins(ctx, hypHome)
+    const { detached } = await readRecordingStateFromDisk({ env: ctx.env })
     /** @param {PluginName} plugin */
-    const isPluginConfigured = (plugin) => configured.has(plugin)
+    const isPluginConfigured = (plugin) => configured.has(plugin) && !detached.has(plugin)
+    /** @param {BackfillContribution} provider */
+    const providerDetached = (provider) => {
+      if (!detached.has(provider.plugin)) return false
+      const own = descriptors.get(provider.name)
+      return !(own?.plugin === provider.plugin && (own.transcriptEntrypoints?.length ?? 0) > 0)
+    }
     return {
       entrypointOwners: resolveEntrypointOwners(descriptors.values(), isPluginConfigured),
       isPluginConfigured,
+      /** @param {PluginName} plugin */
+      isPluginDetached: (plugin) => detached.has(plugin),
+      providerDetached,
     }
   } catch (err) {
     log.warn('backfill.entrypoint_owners_unavailable', {
@@ -908,28 +902,6 @@ function addEnabledPluginNames(names, config) {
 }
 
 /**
- * @param {{
- *   env: NodeJS.ProcessEnv,
- *   storage: CommandRunContext['storage'],
- *   retentionDays?: number,
- *   entrypointOwners?: EntrypointOwners,
- *   isPluginConfigured?: (plugin: PluginName) => boolean,
- * }} args
- * @returns {BackfillPlanContext}
- */
-function buildPlanContext(args) {
-  /** @type {BackfillPlanContext} */
-  return {
-    env: args.env,
-    cacheRoot: args.storage.cacheRoot,
-    ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
-    ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
-    ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
-    log: noopProviderLogger(),
-  }
-}
-
-/**
  * @param {string} provider
  * @param {string} devRunId
  * @returns {PluginLogger}
@@ -951,11 +923,6 @@ function createProviderLogger(provider, devRunId) {
     warn(message, fields)  { base.warn(message,  stamp(fields)) },
     error(message, fields) { base.error(message, stamp(fields)) },
   }
-}
-
-/** @returns {PluginLogger} */
-function noopProviderLogger() {
-  return { debug() {}, info() {}, warn() {}, error() {} }
 }
 
 /**
@@ -1088,77 +1055,6 @@ export function parseRunArgv(argv) {
 }
 
 /**
- * Parse `hyp backfill plan ...` argv. Same as the run argv except
- * `--since`, `--until`, and `--dry-run` are not accepted (plan does
- * not write rows; it just calls `plan()`).
- *
- * @param {string[]} argv
- * @returns {{
- *   providers: string[],
- *   retentionDays?: number,
- *   json: boolean,
- *   error?: undefined,
- * } | { error: string }}
- */
-export function parsePlanArgv(argv) {
-  const parsed = parseCommandArgv(argv, {
-    type: 'object',
-    properties: {
-      providers: { type: 'array', greedy: true },
-      'retention-days': { type: 'number', minimum: 0 },
-      json: { type: 'boolean', default: false },
-    },
-    positional: ['providers'],
-  }, STRICT_SHORT_FLAGS)
-  if ('help' in parsed) {
-    return { error: 'usage: hyp backfill plan [provider...] [--retention-days <n>] [--json]' }
-  }
-  if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ providers?: string[], 'retention-days'?: number, json: boolean }} */ (parsed.params)
-  /** @type {{ providers: string[], retentionDays?: number, json: boolean }} */
-  const result = { providers: p.providers ?? [], json: p.json }
-  if (p['retention-days'] !== undefined) result.retentionDays = p['retention-days']
-  return result
-}
-
-/**
- * @param {{
- *   results: Array<{ provider: string, plugin: string, datasets: string[], plan: BackfillPlan | undefined }>,
- *   retentionDays?: number,
- *   stdout: { write(chunk: string): unknown },
- * }} args
- */
-function renderPlanText(args) {
-  const { results, retentionDays, stdout } = args
-  stdout.write(`backfill plan${retentionDays !== undefined ? ` (retention=${retentionDays}d)` : ''}\n`)
-  if (results.length === 0) {
-    stdout.write('  (no providers selected)\n')
-    return
-  }
-  for (const entry of results) {
-    stdout.write(`  ${entry.provider}  (${entry.plugin})  -> ${entry.datasets.join(', ')}\n`)
-    const plan = entry.plan
-    if (!plan) {
-      stdout.write('    (provider did not return a plan)\n')
-      continue
-    }
-    if (typeof plan.estimated_items === 'number') {
-      stdout.write(`    estimated_items: ${plan.estimated_items}\n`)
-    }
-    if (Array.isArray(plan.sources)) {
-      for (const src of plan.sources) {
-        stdout.write(`    source: ${src}\n`)
-      }
-    }
-    if (Array.isArray(plan.notes)) {
-      for (const note of plan.notes) {
-        stdout.write(`    note: ${note}\n`)
-      }
-    }
-  }
-}
-
-/**
  * @param {{
  *   results: BackfillProviderResult[],
  *   devRunId: string,
@@ -1185,6 +1081,7 @@ function renderRunResults(args) {
             rows_written: r.rows_written,
             rows_skipped: r.rows_skipped,
             ...(r.error ? { error: r.error } : {}),
+            ...(r.note ? { note: r.note } : {}),
           })),
         },
         null,
@@ -1198,6 +1095,7 @@ function renderRunResults(args) {
     stdout.write(`  ${r.provider}  [${r.status}]\n`)
     stdout.write(`    items_seen=${r.items_seen}  sessions=${r.sessions_seen}  rows_written=${r.rows_written}  rows_skipped=${r.rows_skipped}\n`)
     if (r.error) stdout.write(`    error: ${r.error}\n`)
+    if (r.note) stdout.write(`    note: ${r.note}\n`)
   }
 }
 

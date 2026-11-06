@@ -44,7 +44,6 @@ function compose(descriptors, sources, exportChoice = 'local-parquet') {
 
 const ANTHROPIC = { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' }
 const OPENAI = { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' }
-const CHATGPT = { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' }
 
 const LOCAL_SINK = {
   local: {
@@ -55,6 +54,29 @@ const LOCAL_SINK = {
 }
 
 const QUERY = { cache: { retention: { default_days: RETENTION } } }
+
+// @ref LLP 0474#setup [tests]: selected Ollama preserves its transport and unmanaged upstreams without resurrecting deselected rows
+test('Ollama fresh/add/repeat/deselect preserves custom transport, unrelated choices and recording off', async () => {
+  const descriptors = await realPickerDescriptors()
+  const fresh = compose(descriptors, ['ollama'], 'keep-local')
+  assert.ok(fresh.plugins?.some(p => p.name === '@hypaware/ollama'))
+  const custom = { name: 'ollama', base_url: 'http://localhost:21500/service/', path_prefix: '/api/chat', provider: 'ollama', priority: 7 }
+  const unmanaged = { name: 'custom', base_url: 'http://localhost:21600', path_prefix: '/custom' }
+  const existing = /** @type {HypAwareV2Config} */ ({ version: 2, plugins: [
+    { name: '@hypaware/ai-gateway', config: { upstreams: [custom, unmanaged, ANTHROPIC], proxy_mode: false } },
+    { name: '@hypaware/ollama', recording: false },
+    { name: '@hypaware/otel', config: { listen_port: 4321 } },
+  ] })
+  const args = { descriptors, exportChoice: /** @type {PickerExport} */ ('keep-local'), retentionDays: RETENTION, hypHome: HYP_HOME }
+  const added = composePickerConfig({ ...args, sources: ['ollama', 'otel'], existing })
+  assert.deepEqual(added.plugins?.find(p => p.name === '@hypaware/ai-gateway')?.config?.upstreams, [custom, unmanaged])
+  assert.equal(added.plugins?.find(p => p.name === '@hypaware/ollama')?.recording, false)
+  assert.equal(added.plugins?.find(p => p.name === '@hypaware/otel')?.config?.listen_port, 4321)
+  assert.deepEqual(composePickerConfig({ ...args, sources: ['ollama', 'otel'], existing: added }), added)
+  const removed = composePickerConfig({ ...args, sources: ['otel'], existing: added })
+  assert.ok(!removed.plugins?.some(p => p.name === '@hypaware/ollama'))
+  assert.deepEqual(removed.plugins?.find(p => p.name === '@hypaware/ai-gateway')?.config?.upstreams, [unmanaged])
+})
 
 test('claude alone composes the gateway writer with no proxy upstream plus the claude adapter', async () => {
   const d = await realPickerDescriptors()
@@ -72,15 +94,15 @@ test('claude alone composes the gateway writer with no proxy upstream plus the c
   })
 })
 
-test('codex alone composes the gateway + openai + chatgpt upstreams + codex adapter', async () => {
+test('codex composes the shared writer with no inference upstreams', async () => {
   const d = await realPickerDescriptors()
   assert.deepEqual(compose(d, ['codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/codex', config: {} },
     ],
     query: QUERY,
     sinks: LOCAL_SINK,
@@ -179,16 +201,16 @@ test('claude + hermes share the gateway; hermes adds no upstream', async () => {
   })
 })
 
-test('claude + codex compose only the upstreams codex still routes through the gateway', async () => {
+test('claude and codex compose the shared writer without inference upstreams', async () => {
   const d = await realPickerDescriptors()
   assert.deepEqual(compose(d, ['claude', 'codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude' },
-      { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/codex', config: {} },
     ],
     query: QUERY,
     sinks: LOCAL_SINK,
@@ -200,12 +222,12 @@ test('all five sources dedupe upstreams by name and order otel before the export
   assert.deepEqual(compose(d, ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI] } },
       { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 4318 } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude' },
-      { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/codex', config: {} },
     ],
     query: QUERY,
     sinks: LOCAL_SINK,

@@ -112,7 +112,7 @@ export async function run({ harness, expect }) {
 
   const badStdout = makeBuf()
   const badStderr = makeBuf()
-  const badExit = await dispatch(['config', 'validate', '--path', badConfigPath], {
+  const badExit = await dispatch(['config', 'validate', badConfigPath], {
     stdout: badStdout,
     stderr: badStderr,
     env: { ...process.env, HYP_HOME: harness.hypHome },

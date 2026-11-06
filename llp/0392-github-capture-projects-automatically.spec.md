@@ -7,6 +7,7 @@
 **Date:** 2026-09-08
 **Extends:** LLP 0023, LLP 0360
 **Related:** LLP 0032, LLP 0096, LLP 0361
+**Extended-by:** LLP 0512 (recorded AI sessions also project automatically through their connector's daemon source)
 
 > Enabled GitHub capture maintains its own graph projection. An operator no
 > longer needs to run `hyp graph project` after GitHub polling or backfill.

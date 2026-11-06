@@ -43,7 +43,7 @@ export function normalizeKey(key) {
  * @param {unknown} value
  * @returns {string|number|boolean|undefined}
  */
-function normalizeValue(value) {
+export function normalizeValue(value) {
   if (value === undefined || value === null) return undefined
   if (typeof value === 'string') {
     return value.length > MAX_VALUE_LENGTH ? value.slice(0, MAX_VALUE_LENGTH) : value

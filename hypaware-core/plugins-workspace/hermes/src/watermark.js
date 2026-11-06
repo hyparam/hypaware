@@ -8,9 +8,8 @@
  * use for their own per-host cursors ("the plugin's kernel storage", LLP
  * 0122#watermark).
  *
- * @ref LLP 0122#watermark [implements]: `{ session_id (stringified) ->
- *   { max_message_id, ended_at } }`, the exact shape `listChangedSessions`
- *   (T1, `state_db.js`) diffs against.
+ * @ref LLP 0449#detection [implements]: persist a fingerprint only after reconciliation;
+ *   legacy marks without a fingerprint trigger one repair pass.
  *
  * @import { HermesSessionWatermark, HermesWatermarkState } from './types.js'
  */
@@ -81,8 +80,8 @@ function readMark(value) {
   const maxMessageId = candidate.max_message_id
   if (typeof maxMessageId !== 'number' || !Number.isFinite(maxMessageId)) return null
   const endedAt = candidate.ended_at
-  if (endedAt !== null && typeof endedAt !== 'string') return null
-  return { max_message_id: maxMessageId, ended_at: endedAt ?? null }
+  if (endedAt !== null && typeof endedAt !== 'string' && typeof endedAt !== 'number') return null
+  return { max_message_id: maxMessageId, ended_at: endedAt ?? null, ...(typeof candidate.fingerprint === 'string' ? { fingerprint: candidate.fingerprint } : {}) }
 }
 
 /**

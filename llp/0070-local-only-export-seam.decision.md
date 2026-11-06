@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0503 (content masking follows withholding at the shared export read)
 **Systems:** Sinks, Cache
 **Author:** Phil / Claude
 **Date:** 2026-07-06

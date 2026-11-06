@@ -15,9 +15,18 @@ import {
   readClientActionStatus,
   readInstalledAssets,
 } from '../config/action_reconciler.js'
-import { originOf, readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
+import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
+import {
+  hasServiceTokenPrefix,
+  isServiceTokenShape,
+  keptServiceToken,
+  retireKeptServiceToken,
+  serviceTokenPath,
+  writeKeptServiceToken,
+} from '../remote/service_token.js'
+import { sameServer, serverDisplayName, syncDestinationName } from '../remote/builtin_remotes.js'
 import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
-import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
+import { buildClientDescriptorMap, detachClientViaCore, withAttachKeyLock } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
 import { isTty, readAllStdin } from '../cli/stdio.js'
@@ -46,7 +55,7 @@ import { isTty, readAllStdin } from '../cli/stdio.js'
 export async function runJoin(argv, ctx) {
   const parsed = parseJoinArgs(argv)
   if (parsed.help) {
-    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]\n')
+    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]\n')
     ctx.stdout.write('  token sources (pick one): positional argument, --token-file, or stdin\n')
     return 0
   }
@@ -88,6 +97,13 @@ export async function runJoin(argv, ctx) {
     ctx.stderr.write('hyp join: token is empty\n')
     return 2
   }
+  // Refused here rather than sent: a clipped copy of a service secret would
+  // otherwise reach the server as an ordinary bootstrap token.
+  const serviceToken = hasServiceTokenPrefix(token)
+  if (serviceToken && !isServiceTokenShape(token)) {
+    ctx.stderr.write("hyp join: the token starts with 'hsa_' but is not a whole service token - copy it again from HypAware\n")
+    return 2
+  }
 
   /** @type {HypAwareV2Config} */
   const seed = {
@@ -108,6 +124,7 @@ export async function runJoin(argv, ctx) {
   const validation = await validateConfig(seed, {
     knownPlugins: catalogCtx.knownPlugins,
     knownDatasets: catalogCtx.knownDatasets,
+    unloadablePlugins: catalogCtx.unloadablePlugins,
   })
   if (!validation.ok) {
     for (const err of validation.errors) {
@@ -144,6 +161,18 @@ export async function runJoin(argv, ctx) {
       // @ref LLP 0188#migration [implements]: enrollment seeds the empty store before the central seed is written
       await seedClientSyncStoreBestEffort(ctx, obsEnv.stateDir)
 
+      const kept = await keepOrRetireServiceToken(ctx, {
+        stateRoot: obsEnv.stateDir,
+        url: /** @type {string} */ (parsed.url),
+        token: serviceToken ? token : undefined,
+      })
+      span.setAttribute('credential_kind', serviceToken ? 'service_token' : 'bootstrap_token')
+      if (!kept) {
+        span.setAttribute('status', 'failed')
+        span.setAttribute('error_kind', 'service_token_store_failed')
+        return 1
+      }
+
       // The token is the only credential on disk until the first
       // bootstrap, so the seed write is atomic and mode 0600.
       await atomicWriteJson(seedPath, seed, { mode: 0o600 })
@@ -168,18 +197,59 @@ export async function runJoin(argv, ctx) {
         return 0
       }
 
-      const installArgv = parsed.binPath !== undefined ? ['--bin', parsed.binPath] : []
-      const code = await runDaemonInstall(installArgv, ctx)
+      const code = await runDaemonInstall(daemonInstallArgv(parsed), ctx)
       if (code !== 0) {
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'daemon_install_failed')
         return code
       }
-      ctx.stdout.write('✓ Joined - the daemon will pull its configuration from the server\n')
+      ctx.stdout.write(`✓ Joined - the daemon will pull its configuration from ${serverDisplayName(/** @type {string} */ (parsed.url))}\n`)
       return 0
     },
     { component: 'join' }
   )
+}
+
+/**
+ * The kept service record for a join (LLP 0547 D2), settled before the seed
+ * is written: an `hsa_` join keeps its secret beside the default identity
+ * path, the one its seed's sink resolves, and any other join retires every
+ * record a previous enrollment may have left. Records beside the old
+ * enrollment's other identity paths are retired in both cases. Returns false
+ * (after reporting) when the join must stop before the seed.
+ *
+ * @ref LLP 0547#secret-file [implements]: record first, then the seed; a failed retirement stops the join before anything new is written
+ * @param {CommandRunContext} ctx
+ * @param {{ stateRoot: string, url: string, token: string | undefined }} args
+ * @returns {Promise<boolean>}
+ */
+async function keepOrRetireServiceToken(ctx, { stateRoot, url, token }) {
+  const defaultIdentity = path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
+  const layerPath = resolveCentralLayerPath({ stateRoot })
+  const identityPaths = new Set(layerPath !== null ? (await readCentralSinks(layerPath, stateRoot)).map((s) => s.persistedPath) : [])
+  if (token === undefined) identityPaths.add(defaultIdentity)
+  else identityPaths.delete(defaultIdentity)
+  for (const identityPath of identityPaths) {
+    const recordPath = serviceTokenPath(identityPath)
+    try {
+      await retireKeptServiceToken(recordPath)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`hyp join: could not remove the kept service token ${recordPath}: ${message}\n`)
+      return false
+    }
+  }
+  if (token === undefined) return true
+
+  const recordPath = serviceTokenPath(defaultIdentity)
+  const result = await writeKeptServiceToken(recordPath, keptServiceToken({ secret: token, centralUrl: url }))
+  if (result.outcome === 'written') return true
+  if (result.outcome === 'visible') {
+    ctx.stderr.write(`warning: kept the service token at ${recordPath}, but its sync failed (${result.error}); re-run \`hyp join\` if this host crashes before the next start\n`)
+    return true
+  }
+  ctx.stderr.write(`hyp join: could not keep the service token at ${recordPath} (${'error' in result ? result.error : result.outcome}); nothing was changed, re-run the join\n`)
+  return false
 }
 
 /**
@@ -193,17 +263,15 @@ export async function runJoin(argv, ctx) {
  * server-owned org), not something the human typed, so provenance, not who
  * ran the command, picks the layer.
  *
- * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean, compact?: boolean }} args `compact` passes through to the daemon install's one-line report
+ * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean, compact?: boolean, binPath?: string, force?: boolean }} args `compact` passes through to the daemon install's one-line report; `binPath` and `force` are the caller's CLI decision, forwarded to it verbatim
  * @returns {Promise<{ provisioned: boolean, connectedElsewhere?: string, daemonCode: number }>}
  * @ref LLP 0063#d2 [implements]: provision join's exact sink block (minus the bootstrap token) into the central-seed layer, then seed the login-minted identity into it
  * @ref LLP 0063#d5 [implements]: an enrolling login finishes with join's daemon install (join parity); --no-daemon prints the finish-by-hand command
  */
-export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact = false }) {
+export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact = false, binPath, force }) {
   const obsEnv = readObservabilityEnv(ctx.env)
   const stateRoot = obsEnv.stateDir
   const localPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
-  const targetOrigin = originOf(url)
-
   // D4 re-check just before the write: if a central sink targeting a different
   // origin appeared since login's pre-auth gate (a concurrent first login to
   // another server), abort rather than provision a second enrollment. This is
@@ -220,13 +288,13 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact =
   if (unreadable) {
     throw new Error(`the central config layer (${unreadable.configPath}) cannot be read, so this machine's enrollment cannot be verified: ${unreadable.message}`)
   }
-  const elsewhere = connectedOrigins.find((o) => o !== targetOrigin)
+  const elsewhere = connectedOrigins.find((o) => !sameServer(o, url))
   if (elsewhere) return { provisioned: false, connectedElsewhere: elsewhere, daemonCode: 0 }
 
   // Only actually write the seed when no same-origin central sink exists yet
   // (a same-origin sink present means a racing same-server login already
   // provisioned it; fall through to identity-seeding it, which is idempotent).
-  if (targetOrigin === null || !connectedOrigins.includes(targetOrigin)) {
+  if (!connectedOrigins.some((o) => sameServer(o, url))) {
     // `identity: {}` (not absent): the central plugin's own validator requires
     // an identity object (`central.identity is required`), but bootstrap_token
     // is optional, the login-minted gateway seeded into identity.json is the
@@ -271,8 +339,23 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact =
   }
 
   if (noDaemon) return { provisioned: true, daemonCode: 0 }
-  const daemonCode = await runDaemonInstall([], ctx, { compact })
+  const daemonCode = await runDaemonInstall(daemonInstallArgv({ binPath, force }), ctx, { compact })
   return { provisioned: true, daemonCode }
+}
+
+/**
+ * The enrollment lanes are wrappers over `hyp daemon install` (LLP 0025), so
+ * the two decisions about the CLI it records travel as its own flags: an
+ * explicit entrypoint, and `--force` for keeping a temporary one (LLP 0404).
+ *
+ * @param {{ binPath?: string, force?: boolean }} opts
+ * @returns {string[]}
+ */
+function daemonInstallArgv({ binPath, force }) {
+  return [
+    ...(binPath !== undefined ? ['--bin', binPath] : []),
+    ...(force ? ['--force'] : []),
+  ]
 }
 
 /**
@@ -308,7 +391,7 @@ async function rollbackCentralSeed(stateRoot) {
 
 /**
  * @param {string[]} argv
- * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean }}
+ * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean, force?: boolean }}
  */
 function parseJoinArgs(argv) {
   const parsed = parseCommandArgv(argv, {
@@ -319,12 +402,13 @@ function parseJoinArgs(argv) {
       'token-file': { type: 'string' },
       bin: { type: 'string' },
       'no-daemon': { type: 'boolean', default: false },
+      force: { type: 'boolean', default: false },
     },
     positional: ['url', 'token'],
   })
   if ('help' in parsed) return { help: true }
   if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean }} */ (parsed.params)
+  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean, force: boolean }} */ (parsed.params)
   if (p.url === undefined) return { error: 'missing <url> (see hyp join --help)' }
   // '-' as the token positional means "read from stdin", same as
   // omitting it on a piped invocation.
@@ -332,7 +416,7 @@ function parseJoinArgs(argv) {
   if (token !== undefined && p['token-file'] !== undefined) {
     return { error: 'pass the token either as an argument or via --token-file, not both' }
   }
-  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'] }
+  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'], force: p.force }
 }
 
 /**
@@ -378,9 +462,10 @@ export async function runLeave(argv, ctx) {
   const parsedArgv = parseCommandArgv(argv, { type: 'object', properties: {} })
   if ('help' in parsedArgv) {
     ctx.stdout.write('usage: hyp leave\n')
-    ctx.stdout.write('  disconnect this machine from its central server: stop forwarding and\n')
-    ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
-    ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
+    ctx.stdout.write('  disconnect this machine from a HypAware server: stop forwarding\n')
+    ctx.stdout.write('  and config pull, undo org-driven client attaches, and remove the\n')
+    ctx.stdout.write('  forward credential. Keeps query sessions, the local config, and the\n')
+    ctx.stdout.write('  daemon service.\n')
     return 0
   }
   if (!parsedArgv.ok) {
@@ -410,7 +495,7 @@ export async function runLeave(argv, ctx) {
   // lands here with work to do and finishes it - the marker is its own
   // "unfinished teardown" signal, no separate bookkeeping needed.
   if (centralLayerPath === null && unresolvableCentralLayer === null && attachedNames.length === 0) {
-    ctx.stdout.write('hyp leave: this machine is not connected to a central server - nothing to do\n')
+    ctx.stdout.write('hyp leave: this machine is not connected to a HypAware server - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
     // and leave never edits the local layer (#111 doctrine), but a user
     // running `leave` to stop forwarding deserves to know where it lives.
@@ -431,7 +516,7 @@ export async function runLeave(argv, ctx) {
     },
     async (span) => {
       let failures = 0
-      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the central server'}\n`)
+      ctx.stdout.write(`leaving ${syncDestinationName(urls)}\n`)
 
       // Every step below is best-effort and idempotent (force-rm, ENOENT-tolerant
       // unlink, idempotent detach), so a plain re-run of `hyp leave` redoes
@@ -526,9 +611,18 @@ export async function runLeave(argv, ctx) {
               ctx.stdout.write(`  it had installed ${installedAssets.length} file(s), left in place - remove them by hand if you want them gone:\n`)
               for (const dest of installedAssets) ctx.stdout.write(`    ${dest}\n`)
             }
+            // Under the key lock, like every other marker writer, so a reconcile
+            // pass cannot re-commit the marker this drops (#224). A marker that
+            // survives is the #217 block this drop exists to clear, so it
+            // counts as a failure rather than a blemish.
+            // @ref LLP 0523#two-locks [implements]: leave drops a descriptor-less marker under the key lock
             try {
-              clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })
-            } catch { /* best-effort: a stale marker is a status blemish */ }
+              await withAttachKeyLock({ name, ctx }, () => clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name }))
+            } catch (err) {
+              failures += 1
+              const message = err instanceof Error ? err.message : String(err)
+              ctx.stderr.write(`hyp leave: could not drop the attach marker for '${name}': ${message}\n`)
+            }
             continue
           }
           // The one core undo removes the marker's `installed_assets` before it
@@ -572,6 +666,17 @@ export async function runLeave(argv, ctx) {
       }
       let removedIdentity = false
       for (const identityPath of identityPaths) {
+        // The kept service record goes first, so a failure leaves the
+        // identity it belongs to in place for the re-run (LLP 0547 D2).
+        const recordPath = serviceTokenPath(identityPath)
+        try {
+          if (await retireKeptServiceToken(recordPath)) removedIdentity = true
+        } catch (err) {
+          failures += 1
+          const message = err instanceof Error ? err.message : String(err)
+          ctx.stderr.write(`hyp leave: could not remove the kept service token ${recordPath}: ${message}\n`)
+          continue
+        }
         try {
           await fs.unlink(identityPath)
           removedIdentity = true

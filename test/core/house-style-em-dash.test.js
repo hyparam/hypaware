@@ -30,10 +30,10 @@ const EM_DASH = '\u2014'
 /**
  * The one place the rule does not reach.
  *
- * `notes-archive/` holds dated, signed review transcripts of LLP drafts. They
- * are records of what a reviewer wrote on a given day, not project prose being
- * maintained, so re-punctuating them would falsify the record rather than fix a
- * style defect. Everything else in the tree is in scope: code, comments, JSDoc,
+ * `notes-archive/` is where `/llp-review` writes dated review transcripts. It is
+ * gitignored, so nothing there is tracked; if a transcript is ever force-added,
+ * it is a record of what a reviewer wrote on a given day, and re-punctuating it
+ * would falsify the record rather than fix a style defect. Everything else in the tree is in scope: code, comments, JSDoc,
  * strings, docs, skills, and the LLP corpus including its tombstones.
  *
  * Exemptions are prefixes, listed one per reason, so adding one is a visible

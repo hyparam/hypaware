@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util'
 
 import { rowsToBatches } from 'squirreling'
 
-import { normalizeScanColumn } from './scan-column.js'
+import { scanColumnOrNulls } from './scan-column.js'
 
 /**
  * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
@@ -189,8 +189,10 @@ export function unionSources(sources) {
     union.prepareScan = (request) => prepareUnionScan({ union, sources, schema: preparedSchema, request })
   }
   // The column-stream hook is offered only when EVERY partition can stream
-  // the column; a mixed union stays row-based so the engine's fallback owns
-  // correctness.
+  // a column; a mixed union stays row-based so the engine's fallback owns
+  // correctness. A partition that streams but does not carry the requested
+  // column contributes a null per row (LLP 0241's padded cell, on the column
+  // path), never a request the partition would throw on.
   //
   // With no `where`, the union fully owns limit/offset over the CONCATENATED
   // stream (they are not distributive across partitions, the same discipline
@@ -213,10 +215,9 @@ export function unionSources(sources) {
         // until its chunks are consumed) so the merged flags are known
         // before the engine decides whether to re-filter.
         const subs = sources.map((source) => {
-          const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
           const push = canPushWhere(source, predicateColumns)
           const options = push ? { column, where, signal } : { column, signal }
-          const result = normalizeScanColumn(scanColumn(options), options)
+          const result = scanColumnOrNulls(source, options)
           return { result, applied: push && result.appliedWhere }
         })
         return {
@@ -245,7 +246,6 @@ export function unionSources(sources) {
               remainingSkip -= numRows
               continue
             }
-            const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
             const options = {
               column,
               // Per-partition upper bound: this partition can contribute at
@@ -253,7 +253,7 @@ export function unionSources(sources) {
               limit: remaining === Infinity ? undefined : remainingSkip + remaining,
               signal,
             }
-            const sub = normalizeScanColumn(scanColumn(options), options)
+            const sub = scanColumnOrNulls(source, options)
             for await (const chunk of sub.chunks()) {
               signal?.throwIfAborted()
               let start = 0

@@ -12,14 +12,14 @@
  *   builtin into a clear refusal instead of a crash, and a short bounded
  *   SQLITE_BUSY retry so a persistently locked store degrades status
  *   rather than throwing raw into the daemon.
- * @ref LLP 0122#watermark [implements]: `listChangedSessions` is the "one
- *   cheap indexed aggregate query" the poll model (T4) re-projects from.
+ * @ref LLP 0449#detection [implements]: per-session payload digests replace the append-only watermark.
  *
- * @import { HermesSessionRow, HermesMessageRow, HermesWatermarkState, HermesChangedSession, HermesBusyRetryOptions, HermesStateDbOptions } from './types.js'
+ * @import { HermesSessionRow, HermesMessageRow, HermesWatermarkState, HermesChangedSession, HermesBusyRetryOptions, HermesStateDbOptions, HermesSessionSnapshot } from './types.js'
  * @import { DatabaseSync } from 'node:sqlite'
  */
 
 import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 
 import { HermesStateDbError } from './errors.js'
@@ -122,7 +122,7 @@ const SESSION_COLUMNS = [
   'end_reason', 'billing_provider', 'billing_base_url', 'system_prompt',
   'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
   'reasoning_tokens', 'estimated_cost_usd', 'actual_cost_usd', 'api_call_count',
-].join(', ')
+]
 
 const MESSAGE_COLUMNS = [
   'id', 'session_id', 'role', 'content', 'tool_calls', 'tool_name',
@@ -144,33 +144,82 @@ export class HermesStateDb {
     this.db = db
     /** @type {HermesBusyRetryOptions} */
     this.retryOpts = retryOpts
+    /** @type {number | undefined} */
+    this.lastDataVersion = undefined
+    /** @type {HermesChangedSession[] | undefined} */
+    this.snapshot = undefined
+    /** @type {{ schemaVersion: number, sql: string, listSql: string } | undefined} */
+    this.sessionQuery = undefined
   }
 
   /**
-   * All sessions, oldest first.
+   * Resolve modern Hermes metadata while keeping older stores readable. Cache
+   * only SQL, not prompt payloads, and refresh after an upstream migration.
+   * The listing form skips the prompt join: discovery needs no prompt, and
+   * resolving one per session would expand a shared prompt for all history.
+   * @ref LLP 0449#detection [implements]: every read fingerprints the same resolved metadata it projects.
+   * @param {{ listing?: boolean }} [options]
+   * @returns {string}
+   */
+  sessionSelect({ listing = false } = {}) {
+    const schemaVersion = Number(this.db.prepare('PRAGMA schema_version').get()?.schema_version)
+    if (this.sessionQuery?.schemaVersion !== schemaVersion) {
+      const columns = new Set(this.db.prepare('PRAGMA table_info(sessions)').all().map(row => String(row.name)))
+      const promptColumns = columns.has('system_prompt_hash')
+        ? new Set(this.db.prepare('PRAGMA table_info(system_prompts)').all().map(row => String(row.name)))
+        : new Set()
+      const resolvePrompt = promptColumns.has('hash') && promptColumns.has('prompt')
+      const plain = SESSION_COLUMNS.map(column => `sessions.${column}`)
+      const selected = SESSION_COLUMNS.map(column => column === 'system_prompt' && resolvePrompt
+        ? 'COALESCE(system_prompts.prompt, sessions.system_prompt) AS system_prompt'
+        : `sessions.${column}`)
+      if (columns.has('created_source')) {
+        plain.push('sessions.created_source')
+        selected.push('sessions.created_source')
+      }
+      const join = resolvePrompt ? ' LEFT JOIN system_prompts ON system_prompts.hash = sessions.system_prompt_hash' : ''
+      this.sessionQuery = {
+        schemaVersion,
+        sql: `SELECT ${selected.join(', ')} FROM sessions${join}`,
+        listSql: `SELECT ${plain.join(', ')} FROM sessions`,
+      }
+    }
+    return listing ? this.sessionQuery.listSql : this.sessionQuery.sql
+  }
+
+  /**
+   * All sessions, oldest first, for discovery. `system_prompt` is the inline
+   * column only; `readSessionSnapshot` resolves a hash-backed prompt.
    *
    * @returns {Promise<HermesSessionRow[]>}
    */
   async listSessions() {
     return withBusyRetry(
       () => /** @type {HermesSessionRow[]} */ (/** @type {unknown} */ (
-        this.db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions ORDER BY id ASC`).all()
+        this.db.prepare(`${this.sessionSelect({ listing: true })} ORDER BY sessions.id ASC`).all()
       )),
       this.retryOpts
     )
   }
 
+  visibleClause() {
+    const columns = new Set(this.db.prepare('PRAGMA table_info(messages)').all().map(row => String(row.name)))
+    return columns.has('active')
+      ? (columns.has('compacted') ? '(active = 1 OR compacted = 1)' : 'active = 1')
+      : '1 = 1'
+  }
+
   /**
    * All messages for one session, oldest first.
    *
-   * @param {number} sessionId
+   * @param {string | number} sessionId
    * @returns {Promise<HermesMessageRow[]>}
    */
   async listMessagesForSession(sessionId) {
     return withBusyRetry(
       () => /** @type {HermesMessageRow[]} */ (/** @type {unknown} */ (
         this.db
-          .prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE session_id = ? ORDER BY id ASC`)
+          .prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE session_id = ? AND ${this.visibleClause()} ORDER BY id ASC`)
           .all(sessionId)
       )),
       this.retryOpts
@@ -178,54 +227,114 @@ export class HermesStateDb {
   }
 
   /**
-   * Sessions that changed since `watermarks`: `max(messages.id)` advanced,
-   * or `ended_at` transitioned from NULL to set. One indexed aggregate
-   * query (`GROUP BY sessions.id`), then a pure in-memory diff against the
-   * supplied watermark map.
-   *
-   * @ref LLP 0122#watermark [implements]: exactly the two conditions the
-   *   design specifies; a session absent from `watermarks` is compared
-   *   against the implicit `{ max_message_id: 0, ended_at: null }` mark,
-   *   so a never-before-seen session is always "changed".
-   *
+   * Sessions whose visible content or metadata differs from the last
+   * successfully reconciled snapshot. Stream payloads only after a database
+   * commit; preserve just digests between polls.
+   * @ref LLP 0449#detection [implements]: edits and rewinds need not advance IDs
    * @param {HermesWatermarkState} [watermarks]
    * @returns {Promise<HermesChangedSession[]>}
    */
   async listChangedSessions(watermarks = {}) {
-    const rows = await withBusyRetry(
-      () => this.db.prepare(`
-        SELECT s.id AS session_id, s.ended_at AS ended_at, MAX(m.id) AS max_message_id
-        FROM sessions s
-        LEFT JOIN messages m ON m.session_id = s.id
-        GROUP BY s.id
-      `).all(),
-      this.retryOpts
-    )
-
-    /** @type {HermesChangedSession[]} */
-    const changed = []
-    for (const row of /** @type {Array<{ session_id: number, ended_at: string | null, max_message_id: number | null }>} */ (rows)) {
-      const key = String(row.session_id)
-      const prior = watermarks[key] ?? { max_message_id: 0, ended_at: null }
-      const maxMessageId = row.max_message_id ?? 0
-      const endedAt = row.ended_at ?? null
-      const messagesAdvanced = maxMessageId > prior.max_message_id
-      const endedTransitioned = endedAt !== null && prior.ended_at === null
-      if (!messagesAdvanced && !endedTransitioned) continue
-      changed.push({
-        session_id: row.session_id,
-        reason: messagesAdvanced ? 'new_messages' : 'ended',
-        max_message_id: maxMessageId,
-        ended_at: endedAt,
-      })
+    // @ref LLP 0449#detection [implements]: unchanged databases cost a pragma,
+    // not a payload scan. A new connection always seeds from the actual store.
+    const version = Number(this.db.prepare('PRAGMA data_version').get()?.data_version)
+    if (this.lastDataVersion !== version || !this.snapshot) {
+      this.snapshot = await withBusyRetry(() => {
+        this.db.exec('BEGIN')
+        try {
+          const statement = this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE session_id = ? AND ${this.visibleClause()} ORDER BY id ASC`)
+          // Stream the sessions too: a mark is small, but a session row carries
+          // its whole `system_prompt`, and `.all()` would hold every one of
+          // them resident for the length of the full-history hash.
+          const marks = []
+          for (const session of this.db.prepare(`${this.sessionSelect()} ORDER BY sessions.id ASC`).iterate()) {
+            marks.push(sessionMark(/** @type {HermesSessionRow} */ (/** @type {unknown} */ (session)),
+              /** @type {Iterable<HermesMessageRow>} */ (/** @type {unknown} */ (statement.iterate(session.id)))))
+          }
+          this.db.exec('COMMIT')
+          return /** @type {HermesChangedSession[]} */ (/** @type {unknown} */ (marks))
+        } catch (error) {
+          rollbackQuietly(this.db)
+          throw error
+        }
+      }, this.retryOpts)
+      this.lastDataVersion = version
     }
+    const changed = this.snapshot.filter(row => {
+      const prior = watermarks[String(row.session_id)]
+      return !prior || prior.fingerprint !== row.fingerprint
+    }).map(row => ({ ...row,
+      reason: /** @type {HermesChangedSession['reason']} */ (row.max_message_id > (watermarks[String(row.session_id)]?.max_message_id ?? 0)
+        ? 'new_messages' : row.ended_at != null && watermarks[String(row.session_id)]?.ended_at == null ? 'ended' : 'changed'),
+    }))
     return changed
+  }
+
+  /**
+   * One session's row, visible messages and mark, read in a single read
+   * transaction so all three describe the same committed state of the store.
+   * Null when the session no longer exists.
+   * @ref LLP 0449#read-commit-guard [implements]: the fingerprint names exactly the view projected.
+   * @param {string | number} sessionId
+   * @returns {Promise<HermesSessionSnapshot | null>}
+   */
+  async readSessionSnapshot(sessionId) {
+    return withBusyRetry(() => {
+      this.db.exec('BEGIN')
+      try {
+        const session = /** @type {HermesSessionRow | undefined} */ (/** @type {unknown} */ (
+          this.db.prepare(`${this.sessionSelect()} WHERE sessions.id = ?`).get(sessionId)))
+        const messages = session ? /** @type {HermesMessageRow[]} */ (/** @type {unknown} */ (
+          this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE session_id = ? AND ${this.visibleClause()} ORDER BY id ASC`)
+            .all(sessionId))) : []
+        this.db.exec('COMMIT')
+        return session ? { session, messages, mark: sessionMark(session, messages) } : null
+      } catch (error) {
+        rollbackQuietly(this.db)
+        throw error
+      }
+    }, this.retryOpts)
   }
 
   /** Close the underlying connection. Safe to call once; a second call throws per `node:sqlite`. */
   close() {
     this.db.close()
   }
+}
+
+/**
+ * Best-effort recovery ROLLBACK for a read transaction that threw. SQLite may
+ * already have ended the transaction itself, and then ROLLBACK throws `cannot
+ * rollback - no transaction is active`; that failure must not replace the
+ * error the caller rethrows, which is the one `withBusyRetry` classifies and
+ * the poll source reports (issue #2281).
+ * @param {DatabaseSync} db
+ */
+function rollbackQuietly(db) {
+  try {
+    db.exec('ROLLBACK')
+  } catch {
+    // The transaction is already gone; the caller rethrows the original error.
+  }
+}
+
+/**
+ * The change mark for one session: a digest over its row and visible messages
+ * in id order. Shared by the change scan and the guarded snapshot read, so a
+ * watermark written from either compares equal for the same content.
+ * @param {HermesSessionRow} session
+ * @param {Iterable<HermesMessageRow>} messages
+ * @returns {HermesChangedSession}
+ */
+function sessionMark(session, messages) {
+  const hash = createHash('sha256').update(JSON.stringify(session))
+  let maxMessageId = 0
+  for (const message of messages) {
+    hash.update(JSON.stringify(message))
+    maxMessageId = Math.max(maxMessageId, Number(message.id))
+  }
+  return { session_id: session.id, reason: 'changed', max_message_id: maxMessageId,
+    ended_at: session.ended_at ?? null, fingerprint: hash.digest('hex') }
 }
 
 /**

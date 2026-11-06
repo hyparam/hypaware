@@ -2,34 +2,48 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
 import { AI_GATEWAY_MESSAGES_DATASET, errMessage, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import { cmdFileSpawnPlan } from '../../../../src/core/util/cmd_file.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
-import { projectOpenCodeSnapshot } from './projector.js'
+import { openCodeSessionCwd, projectOpenCodeSnapshot } from './projector.js'
 
 /** @import { BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext } from '../../../../hypaware-plugin-kernel-types.js' */
 
 const execFileAsync = promisify(execFile)
 const MAX_SESSION_LIST = 1000
+// An `opencode` child that starts and never exits parks whichever foreground
+// import invoked it: this provider declares no `sweep`, so the daemon sweep
+// driver never fires it, and its call sites are `hyp backfill`, the `hyp init`
+// finale and the `hyp join`/attach finale. Unbounded, it hangs the first-run
+// wizard indefinitely. So both calls are bounded, on separate budgets. The listing
+// is a bounded metadata read and takes the workspace's existing ceiling for a
+// subprocess that does real I/O (the 10s on `gh auth token`), above the 1-3s
+// given to calls that only read a version or a git line. The export renders one
+// whole transcript, which `maxBuffer` already sizes at 32MB, and overrunning it
+// costs one warned session where a slow listing fails the run.
+const LIST_TIMEOUT_MS = 10_000
+const EXPORT_TIMEOUT_MS = 60_000
 
 /**
- * @param {{ localOnlyListPath?: string, runCommand?: (args: string[]) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} [opts]
+ * @param {{ localOnlyListPath?: string, runCommand?: (args: string[], timeoutMs: number) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} [opts]
  * @returns {BackfillContribution}
  */
 export function createOpenCodeBackfillProvider(opts = {}) {
   const resolver = createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
-  const runCommand = opts.runCommand ?? runOpenCode
   return {
     name: 'opencode',
     plugin: '@hypaware/opencode',
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import bounded OpenCode CLI and Desktop session exports',
     async *run(ctx) {
+      refreshSessionIgnores(opts.ignoredSessions)
       yield* runBackfill({
         ctx,
         resolver,
-        runCommand,
+        runCommand: opts.runCommand ?? createOpenCodeCommandRunner(),
         exactSessionIds: opts.exactSessionIds,
         ignoredSessions: opts.ignoredSessions,
       })
@@ -37,7 +51,7 @@ export function createOpenCodeBackfillProvider(opts = {}) {
   }
 }
 
-/** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: (args: string[]) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
+/** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: ((args: string[], timeoutMs: number) => Promise<string>) & { commandLine?: (args: string[]) => string }, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
 async function* runBackfill(deps) {
   const window = resolveWindow(deps.ctx)
   let emptyStdout = false
@@ -55,7 +69,7 @@ async function* runBackfill(deps) {
     /** @type {string} */
     let rawList
     try {
-      rawList = await deps.runCommand(['session', 'list', '--format', 'json', '--max-count', String(MAX_SESSION_LIST)])
+      rawList = await deps.runCommand(['session', 'list', '--format', 'json', '--max-count', String(MAX_SESSION_LIST)], LIST_TIMEOUT_MS)
     } catch (err) {
       if (!isMissingBinary(err)) throw err
       deps.ctx.log.info('opencode.backfill.cli_absent', {
@@ -64,6 +78,16 @@ async function* runBackfill(deps) {
         selected_sessions: 0,
         status: 'ok',
         reason: 'opencode_cli_absent',
+      })
+      // Still ok, but not the same fact as an empty history: the setup and
+      // `hyp backfill` output say the import could not run and how to retry.
+      yield /** @type {BackfillEvent} */ ({
+        type: 'event',
+        event: 'import_unavailable',
+        attributes: {
+          reason: 'opencode_cli_absent',
+          note: 'opencode was not found on PATH, so its history was not imported; live capture is unaffected. After fixing PATH, run `hyp backfill opencode`.',
+        },
       })
       return
     }
@@ -124,13 +148,13 @@ async function* runBackfill(deps) {
     // to MAX_SESSION_LIST sessions behind a single bad export.
     let exported
     try {
-      const rawExport = await deps.runCommand(['export', item.id])
+      const rawExport = await deps.runCommand(['export', item.id], EXPORT_TIMEOUT_MS)
       exported = JSON.parse(rawExport)
     } catch (err) {
       deps.ctx.log.warn('opencode.backfill.session_read_failed', {
         component: 'plugin.opencode.backfill',
         operation: 'backfill.scan',
-        source_path: `opencode export ${item.id}`,
+        source_path: deps.runCommand.commandLine?.(['export', item.id]) ?? `opencode export ${item.id}`,
         session_id: item.id,
         status: 'error',
         error_kind: 'session_read_failed',
@@ -139,7 +163,7 @@ async function* runBackfill(deps) {
       continue
     }
     const session = isPlainObject(exported) && isPlainObject(exported.info) ? exported.info : undefined
-    const cwd = stringValue(session?.directory)
+    const cwd = openCodeSessionCwd(session)
     if (!cwd) {
       yield /** @type {BackfillEvent} */ ({
         type: 'event',
@@ -175,6 +199,55 @@ async function* runBackfill(deps) {
 }
 
 /**
+ * Keep the provider's logical commands stable while choosing each major's
+ * public CLI surface once per import. From 1.3 neither listing is scoped to
+ * our cwd or restricted to root sessions; 1.0 to 1.2 keep the project-scoped
+ * root list. Only metadata crosses this boundary.
+ * @param {(args: string[], timeoutMs: number) => Promise<string>} [runCommand]
+ * @ref LLP 0576#discovery: project-scoped root lists cannot recover other projects or children
+ */
+export function createOpenCodeCommandRunner(runCommand = runOpenCode) {
+  /** @type {Promise<boolean> | undefined} */
+  let isV2
+  let resolvedV2 = false
+  let legacyList = false
+  /** @param {boolean} v2 @param {string[]} args */
+  const resolveArgs = (v2, args) => v2 && args[0] === 'export' ? ['session', ...args] : args
+  const run = async (/** @type {string[]} */ args, /** @type {number} */ timeoutMs) => {
+    isV2 ??= runCommand(['--version'], LIST_TIMEOUT_MS).then(version => {
+      const [, major, minor] = /(?:^|\s)v?(\d+)\.(\d+)/.exec(version) ?? []
+      if (major !== '1' && major !== '2') throw new Error(`Unsupported OpenCode version ${version.trim().slice(0,80)}: history import supports OpenCode 1.x and 2.x.`)
+      // `opencode db` arrived in 1.3; older 1.x keeps its project-scoped list.
+      legacyList = major === '1' && Number(minor) < 3
+      return major === '2'
+    })
+    const v2 = resolvedV2 = await isV2
+    if (args[0] === 'session' && args[1] === 'list') {
+      if (!v2 && legacyList) return runCommand(args, timeoutMs)
+      if (!v2) return runCommand([
+        'db',
+        `SELECT id, time_updated AS updated, time_created AS created, directory FROM session ORDER BY time_updated DESC, id DESC LIMIT ${MAX_SESSION_LIST}`,
+        '--format', 'json',
+      ], timeoutMs)
+      const result = JSON.parse(await runCommand(['api', 'session.list', '--param', `limit=${MAX_SESSION_LIST}`, '--param', 'order=desc'], timeoutMs))
+      if (!isPlainObject(result) || !Array.isArray(result.data)) throw new Error('opencode session API did not return a data array')
+      return JSON.stringify(result.data.filter(isPlainObject).map(session => ({
+        id: session.id,
+        updated: isPlainObject(session.time) ? session.time.updated : undefined,
+        created: isPlainObject(session.time) ? session.time.created : undefined,
+        directory: openCodeSessionCwd(session),
+      })))
+    }
+    return runCommand(resolveArgs(v2, args), timeoutMs)
+  }
+  // A failed export's warning names the command that ran, so a retry by hand
+  // from the log uses the right one on each major.
+  return Object.assign(run, {
+    commandLine: (/** @type {string[]} */ args) => ['opencode', ...resolveArgs(resolvedV2, args)].join(' '),
+  })
+}
+
+/**
  * Did this command fail because the binary is not there, as opposed to
  * failing once it ran? `execFile` reports the first as ENOENT on the spawn
  * itself, which is the one failure that means "this machine has no OpenCode
@@ -184,7 +257,26 @@ async function* runBackfill(deps) {
  * @returns {boolean}
  */
 function isMissingBinary(err) {
-  return err instanceof Error && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT'
+  if (!(err instanceof Error)) return false
+  const code = /** @type {NodeJS.ErrnoException} */ (err).code
+  // Through cmd.exe (the win32 spawn below) a missing binary is not a spawn
+  // failure: cmd itself starts fine and exits 9009, its "not recognized as
+  // an internal or external command" code.
+  return code === 'ENOENT' || /** @type {unknown} */ (code) === 9009
+}
+
+/**
+ * Did this command break its timeout, as opposed to exiting on its own?
+ * `execFile` reports that as a kill it performed itself. The other failure it
+ * kills for is a `maxBuffer` overflow, and that one names itself in `code`.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isTimeoutKill(err) {
+  if (!(err instanceof Error)) return false
+  const failure = /** @type {NodeJS.ErrnoException & { killed?: boolean }} */ (err)
+  return failure.killed === true && failure.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
 }
 
 /**
@@ -192,14 +284,38 @@ function isMissingBinary(err) {
  * emptiness, so trimming here would silently turn a truncated whitespace-only
  * response into a successful "no sessions" import instead of the failure it is.
  *
+ * A timeout kill reaches the caller as "Command failed: opencode ..." with no
+ * mention of the deadline it broke. Restate it, so the disposition each call
+ * site already gives a failure names the command and its budget:
+ * `opencode.backfill.session_read_failed` for an export,
+ * `backfill.provider_error` for a listing that fails the run.
+ *
  * @param {string[]} args
+ * @param {number} timeoutMs
  */
-async function runOpenCode(args) {
-  const result = await execFileAsync('opencode', args, {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
-  return result.stdout
+export async function runOpenCode(args, timeoutMs) {
+  // On win32 `opencode` is an npm `.cmd` shim, which only cmd.exe can run
+  // (Node refuses the direct spawn), so the command rides an escaped cmd
+  // line - the args here carry session ids and SQL, not fixed bare tokens.
+  // @ref LLP 0581#decision [implements]: the escaped cmd.exe transport, with the bare name left to cmd's PATH walk
+  // cmd.exe resolves the bare name over PATH and PATHEXT as a typed command
+  // would. A timeout still kills only cmd.exe itself; the deadline and its
+  // classification above are unchanged.
+  const plan = process.platform === 'win32'
+    ? cmdFileSpawnPlan('opencode', args)
+    : { command: 'opencode', args, options: {} }
+  try {
+    const result = await execFileAsync(plan.command, plan.args, {
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: timeoutMs,
+      ...plan.options,
+    })
+    return result.stdout
+  } catch (err) {
+    if (isTimeoutKill(err)) throw new Error(`opencode ${args.join(' ')} timed out after ${timeoutMs}ms`)
+    throw err
+  }
 }
 
 /** @param {number | undefined} timestamp @param {{ sinceMs?: number, untilMs?: number }} window */

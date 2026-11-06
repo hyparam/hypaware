@@ -169,6 +169,15 @@ conditional, because it needs `@hypaware/github` configured on a server. It
 becomes a reference file the merged skill loads on entry, in the pattern
 `hypaware-report` already uses for `reviewing.md` and its siblings.
 
+> **Note (2026-10-18):** the "on a server" premise is historical.
+> [LLP 0360](./0360-github-source-is-bundled.decision.md#packaging) bundles
+> `@hypaware/github` with HypAware, and any machine that adds it to `plugins[]`
+> captures locally under
+> [#inventory](./0360-github-source-is-bundled.decision.md#inventory). The
+> material is still conditional, on the source being active rather than on a
+> server. What this paragraph decided stands: the GitHub material stays a
+> separately loaded reference file and does not merge into the skill.
+
 Skill count returns to six on every install, rather than six without the graph
 and seven with it.
 

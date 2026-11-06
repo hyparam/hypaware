@@ -9,6 +9,9 @@
 **Tracker:** hyparam/hypaware#798 (implementation spec)
 **Spawns:** LLP 0252, LLP 0253, LLP 0254, LLP 0255, LLP 0256,
 LLP 0258 (decisions), LLP 0257 (spec). All accepted with this RFC, 2026-08-17.
+**Extended-by:** LLP 0524 (accepted 2026-10-17; setup refuses to write a
+config that would strand a machine still proxy-attached from before this RFC,
+and names `hyp client attach claude` as the migration)
 
 > Claude Code now ships a sanctioned, documented export path for everything the
 > proxy intercepts: OTEL telemetry events plus raw API body files

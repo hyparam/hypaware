@@ -5,9 +5,9 @@ The central HypAware server is implemented in a separate package
 the TypeScript types in [`src/types.d.ts`](./src/types.d.ts); this
 document is the wire-level reference.
 
-The contract has three surfaces: identity (bootstrap + refresh), config
-pull (operator-defined config delivered to gateways), and ingest (cache
-partitions forwarded as NDJSON, per signal).
+The contract covers identity (bootstrap + refresh), config pull
+(operator-defined config delivered to gateways), ingest (cache partitions
+forwarded as NDJSON, per signal), and human-authorized session purging.
 
 All endpoints are HTTPS in production. Bodies are UTF-8 JSON unless
 explicitly NDJSON (`application/x-ndjson`). Errors return a JSON object
@@ -18,7 +18,16 @@ tag the client uses for diagnostics, humans read the HTTP status.
 
 All paths are versioned with a leading `/v1/`. Backwards-incompatible
 shape changes go to `/v2/` and both versions stay live until the kernel
-release that drops `/v1/` ships. Clients send no version header.
+release that drops `/v1/` ships.
+
+Config GETs and ingest POSTs carry the optional `X-Hyp-Client-Version`
+header: the HypAware package version loaded by the sending process, not a
+newer version installed on disk. This operational observation is independent
+of product telemetry. Servers accept a bounded version of at most 32
+characters and stamp its observation with server time; missing or malformed
+values never reject an otherwise valid request. Old servers ignore the
+header, and old clients remain compatible without it. See LLP 0558 in the
+client and LLP 0661 in the server for the current-version read contract.
 
 ## Identity
 
@@ -214,6 +223,16 @@ Headers (request):
   genuinely distinct chunk that merely shares bytes is never dropped
   (server LLP 0001).
 
+Optional compression (LLP 0497): a successful ingest response may advertise
+`Accept-Encoding: gzip`. Until then clients send plain NDJSON. Gzip requests
+carry `Content-Encoding: gzip`, encoded `Content-Length`, and
+`X-Hyp-Uncompressed-Length`. The server rejects missing/invalid/over-limit
+decoded lengths (413), malformed or mismatched compressed bodies (400), and
+unknown encodings (415). Decoding is bounded to the declared length and
+admission charges the larger of encoded and decoded lengths. Ledger hits
+still acknowledge before body decoding and admission. A gzip 415 permits one
+plain retry with the same batch id, for mixed-version deployments.
+
 Row-level dedup complements that ledger for `ai_gateway_messages`: the
 server holds a uniqueness guarantee on `part_id`, keyed by `(org, dataset)`
 rather than by gateway, so it spans the whole org's ingest and survives
@@ -240,8 +259,10 @@ HTTP date) is honored; an absent, unparseable, or **non-positive** value
 client's linear backoff ladder: a zero is never taken as an immediate
 retry.
 
-Response 5xx (other): transient transport failure. Client retries with
-exponential backoff capped at 5 minutes.
+Response 502 / 504: retry the same chunk with the shared transport-error
+budget of three retries at 2, 4, and 6 seconds. All attempts remain inside
+the single 330-second chunk lifetime. Other 5xx fail the partition for the
+driver to retry.
 
 > **Client status:** `429`/`503` are now handled as specified, the sink
 > honors a positive `Retry-After` (falling back to the linear ladder when
@@ -254,12 +275,11 @@ exponential backoff capped at 5 minutes.
 > (server LLP 0001 idempotency ledger). The wait is abortable, so sink
 > `close()` / daemon shutdown is never wedged by a paused chunk.
 >
-> Two gaps remain, tracked as follow-up: poison (`400`/`422`) is still
-> **not** dropped, it throws like any other failure and the driver
-> retries it, and there is no **forward cursor** or proactive client
-> pacing yet, so each tick re-streams the whole partition (the server
-> dedup keeps that correct and, post the ledger-before-backpressure fix,
-> cheap).
+> Poison (`400`/`422`) is still **not** dropped: it throws and the driver
+> retries it. Ordinary progress uses an end-of-partition watermark. After
+> interruption, bounded durable chunk receipts skip exact acknowledged chunks
+> while rereading through current privacy filters (LLP 0497). Source-history
+> replay uses separate receipts and does not change the ordinary watermark.
 
 ### Batch boundaries
 
@@ -288,3 +308,33 @@ the canonical mapping is 1:1), the gateway sends one POST per dataset.
 
 `dev_run_id` is preserved end-to-end as a payload attribute so smoke
 tests can correlate ingested rows with the run that produced them.
+
+## Session purge
+
+### POST `/v1/sessions/purge`
+
+Invoked by `hyp privacy purge --session ID` for configured, signed-in, and
+enrolled servers by default. `--remote NAME` limits remote scope;
+`--local-only` opts out. Bearer credentials
+must belong to a live human refresh session with `report-publish` write
+scope. Upload gateway and standalone read credentials are refused. The
+server derives the organization from the credential and permits verified
+session owners or current organization admins.
+
+Request: `{ "session_id": "<exact opaque session id>" }`.
+
+Response 200 includes `session_id`, `org`, `status: "completed"`,
+`stage: "completed"`, `cache_rows_deleted`, `archive_rows_deleted`,
+`scope: "session_keyed_rows"`, and `retained`. Counts describe this attempt;
+retrying an already completed purge can return zero. Completion covers
+spools and position deletes in session-keyed cache/archive tables, plus a
+durable exclusion against replay. Physical files remain until compaction;
+derived copies without session lineage, including generated report copies,
+are disclosed in `retained` and are outside this operation.
+
+Response 401 means a live human credential is required; 403 means the caller
+cannot purge this session; 404 means no ownership evidence exists. Response
+503 signals busy or incomplete work. An incomplete response includes the
+failed `stage` when available. Retry the same request; a durable receipt
+preserves the authorized owner's retry permission after rows are removed.
+Ordinary ignore never calls this endpoint.

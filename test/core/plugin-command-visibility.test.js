@@ -261,6 +261,23 @@ test('public diagnostics carry long help', async () => {
     assert.equal(typeof cmd.help, 'string', `${cmd.name}: a visible diagnostic needs long help`)
     assert.ok(cmd.help.length > 0, `${cmd.name}: long help must not be empty`)
   }
+
+  // `claude-account status` resolves no credential: runStatus reads the
+  // stored record and returns 0 for any present one, expired or not. So
+  // its help cannot sell a nonzero exit for an unresolvable credential,
+  // nor a gate before `claude-desktop install`, and it has to say which
+  // presence a 0 does report (#2459).
+  const accountStatus = account.get('client claude-account status')
+  assert.doesNotMatch(
+    accountStatus.help,
+    /no credential resolves|doubles as a check/,
+    'claude-account status must not claim a nonzero exit for an unresolvable credential: runStatus never resolves one',
+  )
+  assert.match(
+    accountStatus.help,
+    /presence, not resolvability/,
+    'claude-account status help must say a stored token exits 0 even past its recorded expiry',
+  )
 })
 
 test('group help hides the credential helper but keeps the public claude-account surfaces', async () => {

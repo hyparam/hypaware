@@ -143,12 +143,12 @@ export async function run({ harness, expect }) {
 
   // ----- smoke_step: mark_local_only (the durable CLI, LLP 0072#cli) -----
   await step('mark_local_only', async () => {
-    const r = await cli(['ignore', '--local-only', excludedCwd], cleanCwd)
-    expect.that('cli: hyp ignore --local-only exited 0', r.code, (v) => v === 0)
+    const r = await cli(['privacy', 'set', excludedCwd, 'local-only'], cleanCwd)
+    expect.that('cli: hyp privacy set <path> local-only exited 0', r.code, (v) => v === 0)
     expect.that(
-      'cli: hyp ignore --local-only confirms the added directory',
+      'cli: hyp privacy set <path> local-only confirms the marked directory',
       r.stdout,
-      (v) => v.includes('added') && v.includes(excludedCwd)
+      (v) => v.includes('marked') && v.includes(excludedCwd)
     )
   })
 

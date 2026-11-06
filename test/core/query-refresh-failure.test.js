@@ -94,3 +94,32 @@ test('a storage service missing the spool methods fails instead of degrading for
   )
   assert.deepEqual(messages, [], 'a miswired storage service never reads as a stale cache')
 })
+
+test('a caller aborted during the pending read starts no flush and is not degraded past', async () => {
+  for (const refresh of /** @type {const} */ (['auto', 'always'])) {
+    const storage = failingStorage()
+    const cancel = new AbortController()
+    /** @type {string[]} */
+    const messages = []
+    await assert.rejects(
+      () => settlePendingCacheForQuery({
+        partitions: [{ tablePath: '/cache/a' }],
+        storage: /** @type {any} */ ({
+          ...storage,
+          pendingInfo: async () => {
+            cancel.abort()
+            return { pending: true, pendingBytes: 1, lastFlushAtMs: null }
+          },
+          flushTable: storage.flushTable,
+        }),
+        refresh,
+        messages,
+        signal: cancel.signal,
+      }),
+      { name: 'AbortError' },
+      refresh
+    )
+    assert.equal(storage.flushes, 0, `${refresh}: no flush starts after the abort`)
+    assert.deepEqual(messages, [], `${refresh}: an abort is not reported as a refresh failure`)
+  }
+})

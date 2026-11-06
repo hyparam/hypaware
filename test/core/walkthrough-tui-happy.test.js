@@ -1,5 +1,6 @@
 // @ts-check
 
+import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -8,14 +9,13 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import {
-  runPickerWalkthrough,
   WALKTHROUGH_CANCEL_EXIT_CODE,
 } from '../../src/core/cli/walkthrough.js'
 import {
   installObservability,
   readObservabilityEnv,
 } from '../../src/core/observability/index.js'
-import { devTelemetryDir } from '../../src/core/observability/env.js'
+import { devTelemetryDir } from '../../src/core/runtime/paths.js'
 
 /**
  * Build a PassThrough pair that satisfies the TUI runtime's `isTTY` and
@@ -55,7 +55,7 @@ async function settle(ticks = 5) {
   }
 }
 
-test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdout are TTYs', async () => {
+test('runWizardPick drives the TUI multiselect end-to-end when stdin+stdout are TTYs', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-tui-happy-'))
   const io = makeFakeTty()
   const stderr = makeBuf()
@@ -69,8 +69,8 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
   delete process.env.HYP_NO_TUI
 
   try {
-    const promise = runPickerWalkthrough({
-      capabilities: /** @type {any} */ ({}),
+    const promise = runWizardPick({
+
       stdout: io.stdout,
       stderr,
       stdin: io.stdin,
@@ -87,12 +87,13 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     })
 
     // Sources prompt. The rendered rows open claude, claude-desktop, codex,
-    // opencode, otel: the raw API rows are `hidden` and never render
-    // (LLP 0202). Move down four times to land on otel, toggle, then enter.
+    // opencode, antigravity, antigravity-desktop, otel: the raw API rows are
+    // `hidden` and never render (LLP 0202). Move down six times to land on
+    // otel, toggle, then enter.
     // It is the only prompt: export defaults to local-parquet and retention
     // is never asked (LLP 0137).
     await settle()
-    await feed(io.stdin, ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\r'])
+    await feed(io.stdin, ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\r'])
 
     const result = await promise
     assert.equal(result.exitCode, 0)
@@ -121,7 +122,7 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
   }
 })
 
-test('runPickerWalkthrough returns a deterministic cancel exit code when the user cancels at the source prompt', async () => {
+test('runWizardPick returns a deterministic cancel exit code when the user cancels at the source prompt', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-cancel-'))
   const io = makeFakeTty()
   const stderr = makeBuf()
@@ -140,8 +141,8 @@ test('runPickerWalkthrough returns a deterministic cancel exit code when the use
   delete process.env.HYP_NO_TUI
 
   try {
-    const promise = runPickerWalkthrough({
-      capabilities: /** @type {any} */ ({}),
+    const promise = runWizardPick({
+
       stdout: io.stdout,
       stderr,
       stdin: io.stdin,
@@ -155,15 +156,15 @@ test('runPickerWalkthrough returns a deterministic cancel exit code when the use
     const result = await promise
     assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
     assert.equal(result.exitCode, 130)
-    assert.match(stderr.text(), /hyp setup: cancelled/)
+    assert.match(stderr.text(), /Setup cancelled./)
 
     await obs.shutdown()
     const traces = await readJsonl(path.join(devTelemetryDir(obsEnv.stateDir), `traces-${process.pid}.jsonl`))
     const finish = traces.find((record) => (
-      record.name === 'walkthrough.finish' &&
+      record.name === 'wizard.pick.finish' &&
       record.attributes?.status === 'cancelled'
     ))
-    assert.ok(finish, 'cancelled walkthrough.finish span not emitted')
+    assert.ok(finish, 'cancelled wizard.pick.finish span not emitted')
     assert.equal(finish.attributes.exit_code, WALKTHROUGH_CANCEL_EXIT_CODE)
   } finally {
     await obs.shutdown()
@@ -174,27 +175,30 @@ test('runPickerWalkthrough returns a deterministic cancel exit code when the use
   }
 })
 
-test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO_TUI=1', async () => {
+test('runWizardPick falls back to the legacy numbered prompt under HYP_NO_TUI=1', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-tui-fallback-'))
   const input = new PassThrough()
   // Mark BOTH ends as TTYs so the only signal that flips the router is
   // the HYP_NO_TUI escape. This proves the env override wins over the
-  // TTY probe. One answer: source '5' (otel, behind the four client rows;
+  // TTY probe. One answer: source '7' (otel, behind the six client rows;
   // the raw API rows are hidden, LLP 0202). Neither export nor retention
   // is asked.
   Object.defineProperty(input, 'isTTY', { value: true })
-  const stdout = answerDrivenOutput(input, ['5\n'], true)
+  const stdout = answerDrivenOutput(input, ['7\n'], true)
   const stderr = makeBuf()
 
   // HYP_NO_TUI flows through opts.env: the same channel real callers
   // use. So this test also exercises the env-threading contract.
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
     // Pin the platform: the row numbers below are only stable once the test says which platform it counts on.
     platform: 'darwin',
+    // Stub detection: a host with a detected client pre-checks its row,
+    // which swaps the prompt line the answer hook waits for.
+    detect: async () => new Set(),
     env: {
       HOME: tmp,
       HYP_HOME: path.join(tmp, '.hyp'),

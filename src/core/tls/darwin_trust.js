@@ -6,15 +6,10 @@ import path from 'node:path'
 import { runServiceCommand } from '../daemon/service_ops.js'
 
 /**
- * macOS keychain trust for the interception CA.
- *
- * File-scoped trust (`NODE_EXTRA_CA_CERTS`) does not reach Claude Code's SSE
- * transport, so proxy-mode attach installs the CA as a user-domain trusted
- * root in the login keychain. No `sudo`, no admin rights: `security
- * add-trusted-cert` against the login keychain makes macOS raise its own
- * native password dialog, and that dialog is the consent step.
- * @ref LLP 0236#user-domain-suffices [constrained-by]: only the keychain reaches both of Claude Code's trust stores
- * @ref LLP 0237#user-domain-trust [implements]
+ * Inspect and remove macOS keychain trust left by legacy proxy attach.
+ * OTEL attach no longer installs keychain trust; older grants survive until
+ * uninstall or an explicit purge removes them.
+ * @ref LLP 0258#nothing-else [constrained-by]: current attach writes no keychain trust
  *
  * This lives in core beside the CA lifecycle for the same reason the CA does
  * (LLP 0045 Part 3): uninstall and `hyp detach --purge` must be able to
@@ -74,30 +69,6 @@ export async function isCaTrusted({ certPath, run, timeoutMs }) {
   const runner = run ?? ((cmd, cmdArgs) => runServiceCommand(cmd, cmdArgs, { timeoutMs }))
   const result = await runner('security', ['verify-cert', '-c', certPath, '-p', 'ssl'])
   return result.exitCode === 0
-}
-
-/**
- * Install the CA as a user-domain trusted root in the login keychain. macOS
- * raises its native password dialog; a user who cancels it makes the command
- * exit non-zero, which is a refusal, not an error - the caller degrades and
- * says what will not work.
- * @ref LLP 0237#attach-anyway-on-refusal [constrained-by]: refusal must surface as a warning, never abort the attach
- *
- * @param {object} args
- * @param {string} args.certPath
- * @param {string} [args.homeDir]
- * @param {TrustCommandRunner} [args.run]
- * @returns {Promise<{ installed: boolean, detail?: string }>}
- */
-export async function installCaTrust({ certPath, homeDir, run = defaultRunner }) {
-  const result = await run('security', [
-    'add-trusted-cert',
-    '-r', 'trustRoot',
-    '-k', loginKeychainPath(homeDir),
-    certPath,
-  ])
-  if (result.exitCode === 0) return { installed: true }
-  return { installed: false, detail: (result.stderr || result.stdout).trim() || `exit ${result.exitCode}` }
 }
 
 /**

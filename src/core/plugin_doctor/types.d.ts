@@ -6,6 +6,8 @@
 // list of `repair` hints. Agents consume the JSON form; humans read the
 // rendered ✓/✗/⚠ lines.
 
+import type { VerbRegistration } from '../../../hypaware-plugin-kernel-types.d.ts'
+
 export type DiagnosticSeverity = 'error' | 'warn'
 
 /**
@@ -123,6 +125,8 @@ export interface DryRunResult {
   registered: RegisteredSnapshot
   /** What the snapshot refused. Always present, empty on the honest path. */
   refused: RefusedContribution[]
+  /** The verbs the plugin registered, on a successful run asked for them (`withVerbs`). */
+  verbs?: VerbRegistration[]
 }
 
 export type ScaffoldKind = 'source' | 'sink' | 'dataset'

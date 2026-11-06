@@ -1,7 +1,7 @@
 // @ts-check
 
 import { JsonlLogRecordExporter } from './jsonl_exporters.js'
-import { devTelemetryDir } from './env.js'
+import { devTelemetryDir } from '../runtime/paths.js'
 import { Attr, buildAttrs } from './attrs.js'
 import {
   currentLoggerProviderGeneration,

@@ -39,6 +39,13 @@ const DEFAULT_MAX_HEAP_GROWTH_BYTES = 1024 * 1024 * 1024
 const HEAP_WATCH_INTERVAL_MS = 100
 
 /**
+ * The whole of a SHOW TABLES statement, in any case, with an optional
+ * trailing semicolon. Matched against the trimmed query, so leading and
+ * trailing whitespace is already gone.
+ */
+const SHOW_TABLES = /^show\s+tables\s*;?$/i
+
+/**
  * Exported so a caller that routes freshness lines by meaning can tell this
  * one apart from the ordinary debounce staleness line. They arrive in the
  * same `freshnessMessages` array and read alike, but only this one means
@@ -75,14 +82,25 @@ export class QueryExecutionBudgetError extends Error {
    * @param {number} limitBytes
    * @param {number} observedBytes
    * @param {{ site: string, rawBytes: number, baselineBytes: number, gcMode: 'confirmed' | 'unavailable' }} [diagnostics]
+   * @param {boolean} [budgetFromOption] the refused budget came from an
+   *   explicit `maxHeapBytes`, not from the environment or the default
    */
-  constructor(limitBytes, observedBytes, diagnostics) {
+  constructor(limitBytes, observedBytes, diagnostics, budgetFromOption = false) {
     const limitMb = Math.round(limitBytes / 1048576)
     const observedMb = Math.round(observedBytes / 1048576)
+    // resolveHeapBudgetBytes returns an explicit maxHeapBytes before it ever
+    // reads the environment, so on a caller-budgeted path (graph reads and the
+    // graph projection both pass one) advising HYP_QUERY_MAX_HEAP_MB sends the
+    // reader to a knob that does nothing at any value. Name where the budget
+    // came from instead, claiming nothing about how that caller chose it.
+    // @ref LLP 0097 [constrained-by]: the env override applies to the default ceiling only, an explicit maxHeapBytes wins ahead of it
+    const escape = budgetFromOption
+      ? '(this query kind runs under a budget set by its caller, not the operator query-budget default)'
+      : '(raise the budget with HYP_QUERY_MAX_HEAP_MB if this query truly needs more)'
     let message =
       `query exceeded its execution memory budget (${observedMb}MB used of ${limitMb}MB) - ` +
       'add a WHERE/date filter, a LIMIT, or aggregate instead of selecting raw rows ' +
-      '(raise the budget with HYP_QUERY_MAX_HEAP_MB if this query truly needs more)'
+      escape
     // The suffix is the refusal's own diagnosis, and it matters most when
     // the refusal happens on a machine the investigator cannot inspect (a
     // remote daemon surfacing this message through MCP): which check site
@@ -127,6 +145,22 @@ export function resolveHeapBudgetBytes(optionBytes) {
 
 /** Rows between inline heap checks on a row scan. */
 const BUDGET_CHECK_ROW_STRIDE = 4096
+
+/**
+ * How long a shared confirmation GC may stand in for a passing mid-run check,
+ * process-wide. A retaining query that crosses inside it is confirmed at the
+ * next check after it lapses, or sooner once the heap has grown a budget.
+ */
+const CONFIRM_GC_STAND_IN_MS = 1000
+
+/**
+ * The most recent forced confirmation GC, shared by every query guard in the
+ * process. Three scalars, overwritten in place: no query registers here, so a
+ * finished or aborted query leaves nothing behind.
+ *
+ * @ref LLP 0526#shared-confirmation [implements]: one recent forced GC stands in for every guard's passing confirmation
+ */
+const lastConfirmation = { epoch: 0, atMs: 0, settledHeap: 0 }
 
 /** @type {(() => void) | null | undefined} */
 let cachedForcedGc
@@ -414,6 +448,29 @@ export async function executeQuerySql(args) {
       try {
         const trimmed = query.trim()
         if (trimmed.length === 0) throw new Error('SQL query is required')
+
+        // SHOW TABLES names no table, so there is nothing for the engine to
+        // open. The registry is the list of what this caller can query, so it
+        // answers directly, without discovering or opening any dataset. Only
+        // the whole statement matches: anything longer goes to the parser,
+        // which does not know SHOW and refuses it as before. The rows keep the
+        // registry's own order, which is already by name: re-sorting here
+        // would read each live plugin `name` inside a comparator, the read
+        // `listDatasets()` avoids (issue #1524).
+        if (SHOW_TABLES.test(trimmed)) {
+          const rows = registry.listDatasets().map((dataset) => ({ name: dataset.name }))
+          span.setAttribute('row_count', rows.length)
+          instruments.queryRunsTotal.add(1, { status: 'ok' })
+          instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
+          return {
+            columns: ['name'],
+            rows,
+            datasets: [],
+            freshnessMessages: [],
+            localOnly: { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 },
+          }
+        }
+
         // squirreling only parses read-only SELECTs, so its own error message
         // already points at the real problem (syntax error, unknown function,
         // non-SELECT statement). Surface it verbatim rather than wrapping it.
@@ -461,6 +518,7 @@ export async function executeQuerySql(args) {
 
           if (refresh === 'always' && typeof dataset.refreshPartition === 'function') {
             for (const partition of partitions) {
+              args.signal?.throwIfAborted()
               await dataset.refreshPartition(partition, {
                 cacheDir: storage.cacheRoot,
                 force: true,
@@ -475,6 +533,7 @@ export async function executeQuerySql(args) {
             storage,
             refresh,
             messages: freshnessMessages,
+            signal: args.signal,
           })
           if (settled.degraded) refreshDegraded = true
 
@@ -553,6 +612,8 @@ export async function executeQuerySql(args) {
           }
         }
         const baselineHeap = process.memoryUsage().heapUsed
+        // Only a collection after this baseline measures this query's growth.
+        const baselineEpoch = lastConfirmation.epoch
         /** @type {QueryExecutionBudgetError | undefined} */
         let budgetError
         /** @type {NodeJS.Timeout | undefined} */
@@ -564,7 +625,7 @@ export async function executeQuerySql(args) {
               rawBytes: crossing.raw,
               baselineBytes: baselineHeap,
               gcMode: crossing.gcMode,
-            })
+            }, args.maxHeapBytes !== undefined)
             span.setAttribute('budget_trip_site', site)
             span.setAttribute('budget_raw_mb', Math.round(crossing.raw / 1048576))
             span.setAttribute('budget_settled_mb', Math.round(crossing.settled / 1048576))
@@ -586,13 +647,29 @@ export async function executeQuerySql(args) {
         // query pays one forced GC per budget-width of garbage; a genuinely
         // retaining query pays one GC and then refuses.
         // @ref LLP 0097#confirm-with-gc [implements]: only growth that survives a full GC refuses; raw deltas count garbage
-        const confirmGrowth = () => {
-          const raw = process.memoryUsage().heapUsed - baselineHeap
+        // @ref LLP 0526#shared-confirmation [implements]: a recent shared collection can pass a check but never refuse one; terminal always forces
+        const confirmGrowth = (/** @type {boolean} */ terminal) => {
+          const heap = process.memoryUsage().heapUsed
+          const raw = heap - baselineHeap
           if (raw <= budgetBytes) return undefined
           const forcedGc = resolveForcedGc()
           if (!forcedGc) return { settled: raw, raw, gcMode: /** @type {const} */ ('unavailable') }
+          // A shared collection stands in for this one only to pass, and only
+          // while it still describes this query: taken after this baseline,
+          // under the interval old, with less than one budget of heap growth
+          // since, and showing this query under budget. Anything else forces,
+          // so every refusal rests on a collection this check made.
+          const last = lastConfirmation
+          if (!terminal && last.epoch !== baselineEpoch &&
+            performance.now() - last.atMs < CONFIRM_GC_STAND_IN_MS &&
+            heap - last.settledHeap < budgetBytes &&
+            last.settledHeap - baselineHeap <= budgetBytes) return undefined
           forcedGc()
-          const settled = process.memoryUsage().heapUsed - baselineHeap
+          const settledHeap = process.memoryUsage().heapUsed
+          last.epoch++
+          last.atMs = performance.now()
+          last.settledHeap = settledHeap
+          const settled = settledHeap - baselineHeap
           if (settled <= budgetBytes) return undefined
           return { settled, raw, gcMode: /** @type {const} */ ('confirmed') }
         }
@@ -601,7 +678,7 @@ export async function executeQuerySql(args) {
           check(site) {
             if (budgetBytes <= 0) return
             if (budgetError) throw budgetError
-            const crossing = confirmGrowth()
+            const crossing = confirmGrowth(site === 'terminal')
             if (crossing !== undefined) throw trip(crossing, site)
           },
         }
@@ -610,7 +687,7 @@ export async function executeQuerySql(args) {
           // further source rows (join amplification, output finalization)
           // but do yield to the event loop.
           watchdog = setInterval(() => {
-            const crossing = confirmGrowth()
+            const crossing = confirmGrowth(false)
             if (crossing !== undefined) trip(crossing, 'watchdog')
           }, HEAP_WATCH_INTERVAL_MS)
           watchdog.unref()
@@ -687,7 +764,9 @@ export async function executeQuerySql(args) {
  *   storage: ExtendedQueryStorageService,
  *   refresh: RefreshMode,
  *   messages: string[],
- * }} args
+ *   signal?: AbortSignal,
+ * }} args once `signal` is aborted no further flush starts; one already
+ *   under way settles
  * @returns {Promise<{ degraded: boolean }>} whether any stream served
  *   unrefreshed data because its flush failed or is cooling down
  */
@@ -699,6 +778,8 @@ export async function settlePendingCacheForQuery(args) {
     try {
       const info = await args.storage.pendingInfo(partition.tablePath)
       if (!info.pending) continue
+      // Checked after the awaited read, so a caller aborted meanwhile starts no flush
+      args.signal?.throwIfAborted()
       if (args.refresh === 'always') {
         // This gate never consults the stamp under `always`: freshness is the
         // caller's stated requirement, so it gets the attempt and the original
@@ -730,6 +811,8 @@ export async function settlePendingCacheForQuery(args) {
         `cache: last write to query cache was ${formatAgeMinutes(now - info.lastFlushAtMs)} ago`
       )
     } catch (err) {
+      // An abort is the caller's, never an automatic refresh failure to degrade past
+      args.signal?.throwIfAborted()
       if (args.refresh !== 'auto') throw err
       // A storage service that never had the spool methods is a wiring bug,
       // not the blocked spool-to-cache write the auto degrade is for. Told

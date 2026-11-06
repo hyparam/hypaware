@@ -1,0 +1,130 @@
+[
+  {
+    "type": "session",
+    "version": 4,
+    "id": "hyp-sqlite-acceptance",
+    "timestamp": "2026-09-28T18:12:34.365Z",
+    "cwd": "/openclaw-test/workspace"
+  },
+  {
+    "type": "message",
+    "id": "b286f84a-c900-4854-a47a-c4b737f25934",
+    "parentId": "d038a55c-1b29-40c2-a1a6-5323cbe43484",
+    "timestamp": "2026-09-28T18:12:34.522Z",
+    "message": {
+      "role": "user",
+      "content": "Read probe.txt and report its text.",
+      "timestamp": 1790619153173,
+      "__openclaw": {
+        "senderIsOwner": true
+      },
+      "idempotencyKey": "0f25c72c-5cf6-4893-986e-94e230e4d66d:user"
+    }
+  },
+  {
+    "type": "message",
+    "id": "6190ffcc-f8fc-4e84-8513-c701b7b7f3f2",
+    "parentId": "b286f84a-c900-4854-a47a-c4b737f25934",
+    "timestamp": "2026-09-28T18:12:34.549Z",
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "toolCall",
+          "id": "call_probe",
+          "name": "read",
+          "arguments": {
+            "path": "/openclaw-test/workspace/probe.txt"
+          }
+        }
+      ],
+      "api": "openai-completions",
+      "provider": "compat",
+      "model": "probe",
+      "usage": {
+        "input": 50,
+        "output": 20,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 70,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0
+        }
+      },
+      "stopReason": "toolUse",
+      "timestamp": 1790619154527,
+      "responseId": "chatcmpl-probe",
+      "__openclaw": {
+        "runId": "ed9159d7-3dd5-4b2d-88ca-29e6d564ead4"
+      }
+    }
+  },
+  {
+    "type": "message",
+    "id": "7efde1ae-fe0c-47cf-8777-0c051c33ca84",
+    "parentId": "6190ffcc-f8fc-4e84-8513-c701b7b7f3f2",
+    "timestamp": "2026-09-28T18:12:34.560Z",
+    "message": {
+      "role": "toolResult",
+      "toolCallId": "call_probe",
+      "toolName": "read",
+      "content": [
+        {
+          "type": "text",
+          "text": "OpenClaw SQLite acceptance probe\n"
+        }
+      ],
+      "details": {
+        "kind": "text",
+        "content": "OpenClaw SQLite acceptance probe\n"
+      },
+      "isError": false,
+      "timestamp": 1790619154560,
+      "__openclaw": {
+        "runId": "ed9159d7-3dd5-4b2d-88ca-29e6d564ead4"
+      }
+    }
+  },
+  {
+    "type": "message",
+    "id": "865e9c3b-3c4f-48ff-9df8-53ed2a465e1f",
+    "parentId": "c52a02d0-f4d4-4911-b939-45a5f33c34ce",
+    "timestamp": "2026-09-28T18:12:34.573Z",
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. Verified SQLite capture. "
+        }
+      ],
+      "api": "openai-completions",
+      "provider": "compat",
+      "model": "probe",
+      "usage": {
+        "input": 50,
+        "output": 20,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 70,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0
+        }
+      },
+      "stopReason": "stop",
+      "timestamp": 1790619154564,
+      "responseId": "chatcmpl-probe",
+      "__openclaw": {
+        "runId": "ed9159d7-3dd5-4b2d-88ca-29e6d564ead4"
+      }
+    }
+  }
+]

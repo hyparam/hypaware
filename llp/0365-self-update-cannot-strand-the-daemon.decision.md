@@ -7,6 +7,7 @@
 **Date:** 2026-09-02
 **Related:** LLP 0309 (the auto-update decision this extends: #mechanism, #cadence, #unstick-from-the-front, #cli-surface), LLP 0017 (#staged-restart-for-config-replacement: the exit-and-relaunch this bounds), LLP 0348 (#stale-heartbeat-is-unresponsive: how a wedged daemon reads from outside), hyparam/hypaware#610, hyparam/hypaware#1206
 **Extends:** LLP 0309
+**Extended-by:** LLP 0539 (#restart-needs-a-supervisor: the unsupervised refusal is recorded for `hyp status`)
 
 > LLP 0309 settled that the daemon updates itself through `npm install -g`
 > and a staged restart, and accepted two residual risks: a release whose
@@ -126,10 +127,8 @@ the CLI suggests when a daemon will not start) it would downgrade the
 operator's global install and then exit with nothing to relaunch it.
 
 The launchd half rests on a value no test in this repository can falsify:
-every fixture asserts the `XPC_SERVICE_NAME` the fixture itself wrote. It is
-confirmed instead against a real installed LaunchAgent by the
-`launchd_supervisor_env` procedure in `docs/ACCEPTANCE.md`, which a release
-touching this gate runs and whose observed value it records as the baseline.
+every fixture asserts the `XPC_SERVICE_NAME` the fixture itself wrote. Only a
+real installed LaunchAgent can confirm it.
 
 <a id="restart-exit-is-bounded"></a>
 ## A restart exit is bounded

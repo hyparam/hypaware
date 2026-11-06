@@ -63,7 +63,9 @@ test('join writes the central seed (mode 0600) and skips daemon install with --n
   // to the user-owned hypaware-config.json (the #111 fix).
   const seedPath = seedPathFor(hypHome)
   const stat = await fs.stat(seedPath)
-  assert.equal(stat.mode & 0o777, 0o600)
+  if (process.platform !== 'win32') { // No POSIX mode bits on win32.
+    assert.equal(stat.mode & 0o777, 0o600)
+  }
 
   const seed = JSON.parse(await fs.readFile(seedPath, 'utf8'))
   assert.equal(seed.version, 2)
@@ -82,13 +84,15 @@ test('join writes the central seed (mode 0600) and skips daemon install with --n
 
 test('join never touches an existing local config (#111 regression)', async () => {
   const { hypHome, opts } = await makeDispatchOpts()
-  // A working local install: ai-gateway + client wiring the user owns.
+  // An upgraded local install: ai-gateway + client wiring the user owns.
+  // Legacy boot migration is covered by grep-config-migration.test.js.
   const localPath = path.join(hypHome, 'hypaware-config.json')
   const localConfig = {
     version: 2,
     plugins: [
       { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787' } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/grep' },
     ],
   }
   await fs.writeFile(localPath, JSON.stringify(localConfig, null, 2) + '\n')
@@ -131,7 +135,10 @@ test('join supersedes a stale active slot so the fresh token is honored (#139)',
   }
   await fs.writeFile(path.join(controlDir, 'config.b.json'), JSON.stringify(staleSlot, null, 2) + '\n')
   await fs.writeFile(path.join(controlDir, 'config.b.etag'), 'stale-etag\n')
-  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  // The pointer the apply engine writes on this host: a symlink on POSIX,
+  // a regular pointer file on win32 (LLP 0580).
+  if (process.platform === 'win32') await fs.writeFile(path.join(controlDir, 'active'), 'config.b.json\n')
+  else await fs.symlink('config.b.json', path.join(controlDir, 'active'))
 
   const code = await dispatch(
     ['join', 'https://central.example', 'fresh-token', '--no-daemon'],

@@ -8,11 +8,15 @@
 **Related:** LLP 0132 (superseded), LLP 0070 (export seam), LLP 0031 (layered config), LLP 0100/0101 (first-sync review window), LLP 0135 (export-seam design, extended), LLP 0120 (hermes rows), LLP 0147 (CLI-backend attribution), LLP 0175 (live-capture misattribution, open)
 **Extended-by:** [LLP 0190](./0190-wizard-defaults-gate.decision.md) (§never-silent below: the step's prompt shape changes - a defaults gate first, the menu's checkboxes now mark what syncs rather than what stays local, and locked sources appear read-only instead of not at all; the policy, store, and seam enforcement here are unchanged); [LLP 0345](./0345-explicit-client-history-replay.decision.md) (`#no-retroactive-ship`: the standing policy flip remains future-only, and an explicit consent-gated sync mode replays retained history)
 
+**Extended-by:** [LLP 0455](./0455-compact-status.spec.md) (compact text view, per-client sharing labels, and verbose details; collector and JSON verdicts unchanged).
+
 > Supersedes [LLP 0132](./0132-managed-local-additions-local-only.decision.md).
 > The org-visibility default flips: sources the user adds beside the org's
 > config now sync to the org server unless the user opts them out, and the
 > per-item toggle LLP 0132 rejected becomes the mechanism. Central-config
 > sources remain always-sync and cannot be opted out.
+
+**Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
 
 ## Context {#context}
 

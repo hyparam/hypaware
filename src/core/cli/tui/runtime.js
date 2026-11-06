@@ -3,8 +3,8 @@
 import process from 'node:process'
 import readline from 'node:readline'
 
-import { visibleWidth } from '../style.js'
 import { reduce } from './keypress.js'
+import { createLiveRegion } from './live_region.js'
 import { render } from './render.js'
 
 /**
@@ -14,7 +14,6 @@ import { render } from './render.js'
 
 const CURSOR_HIDE  = '\x1b[?25l'
 const CURSOR_SHOW  = '\x1b[?25h'
-const CLEAR_TO_END = '\x1b[J'
 
 let activeRun = false
 
@@ -42,9 +41,11 @@ export async function run(initialState, io) {
 
   /** @type {State} */
   let state = initialState
-  let previousLineCount = 0
+  const region = createLiveRegion(stdout)
   /** @type {((s: string | undefined, k: ReadlineKey) => void) | null} */
   let onKeypress = null
+  /** @type {(() => void) | null} */
+  let onAbort = null
   let cleanedUp = false
 
   // Snapshot raw mode so we can restore it on exit.
@@ -61,6 +62,10 @@ export async function run(initialState, io) {
       stdin.removeListener('keypress', onKeypress)
       onKeypress = null
     }
+    if (onAbort) {
+      try { io.signal?.removeEventListener('abort', onAbort) } catch {}
+      onAbort = null
+    }
     try {
       if (typeof stdin.setRawMode === 'function') {
         stdin.setRawMode(previousRawMode)
@@ -71,29 +76,21 @@ export async function run(initialState, io) {
         stdin.pause()
       }
     } catch {}
-    if (clearOnResolve && previousLineCount > 0) {
-      // Move the cursor back to the top of the rendered frame and clear
-      // everything below it, leaving the screen as it was before the
-      // prompt drew. The next prompt then redraws in the same position.
-      try { stdout.write(`\x1b[${previousLineCount}A\r${CLEAR_TO_END}`) } catch {}
-      previousLineCount = 0
+    if (clearOnResolve) {
+      // Leave the screen as it was before the prompt drew. The next
+      // prompt then redraws in the same position.
+      try { region.clear() } catch {}
     }
     try { stdout.write(CURSOR_SHOW) } catch {}
   }
 
   function writeFrame() {
-    let buf = ''
-    if (previousLineCount > 0) {
-      buf += `\x1b[${previousLineCount}A\r${CLEAR_TO_END}`
-    }
     // Width is read per frame, not once: a resize between keystrokes must
     // reach both the renderer (which drops a box that no longer fits) and
     // the row count below it, or the two disagree about the same frame.
     const columns = terminalColumns(stdout)
-    const frame = render(state, { color, columns })
-    buf += frame
-    previousLineCount = countPhysicalRows(frame, columns)
-    stdout.write(buf)
+    const rows = terminalRows(stdout)
+    region.draw(render(state, { color, columns, ...(rows !== undefined ? { rows } : {}) }), columns)
   }
 
   try {
@@ -127,6 +124,18 @@ export async function run(initialState, io) {
       }
       stdin.on('keypress', onKeypress)
       if (typeof stdin.resume === 'function') stdin.resume()
+      // An abort settles the prompt exactly as escape does, chrome unwound
+      // before the caller sees the rejection, so a caller may still spawn
+      // into the terminal it inherits.
+      // @ref LLP 0198#real-launch [constrained-by]: the chrome is fully unwound before the spawn
+      if (io.signal) {
+        onAbort = () => {
+          cleanup()
+          reject(new PromptCancelledError())
+        }
+        if (io.signal.aborted) onAbort()
+        else io.signal.addEventListener('abort', onAbort, { once: true })
+      }
     }).finally(() => cleanup())
   } finally {
     activeRun = false
@@ -183,32 +192,17 @@ function terminalColumns(stdout) {
 }
 
 /**
- * Count the number of *physical* terminal rows a frame occupies. The
- * runtime uses this to know how far to move the cursor up before
- * clearing the previous frame. A naive newline count is wrong whenever
- * a logical line is wider than the terminal: the terminal soft-wraps it
- * onto multiple rows, so the cursor descended further than the number of
- * `\n` written. Undercounting here leaves stale rows on screen on every
- * redraw: the classic "the question keeps duplicating when I move the
- * cursor" symptom.
+ * Resolve the terminal height in rows, or `undefined` when the stream does
+ * not expose a usable `.rows` (a pipe, a test double). Unlike width there
+ * is no safe default to invent: the renderer treats an unknown height as
+ * "no limit" and draws every row, which is what it did before it could ask.
  *
- * Frames always end with a trailing `\n`; the empty segment after it
- * contributes no row.
- *
- * @param {string} frame
- * @param {number} columns
- * @returns {number}
+ * @param {NodeJS.WriteStream} stdout
+ * @returns {number | undefined}
  */
-export function countPhysicalRows(frame, columns) {
-  const width = columns > 0 ? columns : 80
-  const lines = frame.split('\n')
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
-  let rows = 0
-  for (const line of lines) {
-    const len = visibleWidth(line)
-    rows += len === 0 ? 1 : Math.ceil(len / width)
-  }
-  return rows
+function terminalRows(stdout) {
+  const rows = stdout.rows
+  return typeof rows === 'number' && rows > 0 ? rows : undefined
 }
 
 /**

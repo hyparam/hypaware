@@ -3,6 +3,7 @@
 import path from 'node:path'
 
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import { isPartitionMutationBusy } from '../../../../src/core/util/mutation_guard.js'
 import {
   AI_GATEWAY_MESSAGES_DATASET,
   errMessage,
@@ -10,7 +11,7 @@ import {
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
 import { HermesStateDbError } from './errors.js'
-import { hermesTimestampToIso, projectHermesSession } from './projector.js'
+import { hermesReconcileScope, hermesTimestampToIso, projectHermesSession } from './projector.js'
 import { openHermesStateDb } from './state_db.js'
 
 /**
@@ -56,6 +57,15 @@ const DEFAULT_CLIENT_NAME = 'hermes'
 const DEFAULT_PLUGIN_NAME = '@hypaware/hermes'
 
 const COMPONENT = 'plugin.hermes.backfill'
+
+/**
+ * How long a backfill waits for a session another writer holds before it
+ * gives the session up: one poll reconcile normally finishes well inside it.
+ * A session still busy after the last attempt fails the run visibly once the
+ * rest of the import has finished, never a silent success.
+ */
+export const SCOPE_BUSY_ATTEMPTS = 50
+export const SCOPE_BUSY_DELAY_MS = 100
 
 /**
  * Default hermes state.db path: `<homeDir>/.hermes/state.db`, mirroring
@@ -168,6 +178,7 @@ async function* runHermesBackfill(args) {
   let sessionsSeen = 0
   let sessionsSkippedWindow = 0
   let sessionsSkipped = 0
+  let sessionsBusy = 0
   let sessionsProjected = 0
   let messagesProjected = 0
 
@@ -181,38 +192,59 @@ async function* runHermesBackfill(args) {
     )
     sessionsSkippedWindow = sessions.length - windowed.length
 
-    for (const { session } of windowed) {
+    for (const { session: listed } of windowed) {
       if (ctx.signal?.aborted) break
 
-      const messages = await reader.listMessagesForSession(session.id)
-      const item = await projectHermesSession({
-        session,
-        messages,
-        sourcePath: stateDbPath,
-        clientName,
-        homeDir,
-        resolver,
-        log,
-      })
-      if (!item) {
-        // Either a usage-policy drop (already logged by projectHermesSession
-        // as `plugin.hermes.usage_policy_drop`) or a session with nothing
-        // projectable (no messages, not yet ended).
-        sessionsSkipped += 1
+      // @ref LLP 0449#read-commit-guard [implements]: the session is re-read
+      // under its scope guard, and the guard is held across the yield so the
+      // runner's reconcile commits this exact view before any other writer
+      // can read a newer one. A dry run writes nothing and takes no guard.
+      const release = ctx.dryRun ? () => {} : await claimScope(ctx, hermesReconcileScope(clientName, listed.id))
+      if (!release) {
+        sessionsBusy += 1
+        log.warn('hermes.backfill.session_busy', {
+          component: COMPONENT,
+          operation: 'backfill.project',
+          session_id: listed.id,
+          status: 'deferred',
+          error_kind: 'cache_partition_mutation_busy',
+        })
         continue
       }
+      try {
+        const snapshot = await reader.readSessionSnapshot(listed.id)
+        const item = snapshot && await projectHermesSession({
+          session: snapshot.session,
+          messages: snapshot.messages,
+          sourcePath: stateDbPath,
+          clientName,
+          homeDir,
+          resolver,
+          log,
+        })
+        if (!item) {
+          // Either a usage-policy drop (already logged by projectHermesSession
+          // as `plugin.hermes.usage_policy_drop`), a session with nothing
+          // projectable (no messages, not yet ended), or one deleted since
+          // the listing.
+          sessionsSkipped += 1
+          continue
+        }
 
-      sessionsProjected += 1
-      messagesProjected += /** @type {{ messages: unknown[] }} */ (/** @type {unknown} */ (item.value)).messages.length
-      log.info('hermes.backfill.session_projected', {
-        component: COMPONENT,
-        operation: 'backfill.project',
-        session_id: session.id,
-        message_count: /** @type {{ messages: unknown[] }} */ (/** @type {unknown} */ (item.value)).messages.length,
-        status: 'ok',
-      })
+        sessionsProjected += 1
+        messagesProjected += /** @type {{ messages: unknown[] }} */ (/** @type {unknown} */ (item.value)).messages.length
+        log.info('hermes.backfill.session_projected', {
+          component: COMPONENT,
+          operation: 'backfill.project',
+          session_id: listed.id,
+          message_count: /** @type {{ messages: unknown[] }} */ (/** @type {unknown} */ (item.value)).messages.length,
+          status: 'ok',
+        })
 
-      yield item
+        yield item
+      } finally {
+        release()
+      }
     }
   } finally {
     reader.close()
@@ -224,10 +256,39 @@ async function* runHermesBackfill(args) {
     sessions_seen: sessionsSeen,
     sessions_skipped_window: sessionsSkippedWindow,
     sessions_skipped: sessionsSkipped,
+    sessions_busy: sessionsBusy,
     sessions_projected: sessionsProjected,
     messages_projected: messagesProjected,
-    status: 'ok',
+    status: sessionsBusy ? 'partial' : 'ok',
   })
+
+  if (sessionsBusy) {
+    // Every other session is imported; the held ones are not, so the run
+    // must not read as complete.
+    throw Object.assign(
+      new Error(`${sessionsBusy} hermes session(s) stayed busy in the cache; rerun the backfill to import them`),
+      { error_kind: 'cache_partition_mutation_busy' })
+  }
+}
+
+/**
+ * Claim one session's reconcile scope, retrying a busy one a bounded number
+ * of times. Resolves null when it is still busy after the last attempt.
+ * Storage without the guard (a test double) yields a no-op release.
+ * @param {BackfillRunContext} ctx
+ * @param {Record<string, string>} where
+ * @returns {Promise<(() => void) | null>}
+ */
+async function claimScope(ctx, where) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return ctx.storage.claimReconcileScope?.(AI_GATEWAY_MESSAGES_DATASET, where) ?? (() => {})
+    } catch (err) {
+      if (!isPartitionMutationBusy(err)) throw err
+      if (attempt >= SCOPE_BUSY_ATTEMPTS || ctx.signal?.aborted) return null
+      await new Promise((resolve) => setTimeout(resolve, SCOPE_BUSY_DELAY_MS))
+    }
+  }
 }
 
 /**

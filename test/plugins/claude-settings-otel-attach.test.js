@@ -375,7 +375,7 @@ test('a per-signal OTLP override is warned about, without echoing its value', as
 
   const result = await otelAttach(r)
   assert.equal(result.changed, true)
-  const warned = String(result.changed && result.warnings?.join(' '))
+  const warned = String(result.changed && result.overrideWarnings?.join(' '))
   assert.match(warned, /OTEL_EXPORTER_OTLP_LOGS_ENDPOINT/)
   assert.match(warned, /OTEL_EXPORTER_OTLP_HEADERS/)
   assert.match(warned, /outranks/)
@@ -397,12 +397,25 @@ test('a per-signal OTLP override is warned about, without echoing its value', as
   )
 })
 
+// Issue #892 finding 2: the caller counts `warnings` as malformed-block
+// repairs, so an override on a well-formed settings file must not land there.
+test('a per-signal override is not reported as a malformed-block repair', async (t) => {
+  const r = await rig({ env: { ANTHROPIC_API_KEY: 'sk-user-key' } })
+  t.after(() => r.cleanup())
+  const result = await otelAttach(r, {
+    processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318' },
+  })
+  assert.equal(result.changed, true)
+  assert.equal(result.changed && result.warnings, undefined)
+  assert.equal(result.changed && result.overrideWarnings?.length, 1)
+})
+
 test('an ordinary otel attach warns about no per-signal key', async (t) => {
   const r = await rig()
   t.after(() => r.cleanup())
   const result = await otelAttach(r)
   assert.equal(result.changed, true)
-  assert.equal(result.changed && result.warnings, undefined)
+  assert.equal(result.changed && result.overrideWarnings, undefined)
 })
 
 // The shape that actually happens. The per-signal keys almost never live in
@@ -424,7 +437,7 @@ test('a per-signal OTLP key exported from the shell is warned about', async (t) 
     },
   })
   assert.equal(result.changed, true)
-  const warned = String(result.changed && result.warnings?.join(' '))
+  const warned = String(result.changed && result.overrideWarnings?.join(' '))
   assert.match(warned, /OTEL_EXPORTER_OTLP_LOGS_ENDPOINT/)
   assert.match(warned, /outranks/)
   // Named as coming from the environment, because the repair is not the same
@@ -452,13 +465,13 @@ test('an empty per-signal OTLP value counts as set, in the shell and in settings
       OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/protobuf',
     },
   })
-  const shellWarned = String(fromShell.changed && fromShell.warnings?.join(' '))
+  const shellWarned = String(fromShell.changed && fromShell.overrideWarnings?.join(' '))
   assert.match(shellWarned, /OTEL_EXPORTER_OTLP_LOGS_ENDPOINT/)
 
   const inSettings = await rig({ env: { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: '' } })
   t.after(() => inSettings.cleanup())
   const fromSettings = await otelAttach(inSettings)
-  const settingsWarned = String(fromSettings.changed && fromSettings.warnings?.join(' '))
+  const settingsWarned = String(fromSettings.changed && fromSettings.overrideWarnings?.join(' '))
   assert.match(settingsWarned, /OTEL_EXPORTER_OTLP_METRICS_ENDPOINT/)
 })
 
@@ -475,7 +488,7 @@ test('per-signal headers keys are on the list too', async (t) => {
       OTEL_EXPORTER_OTLP_METRICS_HEADERS: 'authorization=Bearer sekrit',
     },
   })
-  const warned = String(result.changed && result.warnings?.join(' '))
+  const warned = String(result.changed && result.overrideWarnings?.join(' '))
   assert.match(warned, /OTEL_EXPORTER_OTLP_LOGS_HEADERS/)
   assert.match(warned, /OTEL_EXPORTER_OTLP_METRICS_HEADERS/)
   assert.doesNotMatch(warned, /sekrit/)
@@ -493,7 +506,7 @@ test('a traces-only per-signal key is not warned about', async (t) => {
   const result = await otelAttach(r, {
     processEnv: { OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'https://collector.corp:4318' },
   })
-  assert.equal(result.changed && result.warnings, undefined)
+  assert.equal(result.changed && result.overrideWarnings, undefined)
 })
 
 // A key set in both places is one finding, not two: the user has one problem
@@ -505,7 +518,7 @@ test('a key present in both the shell and settings warns once', async (t) => {
   const result = await otelAttach(r, {
     processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://b:4318' },
   })
-  const warnings = (result.changed && result.warnings) || []
+  const warnings = (result.changed && result.overrideWarnings) || []
   const hits = warnings.filter((w) => w.includes('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'))
   assert.equal(hits.length, 1, `expected one warning, got ${JSON.stringify(hits)}`)
 })
@@ -523,7 +536,7 @@ test('a headers key is warned about as a credential leak, not a redirect', async
   const result = await otelAttach(r, {
     processEnv: { OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit' },
   })
-  const warnings = (result.changed && result.warnings) || []
+  const warnings = (result.changed && result.overrideWarnings) || []
   assert.equal(warnings.length, 1)
   const warned = warnings[0]
   assert.match(warned, /OTEL_EXPORTER_OTLP_HEADERS/)
@@ -544,7 +557,7 @@ test('a routing key and a headers key get their own sentences', async (t) => {
       OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit',
     },
   })
-  const warnings = (result.changed && result.warnings) || []
+  const warnings = (result.changed && result.overrideWarnings) || []
   const routing = warnings.find((w) => w.includes('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'))
   const headers = warnings.find((w) => w.includes('OTEL_EXPORTER_OTLP_HEADERS'))
   assert.ok(routing && headers, JSON.stringify(warnings))
@@ -564,7 +577,7 @@ test('a metrics-only key does not claim the prompt text went with it', async (t)
   const result = await otelAttach(r, {
     processEnv: { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: 'https://collector.corp:4318' },
   })
-  const warnings = (result.changed && result.warnings) || []
+  const warnings = (result.changed && result.overrideWarnings) || []
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /OTEL_EXPORTER_OTLP_METRICS_ENDPOINT/)
   assert.match(warnings[0], /metrics/)
@@ -575,7 +588,7 @@ test('a metrics-only key does not claim the prompt text went with it', async (t)
   const logsResult = await otelAttach(logs, {
     processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318' },
   })
-  const logsWarnings = (logsResult.changed && logsResult.warnings) || []
+  const logsWarnings = (logsResult.changed && logsResult.overrideWarnings) || []
   assert.equal(logsWarnings.length, 1)
   assert.match(logsWarnings[0], /log records/)
   assert.match(logsWarnings[0], /prompt and response text/)
@@ -593,7 +606,7 @@ test('a headers key is not told to point itself at the local listener', async (t
   const result = await otelAttach(r, {
     processEnv: { OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer sekrit' },
   })
-  const warnings = (result.changed && result.warnings) || []
+  const warnings = (result.changed && result.overrideWarnings) || []
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /Unset it/)
   assert.doesNotMatch(warnings[0], /point it at/)
@@ -604,7 +617,7 @@ test('a headers key is not told to point itself at the local listener', async (t
   const routingResult = await otelAttach(routing, {
     processEnv: { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://collector.corp:4318' },
   })
-  const routingWarnings = (routingResult.changed && routingResult.warnings) || []
+  const routingWarnings = (routingResult.changed && routingResult.overrideWarnings) || []
   assert.match(routingWarnings[0], /point it at the same local listener/)
 })
 

@@ -14,6 +14,9 @@
  */
 
 export { encodePartition, clusterColumnsForDataset } from './encoder.js'
+export { SYNC_INVENTORY_VERSION, SYNC_INVENTORY_DATASET, SYNC_INVENTORY_MAX_KEYS,
+  SYNC_INVENTORY_PAGE_KEYS, inventoryDay, inventoryKey, inventoryBucket,
+  validInventoryBucket, summarizeInventoryKeys } from './sync-inventory.js'
 export {
   createInstanceWatermarkStore,
   openIncrementalRows,

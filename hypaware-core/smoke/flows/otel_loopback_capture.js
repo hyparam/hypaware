@@ -27,7 +27,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *     the kernel's JSONL exporter records every daemon-emitted span
  *     into `<state>/dev-telemetry/`: that's the "local storage" the
  *     bead asks for. The smoke asserts the expected spans landed:
- *     `source.start` (otlp), `sink.tick`, `daemon.shutdown`. No OTLP
+ *     `source.start` (otlp), `daemon.bookkeeping`, `daemon.shutdown`. No OTLP
  *     loopback into the cache is required (the kernel's exporters are
  *     JSONL-vs-OTLP mutually exclusive: see
  *     `src/core/observability/tracer.js`).
@@ -84,8 +84,8 @@ export async function run({ harness, expect }) {
   await postOtlp(`${baseUrl}/v1/traces`, buildTracesPayload(harness.devRunId))
   await postOtlp(`${baseUrl}/v1/metrics`, buildMetricsPayload(harness.devRunId))
 
-  // Wait for the sink-tick interval to fire at least once so the JSONL
-  // exporter captures a `sink.tick` span before the daemon stops.
+  // Wait for the daemon interval to fire at least once so the JSONL
+  // exporter captures a `daemon.bookkeeping` span before the daemon stops.
   await sleep(120)
 
   await handle.stop()
@@ -128,8 +128,8 @@ export async function run({ harness, expect }) {
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
   expect.that(
-    'traces: at least one sink.tick fired before shutdown',
-    traces.filter((/** @type {any} */ t) => t.name === 'sink.tick'),
+    'traces: at least one daemon bookkeeping pass fired before shutdown',
+    traces.filter((/** @type {any} */ t) => t.name === 'daemon.bookkeeping'),
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
   expect.that(

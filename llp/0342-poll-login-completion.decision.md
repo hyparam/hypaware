@@ -8,6 +8,7 @@
 **Related:** LLP 0058 (extends D2, D8), LLP 0059, LLP 0061, LLP 0063, LLP 0134, LLP 0179
 **Extends:** LLP 0058
 **Extended-by:** LLP 0357 (the request covering two outcomes the poll lane misreports: #d2's loud stale-server failure, which reaches the wizard as retriable, and #d3's single delivery, which strands a successful sign-in when the client cannot read the response that carried it)
+**Extended-by:** LLP 0543 (#d2's stale-server failure reaches the wizard as the definitive `no_poll_endpoint` reason; #d3's single delivery is replaced by server-side repeat pickup, and #d4's replay argument rests on the same single-use, PKCE-bound code: [LLP 0543#typed](./0543-a-stale-server-is-a-definitive-login-outcome.decision.md#typed), [#repeat-pickup](./0543-a-stale-server-is-a-definitive-login-outcome.decision.md#repeat-pickup), [#replay](./0543-a-stale-server-is-a-definitive-login-outcome.decision.md#replay))
 
 > `hyp remote login` on an SSH session is broken by design: the browser flow
 > hands the IdP a `redirect_uri` of `http://127.0.0.1:<port>/callback`, but the
@@ -110,6 +111,8 @@ timeout (today's `DEFAULT_TIMEOUT_MS`, moving from the listener to the
 poller); the server flight TTL stays 10 minutes. Plain interval polling, no
 long-poll: interactive human flow, hand-rolled server.
 
+Extended-by: [LLP 0543#repeat-pickup](./0543-a-stale-server-is-a-definitive-login-outcome.decision.md#repeat-pickup)
+
 ### D4: PKCE stays; no poll secret
 
 <a id="d4"></a>
@@ -126,6 +129,8 @@ The residual risk shared by every flow in this class (an attacker sends their
 own login URL to a victim who completes it) is not mitigated by typed user
 codes either; the mitigations are the server's consent page naming what is
 being authorized and the bounded flight TTL.
+
+Extended-by: [LLP 0543#replay](./0543-a-stale-server-is-a-definitive-login-outcome.decision.md#replay)
 
 ### D5: The browser's terminal pages render server-side
 

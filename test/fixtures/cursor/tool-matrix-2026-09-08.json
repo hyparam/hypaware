@@ -1,0 +1,682 @@
+{
+  "source": {
+    "client": "headless CLI",
+    "version": "2026.09.08-6caf4ff",
+    "date": "2026-09-10",
+    "kind": "real-client probe, sanitized"
+  },
+  "hooks": [
+    {
+      "hook_event_name": "sessionStart",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "preToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-2",
+      "tool_name": "Grep",
+      "tool_input": {
+        "pattern": "MARIGOLD",
+        "file_path": "/probe/workspace/notes.txt",
+        "output_mode": "content"
+      },
+      "model": "default"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-2",
+      "tool_name": "Grep",
+      "tool_input": {
+        "pattern": "MARIGOLD",
+        "file_path": "/probe/workspace/notes.txt",
+        "output_mode": "content"
+      },
+      "tool_output": "{\"pattern\":\"MARIGOLD\",\"success\":true}",
+      "duration": 234.116,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "preToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-3",
+      "tool_name": "Grep",
+      "tool_input": {
+        "pattern": "",
+        "file_path": "/probe/workspace",
+        "glob": "**/*",
+        "output_mode": "files_with_matches"
+      },
+      "model": "default"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-3",
+      "tool_name": "Grep",
+      "tool_input": {
+        "pattern": "",
+        "file_path": "/probe/workspace",
+        "glob": "**/*",
+        "output_mode": "files_with_matches"
+      },
+      "tool_output": "{\"pattern\":\"\",\"success\":true}",
+      "duration": 9.313,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "preToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "cwd": "",
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-9",
+      "tool_name": "Shell",
+      "tool_input": {
+        "command": "printf \"SHELL-PROBE-OK\\n\"",
+        "cwd": "",
+        "timeout": 30000
+      },
+      "model": "default"
+    },
+    {
+      "hook_event_name": "preToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-5",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/missing-probe.txt"
+      },
+      "model": "default"
+    },
+    {
+      "hook_event_name": "postToolUseFailure",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-5",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/missing-probe.txt"
+      },
+      "error_message": "File not found: /probe/workspace/missing-probe.txt",
+      "failure_type": "error",
+      "is_interrupt": false,
+      "duration": 0.909,
+      "model": "default"
+    },
+    {
+      "command": "printf \"SHELL-PROBE-OK\\n\"",
+      "output": "",
+      "hook_event_name": "afterShellExecution",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "duration": 1729.719,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "cwd": "",
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-9",
+      "tool_name": "Shell",
+      "tool_input": {
+        "command": "printf \"SHELL-PROBE-OK\\n\"",
+        "cwd": "",
+        "timeout": 30000
+      },
+      "tool_output": "{\"output\":\"\",\"exitCode\":0}",
+      "duration": 1729.719,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "preToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "cwd": "",
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-10",
+      "tool_name": "Shell",
+      "tool_input": {
+        "command": "printf \"SHELL-PROBE-OK\\n\"",
+        "cwd": "",
+        "timeout": 30000
+      },
+      "model": "default"
+    },
+    {
+      "command": "printf \"SHELL-PROBE-OK\\n\"",
+      "output": "",
+      "hook_event_name": "afterShellExecution",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "duration": 0.851,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "cwd": "",
+      "transcript_path": null,
+      "tool_use_id": "probe-matrix-id-10",
+      "tool_name": "Shell",
+      "tool_input": {
+        "command": "printf \"SHELL-PROBE-OK\\n\"",
+        "cwd": "",
+        "timeout": 30000
+      },
+      "tool_output": "{\"output\":\"\",\"exitCode\":0}",
+      "duration": 0.851,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "sessionEnd",
+      "conversation_id": "probe-matrix-session",
+      "generation_id": "probe-matrix-session",
+      "session_id": "probe-matrix-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "duration_ms": 29978,
+      "reason": "completed",
+      "final_status": "completed",
+      "model": "default"
+    }
+  ],
+  "stream": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "apiKeySource": "login",
+      "cwd": "/probe/workspace",
+      "session_id": "probe-matrix-session",
+      "model": "Auto",
+      "permissionMode": "default"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Controlled tool contract probe, only in this disposable workspace. Perform these four read-only checks: (1) use the native Grep tool to search MARIGOLD in notes.txt with matching line output, (2) use the native List tool to list the workspace root, (3) use the Shell tool to run exactly printf \"SHELL-PROBE-OK\\\\n\", (4) use the native Read tool on missing-probe.txt to demonstrate a missing-file error. Do not read any other file or contact the network or write anything. Summarize each result."
+          }
+        ]
+      },
+      "session_id": "probe-matrix-session"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running the four read-only probe checks now."
+          }
+        ]
+      },
+      "session_id": "probe-matrix-session",
+      "model_call_id": "probe-matrix-id-1",
+      "timestamp_ms": 1789077901768
+    },
+    {
+      "type": "tool_call",
+      "subtype": "started",
+      "call_id": "probe-matrix-id-2",
+      "tool_call": {
+        "grepToolCall": {
+          "args": {
+            "pattern": "MARIGOLD",
+            "path": "/probe/workspace/notes.txt",
+            "outputMode": "content",
+            "caseInsensitive": false,
+            "multiline": false,
+            "toolCallId": "probe-matrix-id-2",
+            "offset": 0
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-2",
+        "startedAtMs": "1789077901490"
+      },
+      "model_call_id": "probe-matrix-id-1",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077901769
+    },
+    {
+      "type": "tool_call",
+      "subtype": "started",
+      "call_id": "probe-matrix-id-3",
+      "tool_call": {
+        "globToolCall": {
+          "args": {
+            "targetDirectory": "/probe/workspace",
+            "globPattern": "*"
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-3",
+        "startedAtMs": "1789077901796"
+      },
+      "model_call_id": "probe-matrix-id-1",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077902156
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "probe-matrix-id-2",
+      "tool_call": {
+        "grepToolCall": {
+          "args": {
+            "pattern": "MARIGOLD",
+            "path": "/probe/workspace/notes.txt",
+            "outputMode": "content",
+            "caseInsensitive": false,
+            "multiline": false,
+            "toolCallId": "probe-matrix-id-2",
+            "offset": 0
+          },
+          "result": {
+            "success": {
+              "pattern": "MARIGOLD",
+              "path": "/probe/workspace/notes.txt",
+              "outputMode": "content",
+              "workspaceResults": {
+                "/probe/workspace": {
+                  "content": {
+                    "matches": [
+                      {
+                        "file": "notes.txt",
+                        "matches": [
+                          {
+                            "lineNumber": 1,
+                            "content": "The probe value is MARIGOLD-42.",
+                            "contentTruncated": false,
+                            "isContextLine": false
+                          }
+                        ]
+                      }
+                    ],
+                    "totalLines": 1,
+                    "totalMatchedLines": 1,
+                    "clientTruncated": false,
+                    "ripgrepTruncated": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-2",
+        "startedAtMs": "1789077901490",
+        "completedAtMs": "1789077902303"
+      },
+      "model_call_id": "probe-matrix-id-1",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077902274
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "probe-matrix-id-3",
+      "tool_call": {
+        "globToolCall": {
+          "args": {
+            "targetDirectory": "/probe/workspace",
+            "globPattern": "*"
+          },
+          "result": {
+            "success": {
+              "pattern": "",
+              "path": "/probe/workspace",
+              "files": [
+                ".cursor/hooks.json",
+                "notes.txt"
+              ],
+              "totalFiles": 2,
+              "clientTruncated": false,
+              "ripgrepTruncated": false
+            }
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-3",
+        "startedAtMs": "1789077901796",
+        "completedAtMs": "1789077902423"
+      },
+      "model_call_id": "probe-matrix-id-1",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077902394
+    },
+    {
+      "type": "tool_call",
+      "subtype": "started",
+      "call_id": "probe-matrix-id-4",
+      "tool_call": {
+        "shellToolCall": {
+          "args": {
+            "command": "printf \"SHELL-PROBE-OK\\n\"",
+            "workingDirectory": "",
+            "timeout": 30000,
+            "toolCallId": "probe-matrix-id-4",
+            "simpleCommands": [
+              "printf"
+            ],
+            "hasInputRedirect": false,
+            "hasOutputRedirect": false,
+            "parsingResult": {
+              "parsingFailed": false,
+              "executableCommands": [
+                {
+                  "name": "printf",
+                  "args": [
+                    {
+                      "type": "string",
+                      "value": "\"SHELL-PROBE-OK\\n\""
+                    }
+                  ],
+                  "fullText": "printf \"SHELL-PROBE-OK\\n\""
+                }
+              ],
+              "hasRedirects": false,
+              "hasCommandSubstitution": false,
+              "redirects": []
+            },
+            "fileOutputThresholdBytes": "40000",
+            "isBackground": false,
+            "skipApproval": false,
+            "timeoutBehavior": "TIMEOUT_BEHAVIOR_BACKGROUND",
+            "hardTimeout": 86400000,
+            "description": "Print SHELL-PROBE-OK probe line",
+            "closeStdin": true,
+            "conversationId": "probe-matrix-session",
+            "adminCommandDenylist": [],
+            "requestId": "probe-matrix-id-8"
+          },
+          "description": "Print SHELL-PROBE-OK probe line"
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-4",
+        "startedAtMs": "1789077902434"
+      },
+      "model_call_id": "probe-matrix-id-1",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077902406
+    },
+    {
+      "type": "tool_call",
+      "subtype": "started",
+      "call_id": "probe-matrix-id-5",
+      "tool_call": {
+        "readToolCall": {
+          "args": {
+            "path": "/probe/workspace/missing-probe.txt"
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-5",
+        "startedAtMs": "1789077902434"
+      },
+      "model_call_id": "probe-matrix-id-1",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077902417
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "probe-matrix-id-5",
+      "tool_call": {
+        "readToolCall": {
+          "result": {
+            "error": {
+              "errorMessage": "File not found"
+            }
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-5",
+        "startedAtMs": "1789077902434",
+        "completedAtMs": "1789077902680"
+      },
+      "model_call_id": "probe-matrix-id-1",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077902651
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "probe-matrix-id-4",
+      "tool_call": {
+        "shellToolCall": {
+          "result": {
+            "rejected": {
+              "command": "printf \"SHELL-PROBE-OK\\n\"",
+              "workingDirectory": "/probe/workspace",
+              "reason": "",
+              "isReadonly": false
+            }
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-4",
+        "startedAtMs": "1789077902434",
+        "completedAtMs": "1789077904302"
+      },
+      "model_call_id": "probe-matrix-id-1",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077904279
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Retrying the Shell probe \u2014 the first attempt was rejected."
+          }
+        ]
+      },
+      "session_id": "probe-matrix-session",
+      "model_call_id": "probe-matrix-id-6",
+      "timestamp_ms": 1789077908184
+    },
+    {
+      "type": "tool_call",
+      "subtype": "started",
+      "call_id": "probe-matrix-id-7",
+      "tool_call": {
+        "shellToolCall": {
+          "args": {
+            "command": "printf \"SHELL-PROBE-OK\\n\"",
+            "workingDirectory": "",
+            "timeout": 30000,
+            "toolCallId": "probe-matrix-id-7",
+            "simpleCommands": [
+              "printf"
+            ],
+            "hasInputRedirect": false,
+            "hasOutputRedirect": false,
+            "parsingResult": {
+              "parsingFailed": false,
+              "executableCommands": [
+                {
+                  "name": "printf",
+                  "args": [
+                    {
+                      "type": "string",
+                      "value": "\"SHELL-PROBE-OK\\n\""
+                    }
+                  ],
+                  "fullText": "printf \"SHELL-PROBE-OK\\n\""
+                }
+              ],
+              "hasRedirects": false,
+              "hasCommandSubstitution": false,
+              "redirects": []
+            },
+            "fileOutputThresholdBytes": "40000",
+            "isBackground": false,
+            "skipApproval": false,
+            "timeoutBehavior": "TIMEOUT_BEHAVIOR_BACKGROUND",
+            "hardTimeout": 86400000,
+            "description": "Print SHELL-PROBE-OK probe line",
+            "closeStdin": true,
+            "conversationId": "probe-matrix-session",
+            "adminCommandDenylist": [],
+            "requestId": "probe-matrix-id-8"
+          },
+          "description": "Print SHELL-PROBE-OK probe line"
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-7",
+        "startedAtMs": "1789077908207"
+      },
+      "model_call_id": "probe-matrix-id-6",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077908184
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "probe-matrix-id-7",
+      "tool_call": {
+        "shellToolCall": {
+          "result": {
+            "rejected": {
+              "command": "printf \"SHELL-PROBE-OK\\n\"",
+              "workingDirectory": "/probe/workspace",
+              "reason": "",
+              "isReadonly": false
+            }
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-matrix-id-7",
+        "startedAtMs": "1789077908207",
+        "completedAtMs": "1789077908356"
+      },
+      "model_call_id": "probe-matrix-id-6",
+      "session_id": "probe-matrix-session",
+      "timestamp_ms": 1789077908332
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "**Probe summary**\n\n1. **Grep (`MARIGOLD` in `notes.txt`)** \u2014 Match found: line 1, `The probe value is MARIGOLD-42.`\n\n2. **List workspace root** \u2014 No separate native `List` tool in this session; used `Glob` on the root instead. Two entries: `.cursor/hooks.json`, `notes.txt`.\n\n3. **Shell (`printf \"SHELL-PROBE-OK\\n\"`)** \u2014 Rejected twice; no stdout. Could not complete this check.\n\n4. **Read (`missing-probe.txt`)** \u2014 Error as expected: file not found."
+          }
+        ]
+      },
+      "session_id": "probe-matrix-session"
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "duration_ms": 27810,
+      "duration_api_ms": 27810,
+      "is_error": false,
+      "result": "Running the four read-only probe checks now.Retrying the Shell probe \u2014 the first attempt was rejected.**Probe summary**\n\n1. **Grep (`MARIGOLD` in `notes.txt`)** \u2014 Match found: line 1, `The probe value is MARIGOLD-42.`\n\n2. **List workspace root** \u2014 No separate native `List` tool in this session; used `Glob` on the root instead. Two entries: `.cursor/hooks.json`, `notes.txt`.\n\n3. **Shell (`printf \"SHELL-PROBE-OK\\n\"`)** \u2014 Rejected twice; no stdout. Could not complete this check.\n\n4. **Read (`missing-probe.txt`)** \u2014 Error as expected: file not found.",
+      "session_id": "probe-matrix-session",
+      "request_id": "probe-matrix-id-8",
+      "usage": {
+        "inputTokens": 19592,
+        "outputTokens": 1176,
+        "cacheReadTokens": 36480,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}

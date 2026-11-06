@@ -152,6 +152,31 @@ test('mint rejects an --expires-days the schema bound refuses', async () => {
   }
 })
 
+test('the enrollment mint refuses past its 3650-day server ceiling before any request', async () => {
+  for (const bad of ['3651', '1e30']) {
+    const hypHome = await tmpHome()
+    const { ctx, err } = await makeCtx({ hypHome })
+    const { impl, calls } = fetchStub([{ status: 200, body: { token: 't' } }])
+    const code = await runRemoteMint(['prod', '--expires-days', bad], ctx, { fetchImpl: impl })
+    assert.equal(code, 2, bad)
+    assert.equal(calls.length, 0, bad)
+    assert.match(err.join(''), /--expires-days expects an integer from 1 to 3650/)
+    assert.match(err.join(''), /usage: hyp remote mint/)
+  }
+})
+
+test('mint accepts both ends of the server ceiling', async () => {
+  for (const days of [1, 3650]) {
+    const hypHome = await tmpHome()
+    const { ctx } = await makeCtx({ hypHome })
+    await seedSession(hypHome)
+    const { impl, calls } = fetchStub([{ status: 200, body: { token: 't' } }])
+    const code = await runRemoteMint(['prod', '--expires-days', String(days)], ctx, { fetchImpl: impl })
+    assert.equal(code, 0, String(days))
+    assert.deepEqual(JSON.parse(calls[0].init.body), { expires_days: days })
+  }
+})
+
 test('mint refuses an unknown target with remote add guidance', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({ hypHome })

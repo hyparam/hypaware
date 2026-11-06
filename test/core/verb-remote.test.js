@@ -101,7 +101,7 @@ test('bare --remote routes to the shipped default target (central server)', asyn
   const code = await cmd.run(['SELECT 1', '--remote', '--format', 'json'], ctx)
   assert.equal(code, 0)
   assert.ok(urls.length > 0)
-  assert.match(urls[0], /^https:\/\/hypaware\.hyperparam\.app/)
+  assert.match(urls[0], /^https:\/\/api\.hypaware\.ai/)
   assert.deepEqual(JSON.parse(out.join('')), [{ n: 1 }])
 })
 

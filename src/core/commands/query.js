@@ -1,15 +1,20 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
+
 import { Attr, getActiveSpan, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
+import { buildQuerySqlOutput, renderResult } from '../query/format.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
-import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
+import { parseCommandArgv, parseControlFlags, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 import { sanitizeLabel } from '../util/json_util.js'
+import { groupThousands } from '../util/format_number.js'
 
 /**
- * @import { CommandRunContext, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, DatasetRegistration, DatasetSchema, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CacheStatusPartition, CacheStatusReport } from '../../../src/core/cache/types.js'
  * @import { OverviewRows } from '../../../src/core/query/types.js'
  */
 
@@ -23,9 +28,24 @@ import { sanitizeLabel } from '../util/json_util.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
-  const parsed = parseCoreCommandArgv('query schema', argv, ctx)
+  const limitFlag = argv.find(arg => /^--max-(bytes|cell)(=|$)/.test(arg))
+  if (limitFlag !== undefined) {
+    ctx.stderr.write(`hyp query schema: ${limitFlag.split('=')[0]} is not supported; schema output is always complete\n`)
+    return 2
+  }
+  const ctrl = parseControlFlags(argv)
+  if (!ctrl.ok) {
+    ctx.stderr.write(`hyp query schema: ${ctrl.error}\n`)
+    return 2
+  }
+  if (ctrl.controls.refreshExplicit) {
+    ctx.stderr.write('hyp query schema: --refresh is not supported for schema metadata\n')
+    return 2
+  }
+  const parsed = parseCoreCommandArgv('query schema', ctrl.rest, ctx)
   if (!parsed.ok) return parsed.code
   const dataset = String(parsed.params.dataset)
+  const { remote, org, output } = ctrl.controls
   return withSpan(
     'query.resolve_tables',
     {
@@ -35,13 +55,49 @@ export async function runQuerySchema(argv, ctx) {
       status: 'ok',
     },
     async () => {
-      const schema = schemaForDataset(ctx.query, dataset)
+      let schema
+      if (remote !== undefined) {
+        const { readRemoteSchema } = await import('../mcp/remote_verb.js')
+        const { effectiveDefaultRemote } = await import('../remote/builtin_remotes.js')
+        // @ref LLP 0062#bare-remote [implements]: schema uses the same default-target resolution as SQL
+        const target = remote === '' ? effectiveDefaultRemote(ctx.config) : remote
+        const result = await readRemoteSchema({ dataset, target, org, ctx })
+        if (!result.ok) {
+          ctx.stderr.write(`hyp query schema: ${result.error}\n`)
+          return result.exitCode ?? 1
+        }
+        schema = /** @type {DatasetSchema} */ (result.result)
+      } else {
+        schema = schemaForDataset(ctx.query, dataset)
+      }
       if (!schema) {
+        if (output !== undefined || ctrl.controls.format !== 'table' || ctrl.controls.json) {
+          ctx.stderr.write(`hyp query schema: unknown dataset '${dataset}'\n`)
+          return 1
+        }
         ctx.stdout.write(`dataset: ${dataset}\n`)
         ctx.stdout.write('  (no dataset registered - install a plugin that contributes it)\n')
         return 0
       }
-      ctx.stdout.write(renderSchema(dataset, schema))
+      const format = ctrl.controls.json && ctrl.controls.format === 'table' ? 'json' : ctrl.controls.format
+      const full = { columns: ['name', 'type', 'nullable'], rows: schema.columns.map(c => ({ ...c })) }
+      // A partial schema can mislead callers about which columns exist.
+      // Keep every definition and name intact in every output format.
+      if (output === undefined) {
+        ctx.stdout.write(format === 'table'
+          ? renderSchema(dataset, schema)
+          : renderResult(full, format))
+      } else {
+        const rendered = buildQuerySqlOutput(full, { maxCell: 0, maxBytes: 0, format, output })
+        try {
+          if (rendered.file) await fs.writeFile(rendered.file.path, rendered.file.content)
+        } catch (err) {
+          ctx.stderr.write(`hyp query schema: ${err instanceof Error ? err.message : String(err)}\n`)
+          return 1
+        }
+        ctx.stdout.write(rendered.stdout)
+        if (rendered.stderr) ctx.stderr.write(rendered.stderr)
+      }
       return 0
     },
     { component: 'query' }
@@ -86,59 +142,144 @@ export async function runQueryStatus(argv, ctx) {
   const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
   const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
-  ctx.stdout.write(`cache:    ${report.cacheRoot}\n`)
-  ctx.stdout.write(`pending:  ${report.pendingSpoolBytes} bytes\n`)
-  // Grep-index coverage over the searchable dataset: how much of a `hyp
-  // query grep` is served by sidecar indexes versus the brute scan. A gap
-  // is expected on a cache that has taken writes since the last
-  // maintenance tick, so the line names the mechanism that closes it. It
-  // says "maintenance", not "compaction": the build pass runs on any
-  // generation with missing coverage, so a partition already at the
-  // compaction floor closes its gap too, and advice naming a rewrite that
-  // will never run is advice the reader cannot act on.
-  // @ref LLP 0302#build-site [constrained-by]: the remedy the line names is the one the build pass actually runs
-  // @ref LLP 0264#lifecycle [implements]: index coverage is observable where the operator already looks
-  const searchable = report.partitions.filter((p) => p.indexedFileCount !== undefined)
-  if (searchable.length > 0) {
-    // `indexableFileCount`, never `dataFileCount`: the latter counts the
-    // position-delete files that share the data directory, and no sidecar is
-    // ever built beside one, so a partition purged since its last compaction
-    // would report coverage it can never reach.
-    const files = searchable.reduce((n, p) => n + (p.indexableFileCount ?? p.dataFileCount), 0)
-    const indexed = searchable.reduce((n, p) => n + (p.indexedFileCount ?? 0), 0)
-    ctx.stdout.write(`grep index: ${indexed} of ${files} data files indexed` +
-      (indexed < files ? ' (searches brute-scan the rest; maintenance indexes them)\n' : '\n'))
+  ctx.stdout.write(renderCacheStatus({ report, datasets }))
+  return 0
+}
+
+/**
+ * Human byte size, in the decimal units `hyp status` reports storage in.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1e3) return `${Math.max(0, Math.round(bytes) || 0)} B`
+  if (bytes < 999_500) return `${Math.round(bytes / 1e3)} KB`
+  if (bytes < 999_500_000) return `${(bytes / 1e6).toFixed(1)} MB`
+  return `${(bytes / 1e9).toFixed(1)} GB`
+}
+
+/**
+ * A partition's row label. The dataset is the row above it, so a
+ * source-only key prints as the bare source.
+ *
+ * @param {CacheStatusPartition} p
+ * @returns {string}
+ */
+function partitionLabel(p) {
+  const entries = Object.entries(p.partition)
+  if (entries.length === 0) return '(all)'
+  if (entries.length === 1 && entries[0][0] === 'source') return entries[0][1]
+  return entries.map(([k, v]) => `${k}=${v}`).join('/')
+}
+
+/**
+ * The retention cutoff most source-table partitions share, hoisted into the
+ * header only when it beats "no cutoff" as the most common answer among them.
+ * A cutoff held by a minority stays on its own row instead of reading as
+ * cache-wide.
+ *
+ * @param {CacheStatusPartition[]} partitions
+ * @returns {string | undefined}
+ */
+function commonRetentionCutoff(partitions) {
+  /** @type {Map<string, number>} */
+  const counts = new Map()
+  /** @type {string} */
+  let best = ''
+  for (const p of partitions) {
+    if (p.layout !== 'source-table') continue
+    const key = p.lastRetentionCutoffDate ?? ''
+    const n = (counts.get(key) ?? 0) + 1
+    counts.set(key, n)
+    if (n > (counts.get(best) ?? 0)) best = key
   }
-  ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
-  for (const dataset of datasets) {
-    ctx.stdout.write(`  ${dataset.name}  (${dataset.plugin})\n`)
+  return best || undefined
+}
+
+const CACHE_STATUS_COLUMNS = ['ROWS', 'FILES', 'SNAPSHOTS', 'DELETES', 'METADATA']
+
+/**
+ * Render `hyp cache status` as one table: a row per dataset, with its
+ * partitions indented beneath it unless the only one is a placeholder
+ * (`source=unknown`, or no partition key). Dataset names stay at column 0,
+ * which is where callers reading the dataset list look for them. Only what
+ * varies is printed per row: the source-table layout is the unlabelled
+ * default, and the shared retention cutoff sits in the header.
+ *
+ * @param {{ report: CacheStatusReport, datasets: DatasetRegistration[] }} args
+ * @returns {string}
+ */
+export function renderCacheStatus({ report, datasets }) {
+  const cutoff = commonRetentionCutoff(report.partitions)
+  // `dataset.name` is a live plugin property, not a stored field, and it is
+  // this table's join key: read it once per registration rather than once per
+  // map, or two disagreeing reads can mark a registered dataset `(not registered)`.
+  /** @type {Map<string, CacheStatusPartition[]>} */
+  const byDataset = new Map()
+  /** @type {Map<string, string>} */
+  const plugins = new Map()
+  for (const d of datasets) {
+    const name = d.name
+    const plugin = d.plugin
+    byDataset.set(name, [])
+    plugins.set(name, plugin)
   }
-  if (report.partitions.length > 0) {
-    ctx.stdout.write(`partitions: ${report.partitions.length}\n`)
-    for (const p of report.partitions) {
-      const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
-      const label = `${p.dataset}/${partKey || 'all'}`
-      if (p.layout === 'source-table') {
-        const extras = []
-        // Carries its own denominator, because `files=` on this same line is
-        // `dataFileCount`, which counts the position-delete files sharing the
-        // data directory. No sidecar is ever built beside one, so a bare
-        // `indexed=N` invites the reader to compare it against `files=M` and
-        // read a purged partition as permanently under-indexed - the exact
-        // misreading the aggregate coverage line above avoids by using
-        // `indexableFileCount`.
-        if (p.indexedFileCount !== undefined) {
-          extras.push(`indexed=${p.indexedFileCount}/${p.indexableFileCount ?? p.dataFileCount}`)
-        }
-        if (p.deleteFileCount) extras.push(`deletes=${p.deleteFileCount}`)
-        if (p.lastRetentionCutoffDate) extras.push(`retention_cutoff=${p.lastRetentionCutoffDate}`)
-        ctx.stdout.write(`  ${label}  source-table  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B${extras.length ? '  ' + extras.join('  ') : ''}\n`)
-      } else {
-        ctx.stdout.write(`  ${label}  epoch=${p.epoch}  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B\n`)
-      }
+  for (const p of report.partitions) {
+    const parts = byDataset.get(p.dataset)
+    if (parts) parts.push(p)
+    else byDataset.set(p.dataset, [p])
+  }
+
+  /** @param {CacheStatusPartition} p */
+  const cells = (p) => [
+    groupThousands(p.rowCount),
+    groupThousands(p.dataFileCount),
+    groupThousands(p.snapshotCount),
+    p.deleteFileCount ? groupThousands(p.deleteFileCount) : '-',
+    formatBytes(p.metadataBytes),
+  ]
+  /** @param {CacheStatusPartition} p */
+  const note = (p) => {
+    if (p.layout !== 'source-table') return `${p.layout === 'epoch' ? 'legacy ' : ''}epoch ${p.epoch}`
+    if (p.lastRetentionCutoffDate === cutoff) return ''
+    return p.lastRetentionCutoffDate ? `cutoff ${p.lastRetentionCutoffDate}` : 'no cutoff'
+  }
+
+  /** @type {Array<{ label: string, cells?: string[], note: string }>} */
+  const rows = []
+  for (const [name, parts] of byDataset) {
+    const owner = plugins.get(name) ?? '(not registered)'
+    const label = parts.length === 1 ? partitionLabel(parts[0]) : ''
+    if (parts.length === 0) {
+      rows.push({ label: name, cells: CACHE_STATUS_COLUMNS.map(() => '-'), note: owner })
+    } else if (label === '(all)' || label === 'unknown') {
+      rows.push({ label: name, cells: cells(parts[0]), note: [owner, note(parts[0])].filter(Boolean).join('  ') })
+    } else {
+      rows.push({ label: name, note: owner })
+      for (const p of parts) rows.push({ label: `  ${partitionLabel(p)}`, cells: cells(p), note: note(p) })
     }
   }
-  return 0
+
+  let out = `cache      ${report.cacheRoot}\n`
+  out += `pending    ${formatBytes(report.pendingSpoolBytes)}\n`
+  if (cutoff) out += `retention  cutoff ${cutoff}\n`
+  if (rows.length === 0) return out + 'datasets   none registered\n'
+
+  const labelWidth = rows.reduce((w, r) => Math.max(w, r.label.length), 'DATASET'.length)
+  const widths = CACHE_STATUS_COLUMNS.map((h, i) => rows.reduce((w, r) => Math.max(w, r.cells?.[i].length ?? 0), h.length))
+  /**
+   * @param {string} label
+   * @param {string[] | undefined} values
+   * @param {string} trailing
+   */
+  const line = (label, values, trailing) => {
+    const padded = [label.padEnd(labelWidth), ...widths.map((w, i) => (values?.[i] ?? '').padStart(w))].join('  ')
+    return `${padded}   ${trailing}`.trimEnd() + '\n'
+  }
+  out += '\n' + line('DATASET', CACHE_STATUS_COLUMNS, '')
+  for (const r of rows) out += line(r.label, r.cells, r.note)
+  return out
 }
 
 const QUERY_OVERVIEW_USAGE =
@@ -287,6 +428,8 @@ export async function runQueryOverview(argv, ctx) {
         color: useColor(ctx.stdout, ctx.env),
         showSql,
         withheld: runner.sawWithholding?.() ?? false,
+        // A pipe reports no width; the renderer then lays out for its fixed default.
+        columns: /** @type {{ columns?: number }} */ (ctx.stdout).columns,
       }))
       return 0
     },
@@ -456,6 +599,9 @@ export async function runQueryMaintain(argv, ctx) {
     })
     if (migrationResult.migrated > 0) {
       ctx.stdout.write(`migrate: ${migrationResult.migrated} legacy partition(s), ${migrationResult.rowsMigrated} row(s)\n`)
+    }
+    if (migrationResult.deferred > 0) {
+      ctx.stdout.write(`migrate: ${migrationResult.deferred} legacy partition(s) deferred (purge cleanup pending or partition busy)\n`)
     }
   }
   const maintenanceConfig = ctx.config?.query?.cache?.maintenance

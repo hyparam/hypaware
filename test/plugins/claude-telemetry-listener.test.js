@@ -172,7 +172,7 @@ test('another exporter\'s scope is ignored', () => {
   assert.deepEqual(flattenClaudeTelemetryEvents(payload), [])
 })
 
-test('one turn projects to a user row and an assistant row with native uuids', () => {
+test('one turn projects a native prompt and provisional assistant text', () => {
   const [projection] = projectAll(turnRecords())
   assert.equal(projection.provider, 'anthropic')
   assert.equal(projection.session_id, SESSION)
@@ -192,7 +192,9 @@ test('one turn projects to a user row and an assistant row with native uuids', (
   assert.equal(user.prompt_id, PROMPT)
 
   assert.equal(assistant.role, 'assistant')
-  assert.equal(assistant.message_id, ASSISTANT_UUID)
+  assert.notEqual(assistant.message_id, ASSISTANT_UUID)
+  assert.equal(assistant.raw_frame?.uuid, ASSISTANT_UUID)
+  assert.equal(/** @type {any} */ (assistant.attributes)?.gateway?.identity_source, 'gateway_fallback')
   assert.equal(assistant.request_id, REQUEST_ID)
   assert.equal(assistant.model, 'claude-haiku-4-5-20251001')
 })
@@ -324,16 +326,15 @@ test('cwd and git identity come from the SessionStart hook record', () => {
   assert.equal(projection.repo_root, '/repo')
 })
 
-test('the expanded rows carry native part identity and null parent-chain columns', () => {
+test('the expanded rows keep prompt identity and mark unverified assistant identity provisional', () => {
   const [projection] = projectAll(turnRecords())
   const rows = aiGatewayRowsFromProjectedExchange(projection)
   assert.equal(rows.length, 2)
   assert.equal(rows[0].part_id, `${USER_UUID}#0`)
-  assert.equal(rows[1].part_id, `${ASSISTANT_UUID}#0`)
-  // Native identity: nothing here is a gateway fallback, so no settlement
-  // enricher has anything to repair. @ref LLP 0254#identity-at-ingest
+  assert.notEqual(rows[1].part_id, `${ASSISTANT_UUID}#0`)
+  assert.equal(/** @type {any} */ (rows[1].attributes)?.gateway?.identity_source, 'gateway_fallback')
+  // @ref LLP 0559#assistant-identity [tests]: text needs transcript confirmation
   for (const row of rows) {
-    assert.equal(/** @type {any} */ (row.attributes)?.gateway?.identity_source, undefined)
     // @ref LLP 0252#consequences: these read null on the OTEL path by design.
     assert.equal(row.parent_uuid, undefined)
     assert.equal(row.logical_parent_uuid, undefined)

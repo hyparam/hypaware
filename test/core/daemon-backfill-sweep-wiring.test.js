@@ -6,7 +6,9 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { collectHypAwareStatus, readStatusFile } from '../../src/core/daemon/status.js'
 import { runDaemon } from '../../src/core/daemon/runtime.js'
+import { daemonLogPath } from '../../src/core/runtime/paths.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
@@ -53,6 +55,7 @@ export async function activate(ctx) {
     sweep: { cron: '* * * * *' },
     async *run() {
       fs.appendFileSync(${JSON.stringify(marker)}, 'swept\\n')
+      if (fs.existsSync(${JSON.stringify(marker + '.fail')})) throw new Error('synthetic_read_failure')
     },
   })
   ctx.sources.register({
@@ -133,6 +136,48 @@ test('the daemon tick runs a sweep-bearing backfill contribution', async () => {
     // started by the last tick can still be touching the state tree here.
     // Retry the teardown rather than racing it.
     await new Promise((resolve) => setTimeout(resolve, 100))
+    await fs.rm(hypHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+
+// @ref LLP 0583#failures [tests]: production bookkeeping persists a failure and clears it after retry
+test('a failed sweep degrades status and a successful retry clears the warning', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-sweep-health-'))
+  const marker = path.join(hypHome, 'sweeps.log')
+  const warning = 'backfill_failed:sweeping-fixture'
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const env = { ...process.env, HYP_HOME: hypHome }
+  let handle
+  try {
+    const configPath = await writeInstall(hypHome, await stageSweepingPlugin(hypHome, marker))
+    await fs.writeFile(marker + '.fail', '')
+    handle = await runDaemon({ hypHome, configPath, env, runId: 'sweep-health', tickIntervalMs: 100, installSignalHandlers: false })
+    /** @param {boolean} failed */
+    const waitFor = async (failed) => {
+      const deadline = Date.now() + 20_000
+      while (Date.now() < deadline) {
+        if (Boolean(readStatusFile(stateRoot)?.warnings?.includes(warning)) === failed) return
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      assert.fail(`sweep did not reach failed=${failed}`)
+    }
+    await waitFor(true)
+    const failed = await collectHypAwareStatus({ env })
+    assert.ok(failed.diagnostics.some(diagnostic => diagnostic.kind === 'backfill_failed' && diagnostic.severity === 'error'))
+    await fs.rm(marker + '.fail')
+    await waitFor(false)
+    const recovered = await collectHypAwareStatus({ env })
+    assert.ok(!recovered.diagnostics.some(diagnostic => diagnostic.kind === 'backfill_failed'))
+    const log = await fs.readFile(daemonLogPath(stateRoot), 'utf8')
+    assert.equal(log.split('daemon.backfill_failed').length - 1, 1)
+    assert.equal(log.split('daemon.backfill_recovered').length - 1, 1)
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await new Promise(resolve => setTimeout(resolve, 100))
     await fs.rm(hypHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })

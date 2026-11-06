@@ -2,13 +2,19 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
+import { detectPickerSources } from '../../src/core/cli/detect.js'
+import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
 import { INIT_CLIENT_CHOICES, INIT_SOURCE_CHOICES, resolveInitSources } from '../../src/core/commands/init.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 
 /**
- * @import { InitFlags } from '../../src/core/cli/types.js'
+ * @import { InitFlags, PickerSource } from '../../src/core/cli/types.js'
+ * @import { HypAwareV2Config } from '../../hypaware-plugin-kernel-types.js'
  */
 
 async function realCatalog() {
@@ -61,11 +67,13 @@ test('every `hyp setup --client` value is a picker row whose plugin contributes 
 // The converse, which is what actually closes #1301 for `--client`: the
 // one-way check above still lets a new client row join the picker without
 // joining the flag, exactly the way `claude-desktop` did. Every row whose
-// plugin contributes a client is a `--client` value unless it is named here,
-// and the one name here is the open question the branch deliberately leaves
-// open: whether OpenClaw belongs in `--client` at all. Adding a client row
+// plugin contributes a client is a `--client` value unless it is named here.
+// OpenClaw is the open question the branch deliberately leaves open: whether
+// it belongs in `--client` at all. Hermes contributes a client only to place
+// the neutral skills under `~/.hermes/skills` (LLP 0494#skills); it has no
+// attach probe, and `--source hermes` already enables it. Adding a client row
 // now forces that answer instead of silently repeating the gap.
-const CLIENT_ROWS_WITHOUT_A_FLAG = new Set(['openclaw'])
+const CLIENT_ROWS_WITHOUT_A_FLAG = new Set(['openclaw', 'hermes'])
 
 test('every picker row whose plugin contributes a client is a `--client` value, or a named exception', async () => {
   const catalog = await realCatalog()
@@ -95,4 +103,144 @@ test('--client claude-desktop folds into the claude-desktop source pick the pick
   // composition itself).
   assert.deepEqual(resolveInitSources(flags({ clients: ['claude-desktop'] })), ['claude-desktop'])
   assert.deepEqual(resolveInitSources(flags({ yes: true, clients: ['claude-desktop'] })), ['claude-desktop'])
+})
+
+// Goose is a picker row and a `--source` value, but not a `--client` one: it
+// contributes no client (read-only adapter, LLP 0570#manifest). The detect
+// path is the default Mac Part A observed, the same as Linux.
+// @ref LLP 0571#tasks [tests]: T2 picker row, detection, and setup re-run cases
+test('the picker pre-checks goose only when ~/.local/share/goose/sessions exists, and opens no database', async () => {
+  const catalog = await realCatalog()
+  assert.deepEqual(catalog.pickerDescriptors.get('goose')?.detect, { settings_file: '.local/share/goose/sessions/sessions.db' })
+  assert.equal(INIT_CLIENT_CHOICES.includes(/** @type {InitFlags['clients'][number]} */ ('goose')), false)
+  assert.deepEqual(resolveInitSources(flags({ sources: ['goose'] })), ['goose'])
+
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-goose-detect-'))
+  try {
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('goose'), false)
+    const dir = path.join(home, '.local', 'share', 'goose', 'sessions')
+    await fs.mkdir(dir, { recursive: true })
+    // Not a SQLite file: detection must not need to open it, and must leave
+    // no -wal, -shm or -journal companion behind.
+    const bytes = 'not a sqlite database'
+    await fs.writeFile(path.join(dir, 'sessions.db'), bytes)
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('goose'), true)
+    assert.deepEqual(await fs.readdir(dir), ['sessions.db'])
+    assert.equal(await fs.readFile(path.join(dir, 'sessions.db'), 'utf8'), bytes)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * @param {Awaited<ReturnType<typeof realCatalog>>} catalog
+ * @param {PickerSource[]} sources
+ * @param {HypAwareV2Config} [existing]
+ */
+function composeSetup(catalog, sources, existing) {
+  return composePickerConfig({
+    sources,
+    descriptors: catalog.pickerDescriptors,
+    exportChoice: 'local-parquet',
+    retentionDays: 30,
+    hypHome: '/home/tester/.hyp',
+    composeWith: catalog.composeWith,
+    ...(existing ? { existing } : {}),
+  })
+}
+
+test('re-running setup with goose picked keeps goose.enabled = false, byte for byte', async () => {
+  const catalog = await realCatalog()
+  const existing = composeSetup(catalog, ['goose'])
+  const goose = existing.plugins?.find((p) => p.name === '@hypaware/goose')
+  assert.ok(goose, 'the goose row composes @hypaware/goose')
+  goose.config = { enabled: false }
+  const before = JSON.stringify(existing, null, 2) + '\n'
+
+  const rerun = composeSetup(catalog, ['goose'], JSON.parse(before))
+  assert.equal(JSON.stringify(rerun, null, 2) + '\n', before)
+  assert.deepEqual(rerun.plugins?.find((p) => p.name === '@hypaware/goose')?.config, { enabled: false })
+})
+
+test('adding goose to a config with another client leaves that client unchanged', async () => {
+  const catalog = await realCatalog()
+  const existing = composeSetup(catalog, ['hermes'])
+  const hermes = existing.plugins?.find((p) => p.name === '@hypaware/hermes')
+  assert.ok(hermes)
+  hermes.config = { enabled: false, poll_interval: '45s' }
+  const priorHermes = structuredClone(hermes)
+
+  const added = composeSetup(catalog, ['hermes', 'goose'], structuredClone(existing))
+  assert.deepEqual(added.plugins?.find((p) => p.name === '@hypaware/hermes'), priorHermes)
+  assert.ok(added.plugins?.some((p) => p.name === '@hypaware/goose'))
+  // Both rows share one gateway entry; goose adds no upstream.
+  assert.equal(added.plugins?.filter((p) => p.name === '@hypaware/ai-gateway').length, 1)
+})
+
+// Crush, like goose, is a picker row and a `--source` value but not a
+// `--client` one: it contributes no client (LLP 0573#manifest). Detection is
+// one stat of the index file; it never reads the index and never opens a
+// project's `crush.db`.
+// @ref LLP 0574#tasks [tests]: T2 picker row, detection, and setup re-run cases
+test('the picker pre-checks crush only when ~/.local/share/crush/projects.json exists, and opens no database', async () => {
+  const catalog = await realCatalog()
+  assert.deepEqual(catalog.pickerDescriptors.get('crush')?.detect, { settings_file: '.local/share/crush/projects.json' })
+  assert.equal(INIT_CLIENT_CHOICES.includes(/** @type {InitFlags['clients'][number]} */ ('crush')), false)
+  assert.deepEqual(resolveInitSources(flags({ sources: ['crush'] })), ['crush'])
+
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-crush-detect-'))
+  try {
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('crush'), false)
+    const indexDir = path.join(home, '.local', 'share', 'crush')
+    const dataDir = path.join(home, 'project', '.crush')
+    await fs.mkdir(indexDir, { recursive: true })
+    await fs.mkdir(dataDir, { recursive: true })
+    const index = JSON.stringify({ projects: [{ path: path.join(home, 'project'), data_dir: dataDir }] })
+    await fs.writeFile(path.join(indexDir, 'projects.json'), index)
+    // Not a SQLite file: detection must not need to open it, and must leave
+    // no -wal, -shm or -journal companion behind.
+    const bytes = 'not a sqlite database'
+    await fs.writeFile(path.join(dataDir, 'crush.db'), bytes)
+    assert.equal((await detectPickerSources(catalog, { HOME: home })).has('crush'), true)
+    assert.deepEqual(await fs.readdir(indexDir), ['projects.json'])
+    assert.equal(await fs.readFile(path.join(indexDir, 'projects.json'), 'utf8'), index)
+    assert.deepEqual(await fs.readdir(dataDir), ['crush.db'])
+    assert.equal(await fs.readFile(path.join(dataDir, 'crush.db'), 'utf8'), bytes)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('re-running setup with crush picked keeps crush.enabled = false, byte for byte', async () => {
+  const catalog = await realCatalog()
+  const existing = composeSetup(catalog, ['crush'])
+  const crush = existing.plugins?.find((p) => p.name === '@hypaware/crush')
+  assert.ok(crush, 'the crush row composes @hypaware/crush')
+  crush.config = { enabled: false }
+  const before = JSON.stringify(existing, null, 2) + '\n'
+
+  const rerun = composeSetup(catalog, ['crush'], JSON.parse(before))
+  assert.equal(JSON.stringify(rerun, null, 2) + '\n', before)
+  assert.deepEqual(rerun.plugins?.find((p) => p.name === '@hypaware/crush')?.config, { enabled: false })
+})
+
+test('adding crush to a config with other clients leaves their sections unchanged', async () => {
+  const catalog = await realCatalog()
+  const existing = composeSetup(catalog, ['hermes', 'goose'])
+  const hermes = existing.plugins?.find((p) => p.name === '@hypaware/hermes')
+  const goose = existing.plugins?.find((p) => p.name === '@hypaware/goose')
+  assert.ok(hermes && goose)
+  hermes.config = { enabled: false, poll_interval: '45s' }
+  goose.config = { enabled: true, poll_interval: '20s' }
+  const prior = JSON.stringify([hermes, goose])
+
+  const added = composeSetup(catalog, ['hermes', 'goose', 'crush'], structuredClone(existing))
+  const after = JSON.stringify([
+    added.plugins?.find((p) => p.name === '@hypaware/hermes'),
+    added.plugins?.find((p) => p.name === '@hypaware/goose'),
+  ])
+  assert.equal(after, prior)
+  assert.ok(added.plugins?.some((p) => p.name === '@hypaware/crush'))
+  // All three rows share one gateway entry; crush adds no upstream.
+  assert.equal(added.plugins?.filter((p) => p.name === '@hypaware/ai-gateway').length, 1)
 })

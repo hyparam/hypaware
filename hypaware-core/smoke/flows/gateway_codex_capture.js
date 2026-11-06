@@ -8,6 +8,7 @@ import process from 'node:process'
 import { Attr, installObservability } from '../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { runDaemon } from '../../../src/core/daemon/runtime.js'
+import { prepareAttach } from '../../plugins-workspace/codex/src/toml-config.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
@@ -29,8 +30,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  * synthetic: it is issued by this file against a local fake upstream, with
  * no Codex Desktop involved. It proves the gateway and projector handle
  * that shape, not that a real Codex Desktop routes through HypAware. The
- * end-to-end claim needs a human and a real app: see the
- * `codex_desktop_capture` procedure in `docs/ACCEPTANCE.md`
+ * end-to-end claim needs a human and a real app
  * (@ref LLP 0141#one-adapter).
  *
  * Bead `hy-bbyi` assertions:
@@ -41,8 +41,9 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *   - The `/backend-api/codex/responses` rows carry `is_sse=true`, a
  *     positive `stream_event_count` under `attributes.gateway`, and
  *     Codex turn metadata projected into first-class columns.
- *   - Daemon self-telemetry (`source.start`, `sink.tick`,
- *     `cache.append`, `daemon.shutdown`) is present in JSONL.
+ *   - Daemon self-telemetry (`source.start`, the daemon dispatch counter,
+ *     `cache.append`, `daemon.shutdown`) is present in JSONL. With no
+ *     configured sinks, no `sink.export_batch` span is emitted.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -53,6 +54,13 @@ export async function run({ harness, expect }) {
       'gateway_codex_capture: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
+
+  const isolatedHome = path.join(harness.tmpDir, 'home')
+  expect.that('isolation: HOME belongs to this smoke', process.env.HOME, (v) => v === isolatedHome)
+  expect.that('isolation: inherited CODEX_HOME was removed', process.env.CODEX_HOME, (v) => v === undefined)
+  const clientConfig = path.join(isolatedHome, '.codex', 'config.toml')
+  await fs.mkdir(path.dirname(clientConfig), { recursive: true })
+  await fs.writeFile(clientConfig, prepareAttach('service_tier = "fast"\n', 4388, 'old').content)
 
   const openai = await startOpenAiUpstream()
 
@@ -127,12 +135,22 @@ export async function run({ harness, expect }) {
   const codexThreadId = `thread-${harness.devRunId}`
   const codexSessionId = `session-${harness.devRunId}`
   const codexTurnId = `turn-${harness.devRunId}`
+  const codexBaseInstructions = 'You are Codex, a coding agent.'
   // @ref LLP 0151#body-is-authority: Codex states its lineage in the body's flat
   // `client_metadata` map on every request kind, so the fixture carries it there
-  // and NOT under the `thread-id` / `session-id` header names Codex never emits.
+  // and NOT under the bare `thread-id` / `session-id` header names.
+  // @ref LLP 0165#header-audit-correction: those two names are real on Codex's
+  // compaction and websocket paths, but no turn states its lineage in them.
   const responsesBody = JSON.stringify({
     model: 'gpt-5-codex',
-    input: [{ role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] }],
+    input: [
+      {
+        type: 'message', role: 'developer',
+        content: [{ type: 'input_text', text: codexBaseInstructions }],
+        internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] },
+      },
+      { role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] },
+    ],
     stream: true,
     client_metadata: {
       'x-codex-installation-id': `install-${harness.devRunId}`,
@@ -178,6 +196,8 @@ export async function run({ harness, expect }) {
   await sleep(120)
   await handle.stop()
   await handle.done
+  expect.that('migration: only the disposable client config is repaired', await fs.readFile(clientConfig, 'utf8'),
+    (v) => v.includes('service_tier = "fast"') && v.includes('[model_providers.hypaware]') && !v.includes('base_url'))
 
   // ----- The gateway's last-seen entrypoints reached status.json -----
   // This is the half of `hyp status` that answers "did Desktop traffic
@@ -210,6 +230,7 @@ export async function run({ harness, expect }) {
       model,
       role,
       content_text,
+      system_text,
       conversation_id,
       cwd,
       client_name,
@@ -250,6 +271,11 @@ export async function run({ harness, expect }) {
 
   const chatRows = rows.filter((r) => r.path === '/v1/chat/completions')
   const responseRows = rows.filter((r) => r.path === '/backend-api/codex/responses')
+  expect.that(
+    'query: Codex 0.162 base instructions populate system_text without an extra developer row',
+    responseRows,
+    (v) => v.length === 2 && v.every((r) => r.system_text === codexBaseInstructions && r.role !== 'developer'),
+  )
   expect.that(
     'query: /v1/chat/completions rows carry provider=openai',
     chatRows.map((r) => r.provider),
@@ -355,10 +381,19 @@ export async function run({ harness, expect }) {
     ),
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
+  // @ref LLP 0471#instance-ownership [tests]: zero-sink dispatch counts a daemon tick without an instance export
+  const metrics = await expect.metrics()
   expect.that(
-    'traces: at least one sink.tick fired before shutdown',
-    traces.filter((/** @type {any} */ t) => t.name === 'sink.tick'),
-    (rows) => Array.isArray(rows) && rows.length >= 1,
+    'metrics: same-run daemon sink dispatch fired before shutdown',
+    metrics,
+    (rows) => rows.some((/** @type {any} */ m) =>
+      m.name === 'hyp_sink_ticks_total' && m.attributes?.source === 'daemon' &&
+      m.resource?.dev_run_id === harness.devRunId && Number(m.value) > 0),
+  )
+  expect.that(
+    'traces: zero-sink fixture emits no sink.export_batch spans',
+    traces.filter((/** @type {any} */ t) => t.name === 'sink.export_batch'),
+    (rows) => rows.length === 0,
   )
   expect.that(
     'traces: at least two cache.append spans for ai_gateway_messages',
@@ -375,6 +410,8 @@ export async function run({ harness, expect }) {
   )
 
   const logs = await expect.logs()
+  expect.that('logs: isolated daemon released the managed route', logs, (v) =>
+    v.some((l) => l.body === 'codex.capture.route_released' && l.attributes?.restart_required === true))
   const exchangeLogs = logs.filter(
     (/** @type {any} */ l) =>
       l.body === 'aigw.exchange' && l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,

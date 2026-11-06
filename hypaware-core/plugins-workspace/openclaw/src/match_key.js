@@ -72,7 +72,7 @@ const BLOCK_KIND_SYNONYMS = new Map([
 ])
 
 /** @param {string} rawKind */
-function normalizeBlockKind(rawKind) {
+export function normalizeBlockKind(rawKind) {
   return BLOCK_KIND_SYNONYMS.get(rawKind) ?? rawKind
 }
 

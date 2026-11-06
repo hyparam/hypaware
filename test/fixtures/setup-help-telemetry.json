@@ -1,0 +1,40 @@
+{
+  "help": [
+    {
+      "name": "installation.inventory",
+      "kind": "event",
+      "attributes": {
+        "adapters": []
+      }
+    },
+    {
+      "name": "cli.invocation",
+      "kind": "event",
+      "attributes": {
+        "command": "setup",
+        "invocation_kind": "help",
+        "outcome": "degraded",
+        "exit_class": "zero"
+      }
+    }
+  ],
+  "preset": [
+    {
+      "name": "installation.inventory",
+      "kind": "event",
+      "attributes": {
+        "adapters": []
+      }
+    },
+    {
+      "name": "cli.invocation",
+      "kind": "event",
+      "attributes": {
+        "command": "setup",
+        "invocation_kind": "execution",
+        "outcome": "degraded",
+        "exit_class": "zero"
+      }
+    }
+  ]
+}

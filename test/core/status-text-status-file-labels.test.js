@@ -6,7 +6,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { statusFilePath } from '../../src/core/runtime/paths.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
@@ -128,7 +129,8 @@ test('a hostile daemon state and mode cannot drive the terminal from hyp status'
   assert.ok(at >= 0)
   assert.match(lines[at], /state=running/, 'the printable part still shows the state')
   assert.match(lines[at], /mode=fore/, 'and the mode')
-  assert.equal(lines[at + 1], '  active plugins:', 'and the forged line never appears')
+  assert.equal(lines[at + 1], '', 'a blank line separates the next section')
+  assert.equal(lines[at + 2], 'Attention', 'and the forged line never appears')
 })
 
 test('an unbounded daemon state is clamped on the daemon line', async () => {

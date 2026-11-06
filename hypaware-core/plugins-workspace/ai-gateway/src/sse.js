@@ -21,6 +21,12 @@ export class SseParser {
     this.buffer = ''
     /** @type {TextDecoder} */
     this.decoder = new TextDecoder()
+    // Where the next feed's terminator search starts. The buffer holds no
+    // terminator that starts before it, so a stream that never sends a blank
+    // line is scanned once rather than from 0 again on every chunk. It stays
+    // within the buffer and drops to 0 whenever the buffer is consumed.
+    /** @type {number} */
+    this.scanFrom = 0
   }
 
   /**
@@ -45,15 +51,22 @@ export class SseParser {
     // recorder the entire decoded stream in one call) costs O(bytes), not
     // O(events x bytes) as it did when every event re-scanned the remainder.
     let pos = 0
+    let from = this.scanFrom
+    const next = { lf: -2, cr: -2 }
     while (true) {
-      const sep = findSeparator(this.buffer, pos)
+      const sep = findSeparator(this.buffer, from, next)
       if (sep === -1) break
       const block = this.buffer.slice(pos, sep.idx)
       pos = sep.idx + sep.len
+      from = pos
       const ev = parseBlock(block)
       if (ev) events.push(ev)
     }
     if (pos > 0) this.buffer = this.buffer.slice(pos)
+    // The search reached the end without a terminator, so the only one the
+    // next chunk can complete starts in the last 3 chars (the longest
+    // terminator is 4) and runs into the new bytes.
+    this.scanFrom = Math.max(0, this.buffer.length - 3)
     return events
   }
 }
@@ -73,45 +86,60 @@ export function isSseHeaders(headers) {
 }
 
 /**
- * Find the next event-block terminator (`\n\n` or `\r\n\r\n`) at or after
- * `from` and return its offset plus the terminator length so callers can
- * advance past it.
+ * Find the next event-block terminator (`\n\n`, `\r\r` or `\r\n\r\n`) at
+ * or after `from` and return its offset plus the terminator length so
+ * callers can advance past it.
  *
- * Walks newlines rather than probing for each terminator separately: the
- * `\r\n\r\n` probe almost never matches (providers send `\n\n`) and so
- * scanned to the end of the buffer on every call. Every terminator holds a
- * newline, so visiting newlines in order and testing the bytes around each
- * finds the earliest terminator start in one pass. The two cannot tie: a
- * `\r\n\r\n` starting at `b` has its first newline at `b + 1`, and `\n\n`
- * cannot start there because the byte after it is `\r`.
+ * Walks line-ending characters rather than probing for each terminator
+ * separately: a probe that almost never matches (providers send `\n\n`)
+ * scans to the end of the buffer on every call. Every terminator starts
+ * with a CR or an LF, so visiting those in order and testing the bytes
+ * after each finds the earliest terminator start in one pass. Two cannot
+ * tie: only `\n\n` starts with an LF, and the two that start with a CR
+ * differ in their second byte.
  *
- * Exported only so the parser tests can check every split point against the
- * two-probe search this replaced; `feed` is the sole runtime caller.
+ * `next` caches the next LF and CR position across calls on the same
+ * buffer, so a buffer with no CR (or no LF) is searched for it once per
+ * feed rather than once per event. -1 means none to the end of `buf`; any
+ * other value before `from` means unknown. A cache holds only for the
+ * buffer string it was filled from, so `feed` makes a new one per call.
  *
- * `from` defaults to 0 so a one-argument call scans the whole buffer, the
- * shape this replaced. Without the default it would not throw: the CRLF
- * branch compares `i > from` against undefined, which is never true, so
- * every `\r\n\r\n` terminator would go silently unreported.
+ * Exported only so the parser tests can check every split point against a
+ * probe-per-terminator search; `feed` is the sole runtime caller.
  *
  * @param {string} buf
  * @param {number} [from]
+ * @param {{ lf: number, cr: number }} [next]
  * @returns {{ idx: number, len: number } | -1}
  */
-export function findSeparator(buf, from = 0) {
-  let i = buf.indexOf('\n', from)
-  while (i !== -1) {
-    if (buf.charCodeAt(i + 1) === 10) return { idx: i, len: 2 }
-    if (
-      i > from &&
-      buf.charCodeAt(i - 1) === 13 &&
-      buf.charCodeAt(i + 1) === 13 &&
-      buf.charCodeAt(i + 2) === 10
-    ) {
-      return { idx: i - 1, len: 4 }
+export function findSeparator(buf, from = 0, next = { lf: -2, cr: -2 }) {
+  let lf = next.lf !== -1 && next.lf < from ? buf.indexOf('\n', from) : next.lf
+  let cr = next.cr !== -1 && next.cr < from ? buf.indexOf('\r', from) : next.cr
+  /** @type {{ idx: number, len: number } | -1} */
+  let found = -1
+  while (lf !== -1 || cr !== -1) {
+    if (cr === -1 || (lf !== -1 && lf < cr)) {
+      if (buf.charCodeAt(lf + 1) === 10) {
+        found = { idx: lf, len: 2 }
+        break
+      }
+      lf = buf.indexOf('\n', lf + 1)
+    } else {
+      const after = buf.charCodeAt(cr + 1)
+      if (after === 13) {
+        found = { idx: cr, len: 2 }
+        break
+      }
+      if (after === 10 && buf.charCodeAt(cr + 2) === 13 && buf.charCodeAt(cr + 3) === 10) {
+        found = { idx: cr, len: 4 }
+        break
+      }
+      cr = buf.indexOf('\r', cr + 1)
     }
-    i = buf.indexOf('\n', i + 1)
   }
-  return -1
+  next.lf = lf
+  next.cr = cr
+  return found
 }
 
 /**
@@ -128,7 +156,7 @@ function parseBlock(block) {
   /** @type {string | undefined} */
   let id
   let hasField = false
-  const lines = block.split(/\r?\n/)
+  const lines = block.split(/\r\n|\r|\n/)
   for (const line of lines) {
     if (line.length === 0) continue
     if (line.startsWith(':')) continue

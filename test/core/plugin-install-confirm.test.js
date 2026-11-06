@@ -20,7 +20,12 @@ import {
   installPlugin,
   updatePlugin,
   loadLock,
+  removePlugin,
 } from '../../src/core/plugin_install/install.js'
+import { writeLock } from '../../src/core/plugin_install/lock.js'
+import { isInstallName, isRemovableInstallDir } from '../../src/core/plugin_install/paths.js'
+import { runPluginInstall } from '../../src/core/commands/plugin.js'
+import { isWithinDir } from '../../src/core/runtime/contribution_names.js'
 
 test('decideConfirmation: --yes returns auto_yes proceed', async () => {
   const decision = await decideConfirmation({ yes: true, tty: false })
@@ -474,20 +479,391 @@ test('updatePlugin (git): rejection leaves the prior install untouched', async (
   }
 })
 
+// Regression, issue #2119. Both fetchers interpolated the third-party
+// `manifest.name` into the install path and then destroyed whatever sat
+// there, so a manifest named `../../victim` deleted and replaced a directory
+// two levels above the plugins root and reported success.
+
+/**
+ * Stage a local-dir plugin source carrying `name` in its manifest.
+ *
+ * @param {string} root temp root to stage under
+ * @param {string} dirName directory to stage into (names may hold separators)
+ * @param {string} name manifest name to write
+ * @returns {Promise<string>} the source directory to install from
+ */
+async function stageLocalPlugin(root, dirName, name) {
+  const dir = path.join(root, dirName)
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(
+    path.join(dir, 'hypaware.plugin.json'),
+    JSON.stringify({
+      schema_version: 1,
+      name,
+      version: '1.0.0',
+      hypaware_api: '^1.0.0',
+      runtime: 'node',
+      entrypoint: './index.js',
+    })
+  )
+  await fs.writeFile(path.join(dir, 'index.js'), 'export async function activate(){}\n')
+  return dir
+}
+
+test('installPlugin (local-dir): an escaping manifest name is refused and the victim survives', async () => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-install-escape-'))
+  try {
+    const stateDir = path.join(tmpRoot, 'hypaware')
+    // `../../victim` from `<stateDir>/plugins` lands here. Assert that before
+    // anything runs: this test is about a delete, so the target it hands the
+    // code under test has to be inside the temp root.
+    const victim = path.join(tmpRoot, 'victim')
+    assert.equal(isWithinDir(victim, tmpRoot), true)
+    await fs.mkdir(victim, { recursive: true })
+    await fs.writeFile(path.join(victim, 'keep.txt'), 'precious\n')
+
+    const pluginDir = await stageLocalPlugin(tmpRoot, 'src', '../../victim')
+    const result = await installPlugin({ rawSource: pluginDir, stateDir })
+
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.equal(result.errorKind, 'manifest_name_unsafe')
+    assert.match(result.message, /refused/)
+    assert.match(result.message, /\.\.\/\.\.\/victim/)
+
+    // The victim is byte-for-byte what it was, with nothing added.
+    assert.deepEqual(await fs.readdir(victim), ['keep.txt'])
+    assert.equal(await fs.readFile(path.join(victim, 'keep.txt'), 'utf8'), 'precious\n')
+    // And nothing was written to the lock.
+    const lock = await loadLock(stateDir)
+    assert.deepEqual(Object.keys(lock.plugins ?? {}), [])
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  }
+})
+
+test('installPlugin (local-dir): escaping names refused, names that stay inside still install', async () => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-install-names-'))
+  try {
+    const stateDir = path.join(tmpRoot, 'hypaware')
+    const pluginsRoot = path.join(stateDir, 'plugins')
+
+    // Refused: out of the root entirely, the state dir itself, the plugins
+    // root itself (a name of `.`, which would take every plugin), and names
+    // that are not one segment or `@scope/name` in normal form (issue #2123).
+    const refused = [
+      '../../victim', '..', '.', '../plugins-evil', '../../../../../../tmp/x',
+      '@third-party', 'trail/', 'sub/dir/deep', 'a/../b', '/absolute/name',
+    ]
+    for (const [i, name] of refused.entries()) {
+      const dir = await stageLocalPlugin(tmpRoot, `src-${i}`, name)
+      const result = await installPlugin({ rawSource: dir, stateDir })
+      assert.equal(result.ok, false, `expected refusal for '${name}'`)
+      if (result.ok) continue
+      assert.equal(result.errorKind, 'manifest_name_unsafe', `for '${name}'`)
+    }
+
+    // Accepted, each landing inside the plugins root. A scoped name installs
+    // two levels deep by design.
+    const accepted = [
+      ['@third-party/plugin', path.join('@third-party', 'plugin')],
+      ['plain-plugin', 'plain-plugin'],
+    ]
+    for (const [i, [name, rel]] of accepted.entries()) {
+      const dir = await stageLocalPlugin(tmpRoot, `ok-${i}`, name)
+      const result = await installPlugin({ rawSource: dir, stateDir })
+      assert.equal(result.ok, true, `expected install for '${name}': ${/** @type {any} */ (result).message}`)
+      if (!result.ok) continue
+      const expected = path.join(pluginsRoot, rel)
+      assert.equal(result.entry.install_dir, expected)
+      assert.equal(isWithinDir(expected, pluginsRoot), true)
+      // The artifact really landed there.
+      assert.equal(
+        JSON.parse(await fs.readFile(path.join(expected, 'hypaware.plugin.json'), 'utf8')).name,
+        name
+      )
+    }
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  }
+})
+
+test('runPluginInstall: the refusal reaches the user on stderr with a nonzero exit', async () => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-install-cli-'))
+  try {
+    const victim = path.join(tmpRoot, 'victim')
+    assert.equal(isWithinDir(victim, tmpRoot), true)
+    await fs.mkdir(victim, { recursive: true })
+    await fs.writeFile(path.join(victim, 'keep.txt'), 'precious\n')
+    const pluginDir = await stageLocalPlugin(tmpRoot, 'src', '../../victim')
+
+    let out = ''
+    let err = ''
+    const ctx = /** @type {any} */ ({
+      env: { HYP_HOME: tmpRoot, HYP_CONFIG: '' },
+      cwd: tmpRoot,
+      stdout: { write: (/** @type {string} */ c) => { out += c; return true } },
+      stderr: { write: (/** @type {string} */ c) => { err += c; return true } },
+    })
+
+    const code = await runPluginInstall([pluginDir], ctx)
+    assert.equal(code, 1)
+    assert.match(err, /hyp plugin install: .*refused/)
+    assert.match(err, /\.\.\/\.\.\/victim/)
+    assert.doesNotMatch(out, /^installed /m)
+    assert.deepEqual(await fs.readdir(victim), ['keep.txt'])
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  }
+})
+
+test('installPlugin (git): an escaping manifest name is refused before the prompt', async () => {
+  const { tmpRoot, stateDir, sourceUrl, cleanup } = await buildGitFixture({ name: '../../victim' })
+  try {
+    // `<stateDir>/plugins/../../victim` with stateDir = <tmpRoot>/state.
+    const victim = path.join(tmpRoot, 'victim')
+    assert.equal(isWithinDir(victim, tmpRoot), true)
+    await fs.mkdir(victim, { recursive: true })
+    await fs.writeFile(path.join(victim, 'keep.txt'), 'precious\n')
+
+    let confirmFired = false
+    const result = await installPlugin({
+      rawSource: sourceUrl,
+      stateDir,
+      confirm: async () => {
+        confirmFired = true
+        return { proceed: true, outcome: 'auto_yes' }
+      },
+    })
+
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.equal(result.errorKind, 'manifest_name_unsafe')
+    // The guard runs ahead of the trust prompt, so the user is told the name
+    // is the reason rather than being asked to confirm a doomed install.
+    assert.equal(confirmFired, false)
+    assert.deepEqual(await fs.readdir(victim), ['keep.txt'])
+    assert.equal(await fs.readFile(path.join(victim, 'keep.txt'), 'utf8'), 'precious\n')
+    const lock = await loadLock(stateDir)
+    assert.deepEqual(Object.keys(lock.plugins ?? {}), [])
+  } finally {
+    await cleanup()
+  }
+})
+
+// Issue #2123: containment alone admits a bare `@scope`, which stays inside
+// the plugins root but names the directory every `@scope/*` plugin lives in.
+
+/**
+ * Install `@third-party/alpha` and `@third-party/beta` from local dirs, and
+ * return what a rejected install must leave exactly as it was.
+ *
+ * @param {string} tmpRoot
+ * @param {string} stateDir
+ */
+async function installScopedSiblings(tmpRoot, stateDir) {
+  for (const base of ['alpha', 'beta']) {
+    const dir = await stageLocalPlugin(tmpRoot, `sibling-${base}`, `@third-party/${base}`)
+    const result = await installPlugin({ rawSource: dir, stateDir })
+    assert.equal(result.ok, true, `sibling @third-party/${base} should install`)
+  }
+  const scopeDir = path.join(stateDir, 'plugins', '@third-party')
+  return {
+    scopeDir,
+    snapshot: async () => ({
+      scope: (await fs.readdir(scopeDir)).sort(),
+      alpha: (await fs.readdir(path.join(scopeDir, 'alpha'))).sort(),
+      beta: (await fs.readdir(path.join(scopeDir, 'beta'))).sort(),
+      lock: (await loadLock(stateDir)).plugins,
+    }),
+  }
+}
+
+test('installPlugin (local-dir): a bare scope name is refused and its siblings and lock rows survive', async () => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-install-bare-scope-'))
+  try {
+    const stateDir = path.join(tmpRoot, 'hypaware')
+    const { snapshot } = await installScopedSiblings(tmpRoot, stateDir)
+    const before = await snapshot()
+    assert.deepEqual(before.scope, ['alpha', 'beta'])
+
+    const hostile = await stageLocalPlugin(tmpRoot, 'hostile', '@third-party')
+    const result = await installPlugin({ rawSource: hostile, stateDir })
+
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.equal(result.errorKind, 'manifest_name_unsafe')
+    assert.match(result.message, /refused/)
+    assert.match(result.message, /'@third-party'/)
+    assert.deepEqual(await snapshot(), before)
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  }
+})
+
+test('installPlugin (git): a bare scope name is refused before the prompt and the swap', async () => {
+  const { tmpRoot, stateDir, sourceUrl, cleanup } = await buildGitFixture({ name: '@third-party' })
+  try {
+    const { snapshot } = await installScopedSiblings(tmpRoot, stateDir)
+    const before = await snapshot()
+
+    let confirmFired = false
+    const result = await installPlugin({
+      rawSource: sourceUrl,
+      stateDir,
+      confirm: async () => {
+        confirmFired = true
+        return { proceed: true, outcome: 'auto_yes' }
+      },
+    })
+
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.equal(result.errorKind, 'manifest_name_unsafe')
+    assert.equal(confirmFired, false)
+    assert.deepEqual(await snapshot(), before)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('installPlugin (git): a trailing-separator name is refused before any rename', async () => {
+  const { tmpRoot, stateDir, sourceUrl, cleanup } = await buildGitFixture({ name: 'trail/' })
+  try {
+    const result = await installPlugin({
+      rawSource: sourceUrl,
+      stateDir,
+      confirm: async () => ({ proceed: true, outcome: 'auto_yes' }),
+    })
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.equal(result.errorKind, 'manifest_name_unsafe')
+    await assert.rejects(fs.stat(path.join(stateDir, 'plugins', 'trail')), { code: 'ENOENT' })
+    assert.deepEqual(Object.keys((await loadLock(stateDir)).plugins ?? {}), [])
+  } finally {
+    await cleanup()
+  }
+})
+
+test('removePlugin: a lock row for a bare scope is cleared without deleting the scope directory', async () => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-remove-bare-scope-'))
+  try {
+    const stateDir = path.join(tmpRoot, 'hypaware')
+    const { scopeDir, snapshot } = await installScopedSiblings(tmpRoot, stateDir)
+    const siblings = await snapshot()
+
+    // The row a pre-fix hostile install left behind: keyed by the bare scope,
+    // with its recorded install_dir naming the scope directory. And the same
+    // key with no install_dir, which reaches the fallback join instead.
+    for (const installDir of [scopeDir, undefined]) {
+      const lock = await loadLock(stateDir)
+      await writeLock(stateDir, {
+        ...lock,
+        plugins: {
+          ...lock.plugins,
+          '@third-party': /** @type {any} */ ({ name: '@third-party', install_dir: installDir }),
+        },
+      })
+      const result = await removePlugin({ name: '@third-party', stateDir })
+      assert.equal(result.ok, true)
+      const after = await snapshot()
+      assert.deepEqual(after.scope, siblings.scope, `install_dir=${installDir}`)
+      assert.deepEqual(after.alpha, siblings.alpha)
+      assert.deepEqual(after.beta, siblings.beta)
+      assert.deepEqual(Object.keys(after.lock).sort(), ['@third-party/alpha', '@third-party/beta'])
+    }
+
+    // A valid scoped row still removes its own directory, and only that one.
+    const removed = await removePlugin({ name: '@third-party/alpha', stateDir })
+    assert.equal(removed.ok, true)
+    assert.deepEqual(await fs.readdir(scopeDir), ['beta'])
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  }
+})
+
+test('isInstallName: one segment or @scope/name, each literal and in normal form', () => {
+  for (const name of ['plain-plugin', '@third-party/plugin', '__proto__', '@hypaware/claude', 'a.b']) {
+    assert.equal(isInstallName(name), true, `accept '${name}'`)
+  }
+  const refused = [
+    '', '@third-party', '@', '@/x', '@scope/', '@scope/@x', 'trail/', '/lead', 'sub/dir/deep',
+    'a/../b', '.', '..', './a', 'a\\b', '@scope\\x', '. ', 'a.', 'a ', '@scope./x', 'a\0b',
+  ]
+  for (const name of refused) {
+    assert.equal(isInstallName(name), false, `refuse ${JSON.stringify(name)}`)
+  }
+  assert.equal(isInstallName(/** @type {any} */ (undefined)), false)
+})
+
+test('removePlugin: a hand-edited row that resolves to another plugin deletes nothing', async () => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-remove-foreign-dir-'))
+  try {
+    const stateDir = path.join(tmpRoot, 'hypaware')
+    const root = path.join(stateDir, 'plugins')
+    // Each case: a lock key and the install_dir its row records (undefined
+    // reaches the fallback join). Every one resolves to a valid destination
+    // owned by a different plugin, so judging the directory alone deletes it.
+    const cases = [
+      { key: 'a/../b', installDir: undefined, victim: 'b' },
+      { key: 'a/../b', installDir: path.join(root, 'b'), victim: 'b' },
+      { key: 'trail/', installDir: undefined, victim: 'trail' },
+      { key: '@scope', installDir: path.join(root, 'b'), victim: 'b' },
+      { key: 'valid', installDir: path.join(root, 'b'), victim: 'b' },
+    ]
+    for (const { key, installDir, victim } of cases) {
+      const victimDir = path.join(root, victim)
+      await fs.mkdir(victimDir, { recursive: true })
+      await fs.writeFile(path.join(victimDir, 'hypaware.plugin.json'), '{}')
+      // The victim's own row sits beside the hand-edited one and must survive.
+      const owner = { name: victim, install_dir: victimDir }
+      await writeLock(stateDir, {
+        schema_version: 1,
+        plugins: /** @type {any} */ ({ [victim]: owner, [key]: { name: key, install_dir: installDir } }),
+      })
+      const result = await removePlugin({ name: key, stateDir })
+      const label = `key=${JSON.stringify(key)} install_dir=${installDir}`
+      assert.equal(result.ok, true, label)
+      assert.equal((await fs.stat(path.join(victimDir, 'hypaware.plugin.json'))).isFile(), true, label)
+      assert.deepEqual((await loadLock(stateDir)).plugins, { [victim]: owner }, label)
+    }
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  }
+})
+
+test('isRemovableInstallDir: only an install-name key at its own derived directory', () => {
+  const stateDir = path.join(os.tmpdir(), 'hyp-removable-probe')
+  const root = path.join(stateDir, 'plugins')
+  assert.equal(isRemovableInstallDir(stateDir, 'plain', path.join(root, 'plain')), true)
+  assert.equal(isRemovableInstallDir(stateDir, '@scope/name', path.join(root, '@scope', 'name')), true)
+  assert.equal(isRemovableInstallDir(stateDir, '@scope', path.join(root, '@scope')), false)
+  assert.equal(isRemovableInstallDir(stateDir, '.', root), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'a/b/c', path.join(root, 'a', 'b', 'c')), false)
+  assert.equal(isRemovableInstallDir(stateDir, '../victim', path.join(stateDir, 'victim')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'a/../b', path.join(root, 'b')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'trail/', path.join(root, 'trail')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'plain', path.join(root, 'other')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'plain', path.join(stateDir, 'plain')), false)
+})
+
 /**
  * Build a hermetic file:// bare-repo fixture so the integration tests
  * exercise the same git_fetch code path real installs hit. Returns the
- * stateDir to install into, the file:// URL, the commit SHA, and a
- * cleanup hook for the temp tree.
+ * temp root, the stateDir to install into, the file:// URL, the commit
+ * SHA, and a cleanup hook for the temp tree.
  *
+ * @param {{ name?: string }} [opts] plugin name to commit in the manifest
  * @returns {Promise<{
+ *   tmpRoot: string,
  *   stateDir: string,
  *   sourceUrl: string,
  *   commitSha: string,
  *   cleanup: () => Promise<void>,
  * }>}
  */
-async function buildGitFixture() {
+async function buildGitFixture(opts = {}) {
+  const pluginName = opts.name ?? '@hypaware/confirm-fixture'
   const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-confirm-git-'))
   const fixtureDir = path.join(tmpRoot, 'fixture')
   await fs.mkdir(fixtureDir, { recursive: true })
@@ -495,7 +871,7 @@ async function buildGitFixture() {
     path.join(fixtureDir, 'hypaware.plugin.json'),
     JSON.stringify({
       schema_version: 1,
-      name: '@hypaware/confirm-fixture',
+      name: pluginName,
       version: '0.1.0',
       hypaware_api: '^1.0.0',
       runtime: 'node',
@@ -522,6 +898,7 @@ async function buildGitFixture() {
   await runGit(['push', '--quiet', 'origin', 'main'], { cwd: workdir })
 
   return {
+    tmpRoot,
     stateDir: path.join(tmpRoot, 'state'),
     sourceUrl: `file://${bareRepoDir}`,
     commitSha: sha,

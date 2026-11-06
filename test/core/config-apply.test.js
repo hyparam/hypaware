@@ -118,10 +118,16 @@ test('stage applies a document: slot persisted, pointer flipped, etag staged, pr
   assert.deepEqual(restarts, ['config_applied'])
 
   // The active-slot pointer (inside config-control/, not the user config)
-  // is now a symlink resolving to the new doc.
+  // now resolves to the new doc: a symlink on POSIX, a pointer file holding
+  // the slot basename on win32 (where file symlinks need privilege).
   const pointer = path.join(stateRoot, 'config-control', 'active')
   const stat = await fsp.lstat(pointer)
-  assert.ok(stat.isSymbolicLink())
+  if (process.platform === 'win32') {
+    assert.ok(stat.isFile())
+    assert.equal((await fsp.readFile(pointer, 'utf8')).trim(), 'config.b.json')
+  } else {
+    assert.ok(stat.isSymbolicLink())
+  }
   assert.deepEqual(readCentralLayer(stateRoot).plugins, REMOTE_CONFIG.plugins)
 
   // The seed was preserved as the rollback target, and retired from its
@@ -362,6 +368,19 @@ test('chained applies alternate slots and roll back one revision', async () => {
   assert.equal(rolled.lastRollback?.etag, 'etag-2')
   assert.equal(rolled.lastRollback?.reason, 'probation_expired')
   assert.equal(rolled.badEtag?.etag, 'etag-2')
+
+  // A newer revision that survives probation retires the stale rollback
+  // record; the bad etag stays as the re-apply backoff.
+  const fourth = makeControl({ stateRoot, now: () => future })
+  fourth.control.attachApplyDeps(makeDeps())
+  const doc3 = { ...REMOTE_CONFIG, plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/local-fs' }] }
+  await fourth.control.stage(doc3, 'etag-3')
+  assert.equal((await fourth.control.status()).lastRollback?.etag, 'etag-2')
+  fourth.control.confirmPoll()
+  const confirmed = await fourth.control.status()
+  assert.equal(confirmed.lastRollback, null)
+  assert.equal(confirmed.badEtag?.etag, 'etag-2')
+  assert.equal(confirmed.runningEtag, 'etag-3')
 })
 
 test('evaluateAtBoot rolls an expired first apply back onto the seed', async () => {

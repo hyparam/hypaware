@@ -8,6 +8,7 @@ import net from 'node:net'
 import path from 'node:path'
 import test from 'node:test'
 
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { createStartOpenCodeSource } from '../../hypaware-core/plugins-workspace/opencode/src/listener.js'
 
 function makeStorage() {
@@ -77,14 +78,20 @@ function snapshot(id, directory, entrypoint = 'cli') {
   }
 }
 
-async function startListener() {
+async function startListener(damagedExclusions = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-opencode-listener-'))
   const policyPath = path.join(root, 'usage-policy', 'local-only.json')
   const storage = makeStorage()
   /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
   const logs = []
   const sink = (/** @type {string} */ event, /** @type {Record<string, unknown>} */ fields) => logs.push({ event, fields })
-  const ignoredSessions = new Set()
+  const ignoredSessions = new SessionIgnoreSet(root)
+  if (damagedExclusions) {
+    ignoredSessions.add('private')
+    const marker = path.join(ignoredSessions.directory, (await fs.readdir(ignoredSessions.directory))[0])
+    await fs.writeFile(marker, 'broken json')
+    assert.throws(() => ignoredSessions.refresh())
+  }
   const start = createStartOpenCodeSource({ localOnlyListPath: policyPath, ignoredSessions })
   const source = await start(/** @type {any} */ ({
     config: { listen_port: 0 },
@@ -180,7 +187,7 @@ test('OpenCode listener writes text and tool rows, converges replays, and publis
   }
 })
 
-test('OpenCode listener applies .hypignore, machine policy, local-only, session ignore, and missing-cwd gates before writes', async () => {
+test('OpenCode 1 and 2 listeners apply privacy gates before writing the session directory', async () => {
   const listener = await startListener()
   const dotIgnored = path.join(listener.root, 'dot-ignored')
   const privateDir = path.join(listener.root, 'machine-private')
@@ -205,21 +212,32 @@ test('OpenCode listener applies .hypignore, machine policy, local-only, session 
     })
     assert.equal(ignoredControl.status, 200)
 
-    assert.equal((await listener.post(snapshot('ses_dot', dotIgnored))).status, 202)
-    assert.equal((await listener.post(snapshot('ses_private', privateDir))).status, 202)
-    assert.equal((await listener.post(snapshot('ses_optout', localOnly))).status, 202)
-    assert.equal((await listener.post(snapshot('ses_missing', undefined))).status, 202)
-    assert.equal((await listener.post(snapshot('ses_local', localOnly, 'unknown'))).status, 200)
+    for (const v2 of [false, true]) {
+      const body = (id, cwd, entrypoint = 'cli') => {
+        const raw = /** @type {any} */ (snapshot(id, cwd, entrypoint))
+        if (v2) {
+          raw.session.location = { directory: raw.session.directory }
+          delete raw.session.directory
+          raw.messages = [{ id: `${id}-user`, type: 'user', text: 'V2 fixture', time: { created: 1000 } }]
+        }
+        return raw
+      }
+      assert.equal((await listener.post(body('ses_dot', dotIgnored))).status, 202)
+      assert.equal((await listener.post(body('ses_private', privateDir))).status, 202)
+      assert.equal((await listener.post(body('ses_optout', localOnly))).status, 202)
+      assert.equal((await listener.post(body('ses_missing', undefined))).status, 202)
+      assert.equal((await listener.post(body(`ses_local${v2 ? '_v2' : ''}`, localOnly, 'unknown'))).status, 200)
+    }
 
-    assert.equal(listener.storage.appended.length, 3)
-    assert.equal(listener.storage.appended.every((row) => row.session_id === 'ses_local'), true)
+    assert.equal(listener.storage.appended.length, 4)
+    assert.equal(listener.storage.appended.every((row) => String(row.session_id).startsWith('ses_local')), true)
     assert.equal(listener.storage.appended.every((row) => row.cwd === localOnly), true)
 
     const status = await listener.source.status?.()
-    assert.equal(status?.details?.policy_drops, 2)
-    assert.equal(status?.details?.session_drops, 1)
-    assert.equal(status?.details?.missing_cwd, 1)
-    assert.equal(status?.details?.unknown_entrypoints, 1)
+    assert.equal(status?.details?.policy_drops, 4)
+    assert.equal(status?.details?.session_drops, 2)
+    assert.equal(status?.details?.missing_cwd, 2)
+    assert.equal(status?.details?.unknown_entrypoints, 2)
     assert.equal(status?.details?.ignored_sessions, 1)
     assert.equal(status?.details?.store_activity_gaps, 0)
   } finally {
@@ -676,17 +694,149 @@ test('a rejected snapshot body is drained only up to a cap, while a small one st
       method: 'POST',
       headers: { 'content-type': 'text/plain' },
       body: overCap,
+    }).catch((err) => {
+      // Winsock discards the queued 415 when the reset lands, so on win32
+      // this sender can meet ECONNRESET instead of the answer; the cap is
+      // measured on the listener's own socket below either way.
+      if (process.platform === 'win32') return undefined
+      throw err
     })
-    assert.equal(capped.status, 415)
-    await capped.text()
+    if (capped) {
+      assert.equal(capped.status, 415)
+      await capped.text()
+    }
     const [served] = serverSockets
     assert.ok(served, 'the rejected upload opened no server connection to measure')
     if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+    // On win32 the reset waits out a grace behind the flushed answer (see
+    // `winsockSoftClose` in `src/core/util/reject_body.js`), so the read
+    // settles at the backpressure figure, one 64 KiB socket read higher. The
+    // bound there still fails an unbounded read of this 262144-byte body.
     assert.ok(
-      served.bytesRead < 3 * 64 * 1024,
+      served.bytesRead < (process.platform === 'win32' ? 4 : 3) * 64 * 1024,
       `the listener read ${served.bytesRead} of the ${overCap.length} bytes it refused`
     )
   } finally {
     await listener.cleanup()
   }
+})
+
+
+/**
+ * Send raw bytes to the listener and collect what comes back until the
+ * connection closes or `ms` passes, keeping the body flowing from `pump`.
+ *
+ * @param {string} endpoint
+ * @param {string} head
+ * @param {{ chunk?: Buffer, ms?: number }} [opts]
+ */
+function rawExchange(endpoint, head, opts = {}) {
+  return new Promise((resolve) => {
+    const socket = net.connect(Number(new URL(endpoint).port), '127.0.0.1')
+    let received = ''
+    let closed = false
+    const timer = setTimeout(() => { socket.destroy(); finish() }, opts.ms ?? 1000)
+    function finish() {
+      clearTimeout(timer)
+      resolve({ received, closed })
+    }
+    function pump() {
+      const chunk = opts.chunk
+      if (!chunk) return
+      const frame = `${chunk.length.toString(16)}\r\n`
+      while (!socket.destroyed) {
+        if (!socket.write(frame) || !socket.write(chunk) || !socket.write('\r\n')) {
+          socket.once('drain', pump)
+          return
+        }
+      }
+    }
+    socket.on('connect', () => {
+      socket.write(head)
+      pump()
+    })
+    socket.on('data', (data) => { received += data.toString('utf8') })
+    socket.on('error', () => {})
+    socket.on('close', () => {
+      closed = true
+      finish()
+    })
+  })
+}
+
+// GET / reads no body, but answering without touching the request leaves
+// Node's `_dump()` fallback reading whatever the sender attaches to EOF
+// (issue #1344). The route discards a body under the shared drain cap and
+// refuses one declared past it.
+test('the readiness route bounds the body it discards and keeps a bodiless probe reusable', async () => {
+  /** @type {net.Socket[]} */
+  const serverSockets = []
+  const createServer = http.createServer
+  http.createServer = (/** @type {any[]} */ ...args) => {
+    const server = createServer(...args)
+    server.on('connection', (socket) => serverSockets.push(socket))
+    return server
+  }
+  const listener = await startListener().finally(() => {
+    http.createServer = createServer
+  })
+  try {
+    // A bodiless probe is unchanged: 200, the same shape, and a connection
+    // left open for the next request.
+    const probe = /** @type {{ received: string, closed: boolean }} */ (
+      await rawExchange(listener.endpoint, 'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n', { ms: 300 })
+    )
+    assert.match(probe.received, /^HTTP\/1\.1 200 /)
+    assert.doesNotMatch(probe.received, /\r\nconnection: close\r\n/i)
+    assert.match(probe.received, /"status":"ready"/)
+    assert.equal(probe.closed, false, 'a bodiless readiness probe closed its connection')
+
+    // An endless chunked body is cut at the cap rather than read to EOF.
+    serverSockets.length = 0
+    const endless = /** @type {{ received: string, closed: boolean }} */ (
+      await rawExchange(
+        listener.endpoint,
+        'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\ntransfer-encoding: chunked\r\n\r\n',
+        { chunk: Buffer.alloc(16 * 1024, 'x'), ms: 3000 }
+      )
+    )
+    assert.equal(endless.closed, true, 'the listener kept reading an endless readiness body')
+    const [served] = serverSockets
+    assert.ok(served, 'the chunked probe opened no server connection to measure')
+    assert.ok(served.bytesRead < 3 * 64 * 1024, `the listener read ${served.bytesRead} bytes of a readiness body`)
+    if (endless.received) {
+      assert.match(endless.received, /^HTTP\/1\.1 200 /)
+      assert.match(endless.received, /\r\nconnection: close\r\n/i)
+    }
+
+    // A body declared past the cap is refused with a 413 the caller can read
+    // (on a raw socket, since fetch will not send a GET body).
+    const oversized = /** @type {{ received: string, closed: boolean }} */ (
+      await rawExchange(
+        listener.endpoint,
+        `GET / HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-length: ${1024 * 1024}\r\n\r\n`,
+        { ms: 1000 }
+      )
+    )
+    assert.match(oversized.received, /^HTTP\/1\.1 413 /)
+    assert.match(oversized.received, /\r\nconnection: close\r\n/i)
+    assert.match(oversized.received, /request body too large/)
+  } finally {
+    await listener.cleanup()
+  }
+})
+
+test('invalid exclusions disable OpenCode capture while its listener remains available', async () => {
+  const env = await startListener(true)
+  try {
+    for (const id of ['private', 'other', undefined]) {
+      const body = /** @type {any} */ (snapshot('private', env.root))
+      body.session.id = id
+      const res = await env.post(body)
+      assert.equal(res.status, 202)
+      assert.equal(/** @type {any} */ (await res.json()).status, 'skipped')
+    }
+    assert.deepEqual(env.storage.appended, [])
+    assert.match((await env.source.status?.())?.lastError ?? '', /capture is disabled/)
+  } finally { await env.cleanup() }
 })

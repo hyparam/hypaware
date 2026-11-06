@@ -113,7 +113,7 @@ test('validateManifest rejects a detect probe with no recognized variant', () =>
   assert.equal(result.ok, false)
   assert.equal(
     result.message,
-    'contributes.picker detect must set exactly one of settings_file, app_bundle, path'
+    'contributes.picker detect must set exactly one of settings_file, app_bundle, path, vscode_extension, project_dependencies'
   )
 })
 
@@ -124,7 +124,7 @@ test('validateManifest rejects a detect probe with more than one variant', () =>
   assert.equal(result.ok, false)
   assert.equal(
     result.message,
-    'contributes.picker detect must set exactly one of settings_file, app_bundle, path'
+    'contributes.picker detect must set exactly one of settings_file, app_bundle, path, vscode_extension, project_dependencies'
   )
 })
 
@@ -132,6 +132,15 @@ test('validateManifest rejects a non-string probe path', () => {
   const result = validateManifest(baseManifest({ picker: [{ name: 'x', label: 'x', detect: { path: 5 } }] }))
   assert.equal(result.ok, false)
   assert.equal(result.message, 'contributes.picker detect.path must be a non-empty string')
+})
+
+test('validateManifest validates extension and project dependency probe data', () => {
+  for (const detect of [{ vscode_extension: 'github.copilot-chat' }, { project_dependencies: { npm: '@langchain/langgraph', python: 'langgraph' } }]) {
+    assert.equal(validateManifest(baseManifest({ picker: [{ name: 'x', label: 'x', detect }] })).ok, true)
+  }
+  for (const project_dependencies of [{}, [], { npm: '' }, { python: 1 }, { arbitrary: 'langgraph' }]) {
+    assert.equal(validateManifest(baseManifest({ picker: [{ name: 'x', label: 'x', detect: { project_dependencies } }] })).ok, false)
+  }
 })
 
 test('validateManifest rejects a non-boolean needs_setup', () => {

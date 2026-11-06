@@ -2,6 +2,8 @@
 
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+import { randomUUID } from 'node:crypto'
 
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
@@ -17,13 +19,14 @@ import {
   scanRowsFromTable,
   tableExists,
 } from '../../../../src/core/cache/iceberg/store.js'
-import { discoverCachePartitions, tryReadCursorSync, writeCursor } from '../../../../src/core/cache/partition.js'
+import { discoverCachePartitions, tryReadCursorSync, withPartitionMutationLock, writeCursor } from '../../../../src/core/cache/partition.js'
+import { isConfirmedSymlink } from '../../../../src/core/cache/paths.js'
 
-import { EDGE_COLUMNS, EDGE_DATASET, NODE_COLUMNS, NODE_DATASET } from './datasets.js'
+import { EDGE_COLUMNS, EDGE_DATASET, graphDatasetRegistration, graphTablePath, NODE_COLUMNS, NODE_DATASET } from './datasets.js'
 import { firstSeenTime, mergeRow } from './project.js'
 
 /**
- * @import { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AppendOptions, ExtendedQueryStorageService, PartitionCursor } from '../../../../src/core/cache/types.js'
  * @import { PartitionSpec } from 'icebird/src/types.js'
  * @import { GraphRow, SkippedPartition } from './types.js'
@@ -119,6 +122,9 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
   const liveByPart = new Map()
   for (const part of partitions) {
     if (part.legacy) continue // bare table without a cursor; not a graph source-table
+    // Named organizations have separate graph identity namespaces. The local
+    // compactor must never fold them into its unscoped duplicate map.
+    if (Object.hasOwn(part.partition, 'org')) continue
     const cursor = tryReadCursorSync(part.path)
     if (!cursor) {
       partitionsSkipped.push({ path: part.path, reason: 'unreadable-cursor' })
@@ -271,10 +277,9 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
  * cursor that can no longer be positively read) aborts the swap: the
  * staged replacement table is removed and the partition is reported
  * skipped, because retiring the old generation at that point would lose
- * the rows appended during the rewrite window. (A small write window
- * between the re-read and the cursor write remains; closing it needs a
- * partition-level lock, which graph compaction doesn't take. Reruns are
- * cheap and duplicates are benign.)
+ * the rows appended during the rewrite window. Automated refresh holds the
+ * partition mutation guard across its read and this replacement. Manual
+ * compaction retains its conditional-swap contract and remaining write window.
  *
  * @param {{
  *   partitionDir: string
@@ -289,7 +294,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
  * @ref LLP 0023#graph-compaction [constrained-by]: conditional swap: on any cursor change, skip and report; never retire
  */
 export async function rewritePartition({ partitionDir, idCol, dropIds, extraRows, expectedCursor, fallbackColumns, sortOrder }) {
-  const oldTableDirName = expectedCursor.tableDir ?? 'table'
+  const oldTableDirName = graphGenerationDir(expectedCursor)
   const oldTableDir = path.join(partitionDir, oldTableDirName)
 
   /** @type {ColumnSpec[]} */
@@ -312,7 +317,7 @@ export async function rewritePartition({ partitionDir, idCol, dropIds, extraRows
   const sortableColumns = new Set(columns.map((c) => c.name))
   const effectiveSortOrder = sortOrder.filter((s) => sortableColumns.has(s.column))
 
-  const newTableDirName = `table-${Date.now()}`
+  const newTableDirName = `table-${Date.now()}-${randomUUID()}`
   const newTableDir = path.join(partitionDir, newTableDirName)
   /** @type {AppendOptions} */
   const appendOpts = {
@@ -358,8 +363,8 @@ export async function rewritePartition({ partitionDir, idCol, dropIds, extraRows
   if (
     current.epoch !== expectedCursor.epoch ||
     current.rowCount !== expectedCursor.rowCount ||
-    (current.tableDir ?? 'table') !== oldTableDirName ||
-    current.layout !== 'source-table'
+    current.tableDir !== expectedCursor.tableDir ||
+    current.layout !== expectedCursor.layout
   ) {
     await removeStagedTable(newTableDir)
     return { status: 'skipped', reason: 'concurrent-write' }
@@ -378,6 +383,15 @@ export async function rewritePartition({ partitionDir, idCol, dropIds, extraRows
   })
   await fsPromises.writeFile(path.join(oldTableDir, '.retired'), new Date().toISOString(), 'utf8')
   return { status: 'rewritten', dropped }
+}
+
+/** @param {PartitionCursor} cursor @returns {string} */
+function graphGenerationDir(cursor) {
+  if (cursor.layout === 'source-table') return cursor.tableDir ?? 'table'
+  // The cursor reader validates an explicit tableDir instead of the default
+  // epoch path. Never open a different generation than the gate validated.
+  if (cursor.tableDir !== undefined) throw new Error('graph refresh: ambiguous epoch cursor')
+  return `epoch=${cursor.epoch}`
 }
 
 /**
@@ -411,4 +425,119 @@ function compareDupRows(a, b) {
   const ra = typeof a.row._hyp_cache_row_id === 'string' ? a.row._hyp_cache_row_id : ''
   const rb = typeof b.row._hyp_cache_row_id === 'string' ? b.row._hyp_cache_row_id : ''
   return compareStrings(ra, rb)
+}
+
+/**
+ * Replace only re-derived identities from the same projector. The input rows
+ * have already been fully projected before any generation is touched. A
+ * concurrent append aborts the affected swap; retry is safe after a partial run.
+ * @param {{ storage: ExtendedQueryStorageService, query: QueryRegistry, config?: HypAwareV2Config, dataset: 'node' | 'edge', rows: GraphRow[], signal?: AbortSignal, mergeEvidence?: boolean }} args
+ * @returns {Promise<void>}
+ * @ref LLP 0428#refresh [implements]: explicit refresh reuses conditional generation replacement.
+ */
+export async function refreshGraphRows({ storage, query, config, dataset, rows, signal, mergeEvidence = false }) {
+  const idCol = ID_COLUMNS[dataset]
+  const byId = new Map(rows.map(row => [row[idCol], row]))
+  // Hosts can physically scope the registry to one organization's graph while
+  // sharing cacheRoot. The same registry that scopes dedup must scope rewrites.
+  const registration = query.getDataset(dataset)
+  if (!registration) throw new Error(`graph refresh: missing dataset ${dataset}`)
+  const parts = await registration.discoverPartitions({ config: config ?? { version: 2, plugins: [] }, scope: { limit: 0 }, cacheDir: storage.cacheRoot })
+  // The built-in registry permits whole-cache reads for dedup. That does not
+  // authorize its unscoped writer to replace named organizations' rows.
+  const unscoped = registration.discoverPartitions === graphDatasetRegistration(dataset).discoverPartitions
+  const paths = new Set(parts.filter(part => !unscoped || !Object.hasOwn(part.partition, 'org')).map(part => part.tablePath))
+  for (const partitionDir of paths) {
+    signal?.throwIfAborted()
+    if (!partitionDir) throw new Error('graph refresh: partition has no local table path')
+    assertGraphPartitionPath(storage.cacheRoot, dataset, partitionDir)
+    // @ref LLP 0417#cache-mutation-guard [implements]: guard the evidence read and replacement so purge/append cannot create a cursor ABA
+    await withPartitionMutationLock(partitionDir, async () => {
+      const cursor = tryReadCursorSync(partitionDir)
+      if (!cursor) {
+        try {
+          await fsPromises.access(path.join(partitionDir, 'cursor.json'))
+        } catch (err) {
+          // Only the actual spool label may lack a cursor. A selected graph
+          // partition with a missing cursor must not masquerade as an empty spool.
+          if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT' && partitionDir === graphTablePath(storage, dataset)) {
+            const entries = await fsPromises.readdir(partitionDir).catch(error => {
+              if (error.code === 'ENOENT') return []
+              throw error
+            })
+            if (entries.every(name => name === '_hypaware_spool')) return
+          }
+        }
+        throw new Error(`graph refresh: unreadable partition ${partitionDir}`)
+      }
+      // The server's direct-partition append also creates valid epoch-layout
+      // graphs. A changed row promotes that generation through the same swap.
+      const tableDir = path.join(partitionDir, graphGenerationDir(cursor))
+      if (!tableExists(tableDir)) throw new Error(`graph refresh: missing table in ${partitionDir}`)
+      const replacements = new Map()
+      const foreign = new Set()
+      const folded = new Map()
+      for await (const existing of scanRowsFromTable(tableDir)) {
+        signal?.throwIfAborted()
+        let fresh = byId.get(existing[idCol])
+        if (!fresh) continue
+        const id = String(existing[idCol])
+        if (fresh.projector !== existing.projector || fresh.source_dataset !== existing.source_dataset) {
+          foreign.add(id)
+          continue
+        }
+        if (mergeEvidence) {
+          // @ref LLP 0564#incremental-evidence: partial scans add evidence, never retract it.
+          const merged = { ...existing }
+          for (const key of ['props', 'source_keys']) {
+            if (typeof merged[key] === 'string') merged[key] = JSON.parse(merged[key])
+          }
+          // Copies awaiting compaction are all dropped below, so fold each into one row.
+          mergeRow(merged, folded.get(id) ?? fresh)
+          folded.set(id, merged)
+          fresh = merged
+        }
+        // Avoid a generation rewrite when this projection is already current.
+        const same = Object.keys(fresh).every(key => {
+          let value = existing[key]
+          if ((key === 'props' || key === 'source_keys') && typeof value === 'string') {
+            try { value = JSON.parse(value) } catch { return false }
+          }
+          return isDeepStrictEqual(value, fresh[key])
+            || (key === 'first_seen' && firstSeenTime(value) === firstSeenTime(fresh[key]))
+        })
+        if (!same || replacements.has(id)) replacements.set(id, { ...existing, ...fresh })
+      }
+      for (const id of foreign) {
+        if (replacements.has(id)) throw new Error('graph refresh: shared projector identity requires a full graph rebuild')
+      }
+      if (!replacements.size) return
+      signal?.throwIfAborted()
+      const result = await rewritePartition({ partitionDir, idCol,
+        dropIds: new Set(replacements.keys()), extraRows: [...replacements.values()],
+        expectedCursor: cursor, fallbackColumns: FALLBACK_COLUMNS[dataset], sortOrder: SORT_ORDERS[dataset] })
+      if (result.status !== 'rewritten') throw new Error(`graph refresh: ${result.reason}; retry when graph writers are idle`)
+    })
+  }
+}
+
+/**
+ * @param {string} cacheRoot
+ * @param {'node' | 'edge'} dataset
+ * @param {string} partitionDir
+ * @ref LLP 0326#one-level-down [constrained-by]: registry paths retain filesystem discovery's refusal to descend dataset-tree symlinks
+ */
+function assertGraphPartitionPath(cacheRoot, dataset, partitionDir) {
+  const root = path.resolve(cacheRoot)
+  const segments = path.relative(root, path.resolve(partitionDir)).split(path.sep)
+  if (segments.length < 3 || segments[0] !== 'datasets' || segments[1] !== dataset || segments.includes('..')) {
+    throw new Error('graph refresh: partition outside the dataset root')
+  }
+  // Preserve supported links above the cache root, while retaining the old
+  // directory walk's refusal to descend links inside the datasets tree.
+  let current = root
+  for (const segment of segments) {
+    current = path.join(current, segment)
+    if (isConfirmedSymlink(current)) throw new Error('graph refresh: symlinked partition path')
+  }
 }

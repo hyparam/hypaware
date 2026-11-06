@@ -24,6 +24,7 @@ import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { createVerbRegistry } from '../../src/core/registry/verbs.js'
 import { Attr } from '../../src/core/observability/attrs.js'
 import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
+import { queryGrepVerb } from '../../hypaware-core/plugins-workspace/grep/src/grep_verb.js'
 import { graphNeighborsVerb } from '../../hypaware-core/plugins-workspace/context-graph/src/verb.js'
 
 /**
@@ -233,14 +234,18 @@ test('the shipped verb set is advertised exactly as the plain property read did'
   const verbs = createVerbRegistry()
   for (const verb of CORE_VERBS) verbs.register(verb)
   verbs.register(graphNeighborsVerb)
+  verbs.register(queryGrepVerb)
 
   const tools = await toolsList(mcp(verbs))
 
-  // What the pre-guard `tools/list` built, from the same registrations.
+  // What the pre-guard `tools/list` built, from the same registrations. Every
+  // shipped verb is `read`, so each carries the read hint.
   const expected = verbs.list().map((verb) => ({
     name: verb.tool,
+    title: verb.title ?? verb.tool,
     description: verb.summary,
     inputSchema: toJsonSchema(verb.inputSchema),
+    annotations: { title: verb.title ?? verb.tool, readOnlyHint: true },
   }))
   assert.deepEqual(tools.map((/** @type {any} */ t) => t.name), ['graph_neighbors', 'grep_search', 'query_sql'])
   assert.equal(JSON.stringify(tools), JSON.stringify(expected))

@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0446 (remove backfill planning; use import dry runs)
 **Systems:** Plugins, Backfill, Config
 **Author:** Brendan / Claude
 **Date:** 2026-07-27

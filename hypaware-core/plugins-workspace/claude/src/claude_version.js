@@ -3,6 +3,10 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
+/**
+ * @import { ClientPreflight } from '../../../../hypaware-plugin-kernel-types.js'
+ */
+
 const execFileAsync = promisify(execFile)
 
 /**
@@ -22,9 +26,11 @@ const execFileAsync = promisify(execFile)
 export const CLAUDE_OTEL_MIN_VERSION = '2.1.193'
 
 /**
- * First release that carries `tool_source` on tool-decision events. Above the
- * floor, so it never blocks an attach: a machine between the two captures
- * everything except which surface approved a tool call.
+ * First Claude Code release whose telemetry carries tool-decision detail
+ * (`tool_source`). Below it capture works and that column stays null, so the
+ * setup preflight warns rather than refuses.
+ *
+ * @ref LLP 0258#version-floor: the second, softer floor beside the attach floor
  */
 export const CLAUDE_TOOL_SOURCE_MIN_VERSION = '2.1.214'
 
@@ -135,4 +141,30 @@ export async function resolveClaudeCodeVersion(env, opts) {
     if (parsed !== undefined) return parsed
   }
   return detectClaudeCodeVersion(opts)
+}
+
+/**
+ * The setup preflight's verdict on one Claude Code version: a refusal below
+ * the attach floor, a warning between the two floors, and nothing at or
+ * above both or when the version is unknown. Pure, so every band is testable
+ * without a binary; the caller resolves the version once.
+ *
+ * @ref LLP 0532#verdict [implements]: refuse below the attach floor, warn below the tool-source floor, unknown proceeds
+ * @param {string | undefined} version
+ * @returns {ClientPreflight}
+ */
+export function claudeVersionPreflight(version) {
+  if (isBelowClaudeVersion(version, CLAUDE_OTEL_MIN_VERSION)) {
+    return {
+      refuse: `Claude Code ${String(version)} is older than ${CLAUDE_OTEL_MIN_VERSION}, the first release HypAware can record. ` +
+        `Setup will not attach Claude Code; your other choices continue. Run '${CLAUDE_UPDATE_HINT}', then 'hyp client attach claude'.`,
+    }
+  }
+  if (isBelowClaudeVersion(version, CLAUDE_TOOL_SOURCE_MIN_VERSION)) {
+    return {
+      warn: `Claude Code ${String(version)} is recorded, but tool-decision detail needs ${CLAUDE_TOOL_SOURCE_MIN_VERSION} or newer. ` +
+        `Run '${CLAUDE_UPDATE_HINT}' to get it.`,
+    }
+  }
+  return {}
 }

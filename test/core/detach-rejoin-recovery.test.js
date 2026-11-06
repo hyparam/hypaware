@@ -369,7 +369,7 @@ test("detach of a probe-LESS client does NOT clear its marker (mirrors reverse()
   }
 })
 
-test('detach still succeeds when the marker retraction throws (best-effort, not a detach failure)', async () => {
+test('detach fails, naming the marker, when the marker retraction throws (LLP 0523)', async () => {
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-detach-marker-throw-'))
   const stateRoot = path.join(home, 'hypaware')
   const settingsPath = path.join(home, '.claude', 'settings.json')
@@ -388,9 +388,9 @@ test('detach still succeeds when the marker retraction throws (best-effort, not 
     )
 
     // Force clearClientActionMarker to throw: a *directory* where the marker
-    // file belongs makes its readFileSync fail (EISDIR). Any throw from the
-    // retraction must be swallowed - without the best-effort try/catch this
-    // would bubble up and fail the detach with exit 1.
+    // file belongs makes its readFileSync fail (EISDIR). A marker the detach
+    // cannot retract would make a later attach skip, so the detach reports it
+    // as a failure instead of swallowing it.
     fs.mkdirSync(path.join(stateRoot, 'config-control', 'client-actions.json'), { recursive: true })
 
     const { registry, kernel } = fakeKernel()
@@ -403,14 +403,12 @@ test('detach still succeeds when the marker retraction throws (best-effort, not 
       kernel,
       env: { ...process.env, HOME: home, HYP_HOME: home, CLAUDE_HOME: '' },
     })
-    // Exit 0 proves the best-effort catch swallowed the real throw; the detach
-    // output and the reversed settings prove execution continued past it.
-    assert.equal(code, 0, stderr.text())
-    const out = JSON.parse(stdout.text())
-    assert.equal(out.status, 'ok')
-    assert.equal(out.changed, true, 'the settings reversal still landed')
+    // The detach exits nonzero and names the marker, so the operator knows to
+    // re-run it; the settings reversal before the throw still landed.
+    assert.equal(code, 1, stderr.text())
+    assert.match(stderr.text(), /attach marker could not be cleared/)
     const afterDetach = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
-    assert.equal('_hypaware' in afterDetach, false, 'detach stripped the settings marker despite the marker-store throw')
+    assert.equal('_hypaware' in afterDetach, false, 'detach stripped the settings marker before the marker-store throw')
   } finally {
     await fsp.rm(home, { recursive: true, force: true })
   }

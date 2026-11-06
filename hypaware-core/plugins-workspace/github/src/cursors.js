@@ -3,6 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { withFileLock } from '../../../../src/core/util/file_lock.js'
 
 /**
  * Per-repo capture cursors, persisted as a single sidecar JSON under the
@@ -35,7 +36,16 @@ export function readCursors(stateDir) {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
     if (parsed && parsed.schema_version === SCHEMA_VERSION && parsed.repos && typeof parsed.repos === 'object') {
       const nextRepo = typeof parsed.next_repo === 'string' && parsed.next_repo !== '' ? parsed.next_repo : undefined
-      return { schema_version: SCHEMA_VERSION, repos: readRepos(parsed.repos), ...(nextRepo ? { next_repo: nextRepo } : {}) }
+      // Absent rather than false on a sidecar written before the verdict had a
+      // home: a reader that cannot tell those apart reads every pre-upgrade
+      // continuation as finished.
+      // @ref LLP 0438#readers [implements]: an unrecorded verdict is distinguishable from a negative one
+      return {
+        schema_version: SCHEMA_VERSION,
+        repos: readRepos(parsed.repos),
+        ...(nextRepo ? { next_repo: nextRepo } : {}),
+        ...(typeof parsed.pending === 'boolean' ? { pending: parsed.pending } : {}),
+      }
     }
   } catch {
     // Missing, malformed, or an older schema - start clean (a fresh poll
@@ -45,15 +55,68 @@ export function readCursors(stateDir) {
 }
 
 /**
- * @param {string} stateDir
+ * Repos carrying a one-time-import authorization. A caller passes the set it
+ * read back to {@link writeCursors}, which is what distinguishes an
+ * authorization that arrived while it worked from one it has since completed
+ * or retired itself.
+ *
  * @param {CursorState} state
+ * @returns {Set<string>}
  */
-export function writeCursors(stateDir, state) {
+export function authorizedImports(state) {
+  /** @type {Set<string>} */
+  const repos = new Set()
+  for (const [repo, cursor] of Object.entries(state.repos)) {
+    if (cursor.one_time_import === true) repos.add(repo)
+  }
+  return repos
+}
+
+/**
+ * Commit the sidecar, adopting under the lock any one-time-import
+ * authorization that landed while the caller worked.
+ *
+ * The file is rewritten whole, so overlapping writers lose each other's edits,
+ * and a capture tick can span `CAPTURE_REQUEST_LIMIT` requests.
+ * `hyp github backfill` commits its authorization before any network work
+ * precisely so it is durable; without the read-back a tick already in flight
+ * closes over it with a stale snapshot, and nothing resumes an import the
+ * command has already reported as bounded work remaining.
+ *
+ * A repo carrying an authorization absent from `known` is adopted whole,
+ * because authorizing resets that repo's cursor to fetch full history: keeping
+ * this caller's advanced cursor would leave a marker that polls rather than
+ * imports. A repo in `known` is this caller's own to complete or retire, so
+ * its state wins and a finished import is not resurrected. Cursor advancement
+ * outside that window still follows the last writer, as before.
+ *
+ * A caller with no verdict of its own (`state.pending === undefined`) takes
+ * whatever verdict is already on disk, newer or not, rather than committing an
+ * absence that reads as "no backlog".
+ *
+ * @ref LLP 0409#one-time-imports [implements]: an authorization written before the network work survives a tick already in flight
+ *
+ * @param {string} stateDir
+ * @param {CursorState} state  mutated in place by an adoption, so the caller's snapshot matches disk
+ * @param {Set<string>} [known] authorizations the caller read before it worked
+ * @returns {Promise<void>}
+ */
+export async function writeCursors(stateDir, state, known) {
   fs.mkdirSync(stateDir, { recursive: true })
   const file = path.join(stateDir, STATE_FILE)
-  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8')
-  fs.renameSync(tmp, file)
+  await withFileLock(`${file}.lock`, async () => {
+    const disk = known || state.pending === undefined ? readCursors(stateDir) : undefined
+    if (known) {
+      for (const [repo, cursor] of Object.entries(/** @type {CursorState} */ (disk).repos)) {
+        if (cursor.one_time_import === true && !known.has(repo)) state.repos[repo] = cursor
+      }
+    }
+    // @ref LLP 0438#writers [implements]: a caller with no verdict of its own takes the one already on disk
+    if (state.pending === undefined && disk?.pending !== undefined) state.pending = disk.pending
+    const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8')
+    fs.renameSync(tmp, file)
+  })
 }
 
 /**
@@ -79,6 +142,7 @@ function readRepoCursor(value) {
   const v = /** @type {Record<string, unknown>} */ (value)
   /** @type {RepoCursor} */
   const cursor = {}
+  if (v.one_time_import === true) cursor.one_time_import = true
   if (v.since && typeof v.since === 'object') {
     const s = /** @type {Record<string, unknown>} */ (v.since)
     /** @type {NonNullable<RepoCursor['since']>} */

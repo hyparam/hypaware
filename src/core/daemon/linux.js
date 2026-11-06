@@ -100,7 +100,6 @@ export function buildUnit(options) {
   const description = options.description ?? `HypAware daemon (${label})`
   const restart = options.restart !== false
   const restartSec = typeof options.restartSec === 'number' ? options.restartSec : 5
-  const foreground = options.foreground !== false
   const { nodePath, binPath, configPath, logDir, env } = options
 
   if (!nodePath || typeof nodePath !== 'string') throw new SystemdUnitError('nodePath is required')
@@ -118,7 +117,6 @@ export function buildUnit(options) {
     'daemon',
     'run',
   ]
-  if (foreground) execArgs.push('--foreground')
   execArgs.push('--config', quoteExecArg(configPath))
 
   const lines = [
@@ -361,6 +359,16 @@ export async function startSystemdUnit(options) {
 }
 
 /**
+ * Stop without disabling or removing the installed unit.
+ * @param {{ label?: string, systemctl?: SystemctlAdapter }} options
+ * @returns {Promise<void>}
+ */
+export async function stopSystemdUnit(options) {
+  const { systemctl, unitName } = resolveUnit(options)
+  ensure(await systemctl.stop(unitName), `stop ${unitName}`)
+}
+
+/**
  * Restart an installed systemd user unit.
  *
  * @param {{ label?: string, systemctl?: SystemctlAdapter }} options
@@ -387,17 +395,50 @@ export function isSystemdUnitInstalled(options) {
  * Query the runtime status of the systemd user unit via
  * `systemctl --user show <unit>`.
  *
+ * `show` answers an unknown unit with exit 0 and `LoadState=not-found`, so a
+ * nonzero exit is systemctl failing to answer at all ("Failed to connect to
+ * bus" with no user session). That is not loaded and also says so (#1406).
+ * @ref LLP 0545#unreachable [implements]: a nonzero `show` is a probe that never ran
+ *
  * @param {{ label?: string, systemctl?: SystemctlAdapter, homeDir?: string, platform?: NodeJS.Platform }} options
- * @returns {Promise<{ loaded: boolean, pid?: number }>}
+ * @returns {Promise<{ loaded: boolean, active?: boolean, pid?: number, unreachable?: boolean }>}
  */
 export async function systemdUnitStatus(options) {
   const { systemctl, unitName } = resolveUnit(options)
   const result = await systemctl.show(unitName)
-  if (result.exitCode !== 0) return { loaded: false }
+  if (result.exitCode !== 0) return { loaded: false, unreachable: true }
   const props = parseShowOutput(result.stdout)
   if (props.LoadState !== 'loaded') return { loaded: false }
   const pid = parsePid(props.MainPID)
-  return pid === undefined ? { loaded: true } : { loaded: true, pid }
+  const active = unitIsSupervised(props.ActiveState)
+  return pid === undefined ? { loaded: true, active } : { loaded: true, active, pid }
+}
+
+/**
+ * Is systemd currently keeping this unit up? `LoadState` cannot answer it: a
+ * unit stopped by `systemctl --user stop` stays `loaded`, which is the whole
+ * reason `hyp daemon stop` preserves the installation. `ActiveState` is what
+ * separates them, and `show` has always asked for it (it is in the same
+ * `--property` list as `MainPID`), so this reads a value already on the wire.
+ *
+ * It is not `MainPID > 0` either: `Restart=always` leaves a crash-looping unit
+ * with no MainPID for the whole `RestartSec` gap while systemd is still very
+ * much going to respawn it. That gap is exactly when an operator reaches for
+ * `hyp daemon stop`, and a stop routed anywhere but through systemd during it
+ * is a stop that does not happen.
+ *
+ * Named forwards, not as `!== 'inactive'`: an unrecognised or missing
+ * `ActiveState` is not evidence of supervision, and `failed` is systemd having
+ * given up (`StartLimitBurst` spent), which is not supervision either.
+ *
+ * @param {string | undefined} activeState
+ * @returns {boolean}
+ */
+function unitIsSupervised(activeState) {
+  return activeState === 'active'
+    || activeState === 'activating'
+    || activeState === 'reloading'
+    || activeState === 'deactivating'
 }
 
 /**

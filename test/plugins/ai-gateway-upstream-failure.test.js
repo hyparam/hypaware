@@ -198,3 +198,59 @@ test('the upstream-failure 502 never answers an over-cap declared body as a reus
     }
   })
 })
+
+// An upstream that dies mid-stream must take the client's response down with
+// it. `upstreamRes.pipe(res)` does not end or destroy `res` when the source
+// errors, so without an explicit destroy the client keeps a half-finished SSE
+// response open and waits on its own idle timeout (observed: Codex stalls of
+// 14 to 26 minutes after `read ETIMEDOUT` / `read ECONNRESET` upstream).
+test('an upstream that drops mid-stream closes the client response instead of leaving it open', async () => {
+  const upstream = net.createServer((socket) => {
+    socket.once('data', () => {
+      socket.write(
+        'HTTP/1.1 200 OK\r\n' +
+        'Content-Type: text/event-stream\r\n' +
+        'Transfer-Encoding: chunked\r\n' +
+        '\r\n'
+      )
+      const event = 'data: {"type":"response.created"}\n\n'
+      socket.write(`${Buffer.byteLength(event).toString(16)}\r\n${event}\r\n`)
+      setTimeout(() => socket.destroy(), 50)
+    })
+  })
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', () => resolve(undefined)))
+  const upstreamPort = /** @type {net.AddressInfo} */ (upstream.address()).port
+  /** @type {unknown[]} */
+  const errors = []
+  const proxy = await startProxy({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'flaky', base_url: `http://127.0.0.1:${upstreamPort}`, path_prefix: '/v1/responses' }],
+    startExchange: () => /** @type {any} */ ({
+      isSse: true,
+      response: undefined,
+      appendRequestChunk() {},
+      setResponseStart() {},
+      appendResponseChunk() {},
+      consumeStreamChunk() {},
+      setError(/** @type {unknown} */ err) { errors.push(err) },
+    }),
+    onExchangeFinished: () => {},
+  })
+  const socket = net.connect(proxy.port, '127.0.0.1', () => {
+    socket.write(
+      'POST /v1/responses HTTP/1.1\r\n' +
+      `Host: 127.0.0.1:${proxy.port}\r\n` +
+      'Content-Length: 2\r\n' +
+      '\r\n{}'
+    )
+  })
+  try {
+    socket.resume()
+    await bounded(new Promise((resolve) => socket.on('close', resolve)), 'the client response to close after the upstream dropped')
+    assert.ok(errors.length > 0, 'the exchange recorded the upstream error')
+  } finally {
+    socket.destroy()
+    await bounded(proxy.stop(), 'the proxy to stop')
+    await new Promise((resolve) => upstream.close(() => resolve(undefined)))
+  }
+})

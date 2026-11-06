@@ -69,6 +69,131 @@ export function visibleWidth(line) {
   return stripSgr(line).length
 }
 
+// East Asian Wide (W) and Fullwidth (F) blocks, as [first, last] code
+// points: the characters a terminal draws two columns wide. Block-level
+// rather than the full per-character table, which is the trade a no-
+// dependency rule makes; emoji are matched by property below instead.
+const WIDE_RANGES = [
+  [0x1100, 0x115f], // Hangul Jamo initials
+  [0x2e80, 0x303e], // CJK radicals, Kangxi, CJK symbols and punctuation
+  [0x3041, 0x33ff], // Hiragana, Katakana, Bopomofo, Hangul compatibility, CJK compatibility
+  [0x3400, 0x4dbf], // CJK Extension A
+  [0x4e00, 0x9fff], // CJK Unified Ideographs
+  [0xa000, 0xa4cf], // Yi
+  [0xa960, 0xa97f], // Hangul Jamo Extended-A
+  [0xac00, 0xd7a3], // Hangul syllables
+  [0xf900, 0xfaff], // CJK Compatibility Ideographs
+  [0xfe10, 0xfe19], // vertical forms
+  [0xfe30, 0xfe6f], // CJK compatibility forms, small form variants
+  [0xff00, 0xff60], // fullwidth ASCII variants
+  [0xffe0, 0xffe6], // fullwidth signs
+  [0x20000, 0x3fffd], // CJK Extensions B onward (planes 2 and 3)
+]
+
+// Emoji drawn as emoji by default occupy two columns.
+const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u
+
+// Combining and enclosing marks (accents, variation selectors) and the
+// zero-width format characters draw on the cell before them.
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u200b-\u200f\u2060-\u2064\ufeff]/u
+
+// A zero-width joiner fuses two pictographs into one drawn glyph; between
+// anything else it joins nothing, and both sides keep their width.
+const ZWJ = 0x200d
+const PICTOGRAPHIC = /\p{Extended_Pictographic}/u
+
+// Printable ASCII only: the common case, measured without a code-point walk.
+const PLAIN_ASCII = /^[\x20-\x7e]*$/
+
+/**
+ * Columns one code point occupies: 0, 1 or 2. See {@link displayWidth}.
+ *
+ * @param {number} cp
+ * @returns {number}
+ */
+export function codePointWidth(cp) {
+  if (cp < 0x7f) return cp < 0x20 ? 0 : 1
+  const ch = String.fromCodePoint(cp)
+  if (ZERO_WIDTH.test(ch)) return 0
+  if (EMOJI_PRESENTATION.test(ch)) return 2
+  for (const [lo, hi] of WIDE_RANGES) {
+    if (cp < lo) break
+    if (cp <= hi) return 2
+  }
+  return 1
+}
+
+/**
+ * Terminal columns a line occupies, ignoring style escapes, for text that
+ * may hold CJK, emoji or combining marks. {@link visibleWidth} counts code
+ * units, which is right for the CLI's own Latin chrome but not for captured
+ * labels: a model, repo or tool name can carry any of these.
+ *
+ * The rule, in order: printable ASCII is one column; combining and
+ * enclosing marks, variation selectors and the zero-width format
+ * characters are zero; a pictograph joined to the pictograph before it by
+ * a zero-width joiner is zero, so a joined emoji sequence counts as its
+ * first emoji (a joiner between other characters joins nothing); East
+ * Asian Wide and
+ * Fullwidth blocks ({@link WIDE_RANGES}) and default-emoji-presentation
+ * characters are two; everything else is one. Not handled: a regional-
+ * indicator pair (a flag) measures four where most terminals draw two.
+ *
+ * @param {string} text
+ * @returns {number}
+ */
+export function displayWidth(text) {
+  const plain = stripSgr(text)
+  if (PLAIN_ASCII.test(plain)) return plain.length
+  const step = widthStepper()
+  let width = 0
+  for (const ch of plain) width += step(/** @type {number} */ (ch.codePointAt(0)))
+  return width
+}
+
+/**
+ * A counter fed one code point at a time that returns each one's columns
+ * under the {@link displayWidth} rule, for a caller that has to stop part
+ * way along a string. It carries only whether the last drawn code point
+ * was a pictograph and whether a joiner followed it.
+ *
+ * @returns {(cp: number) => number}
+ */
+export function widthStepper() {
+  let pictograph = false
+  let joined = false
+  return (cp) => {
+    const isPictograph = cp >= 0x7f && PICTOGRAPHIC.test(String.fromCodePoint(cp))
+    const width = joined && isPictograph ? 0 : codePointWidth(cp)
+    joined = cp === ZWJ && pictograph
+    // Marks and selectors sit on the glyph before them, so they leave the
+    // pictograph state as it was.
+    if (width > 0 || isPictograph) pictograph = isPictograph
+    return width
+  }
+}
+
+/**
+ * How many *physical* terminal rows one logical line occupies. A line
+ * wider than the terminal soft-wraps onto further rows, and an empty line
+ * still occupies one. `columns` omitted means "do not know", which falls
+ * back to the 80 the rest of the CLI assumes.
+ *
+ * Shared rather than local so the two places that have to agree about one
+ * frame's height - the renderer deciding how many option rows fit, and the
+ * runtime deciding how far to move the cursor back up - measure it the
+ * same way.
+ *
+ * @param {string} line - a single line, without its trailing newline
+ * @param {number} [columns]
+ * @returns {number}
+ */
+export function lineRows(line, columns) {
+  const width = typeof columns === 'number' && columns > 0 ? columns : 80
+  const len = visibleWidth(line)
+  return len === 0 ? 1 : Math.ceil(len / width)
+}
+
 /** The one frame shape: rounded, single-ruled, to match the dim `─` rules. */
 const BOX = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' }
 

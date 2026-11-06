@@ -139,8 +139,9 @@ async function icebergTableHasMetadata(blobStore, prefix) {
 
 /**
  * Materialize an S3 object into an in-memory `AsyncBuffer`. This reads
- * the whole object (fine for the modest parquet files HypAware writes);
- * range-based reads can be layered on later by extending `getObject`.
+ * the whole object, which is fine for the modest parquet files HypAware
+ * writes. `getObject` now takes an optional range (LLP 0452), so a caller
+ * that needs footer-and-column reads can ask for slices instead.
  *
  * @param {BlobStore} blobStore
  * @param {string} key

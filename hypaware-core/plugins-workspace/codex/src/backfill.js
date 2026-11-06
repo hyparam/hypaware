@@ -1,7 +1,10 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import { captureSessionTitle } from '../../../../src/core/backfill/session_title.js'
+import { readCodexSessionTitles, readCodexTitleDatabase } from './session_titles.js'
 import path from 'node:path'
+import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
 import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
@@ -13,9 +16,15 @@ import {
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
 import { redactRemoteUserinfo } from './git-remote.js'
+import { detach } from './settings.js'
+import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import {
+  contentItemKinds,
+  compactedMessageFromPayload,
+  compactionSummaryFromMessage,
   copyNumberAlias,
   firstString,
+  hasTextOrToolUse,
   netInputUsage,
   numberValue,
   reasoningMessageFromPayload,
@@ -30,6 +39,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { CodexRolloutItem, CodexRolloutSession } from './types.js'
+ * @import { FileHandle } from 'node:fs/promises'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -79,6 +89,14 @@ const PROVIDER = 'openai'
 const CONVERSATION_SOURCE = 'codex'
 
 const COMPONENT = 'plugin.codex.backfill'
+// Most rollout paths whose read failure the sweep remembers, so a file that
+// keeps failing warns once instead of every minute (#2070). Each entry is a
+// path (bounded by the OS path limit, 4096 bytes on Linux) plus a short error
+// code, so the map tops out near 256 x 4 KiB = 1 MiB and holds a few KiB for
+// ordinary ~120-byte rollout paths. A sweep failure past the cap is counted
+// in `scan_complete` but not warned per file, so the warn stream stays bounded
+// however many files fail.
+const MAX_READ_FAILURES = 256
 
 /**
  * Build the Codex backfill provider. Registered at plugin activation via
@@ -95,6 +113,9 @@ const COMPONENT = 'plugin.codex.backfill'
  *   pluginName?: string,
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
+ *   ignoredSessions?: Set<string>,
+ *   config?: JsonObject,
+ *   configPath?: string,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -103,23 +124,101 @@ export function createCodexBackfillProvider(opts) {
   const pluginName = opts.pluginName ?? DEFAULT_PLUGIN_NAME
   const codexHome = opts.codexHome ?? defaultCodexHome(opts.homeDir)
   const sessionsDir = opts.sessionsDir ?? path.join(codexHome, 'sessions')
-  const unsupportedLocations = opts.unsupportedLocations ?? defaultUnsupportedLocations(opts.homeDir)
+  const unsupportedLocations = opts.unsupportedLocations
+    ?? defaultUnsupportedLocations(opts.homeDir, opts.config?.capture_mode === 'gateway')
+  const config = opts.config
+  const backfill = isPlainObject(config?.backfill) ? config.backfill : {}
+  /** @type {Map<string, { ino: number, size: number, mtimeMs: number, threadIds?: string[], titleRevision?: string }>} */
+  const fingerprints = new Map()
+  // How many sessions each file is still holding back, so `sessions_deferred`
+  // is a level rather than a one-tick edge: the fingerprint skip below returns
+  // a deferred file to the loop unread, and an operator reading the latest
+  // scan record would otherwise be told nothing is owed. Keyed and pruned
+  // exactly like `fingerprints`, and only holds files that defer something,
+  // so it is bounded by disk and normally empty.
+  /** @type {Map<string, number>} */
+  const deferrals = new Map()
+  // Rollouts whose last sweep read failed, with the error code it failed on.
+  // Keyed and pruned like `fingerprints`, dropped when the read succeeds, and
+  // capped at MAX_READ_FAILURES.
+  /** @type {Map<string, string>} */
+  const readFailures = new Map()
   // One `.hypignore` resolver per backfill run, holding its per-cwd cache for
   // the whole scan (LLP 0049 R6).
   // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
   // source, so `hyp backfill` skips `--private` (`ignore`) dirs, never re-importing
   // sessions a live capture already dropped.
   const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
+  // `on_join: false` declines the history import, and a cold sweep would
+  // otherwise import every retained rollout. Floor the sweep at activation so
+  // it records only what happens from here on; manual `hyp backfill` is
+  // unaffected.
+  // @ref LLP 0466#on-join [implements]: the sweep keeps recording without importing declined history
+  const sweepFloorMs = readBackfillPolicy({ name: pluginName, config }).onJoin === false ? Date.now() : undefined
 
   return {
     name: clientName,
     plugin: pluginName,
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Codex session rollouts into ai_gateway_messages',
+    // Gateway mode selects the provider writer, so it registers no sweep:
+    // running both lanes forever would be permanent unpaid work for a route
+    // the operator explicitly opted out of.
+    // `backfill.on_join` does not gate it: in transcript mode the sweep is
+    // the only capture lane, so opting out of the join-time history import
+    // must not also stop recording (#2076). The off switch for recording is
+    // `hyp client detach codex`, which the backfill runner enforces.
+    // @ref LLP 0429#sweep [implements]: ordinary capture rides the existing background queue, including Desktop
+    // @ref LLP 0466#on-join [implements]: on_join is the join-time import only; recording is the detach switch
+    ...(config?.capture_mode !== 'gateway'
+      ? { sweep: { cron: stringValue(backfill.sweep_cron) ?? '* * * * *' } }
+      : {}),
     async *run(ctx) {
-      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver })
+      // Scheduled work is the daemon-only migration seam, including local
+      // installs without a fleet attach marker. Manual queries/imports never
+      // change client settings. Failure is retried by the next sweep.
+      //
+      // Releasing the old route is cleanup, not capture: an unreadable or
+      // unwritable config.toml must not cost the sweep its rows, or one
+      // bad permission bit silently stops Codex recording altogether.
+      // @ref LLP 0429#migration [implements]
+      if (ctx.sweep && !ctx.dryRun && config?.capture_mode !== 'gateway') {
+        try {
+          const result = await detach({ configPath: opts.configPath ?? path.join(codexHome, 'config.toml') })
+          if (result.changed) ctx.log.info(result.removed ? 'codex.capture.route_released' : 'codex.capture.provider_repaired', {
+            component: COMPONENT, operation: 'capture.migrate', status: 'ok',
+            mode: 'transcript', restart_required: true,
+          })
+          if ('warning' in result && result.warning) ctx.log.warn('codex.capture.route_warning', {
+            component: COMPONENT, operation: 'capture.migrate', warning: result.warning,
+          })
+        } catch (err) {
+          ctx.log.error('codex.capture.route_release_failed', {
+            component: COMPONENT, operation: 'capture.migrate', status: 'failed',
+            error_kind: err instanceof Error ? err.name : 'unknown',
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+      yield* runCodexBackfill({
+        ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, deferrals, readFailures,
+        ignoredSessions: opts.ignoredSessions,
+        ...(ctx.sweep && sweepFloorMs !== undefined ? { floorMs: sweepFloorMs } : {}),
+      })
     },
   }
+}
+
+/**
+ * A short, stable key for why a rollout read failed, so a sweep can tell the
+ * same failure repeating from a changed one without holding the message.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function readFailureCode(err) {
+  if (err && typeof err === 'object' && 'code' in err && typeof err.code === 'string') return err.code.slice(0, 32)
+  return err instanceof Error ? err.name.slice(0, 32) : 'unknown'
 }
 
 /** @param {string} homeDir */
@@ -131,17 +230,19 @@ export function defaultCodexHome(homeDir) {
  * Which routes still capture Codex Desktop when HypAware declines to parse
  * the Codex Desktop app container. Named on the event itself because the
  * flag is otherwise read as a verdict on the client rather than on one
- * directory: Codex Desktop routes through the same gateway as the CLI and
- * writes the same rollout tree, so nothing is actually lost by leaving the
- * container alone.
+ * directory: Codex Desktop writes the same rollout tree as the CLI (and, in
+ * gateway mode, routes through the same gateway), so nothing is actually
+ * lost by leaving the container alone.
  *
- * Two short tokens, not prose, so the attribute stays queryable like every
+ * Short tokens, not prose, so the attribute stays queryable like every
  * other attribute on the event. The explanation lives where prose belongs:
  * LLP 0141 `#unsupported-boundary` and the README.
  *
  * @ref LLP 0141#unsupported-boundary [implements]: the boundary is one opaque directory, not a client, and the event has to say so
+ * @ref LLP 0429#content [constrained-by]: the default runs one route, so the token names one; `gateway_live` returns with gateway mode
  */
-const CODEX_DESKTOP_COVERED_BY = 'gateway_live,codex_sessions_rollout'
+const CODEX_DESKTOP_COVERED_BY = 'codex_sessions_rollout'
+const CODEX_DESKTOP_COVERED_BY_GATEWAY = `gateway_live,${CODEX_DESKTOP_COVERED_BY}`
 
 /**
  * Codex/ChatGPT app + browser storage we DETECT but never parse in V1.
@@ -155,26 +256,25 @@ const CODEX_DESKTOP_COVERED_BY = 'gateway_live,codex_sessions_rollout'
  * app's does not, and its flag stays bare on purpose.
  *
  * @param {string} homeDir
+ * @param {boolean} [gatewayCapture]  Gateway mode runs the live route too, so the token names it.
  * @returns {Array<{ kind: string, path: string, coveredBy?: string }>}
  */
-function defaultUnsupportedLocations(homeDir) {
+function defaultUnsupportedLocations(homeDir, gatewayCapture = false) {
   return [
     { kind: 'chatgpt_desktop_app', path: path.join(homeDir, 'Library', 'Application Support', 'ChatGPT') },
     { kind: 'chatgpt_desktop_app', path: path.join(homeDir, '.config', 'ChatGPT') },
     {
       kind: 'codex_desktop_app',
       path: path.join(homeDir, 'Library', 'Application Support', 'Codex'),
-      coveredBy: CODEX_DESKTOP_COVERED_BY,
+      coveredBy: gatewayCapture ? CODEX_DESKTOP_COVERED_BY_GATEWAY : CODEX_DESKTOP_COVERED_BY,
     },
   ]
 }
 
 /**
- * Scan the sessions root, project each session, and yield one
- * `ai_gateway.projected_exchange` item per session. One item per session
- * keeps the materializer's per-call dedup state and tool-call lookup whole,
- * so a conversation's tool_use → tool_result pairing and fallback id chain
- * are never split across items.
+ * Scan sessions and yield bounded projected exchanges. The materializer's
+ * shared run token keeps tool lookup and identity state across batches.
+ * @ref LLP 0583#bounded-projection [implements]: changed files stream through bounded batches
  *
  * @param {{
  *   ctx: BackfillRunContext,
@@ -183,13 +283,43 @@ function defaultUnsupportedLocations(homeDir) {
  *   unsupportedLocations: Array<{ kind: string, path: string, coveredBy?: string }>,
  *   clientName: string,
  *   resolver: UsagePolicyResolver,
+ *   ignoredSessions?: Set<string>,
+ *   fingerprints: Map<string, { ino: number, size: number, mtimeMs: number, threadIds?: string[], titleRevision?: string }>,
+ *   deferrals: Map<string, number>,
+ *   readFailures: Map<string, string>,
+ *   floorMs?: number,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
 async function* runCodexBackfill(args) {
   const { ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver } = args
+  refreshSessionIgnores(args.ignoredSessions)
   const log = ctx.log
+  let titles = new Map()
+  try { titles = await readCodexSessionTitles(path.join(codexHome, 'session_index.jsonl')) }
+  catch {
+    log.warn('codex.backfill.title_index_unavailable', {
+      component: COMPONENT, operation: 'backfill.titles', status: 'partial',
+      error_kind: 'title_index_unavailable',
+    })
+  }
+  try {
+    for (const [id, title] of await readCodexTitleDatabase(codexHome)) {
+      const prior = titles.get(id)
+      if (!prior || title.updatedAt >= prior.updatedAt) titles.set(id, title)
+    }
+  } catch {
+    log.warn('codex.backfill.title_database_unavailable', {
+      component: COMPONENT, operation: 'backfill.titles', status: 'partial',
+      error_kind: 'title_database_unavailable',
+    })
+  }
+  const titleRevision = (/** @type {string[] | undefined} */ ids) =>
+    JSON.stringify((ids ?? []).map(id => titles.get(id) ?? null))
   const window = resolveWindow(ctx)
+  if (args.floorMs !== undefined && (window.sinceMs === undefined || window.sinceMs < args.floorMs)) {
+    window.sinceMs = args.floorMs
+  }
 
   log.info('codex.backfill.scan_started', {
     component: COMPONENT,
@@ -212,75 +342,180 @@ async function* runCodexBackfill(args) {
   let sessionsProjected = 0
   let sessionsIgnored = 0
   let messagesProjected = 0
+  let filesRead = 0
+  let filesUnchanged = 0
+  let filesReadFailing = 0
+  let firstFailure = ''
+  let sessionsDeferred = 0
+  // Every other drop on this path is counted (ignored sessions, deferred
+  // suffixes). Count this one too, so an operator can tell a session that
+  // recorded nothing from one whose delivery evidence was filtered out.
+  let deliveryEvidenceSkipped = 0
+  // Completed TurnItems no projection exists for, by type, in turns projected
+  // from TurnItems. Counts and fixed type names only, never content.
+  /** @type {Map<string, number>} */
+  const completedUnsupported = new Map()
+  const files = await listRolloutFiles(sessionsDir)
+  const present = new Set(files)
+  for (const filePath of args.fingerprints.keys()) {
+    if (!present.has(filePath)) args.fingerprints.delete(filePath)
+  }
+  for (const filePath of args.deferrals.keys()) {
+    if (!present.has(filePath)) args.deferrals.delete(filePath)
+  }
+  for (const filePath of args.readFailures.keys()) {
+    if (!present.has(filePath)) args.readFailures.delete(filePath)
+  }
 
-  for (const filePath of await listRolloutFiles(sessionsDir)) {
+  for (const filePath of files) {
     if (ctx.signal?.aborted) break
     filesSeen += 1
-    /** @type {CodexRolloutSession[]} */
-    let sessions
+    let fileDeferred = 0
+    const projectedThreads = new Set()
+    const ignoredThreads = new Set()
+    const threadIds = new Set()
+    /** @type {{ ino: number, size: number, mtimeMs: number, threadIds?: string[], titleRevision?: string } | undefined} */
+    let fingerprint
+    const failedBefore = ctx.itemsFailed ?? 0
     try {
-      sessions = await parseRolloutFile(filePath)
+      if (ctx.sweep) {
+        const stat = await fs.stat(filePath)
+        fingerprint = { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs }
+        const prior = args.fingerprints.get(filePath)
+        if (prior && prior.ino === stat.ino && prior.size === stat.size && prior.mtimeMs === stat.mtimeMs
+            && prior.titleRevision === titleRevision(prior.threadIds)) {
+          filesUnchanged += 1
+          // Unread, but still owing whatever it owed when it was last read.
+          sessionsDeferred += args.deferrals.get(filePath) ?? 0
+          continue
+        }
+      }
+      filesRead += 1
+      for await (const parsed of parseRolloutFile(filePath, window, ctx)) {
+        const { session } = parsed
+        threadIds.add(session.threadId)
+        refreshSessionIgnores(args.ignoredSessions)
+        deliveryEvidenceSkipped += session.deliveryEvidenceSkipped ?? 0
+        // @ref LLP 0403#backfill [implements]: key on the container, not thread ID.
+        if (args.ignoredSessions?.has(session.sessionId)) {
+          if (!ignoredThreads.has(session.threadId)) sessionsIgnored += 1
+          ignoredThreads.add(session.threadId)
+          log.info('codex.backfill.session_ignore_drop', {
+            component: COMPONENT, operation: 'backfill.scan',
+            policy_source: 'session_opt_out', status: 'ignored',
+          })
+          continue
+        }
+        // @ref LLP 0050 [implements]: capture-seam drop for backfill, symmetric
+        // to the @hypaware/claude backfill skip. A session whose recorded cwd has
+        // an ancestor `.hypignore` of class `ignore` is skipped before projecting
+        // or yielding any row, so `hyp backfill` never re-imports the exact
+        // sessions ignored live (LLP 0049 R1).
+        const sessionPolicy = session.cwd ? resolver.resolve(session.cwd) : null
+        if (sessionPolicy?.class === 'ignore') {
+          if (!ignoredThreads.has(session.threadId)) sessionsIgnored += 1
+          ignoredThreads.add(session.threadId)
+          // A fail-safe clamp (declared token unimplemented) escalates to warn
+          // so an operator can tell it from an intended ignore (R3 SHOULD).
+          log[sessionPolicy.warn ? 'warn' : 'info']('codex.backfill.usage_policy_drop', {
+            component: COMPONENT,
+            operation: 'usage_policy_drop',
+            conversation_id: session.threadId,
+            class: 'ignore',
+            declared: sessionPolicy.declared,
+            governed_by: sessionPolicy.governedBy,
+            status: 'skipped',
+            ...(sessionPolicy.warn ? { warn: sessionPolicy.warn } : {}),
+          })
+          continue
+        }
+        if (parsed.deferred) fileDeferred = 1
+        // Counted only for sessions the scan keeps, so an ignored session
+        // leaves no trace of what it held.
+        for (const [type, count] of session.completedItemsUnsupported ?? []) {
+          completedUnsupported.set(type, (completedUnsupported.get(type) ?? 0) + count)
+        }
+
+        // @ref LLP 0583#bounded-projection [implements]: the streamed reader already applies settlement and the date window
+        const exchange = projectedExchangeFromSession({
+          session,
+          items: filterByWindow(session.items, window),
+          clientName,
+          messageOffset: parsed.offset,
+          identitySource: parsed.identitySource,
+        })
+        if (!exchange) continue
+        const title = titles.get(session.threadId)
+        const titleCaptured = title && parsed.final ? captureSessionTitle(exchange, title.title, { updatedAt: title.updatedAt }) : false
+
+        if (!projectedThreads.has(session.threadId)) sessionsProjected += 1
+        projectedThreads.add(session.threadId)
+        messagesProjected += exchange.messages.length
+        log.info('codex.backfill.session_projected', {
+          component: COMPONENT,
+          operation: 'backfill.project',
+          conversation_id: session.threadId,
+          message_count: exchange.messages.length,
+          identity_source: readCodexIdentitySource(exchange),
+          title_captured: titleCaptured,
+          status: 'ok',
+        })
+
+        yield projectedExchangeItem(exchange, {
+          client_name: clientName,
+          source_path: filePath,
+          // The rollout's own native identity is the thread it records, not the
+          // session container it may belong to.
+          native_id: session.threadId,
+        })
+      }
+      if (fingerprint) {
+        fingerprint.threadIds = [...threadIds]
+        fingerprint.titleRevision = titleRevision(fingerprint.threadIds)
+      }
     } catch (err) {
-      log.warn('codex.backfill.rollout_read_failed', {
+      filesReadFailing += 1
+      if (!firstFailure) firstFailure = `${path.basename(filePath)}: ${errMessage(err).replace(/[\r\n]/g, ' ').slice(0, 200)}`
+      // The file is left unfingerprinted so the next sweep retries it and a
+      // permission fix imports with no restart. Only the warn is deduplicated:
+      // a sweep repeats it only when the failure changes, and the per-sweep
+      // count rides `scan_complete`.
+      const code = readFailureCode(err)
+      const prior = args.readFailures.get(filePath)
+      const tracked = prior !== undefined || args.readFailures.size < MAX_READ_FAILURES
+      if (!ctx.sweep || (tracked && prior !== code)) {
+        log.warn('codex.backfill.rollout_read_failed', {
+          component: COMPONENT,
+          operation: 'backfill.scan',
+          source_path: filePath,
+          status: 'error',
+          error_kind: 'rollout_read_failed',
+          error: errMessage(err),
+        })
+        if (ctx.sweep) args.readFailures.set(filePath, code)
+      }
+      continue
+    }
+    if (args.readFailures.delete(filePath)) {
+      log.info('codex.backfill.rollout_read_recovered', {
         component: COMPONENT,
         operation: 'backfill.scan',
         source_path: filePath,
-        status: 'error',
-        error_kind: 'rollout_read_failed',
-        error: errMessage(err),
-      })
-      continue
-    }
-
-    for (const session of sessions) {
-      // @ref LLP 0050 [implements]: capture-seam drop for backfill, symmetric
-      // to the @hypaware/claude backfill skip. A session whose recorded cwd has
-      // an ancestor `.hypignore` of class `ignore` is skipped before projecting
-      // or yielding any row, so `hyp backfill` never re-imports the exact
-      // sessions ignored live (LLP 0049 R1).
-      const sessionPolicy = session.cwd ? resolver.resolve(session.cwd) : null
-      if (sessionPolicy?.class === 'ignore') {
-        sessionsIgnored += 1
-        // A fail-safe clamp (declared token unimplemented) escalates to warn
-        // so an operator can tell it from an intended ignore (R3 SHOULD).
-        log[sessionPolicy.warn ? 'warn' : 'info']('codex.backfill.usage_policy_drop', {
-          component: COMPONENT,
-          operation: 'usage_policy_drop',
-          conversation_id: session.threadId,
-          class: 'ignore',
-          declared: sessionPolicy.declared,
-          governed_by: sessionPolicy.governedBy,
-          status: 'skipped',
-          ...(sessionPolicy.warn ? { warn: sessionPolicy.warn } : {}),
-        })
-        continue
-      }
-
-      const exchange = projectedExchangeFromSession({
-        session,
-        items: filterByWindow(session.items, window),
-        clientName,
-      })
-      if (!exchange) continue
-
-      sessionsProjected += 1
-      messagesProjected += exchange.messages.length
-      log.info('codex.backfill.session_projected', {
-        component: COMPONENT,
-        operation: 'backfill.project',
-        conversation_id: session.threadId,
-        message_count: exchange.messages.length,
-        identity_source: readCodexIdentitySource(exchange),
         status: 'ok',
       })
+    }
 
-      yield projectedExchangeItem(exchange, {
-        client_name: clientName,
-        source_path: filePath,
-        // The rollout's own native identity is the thread it records, not the
-        // session container it may belong to.
-        native_id: session.threadId,
-      })
+    sessionsDeferred += fileDeferred
+    // Remember what this file still owes, so the next tick's fingerprint skip
+    // can report it without re-reading. Deleted when it settles, so a file
+    // that finished is not counted forever.
+    if (ctx.sweep) {
+      if (fileDeferred > 0) args.deferrals.set(filePath, fileDeferred)
+      else args.deferrals.delete(filePath)
+    }
+    // @ref LLP 0429#sweep [implements]: retry failed writes, and reread files changed during consumption on the next pass
+    if (ctx.sweep && !ctx.dryRun && fingerprint && (ctx.itemsFailed ?? 0) === failedBefore) {
+      args.fingerprints.set(filePath, fingerprint)
     }
   }
 
@@ -288,11 +523,20 @@ async function* runCodexBackfill(args) {
     component: COMPONENT,
     operation: 'backfill.scan',
     files_seen: filesSeen,
+    files_read: filesRead,
+    files_unchanged: filesUnchanged,
+    files_read_failing: filesReadFailing,
+    sessions_deferred: sessionsDeferred,
     sessions_projected: sessionsProjected,
     sessions_ignored: sessionsIgnored,
+    delivery_evidence_skipped: deliveryEvidenceSkipped,
+    // @ref LLP 0567#diagnostic [implements]: bounded, content-free count of TurnItems with no projection
+    completed_items_unsupported: [...completedUnsupported.values()].reduce((sum, count) => sum + count, 0),
+    completed_item_unsupported_types: [...completedUnsupported.keys()].sort().join(','),
     messages_projected: messagesProjected,
-    status: 'ok',
+    status: filesReadFailing ? 'failed' : 'ok',
   })
+  if (filesReadFailing) throw new Error(`${filesReadFailing} Codex rollout file(s) could not be captured; first failure: ${firstFailure}`)
 }
 
 /**
@@ -408,21 +652,268 @@ function isRolloutFileName(name) {
 // Parsing (version-defensive)
 // ---------------------------------------------------------------------
 
+const MAX_ROLLOUT_RECORD_BYTES = 16 * 1024 * 1024
+const MAX_ROLLOUT_INDEX_ENTRIES = 100_000
+const MAX_ROLLOUT_TURN_BYTES = 8 * 1024 * 1024
+const MAX_BATCH_MESSAGES = 128
+const MAX_BATCH_BYTES = 4 * 1024 * 1024
+
 /**
- * Parse one rollout file into zero or more sessions. The legacy format is a
- * single pretty-printed JSON object; the modern format is line-delimited
- * records. Each file holds one session, so the array carries at most one
- * entry: the array shape just keeps the run loop uniform.
- *
- * @param {string} filePath
- * @returns {Promise<CodexRolloutSession[]>}
+ * Read bounded lines from the same descriptor and initial byte extent on every
+ * pass. Decode only complete lines so a chunk cannot split a UTF-8 character.
+ * @param {FileHandle} file
+ * @param {number} size
+ * @param {AbortSignal | undefined} signal
  */
-async function parseRolloutFile(filePath) {
-  const text = await fs.readFile(filePath, 'utf8')
-  const legacy = parseLegacyDoc(text, filePath)
-  if (legacy) return [legacy]
-  const modern = parseJsonlRollout(text, filePath)
-  return modern ? [modern] : []
+async function* rolloutLines(file, size, signal) {
+  let position = 0
+  let index = 0
+  let bytes = 0
+  /** @type {Buffer[]} */
+  let fragments = []
+  while (position < size) {
+    if (signal?.aborted) throw new Error('Codex rollout read aborted')
+    // Each retained fragment owns its chunk; never reuse a retained buffer.
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, size - position))
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, position)
+    if (!bytesRead) throw new Error('Codex rollout changed during read')
+    position += bytesRead
+    let start = 0
+    while (start < bytesRead) {
+      const newline = buffer.indexOf(10, start)
+      const end = newline < 0 || newline >= bytesRead ? bytesRead : newline
+      const part = buffer.subarray(start, end)
+      bytes += part.length
+      if (bytes > MAX_ROLLOUT_RECORD_BYTES) throw new Error('Codex rollout record exceeds 16 MiB limit')
+      if (part.length) fragments.push(part)
+      if (end < bytesRead) {
+        const line = fragments.length === 1 ? fragments[0] : Buffer.concat(fragments, bytes)
+        yield { text: line?.toString('utf8') ?? '', bytes, index: index++ }
+        fragments = []
+        bytes = 0
+      }
+      start = end + 1
+    }
+  }
+  if (bytes) yield { text: Buffer.concat(fragments, bytes).toString('utf8'), bytes, index }
+}
+
+/**
+ * @param {FileHandle} file
+ * @param {number} size
+ * @param {AbortSignal | undefined} signal
+ */
+async function* rolloutRecords(file, size, signal) {
+  for await (const line of rolloutLines(file, size, signal)) {
+    /** @type {unknown} */
+    let row
+    try { row = JSON.parse(line.text.trim()) } catch { continue }
+    if (isPlainObject(row)) yield { row, index: line.index, bytes: line.bytes }
+  }
+}
+
+/**
+ * Three bounded passes preserve global mirror decisions and late usage without
+ * retaining the conversation. Legacy JSON is allowed only within the line cap.
+ * @ref LLP 0583#bounded-projection [implements]: trade sequential reads for bounded conversation memory
+ * @param {string} filePath
+ * @param {ReturnType<typeof resolveWindow>} window
+ * @param {BackfillRunContext} ctx
+ */
+async function* parseRolloutFile(filePath, window, ctx) {
+  const file = await fs.open(filePath, 'r')
+  try {
+    const { size } = await file.stat()
+    /** @type {Record<string, unknown> | undefined} */
+    let metaPayload
+    /** @type {Record<string, unknown>} */
+    const context = {}
+    const rawTurns = new Set()
+    const promptTurns = new Set()
+    let turnBytes = 0
+    /** @param {Set<string>} turns @param {string} id */
+    const addTurn = (turns, id) => {
+      if (turns.has(id)) return
+      turnBytes += Buffer.byteLength(id)
+      if (turnBytes > MAX_ROLLOUT_TURN_BYTES || rawTurns.size + promptTurns.size >= MAX_ROLLOUT_INDEX_ENTRIES) {
+        throw new Error('Codex rollout turn index exceeds limit')
+      }
+      turns.add(id)
+    }
+    let first = true
+    let legacyCandidate = false
+    let sawRecord = false
+    let sawContent = false
+    let tracksLifecycle = false
+    let settledLine = -1
+    let deliveryEvidenceSkipped = 0
+    /** @type {string | undefined} */
+    let turnId
+    for await (const line of rolloutLines(file, size, ctx.signal)) {
+      const text = line.text.trim()
+      if (!text) continue
+      sawContent = true
+      if (first && text === '{') {
+        legacyCandidate = true
+        if (size <= MAX_ROLLOUT_RECORD_BYTES) {
+          // A later append cannot turn this bounded legacy probe into a
+          // whole-file read or change the snapshot being interpreted.
+          const buffer = Buffer.allocUnsafe(size)
+          let position = 0
+          while (position < size) {
+            if (ctx.signal?.aborted) throw new Error('Codex rollout read aborted')
+            const { bytesRead } = await file.read(buffer, position, size - position, position)
+            if (!bytesRead) throw new Error('Codex rollout changed during read')
+            position += bytesRead
+          }
+          const legacy = parseLegacyDoc(buffer.toString('utf8'), filePath)
+          if (legacy) {
+            yield { session: legacy, offset: 0, deferred: false, final: true, identitySource: undefined }
+            return
+          }
+        }
+      }
+      if (legacyCandidate && size > MAX_ROLLOUT_RECORD_BYTES && /^"(?:session|items)"\s*:/.test(text)) {
+        throw new Error('Legacy Codex rollout exceeds 16 MiB limit')
+      }
+      first = false
+      /** @type {unknown} */
+      let row
+      try { row = JSON.parse(text) } catch { continue }
+      if (!isPlainObject(row)) continue
+      legacyCandidate = false
+      // Single-line legacy files use the same bounded read as JSONL records.
+      if (Array.isArray(row.items)) {
+        const legacy = parseLegacyDoc(text, filePath)
+        if (legacy) yield { session: legacy, offset: 0, deferred: false, final: true, identitySource: undefined }
+        return
+      }
+      sawRecord = true
+      const payload = isPlainObject(row.payload) ? row.payload : undefined
+      if (!payload) continue
+      if (row.type === 'session_meta' && !metaPayload) metaPayload = payload
+      if (row.type === 'turn_context') {
+        // Retain only first usable fields, not every context or its prompt.
+        for (const key of ['model', 'sandbox']) {
+          if (!context[key] && stringValue(payload[key])) context[key] = payload[key]
+        }
+        if (!context.cwd && sessionMetaCwd(payload.cwd)) context.cwd = payload.cwd
+        if (!context.sandbox_policy && isPlainObject(payload.sandbox_policy)) {
+          context.sandbox_policy = { type: payload.sandbox_policy.type }
+        }
+      }
+      if (row.type === 'response_item') {
+        if (isDeliveredAssistantEvidence(row.metadata, payload)) {
+          deliveryEvidenceSkipped++
+          continue
+        }
+        if (turnId !== undefined) {
+          if (payload.type === 'message' && payload.role !== 'assistant') {
+            if (contentItemKinds(payload)?.some(kind => kind.startsWith('user.'))) addTurn(promptTurns, turnId)
+          } else if (RAW_TURN_EVIDENCE.has(stringValue(payload.type) ?? '')) addTurn(rawTurns, turnId)
+        }
+      }
+      if (row.type === 'event_msg') {
+        if (payload.type === 'task_started') {
+          tracksLifecycle = true
+          turnId = stringValue(payload.turn_id)
+        }
+        if (codexUsageFromTokenCount(payload)) settledLine = line.index
+        if (payload.type === 'task_complete' || payload.type === 'turn_aborted') {
+          settledLine = line.index
+          turnId = undefined
+        }
+      }
+    }
+    if (!sawRecord) {
+      if (sawContent) throw new Error('Codex rollout has no readable JSON records')
+      return
+    }
+    const session = buildSession({ metaPayload: metaPayload ?? {}, turnPayloads: [context], items: [], fallbackId: sessionIdFromPath(filePath) })
+    /** @type {Map<number, JsonObject>} */
+    const usageByLine = new Map()
+    /** @type {Map<string, number>} */
+    const unsupported = new Map()
+    let deferred = false
+    let hasNative = false
+    let lastAssistant = -1
+    for await (const { item, index } of selectedItems(unsupported)) {
+      if (ctx.sweep && tracksLifecycle && index > settledLine) {
+        deferred = true
+        continue
+      }
+      if (filterByWindow([item], window).length === 0) continue
+      // A checkpoint closes the pre-compaction turn even when it is opaque, so
+      // a later token_count cannot re-bill the response before it.
+      if (item.payload.type === 'compacted') lastAssistant = -1
+      if (item.usageAttributes) {
+        if (lastAssistant >= 0) {
+          if (usageByLine.size >= MAX_ROLLOUT_INDEX_ENTRIES) throw new Error('Codex rollout usage index exceeds limit')
+          usageByLine.set(lastAssistant, item.usageAttributes)
+        }
+        lastAssistant = -1
+      } else {
+        const message = projectedMessageFromItem(item)
+        if (message?.message_id) hasNative = true
+        if (message?.role === 'assistant' && !message.is_compact_summary && hasTextOrToolUse(message)) lastAssistant = index
+      }
+    }
+    const identitySource = hasNative ? 'native' : 'gateway_fallback'
+    /** @type {CodexRolloutItem[]} */
+    let batch = []
+    let batchBytes = 0
+    let count = 0
+    let offset = 0
+    for await (const { item, index, bytes } of selectedItems()) {
+      if (ctx.sweep && tracksLifecycle && index > settledLine) continue
+      if (item.usageAttributes || filterByWindow([item], window).length === 0 || !projectedMessageFromItem(item)) continue
+      if (count && (count >= MAX_BATCH_MESSAGES || batchBytes + bytes > MAX_BATCH_BYTES)) {
+        yield { session: { ...session, items: batch }, offset, deferred: false, final: false, identitySource }
+        offset += count
+        batch = []
+        batchBytes = 0
+        count = 0
+      }
+      batch.push(item)
+      const usageAttributes = usageByLine.get(index)
+      if (usageAttributes) batch.push({ payload: { type: 'token_count' }, usageAttributes, timestampMs: item.timestampMs })
+      batchBytes += bytes
+      count++
+    }
+    yield { session: { ...session, items: batch, deliveryEvidenceSkipped, completedItemsUnsupported: unsupported }, offset, deferred, final: true, identitySource }
+
+    /** @param {Map<string, number>} [counts] */
+    async function* selectedItems(counts) {
+      /** @type {string | undefined} */
+      let activeTurn
+      for await (const { row, index, bytes } of rolloutRecords(file, size, ctx.signal)) {
+        const payload = isPlainObject(row.payload) ? row.payload : undefined
+        if (!payload) continue
+        /** @type {CodexRolloutItem | undefined} */
+        let item
+        if (row.type === 'response_item' && !isDeliveredAssistantEvidence(row.metadata, payload)) {
+          item = { payload, timestampMs: timestampToMs(row.timestamp) }
+        } else if (row.type === 'compacted') {
+          // Drop the potentially large replacement snapshot here. Keep even an
+          // opaque checkpoint as a usage boundary for the carrier pass.
+          item = { payload: { type: 'compacted' }, projectedMessage: compactedMessageFromPayload(payload), timestampMs: timestampToMs(row.timestamp) }
+        } else if (row.type === 'event_msg') {
+          if (payload.type === 'task_started') activeTurn = stringValue(payload.turn_id)
+          if (payload.type === 'item_completed' && isPlainObject(payload.item)) {
+            const completedAt = numberValue(payload.completed_at_ms)
+            item = normalizeCompletedItem({ payload: payload.item,
+              timestampMs: completedAt && completedAt > 0 ? completedAt : timestampToMs(row.timestamp),
+              completed: { turnId: stringValue(payload.turn_id) ?? activeTurn ?? '', threadId: stringValue(payload.thread_id) },
+            }, session.threadId, rawTurns, promptTurns, counts)
+          }
+          const usageAttributes = codexUsageFromTokenCount(payload)
+          if (usageAttributes) item = { payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes }
+          if (payload.type === 'task_complete' || payload.type === 'turn_aborted') activeTurn = undefined
+        }
+        if (item) yield { item, index, bytes }
+      }
+    }
+  } finally { await file.close() }
 }
 
 /**
@@ -453,61 +944,95 @@ function parseLegacyDoc(text, filePath) {
   return buildSession({ metaPayload: sessionMeta, turnPayloads: [], items, fallbackId: sessionIdFromPath(filePath) })
 }
 
+// Guardian's Code Mode delivery markers, verbatim from the Codex serializer
+// (`codex-rs/history/src/rollout_payload.rs`). Only the synthetic record carries
+// one; the genuine `send_message` tool result carries the delivered text itself
+// under the same envelope key.
+const CODE_MODE_DELIVERY_COMPLETE = 'codex:code-mode-delivery:v1:complete'
+const CODE_MODE_DELIVERY_INCOMPLETE = 'codex:code-mode-delivery:v1:incomplete:'
+
 /**
- * Modern rollout: line-delimited `{ timestamp, type, payload }` records:
- * one `session_meta`, zero+ `turn_context`, and the conversation's
- * `response_item`s. A `token_count` `event_msg` carries the turn's token
- * usage and is captured as a synthetic turn-boundary marker (no message);
- * all other `event_msg` / `compacted` and unknown line types are skipped. A
- * blank or truncated line never aborts the parse.
+ * Is this response item Guardian delivery evidence rather than model output?
  *
- * @param {string} text
- * @param {string} filePath
- * @returns {CodexRolloutSession | undefined}
+ * Codex persists a confirmed Code Mode send twice. The evidence record is a
+ * SYNTHESIZED assistant message whose envelope metadata carries a
+ * `codex:code-mode-delivery:v1:` marker (and, when the send was truncated,
+ * whose text is a fixed unavailable-content placeholder). The send's own
+ * `function_call_output` is a GENUINE record, and it carries the delivered text
+ * verbatim under the same `delivered_assistant_message` key. Keying on the
+ * field's presence alone therefore drops a real tool result, so this mirrors
+ * the conjunction Codex's own reader uses to recognize its synthetic record:
+ * an assistant message payload plus a marker-shaped value.
+ *
+ * @param {unknown} metadata  the response item's envelope metadata
+ * @param {Record<string, unknown>} payload
+ * @returns {boolean}
  */
-function parseJsonlRollout(text, filePath) {
-  /** @type {Record<string, unknown> | undefined} */
-  let metaPayload
-  /** @type {Record<string, unknown>[]} */
-  const turnPayloads = []
-  /** @type {CodexRolloutItem[]} */
-  const items = []
-  let sawRecord = false
+function isDeliveredAssistantEvidence(metadata, payload) {
+  if (!isPlainObject(metadata)) return false
+  const marker = stringValue(metadata.delivered_assistant_message)
+  if (!marker) return false
+  if (marker !== CODE_MODE_DELIVERY_COMPLETE && !marker.startsWith(CODE_MODE_DELIVERY_INCOMPLETE)) return false
+  return payload.type === 'message' && payload.role === 'assistant'
+}
 
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    /** @type {unknown} */
-    let row
-    try {
-      row = JSON.parse(trimmed)
-    } catch {
-      continue
-    }
-    if (!isPlainObject(row)) continue
-    sawRecord = true
-    const type = stringValue(row.type)
-    const payload = isPlainObject(row.payload) ? row.payload : undefined
-    if (type === 'session_meta' && payload) {
-      if (!metaPayload) metaPayload = payload
-    } else if (type === 'turn_context' && payload) {
-      turnPayloads.push(payload)
-    } else if (type === 'response_item' && payload) {
-      items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
-    } else if (type === 'event_msg' && payload) {
-      // The one event_msg we keep: token_count. It is NOT a message: it is a
-      // turn-boundary marker carrying that turn's normalized usage. Its slot in
-      // the items stream is preserved (so the projector can attribute it to the
-      // preceding assistant message), but it never projects a row of its own.
-      const usageAttributes = codexUsageFromTokenCount(payload)
-      if (usageAttributes) {
-        items.push({ payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes })
-      }
-    }
+// Response items only a model response writes. A user-role message is not
+// one: Codex records harness context (AGENTS.md, environment) as user
+// messages, so its presence says nothing about whether the turn's answer was
+// written as response items. The person's own prompt is told apart by its
+// `user.*` content kinds and stands in for the UserMessage mirror alone.
+// @ref LLP 0567#dedupe [implements]: a turn's model response items decide its representation
+const RAW_TURN_EVIDENCE = new Set([
+  'message', 'function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'reasoning',
+  'web_search_call', 'image_generation_call', 'local_shell_call', 'tool_search_call', 'tool_search_output',
+  'compaction', 'compaction_summary', 'context_compaction',
+])
+
+// The TurnItems a completed-only turn is projected from, each normalized to
+// the response item it mirrors so one projector handles both. Tool TurnItems
+// are not here: Codex persists a tool call's response items in every history
+// mode, so a turn that ran a tool already has raw evidence.
+/** @type {Record<string, (item: Record<string, unknown>) => Record<string, unknown>>} */
+const COMPLETED_TURN_ITEMS = {
+  UserMessage: item => ({ type: 'message', role: 'user', content: item.content }),
+  AgentMessage: item => ({ type: 'message', role: 'assistant', content: item.content }),
+  Reasoning: item => ({ type: 'reasoning', summary: item.summary_text }),
+}
+
+// Every TurnItem variant Codex defines. A type outside this list is counted
+// as `other`, so the diagnostic stays bounded whatever a newer client writes.
+const KNOWN_TURN_ITEMS = new Set([
+  'UserMessage', 'FunctionCallOutput', 'HookPrompt', 'AgentMessage', 'Plan', 'Reasoning', 'CommandExecution',
+  'DynamicToolCall', 'CollabAgentToolCall', 'SubAgentActivity', 'WebSearch', 'ImageView', 'Extension',
+  'ImageGeneration', 'EnteredReviewMode', 'ExitedReviewMode', 'ContextCompaction', 'FileChange', 'McpToolCall',
+])
+
+/**
+ * @ref LLP 0567#dedupe [implements]: decide mirrors by the complete turn evidence, never text
+ * @param {CodexRolloutItem} item
+ * @param {string} threadId
+ * @param {Set<string>} rawTurns
+ * @param {Set<string>} promptTurns
+ * @param {Map<string, number>} [unsupported]
+ * @returns {CodexRolloutItem | undefined}
+ */
+function normalizeCompletedItem(item, threadId, rawTurns, promptTurns, unsupported) {
+  const completed = item.completed
+  if (!completed) return item
+  if (rawTurns.has(completed.turnId)) return undefined
+  if (completed.threadId && completed.threadId !== threadId) return undefined
+  const turnItemType = stringValue(item.payload.type) ?? ''
+  if (turnItemType === 'UserMessage' && promptTurns.has(completed.turnId)) return undefined
+  const normalize = COMPLETED_TURN_ITEMS[turnItemType]
+  if (!normalize) {
+    const key = KNOWN_TURN_ITEMS.has(turnItemType) ? turnItemType : 'other'
+    unsupported?.set(key, (unsupported.get(key) ?? 0) + 1)
+    return undefined
   }
-
-  if (!sawRecord) return undefined
-  return buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
+  const payload = normalize(item.payload)
+  const id = stringValue(item.payload.id)
+  if (id && !/^item-\d+$/.test(id)) payload.id = id
+  return { payload, turnItemType, timestampMs: item.timestampMs }
 }
 
 /**
@@ -571,6 +1096,9 @@ function buildSession(args) {
     parentThreadId: stringValue(metaPayload.parent_thread_id),
     model: firstTurnString(turnPayloads, 'model'),
     modelProvider: stringValue(metaPayload.model_provider),
+    systemText: isPlainObject(metaPayload.base_instructions)
+      ? stringValue(metaPayload.base_instructions.text)
+      : stringValue(metaPayload.base_instructions),
     source: stringValue(metaPayload.source),
     items,
   }
@@ -589,6 +1117,8 @@ function buildSession(args) {
  *   session: CodexRolloutSession,
  *   items: CodexRolloutItem[],
  *   clientName: string,
+ *   messageOffset?: number,
+ *   identitySource?: string,
  * }} args
  * @returns {AiGatewayProjectedExchange | undefined}
  */
@@ -605,6 +1135,10 @@ function projectedExchangeFromSession(args) {
   // message and dedupe to one row. @ref LLP 0035#per-turn
   let turnStartIndex = 0
   for (const item of items) {
+    // A checkpoint closes the pre-compaction turn even when it is opaque.
+    // Subsequent token_count can repeat the last response's usage after Codex
+    // recomputes context size; it must not re-bill that response or the summary.
+    if (item.payload.type === 'compacted') turnStartIndex = messages.length
     if (item.usageAttributes) {
       stampUsageOnLastAssistant(messages, item.usageAttributes, turnStartIndex)
       turnStartIndex = messages.length
@@ -613,13 +1147,14 @@ function projectedExchangeFromSession(args) {
     const message = projectedMessageFromItem(item)
     if (!message) continue
     if (message.message_id) nativeIdCount += 1
+    if (args.messageOffset !== undefined) message.message_index = args.messageOffset + messages.length
     messages.push(message)
   }
   if (messages.length === 0) return undefined
 
   // Native message ids preserved verbatim when the rollout carries them;
   // otherwise the gateway computes deterministic fallback identity.
-  const identitySource = nativeIdCount > 0 ? 'native' : 'gateway_fallback'
+  const identitySource = args.identitySource ?? (nativeIdCount > 0 ? 'native' : 'gateway_fallback')
 
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
@@ -656,6 +1191,8 @@ function projectedExchangeFromSession(args) {
   if (session.threadSource !== undefined) exchange.is_sidechain = session.threadSource === 'subagent'
   if (session.parentThreadId) exchange.parent_thread_id = session.parentThreadId
   if (session.model) exchange.model = session.model
+  // @ref LLP 0429#content [implements]: native base instructions are evidence; missing full tool definitions stay null
+  if (session.systemText) exchange.system_text = session.systemText
   return exchange
 }
 
@@ -707,7 +1244,10 @@ function projectedMessageFromItem(item) {
   let message
   switch (itemType) {
   case 'message':
-    message = messageItemToProjected(payload)
+    message = compactionSummaryFromMessage(payload) ?? messageItemToProjected(payload)
+    break
+  case 'compacted':
+    message = item.projectedMessage ?? compactedMessageFromPayload(payload)
     break
   case 'function_call':
   case 'custom_tool_call': {
@@ -732,8 +1272,10 @@ function projectedMessageFromItem(item) {
   const nativeId = stringValue(payload.id)
   if (nativeId) message.message_id = nativeId
   if (item.timestampMs !== undefined) message.message_created_at = new Date(item.timestampMs).toISOString()
+  // The checkpoint helper recovers an id from its matching replacement item.
   // Carry the native item type as a provenance breadcrumb on the row.
-  if (itemType) message.provider_type = itemType
+  const providerType = item.turnItemType ?? itemType
+  if (providerType) message.provider_type = providerType
   return message
 }
 
@@ -745,7 +1287,13 @@ function messageItemToProjected(payload) {
   const role = stringValue(payload.role) ?? 'user'
   const content = textBlocksFromContent(payload.content)
   if (content.length === 0) return undefined
-  return { role, content }
+  /** @type {AiGatewayProjectedMessage} */
+  const message = { role, content }
+  // Message-level `attributes.codex` deep-merges with the exchange-level
+  // namespace (`thread_source`, `originator`, ...) at materialization.
+  const kinds = contentItemKinds(payload)
+  if (kinds) message.attributes = { codex: { content_item_kinds: kinds } }
+  return message
 }
 
 // ---------------------------------------------------------------------
@@ -879,4 +1427,3 @@ function boolValue(value) {
 function firstBool(...values) {
   return values.find((value) => typeof value === 'boolean')
 }
-

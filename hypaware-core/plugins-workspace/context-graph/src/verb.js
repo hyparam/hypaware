@@ -10,9 +10,6 @@ import { PLUGIN_NAME } from './datasets.js'
  * @import { Direction, TraversalOk, TraversalErr } from './types.js'
  */
 
-/** A graph this large strained the basic in-memory loader; nudge to the index path. */
-const LARGE_GRAPH = 500_000
-
 /**
  * `graph neighbors` as a verb: one declaration projecting the CLI command
  * **and** the `graph_neighbors` MCP tool. The traversal core
@@ -28,6 +25,7 @@ export const graphNeighborsVerb = {
   category: 'explore-share',
   audience: 'everyday',
   tool: 'graph_neighbors',
+  title: 'Find related sessions',
   plugin: PLUGIN_NAME,
   summary: 'Walk the activity graph from a node out to N hops',
   // The traversal mechanics live here rather than in a skill: they are
@@ -36,6 +34,11 @@ export const graphNeighborsVerb = {
   // @ref LLP 0214#d1 [implements]: a verb explains its own flags instead of a skill narrating them
   help: [
     'Walks outward from a seed node and prints what it reaches.',
+    'Skill ran edges are evidence, not execution counts. dispatch_tool or',
+    'dispatch_slash means invocation requested; dispatch_marker means instructions',
+    'supplied; dispatch_file_read and dispatch_shell_search mean file access',
+    'requested. Legacy dispatch_shell_read is unverified read/search evidence.',
+    'No flag proves success. Use source messages for event counts and outcomes.',
     '',
     'The seed resolves in order: node_id, then natural_key, then label. So a',
     'session id, a file path or basename, a model id, or a tool / skill /',
@@ -60,6 +63,11 @@ export const graphNeighborsVerb = {
     '',
     'Truncation is part of the result, so it is printed on stdout with the',
     'rows (`... - truncated; raise --limit`) and set as `truncated` in --json.',
+    'Reads are scoped to the visited neighborhood. Over-budget walks fail',
+    'explicitly; reduce --depth or narrow --edge-type. --limit caps output,',
+    'not the work needed to count all reachable neighbors.',
+    'JSON totalNodes/totalEdges describe visited ids/examined edges, not the',
+    'size of the entire graph.',
     'Not-found and ambiguity notes go to stderr instead. Exit 1 is a seed that',
     'could not be resolved; exit 2 is a usage error.',
     '',
@@ -160,9 +168,8 @@ function localOnlyNotice(localOnly) {
 }
 
 /**
- * Render a successful traversal as a human-readable list, grouped implicitly
- * by BFS order (hop ascending). Truncation and a large-graph memory note are
- * surfaced, never hidden.
+ * Render a successful traversal in BFS order (hop ascending), with explicit
+ * output truncation and the exact reachable count of the completed walk.
  *
  * @param {TraversalOk & { depth: number, direction: Direction }} result
  * @returns {VerbRenderResult}
@@ -202,13 +209,16 @@ function renderNeighbors(result) {
     }
   }
   for (const n of result.neighbors) {
-    const arrow = n.direction === 'out' ? `-${n.edge_type}→` : `←${n.edge_type}-`
+    const relation = n.edge_type === 'ran' ? 'skill evidence' : n.edge_type
+    const arrow = n.direction === 'out' ? `-${relation}→` : `←${relation}-`
     const text = display(n.node)
     let shown = text
     if (labelCounts.get(text) > 1) {
       shown = `${text} (${disambiguator(n.node)})`
       if (shownCounts.get(shown) > 1) shown = `${text} (${n.node.node_id})`
     }
+    if (n.edge_type === 'ran') shown += ` (${skillEvidenceLabel(n.props)})`
+    if (n.props?.inferred_call === true) shown += ' (inferred call)'
     out.push(`  ${n.hop}  ${arrow.padEnd(18)} ${n.node.node_type.padEnd(8)} ${shown}`)
   }
   if (result.truncated) {
@@ -216,12 +226,7 @@ function renderNeighbors(result) {
   } else {
     out.push(`${result.reachable} neighbor(s) within ${result.depth} hop(s)`)
   }
-  /** @type {string | undefined} */
-  let stderr
-  if (result.totalNodes + result.totalEdges >= LARGE_GRAPH) {
-    stderr = `hyp graph neighbors: loaded ${result.totalNodes} node(s) + ${result.totalEdges} edge(s) in memory; at this size consider the persisted index path (LLP 0064 §honest-limits)\n`
-  }
-  return { stdout: out.join('\n') + '\n', ...(stderr ? { stderr } : {}) }
+  return { stdout: out.join('\n') + '\n' }
 }
 
 /**
@@ -256,4 +261,16 @@ function disambiguator(node) {
  */
 function shortId(id) {
   return id.length > 12 ? id.slice(0, 12) : id
+}
+
+/** @param {Record<string, unknown> | null | undefined} props @returns {string} */
+function skillEvidenceLabel(props) {
+  const labels = []
+  if (props?.dispatch_tool === true || props?.dispatch_slash === true) labels.push('invocation requested')
+  if (props?.dispatch_marker === true) labels.push('instructions supplied')
+  if (props?.dispatch_file_read === true) labels.push('file read requested')
+  if (props?.dispatch_shell_search === true) labels.push('file search requested')
+  if (props?.dispatch_shell_read === true) labels.push('legacy file reference: read/search unverified')
+  if (!labels.length) labels.push('unclassified reference')
+  return labels.join('; ') + '; execution and success not established'
 }

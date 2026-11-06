@@ -336,11 +336,12 @@ test('a plugin whose activate() throws is reported on the surfaces a shipped ins
     // Quoted whole: the reason is the only thing this diagnostic is for.
     assert.ok(diag.message.includes(THROWN_MESSAGE), `the reason was truncated: ${diag.message}`)
     // And the repair is the record that keeps it whole past the clamp, not a
-    // plugin listing: `hyp plugin list` prints the plugins the CLI's own boot
-    // activated plus the install lock, so a bundled adapter that failed to
-    // activate is absent from its output entirely, and an installed one sits
-    // under "Installed plugins" with nothing marking it broken. Both log files
-    // are named because either process can be the one that could not activate.
+    // plugin listing. `hyp plugin list` does name a plugin that came up short
+    // (issue #1570), but for its own CLI boot rather than for the daemon this
+    // diagnostic reads, and what it adds over this message is the version and
+    // which copy boot selected, never the reason the operator is missing.
+    // Both log files are named because either process can be the one that
+    // could not activate.
     assert.equal(diag.repair.length, 2)
     assert.match(diag.repair[0], /^grep -s plugin_activate_failed /)
     for (const logFile of [

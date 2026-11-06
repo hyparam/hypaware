@@ -9,7 +9,8 @@ import path from 'node:path'
 
 import { BOOT_FAILED_WARNING_PREFIX } from '../../src/core/daemon/boot_failure.js'
 import { runDaemon } from '../../src/core/daemon/runtime.js'
-import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { statusFilePath } from '../../src/core/runtime/paths.js'
 import { previousBootLooksStuck } from '../../src/core/update/self_update.js'
 import { defaultUnitDir, unitFileName } from '../../src/core/daemon/platform.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
@@ -50,7 +51,9 @@ async function makeHomeThatFailsBoot() {
   await fs.mkdir(unitDir, { recursive: true })
   await fs.writeFile(path.join(unitDir, unitFileName()), '[Unit]\nDescription=HypAware\n')
   const usagePolicyDir = path.join(stateRoot, 'usage-policy')
-  await fs.symlink(path.join(stateRoot, 'nowhere'), usagePolicyDir)
+  // A junction on win32 (no Developer Mode needed); a dangling one still reads
+  // ENOENT on stat and refuses the mkdir, which is all the trap requires.
+  await fs.symlink(path.join(stateRoot, 'nowhere'), usagePolicyDir, process.platform === 'win32' ? 'junction' : null)
   return { hypHome, stateRoot, usagePolicyDir }
 }
 

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/nanoclaw",
+  "version": "1.0.0",
+  "description": "Read-only recovery of NanoClaw v2 Claude transcripts from an explicitly configured local installation.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22.13",
+  "entrypoint": "./src/index.js",
+  "permissions": ["read_home", "read_state", "write_state"],
+  "contributes": {
+    "client": { "name": "nanoclaw", "skill_dir": "" },
+    "sources": [{ "name": "nanoclaw" }],
+    "commands": [
+      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Manage persistent recording exclusions for a native session ID" },
+      { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Manage persistent recording exclusions for a native session ID" },
+      { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Manage persistent recording exclusions for a native session ID" }
+    ],
+    "config_sections": [{ "section": "nanoclaw", "summary": "Absolute NanoClaw installation root and bounded backfill policy." }]
+  }
+}

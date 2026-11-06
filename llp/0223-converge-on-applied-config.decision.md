@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-13
 **Related:** [LLP 0129](./0129-init-wizard-fork.decision.md) (§join-before-picker: the wait this decision re-grounds), [LLP 0031](./0031-layered-config.decision.md) (§physical-layout: the active-slot/seed layout the new probe reads), [LLP 0063](./0063-login-auto-provision-forward-sink.decision.md) (the login lane whose attach wait stays as it is)
+**Extended-by:** [LLP 0498](./0498-onboarding-without-config-wait.spec.md) (onboarding checks applied org config once without waiting; login attachment observation is limited to three seconds)
 
 > Extends [LLP 0129 §join-before-picker](./0129-init-wizard-fork.decision.md#join-before-picker):
 > the bounded wait, its budget, and the timeout-means-unlocked-picker

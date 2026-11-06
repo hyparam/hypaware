@@ -1,9 +1,14 @@
 // @ts-check
 
+import { performance } from 'node:perf_hooks'
+
 import { Attr, getLogger } from '../observability/index.js'
 import { jsonReplacer } from '../query/format.js'
+import { UNDECLARED_SCHEMA_NOTE } from '../query/schema.js'
 import { toJsonSchema, validateToolArguments } from '../cli/verb_codec.js'
 import { verbAuthClass, verbExposure } from '../registry/verbs.js'
+import { buildInstructions } from './instructions.js'
+import { listPrompts, renderPrompt } from './prompts.js'
 import {
   INTERNAL_ERROR,
   INVALID_PARAMS,
@@ -15,7 +20,7 @@ import {
 } from './jsonrpc.js'
 
 /**
- * @import { DatasetRegistration, QueryRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, PluginName, QueryRegistry, VerbAuthClass, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /** Protocol version advertised when the client sends none. */
@@ -26,6 +31,21 @@ const SERVER_COMPONENT = 'mcp-server'
 const LIST_TOOLS_OPERATION = 'mcp.tools_list'
 const LIST_RESOURCES_OPERATION = 'mcp.resources_list'
 const HANDLE_OPERATION = 'mcp.handle_message'
+
+/**
+ * The `annotations` hints each auth class implies. A verb names its class,
+ * never its hints, so no registration can advertise a hint its class
+ * contradicts (a `read` claim on a verb allowed to rewrite state).
+ *
+ * @type {Readonly<Record<VerbAuthClass, Readonly<{ readOnlyHint: boolean, destructiveHint?: boolean }>>>}
+ * @ref LLP 0494#annotations [implements]: hints derive from the auth class, with no per-verb override
+ */
+const HINTS_BY_AUTH_CLASS = Object.freeze({
+  read: Object.freeze({ readOnlyHint: true }),
+  // A mark appends to a ledger and removes nothing, so `write` is not destructive.
+  write: Object.freeze({ readOnlyHint: false, destructiveHint: false }),
+  operator: Object.freeze({ readOnlyHint: false, destructiveHint: true }),
+})
 
 /**
  * Build the **one server assembly** (verbs → MCP tools, datasets → MCP
@@ -40,14 +60,19 @@ const HANDLE_OPERATION = 'mcp.handle_message'
  *   a remote/HTTP transport.
  * - operator-class verbs require `allowOperator` (true for local-user-trust
  *   stdio; a query-scoped HTTP client gets only read-class tools).
+ * - write-class verbs require their `scope` in `allowScopes` (default empty,
+ *   on every transport): the server passes the principal's scopes, and the
+ *   local host passes none.
  *
  * @param {{
  *   verbs: VerbRegistry,
  *   query: QueryRegistry,
- *   runTool: (verb: VerbRegistration, params: Record<string, unknown>) => Promise<unknown>,
+ *   runTool: (verb: VerbRegistration, params: Record<string, unknown>, owner: PluginName | undefined) => Promise<unknown>,
  *   transport?: 'stdio' | 'http',
  *   allowOperator?: boolean,
+ *   allowScopes?: readonly string[],
  *   serverVersion?: string,
+ *   onToolCall?: (call: { tool: string, outcome: 'success' | 'failure', error?: unknown, value?: unknown, duration_ms: number }) => void,
  * }} opts
  * @ref LLP 0034#tool-auth-class [implements]: read/operator boundary lives on the tool; the credential scope gates it
  */
@@ -55,16 +80,27 @@ export function createMcpServer(opts) {
   const { verbs, query, runTool } = opts
   const transport = opts.transport ?? 'stdio'
   const allowOperator = opts.allowOperator ?? (transport === 'stdio')
+  // Copied once, so a caller that later edits its array cannot widen what this
+  // assembly already listed.
+  const allowScopes = new Set(opts.allowScopes ?? [])
   const serverVersion = opts.serverVersion ?? '0.0.0'
+  const onToolCall = opts.onToolCall
 
   const log = getLogger(SERVER_COMPONENT)
 
-  /** @param {VerbRegistration} verb */
-  function toolVisible(verb) {
+  /**
+   * @param {VerbRegistration} verb
+   * @param {VerbAuthClass} [authClass] the class already read, so a caller
+   *   that also derives hints from it gates and annotates on one answer
+   */
+  function toolVisible(verb, authClass) {
     const exposure = verbExposure(verb)
     if (exposure === 'cli-only') return false
     if (transport !== 'stdio' && exposure === 'local-only') return false
-    if (!allowOperator && verbAuthClass(verb) === 'operator') return false
+    const cls = authClass ?? verbAuthClass(verb)
+    if (!allowOperator && cls === 'operator') return false
+    // @ref LLP 0494#write-class [implements]: by class and scope, never by tool name; listing and dispatch share this gate
+    if (cls === 'write' && !allowScopes.has(/** @type {string} */ (verb.scope))) return false
     return true
   }
 
@@ -86,14 +122,20 @@ export function createMcpServer(opts) {
    * any handler try/catch (`src/core/commands/mcp.js`), so an accessor that
    * throws costs the whole tool surface rather than the one verb.
    *
+   * The auth class is read once and used for both the visibility gate and the
+   * hints, so an accessor answering `read` to one and `operator` to the other
+   * cannot list a verb under hints its gate did not judge. A class outside
+   * the hint table has no honest hints and is not listed.
+   *
    * @param {VerbRegistration} verb
-   * @returns {{ name: string, description: string, inputSchema: object } | undefined}
+   * @returns {{ name: string, title: string, description: string, inputSchema: object, annotations: { title: string, readOnlyHint: boolean, destructiveHint?: boolean } } | undefined}
    */
   function toolEntry(verb) {
     /** @type {string | undefined} */
     let named
     try {
-      if (!toolVisible(verb)) return undefined
+      const authClass = verbAuthClass(verb)
+      if (!toolVisible(verb, authClass)) return undefined
       const tool = verb.tool
       if (verbs.getByTool(tool) !== verb) {
         warnNotAdvertised({
@@ -106,6 +148,20 @@ export function createMcpServer(opts) {
         return undefined
       }
       named = tool
+      if (!Object.hasOwn(HINTS_BY_AUTH_CLASS, authClass)) {
+        warnNotAdvertised({
+          event: 'mcp.tool_not_advertised',
+          operation: LIST_TOOLS_OPERATION,
+          errorKind: 'unknown_auth_class',
+          key: 'tool',
+          name: tool,
+        })
+        return undefined
+      }
+      // One read: a missing (or drifted, non-string) title falls back to the
+      // tool name, so every listed entry carries a non-empty one.
+      const declared = verb.title
+      const title = typeof declared === 'string' && declared.length > 0 ? declared : tool
       // Proved serializable here, where a throw costs this verb its listing
       // and nothing else. `serveStdio` writes the whole response with one
       // `JSON.stringify`, and both remaining fields are second reads of
@@ -115,10 +171,14 @@ export function createMcpServer(opts) {
       // raise, and `serveStdio` answered with no line at all - the same
       // forever-wait `handleMessage`'s catch ends one layer out, on the one
       // method every client calls first, so it hung the session, not a call.
+      // The title goes in both places the MCP spec has for one, so a client
+      // reading either finds it.
       return JSON.parse(JSON.stringify({
         name: tool,
+        title,
         description: verb.summary,
         inputSchema: toJsonSchema(verb.inputSchema),
+        annotations: { title, ...HINTS_BY_AUTH_CLASS[authClass] },
       }))
     } catch (err) {
       warnNotAdvertised({
@@ -165,10 +225,15 @@ export function createMcpServer(opts) {
         return undefined
       }
       named = name
+      // The resource body stays `{ dataset, columns }`; an empty declaration
+      // is qualified here, in the slot the entry already has.
+      const declared = dataset.schema.columns.length > 0
       return {
         uri: datasetSchemaUri(name),
         name: `${name} schema`,
-        description: `Column schema for the ${name} dataset`,
+        description: declared
+          ? `Column schema for the ${name} dataset`
+          : `Column schema for the ${name} dataset: ${UNDECLARED_SCHEMA_NOTE}`,
         mimeType: 'application/json',
       }
     } catch (err) {
@@ -205,13 +270,42 @@ export function createMcpServer(opts) {
   }
 
   function listTools() {
-    /** @type {{ name: string, description: string, inputSchema: object }[]} */
+    /** @type {{ name: string, title: string, description: string, inputSchema: object, annotations: { title: string, readOnlyHint: boolean, destructiveHint?: boolean } }[]} */
     const tools = []
     for (const verb of verbs.list()) {
       const entry = toolEntry(verb)
       if (entry !== undefined) tools.push(entry)
     }
     return tools
+  }
+
+  /** @type {ReadonlySet<string> | undefined} */
+  let visibleTools
+  /** @type {string | undefined} */
+  let instructions
+
+  /**
+   * The names of the tools this assembly lists, read once. The visible set is
+   * fixed for the assembly's life (`listChanged: false`), so the instructions
+   * and the prompts share this one read. Taken on the first request that
+   * needs it rather than at creation: listing reads plugin-controlled verb
+   * properties, and reading at creation would add a read and a skip warn to
+   * every assembly, including one that never sees `initialize`.
+   *
+   * @ref LLP 0494#instructions: once per assembly, never per request
+   */
+  function assemblyVisibleTools() {
+    visibleTools ??= new Set(listTools().map((tool) => tool.name))
+    return visibleTools
+  }
+
+  /**
+   * The `initialize` instructions, built once per assembly from the tools it
+   * lists and its transport; every later `initialize` returns this one string.
+   */
+  function assemblyInstructions() {
+    instructions ??= buildInstructions(assemblyVisibleTools(), transport)
+    return instructions
   }
 
   function listResources() {
@@ -276,8 +370,9 @@ export function createMcpServer(opts) {
           protocolVersion: typeof params?.protocolVersion === 'string' && params.protocolVersion
             ? params.protocolVersion
             : DEFAULT_PROTOCOL_VERSION,
-          capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
+          capabilities: { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } },
           serverInfo: { name: SERVER_NAME, version: serverVersion },
+          instructions: assemblyInstructions(),
         })
       case 'ping':
         return jsonRpcResult(id, {})
@@ -290,22 +385,80 @@ export function createMcpServer(opts) {
         // either way, because an async function's promise adopts the one it
         // returns. The `await` is kept so it still would if a `try` were ever
         // added inside this function, where the difference is real.
-        return await callTool(id, params)
+        return await (onToolCall ? observedCallTool(id, params) : callTool(id, params))
       case 'resources/read':
         return readResource(id, params)
+      case 'prompts/list':
+        return jsonRpcResult(id, { prompts: listPrompts(assemblyVisibleTools(), transport) })
+      case 'prompts/get': {
+        const rendered = renderPrompt(params?.name, params?.arguments, assemblyVisibleTools(), transport)
+        return rendered.ok ? jsonRpcResult(id, rendered.result) : jsonRpcError(id, INVALID_PARAMS, rendered.error)
+      }
       default:
         return jsonRpcError(id, METHOD_NOT_FOUND, `unknown method '${method}'`)
     }
   }
 
   /**
+   * `callTool` with one `onToolCall` report per call: the tool name, whether
+   * it succeeded, the thrown value or result, and its duration. A throwing
+   * observer never changes the reply.
+   *
    * @param {string | number | null} id
    * @param {any} params
    */
-  async function callTool(id, params) {
+  async function observedCallTool(id, params) {
+    const observe = /** @type {NonNullable<typeof onToolCall>} */ (onToolCall)
+    const started = performance.now()
+    /** @type {{ error?: unknown, value?: unknown }} */
+    const seen = {}
+    /** @type {any} */
+    let reply
+    try {
+      reply = await callTool(id, params, seen)
+      return reply
+    } finally {
+      try {
+        const failed = !reply || reply.error !== undefined || reply.result?.isError === true
+        observe({
+          tool: typeof params?.name === 'string' ? params.name : '',
+          outcome: failed ? 'failure' : 'success',
+          ...(failed ? { error: seen.error ?? null } : { value: seen.value }),
+          duration_ms: performance.now() - started,
+        })
+      } catch {}
+    }
+  }
+
+  /**
+   * @param {string | number | null} id
+   * @param {any} params
+   * @param {{ error?: unknown, value?: unknown }} [seen] filled with the
+   *   tool's thrown value or result, for {@link observedCallTool}
+   */
+  async function callTool(id, params, seen) {
     const name = params?.name
     const verb = typeof name === 'string' ? verbs.getByTool(name) : undefined
-    if (!verb || !toolVisible(verb)) {
+    if (!verb) {
+      return jsonRpcError(id, METHOD_NOT_FOUND, `unknown tool '${name}'`)
+    }
+    // Settle the owner from the same resolution that produced `verb`, before a
+    // single plugin-controlled property runs: `toolVisible` reads `verb.exposure`
+    // and `verb.authClass`, and `validateToolArguments` reads `verb.inputSchema`,
+    // any of which can be an accessor that unregisters this verb and empties the
+    // ledger for the slot the host is mid-dispatch on. Resolved by `name`, the
+    // key `getByTool` matched, never `verb.tool`; carried into `runTool` so the
+    // config slice is picked from the owner captured here and never from a
+    // re-read of a ledger plugin code has since mutated (issue #1982). This is
+    // the CLI route's order: `dispatch` settles `commandOwner` from
+    // `registry.ownerOf(matched.invokedName)` before it runs any plugin code.
+    // @ref LLP 0425#tool-owner [implements]: capture the owner at the resolution instant, before any plugin property runs, and carry it forward
+    // `ownerOfTool` is core `createVerbRegistry`'s, not the plugin-facing
+    // `VerbRegistry` contract (a host may drive its own registry without it),
+    // so feature-detect it: absent means every tool keeps the whole config.
+    const ownerOfTool = /** @type {VerbRegistry & { ownerOfTool?: (tool: string) => PluginName | undefined }} */ (verbs).ownerOfTool
+    const owner = typeof ownerOfTool === 'function' ? ownerOfTool.call(verbs, name) : undefined
+    if (!toolVisible(verb)) {
       return jsonRpcError(id, METHOD_NOT_FOUND, `unknown tool '${name}'`)
     }
     const validated = validateToolArguments(verb.inputSchema, params?.arguments ?? {})
@@ -313,7 +466,8 @@ export function createMcpServer(opts) {
       return jsonRpcError(id, INVALID_PARAMS, validated.error)
     }
     try {
-      const structured = await runTool(verb, validated.params)
+      const structured = await runTool(verb, validated.params, owner)
+      if (seen) seen.value = structured
       // Round-trip through the query replacer so BigInt/Date in rows can't
       // break the outer response serialization, and structuredContent stays
       // a plain JSON value.
@@ -330,6 +484,7 @@ export function createMcpServer(opts) {
       // Coerced, not passed through: `err.message` is whatever the plugin's
       // throw carried, and a non-string one broke the transport's own
       // `JSON.stringify` the same way, for no reply at all.
+      if (seen) seen.error = err
       const text = describeThrown(err)
       return jsonRpcResult(id, { content: [{ type: 'text', text }], isError: true })
     }

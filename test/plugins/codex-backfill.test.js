@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,6 +13,9 @@ import {
   aiGatewayBackfillMaterializer,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspace/codex/src/backfill.js'
+import { prepareAttach } from '../../hypaware-core/plugins-workspace/codex/src/toml-config.js'
+import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
+import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
 
 /**
@@ -23,9 +27,11 @@ import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
  * @param {string} ignoredDir
  */
 function ignoringResolver(ignoredDir) {
-  const hypignore = path.join(ignoredDir, '.hypignore')
+  // Resolved: the matcher hands the fs the resolved spelling, which on win32
+  // gains a drive letter and backslashes over a POSIX-written fixture.
+  const hypignore = path.resolve(path.join(ignoredDir, '.hypignore'))
   return createUsagePolicyResolver({
-    existsSync: (p) => p === hypignore,
+    existsSync: (p) => path.resolve(p) === hypignore,
     readFileSync: () => 'ignore\n',
   })
 }
@@ -65,7 +71,7 @@ async function stageEnv() {
  * @param {{
  *   meta: Record<string, unknown>,
  *   turns?: Array<Record<string, unknown>>,
- *   items: Array<{ type?: string, timestamp?: string, payload: Record<string, unknown> }>,
+ *   items: Array<{ type?: string, timestamp?: string, payload: Record<string, unknown>, metadata?: unknown }>,
  * }} doc
  */
 async function writeModernRollout(env, relPath, doc) {
@@ -78,7 +84,7 @@ async function writeModernRollout(env, relPath, doc) {
     lines.push(JSON.stringify({ type: 'turn_context', timestamp: doc.meta.timestamp, payload: turn }))
   }
   for (const item of doc.items) {
-    lines.push(JSON.stringify({ type: item.type ?? 'response_item', timestamp: item.timestamp, payload: item.payload }))
+    lines.push(JSON.stringify({ type: item.type ?? 'response_item', timestamp: item.timestamp, payload: item.payload, metadata: item.metadata }))
   }
   await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
   return filePath
@@ -226,6 +232,261 @@ test('provider advertises a stable contribution shape', async () => {
   assert.equal(provider.plugin, '@hypaware/codex')
   assert.deepEqual(provider.datasets, ['ai_gateway_messages'])
   assert.equal(typeof provider.run, 'function')
+  assert.equal(provider.sweep?.cron, '* * * * *')
+  // Opting out of the join-time import keeps the only capture lane (#2076).
+  // @ref LLP 0466#on-join [tests]: on_join no longer switches recording off
+  assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { backfill: { on_join: false } } }).sweep?.cron, '* * * * *')
+  // Gateway mode selects the provider writer, so the rollout sweep must not
+  // also run: both lanes forever is permanent unpaid work on a route the
+  // operator explicitly opted out of.
+  // @ref LLP 0429#sweep [tests]: the scheduled lane belongs to transcript capture
+  assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { capture_mode: 'gateway' } }).sweep, undefined)
+})
+
+// The migration undo is cleanup, not capture. A config.toml the daemon cannot
+// read must not cost the sweep its rows, or one bad permission bit silently
+// stops Codex recording altogether and retries that failure every minute.
+// @ref LLP 0429#migration [tests]: a failed settings write fails visibly, it does not disable capture
+test('a config.toml the sweep cannot read is reported, and capture still runs', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-readonly.jsonl', modernConversation('readonly'))
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+    await fs.chmod(configPath, 0o000)
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const { items } = await collect(provider.run(ctx))
+    assert.equal(items.length, 1, 'rollout rows are captured despite the settings failure')
+    const failed = entries.find((e) => e.message === 'codex.capture.route_release_failed')
+    assert.ok(failed, 'the failed undo is reported rather than swallowed')
+    assert.equal(failed?.fields?.status, 'failed')
+  } finally {
+    await fs.chmod(path.join(env.homeDir, '.codex', 'config.toml'), 0o600).catch(() => {})
+    await env.cleanup()
+  }
+})
+
+// A suffix left unsettled by a crashed client is deferred to a manual import
+// (LLP 0429 #content), and the sweep never revisits it: the file stops
+// changing, so its fingerprint keeps matching. The scan record is therefore
+// the only thing that can tell an operator an import is owed - and it has to
+// keep saying so, because the very skip that strands the file is what would
+// otherwise reset the count to zero on the next tick.
+// @ref LLP 0429#content [tests]: deferral is visible, not silent
+test('a deferred unfinished response is counted in the scan record', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-crashed.jsonl', {
+      meta: { id: 'crashed', originator: 'codex-tui' },
+      items: [
+        { type: 'event_msg', payload: { type: 'task_started' } },
+        { payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'q' }] } },
+        { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 4, output_tokens: 1 } } } },
+        { payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'never settled' }] } },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    await collect(provider.run(ctx))
+    const scan = entries.findLast((e) => e.message === 'codex.backfill.scan_complete')
+    assert.equal(scan?.fields?.sessions_deferred, 1)
+
+    // It is a level, not an edge. The second tick skips the file on its
+    // unchanged fingerprint and must still report the debt: an operator who
+    // greps the latest scan record is the reader this signal exists for, and
+    // a one-tick edge tells them nothing is owed for as long as it is true.
+    const second = runContext()
+    second.ctx.sweep = true
+    await collect(provider.run(second.ctx))
+    const rescan = second.entries.findLast((e) => e.message === 'codex.backfill.scan_complete')
+    assert.equal(rescan?.fields?.files_unchanged, 1, 'the file really was skipped unread')
+    assert.equal(rescan?.fields?.files_read, 0)
+    assert.equal(rescan?.fields?.sessions_deferred, 1, 'and still reports what it owes')
+
+    // It clears when the client comes back and settles the turn, so the level
+    // cannot latch on forever.
+    await fs.appendFile(
+      path.join(env.sessionsDir, 'rollout-crashed.jsonl'),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }) + '\n'
+    )
+    const third = runContext()
+    third.ctx.sweep = true
+    await collect(provider.run(third.ctx))
+    assert.equal(
+      third.entries.findLast((e) => e.message === 'codex.backfill.scan_complete')?.fields?.sessions_deferred,
+      0,
+      'a settled turn stops being owed'
+    )
+
+    // A fully settled file reports none, so the counter means what it says.
+    const clean = await stageEnv()
+    try {
+      await writeModernRollout(clean, 'rollout-clean.jsonl', modernConversation('clean'))
+      const { ctx: ctx2, entries: entries2 } = runContext()
+      ctx2.sweep = true
+      await collect(createCodexBackfillProvider({ homeDir: clean.homeDir }).run(ctx2))
+      assert.equal(entries2.findLast((e) => e.message === 'codex.backfill.scan_complete')?.fields?.sessions_deferred, 0)
+    } finally {
+      await clean.cleanup()
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('scheduled capture migrates the route, skips unchanged files, and retries failed consumption', async () => {
+  const env = await stageEnv()
+  try {
+    const doc = modernConversation('scheduled')
+    doc.meta.base_instructions = { text: 'native base instructions' }
+    const file = await writeModernRollout(env, 'rollout-scheduled.jsonl', doc)
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const first = await collect(provider.run(ctx))
+    assert.equal(first.items.length, 1)
+    assert.equal(value(first.items[0]).system_text, 'native base instructions')
+    assert.equal(value(first.items[0]).tools, undefined)
+    assert.match(await fs.readFile(configPath, 'utf8'), /^model_provider = "custom"\n/)
+    assert.ok(entries.some((e) => e.message === 'codex.capture.route_released'))
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    assert.equal(entries.at(-1)?.fields?.files_read, 0)
+    assert.equal(entries.at(-1)?.fields?.files_unchanged, 1)
+    await fs.appendFile(file, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'new turn' }] } }) + '\n')
+    for await (const item of provider.run(ctx)) {
+      if (item.type !== 'event') ctx.itemsFailed = (ctx.itemsFailed ?? 0) + 1
+    }
+    assert.equal((await collect(provider.run(ctx))).items.length, 1, 'a failed materialization is retried')
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    ctx.sweep = false
+    assert.equal((await collect(provider.run(ctx))).items.length, 1, 'manual import bypasses fingerprints')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an unreadable rollout warns once across an hour of sweeps, then imports when it recovers (#2070)', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' },  async () => {
+  const env = await stageEnv()
+  const file = await writeModernRollout(env, 'rollout-locked.jsonl', modernConversation('locked'))
+  try {
+    await fs.chmod(file, 0o000)
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const failed = () => entries.filter((e) => e.message === 'codex.backfill.rollout_read_failed')
+    const scans = () => entries.filter((e) => e.message === 'codex.backfill.scan_complete')
+    for (let minute = 0; minute < 60; minute++) {
+      await assert.rejects(collect(provider.run(ctx)), /1 Codex rollout file/)
+    }
+    assert.equal(failed().length, 1, 'one warn for an hour of the same failure')
+    assert.equal(failed()[0].level, 'warn')
+    assert.equal(scans().length, 60)
+    assert.ok(scans().every((e) => e.fields?.files_read_failing === 1), 'every sweep still counts the failing file')
+
+    await fs.chmod(file, 0o644)
+    const recovered = await collect(provider.run(ctx))
+    assert.deepEqual(recovered.items.map((item) => value(item).session_id), ['locked'], 'recovery imports with no restart')
+    assert.equal(entries.filter((e) => e.message === 'codex.backfill.rollout_read_recovered').length, 1)
+    assert.equal(scans().at(-1)?.fields?.files_read_failing, 0)
+
+    // An imported, unchanged file is skipped by its fingerprint before any
+    // read, so it has to grow before it can fail again.
+    await fs.appendFile(file, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'new turn' }] } }) + '\n')
+    await fs.chmod(file, 0o000)
+    await assert.rejects(collect(provider.run(ctx)), /1 Codex rollout file/)
+    assert.equal(failed().length, 2, 'a file that fails again after recovering warns again')
+    await fs.rm(file)
+    await collect(provider.run(ctx))
+    await writeModernRollout(env, 'rollout-locked.jsonl', modernConversation('locked'))
+    await fs.chmod(file, 0o000)
+    await assert.rejects(collect(provider.run(ctx)), /1 Codex rollout file/)
+    assert.equal(failed().length, 3, 'a departed file drops from the remembered failures')
+
+    ctx.sweep = false
+    await assert.rejects(collect(provider.run(ctx)), /1 Codex rollout file/)
+    assert.equal(failed().length, 4, 'a manual import still warns on every run')
+  } finally {
+    await fs.chmod(file, 0o644).catch(() => {})
+    await env.cleanup()
+  }
+})
+
+test('the remembered read failures are capped, so many unreadable rollouts still warn a bounded number of times (#2070)', { skip: process.platform === 'win32' && 'chmod 0o000 does not make a file unreadable on win32' },  async () => {
+  const env = await stageEnv()
+  /** @type {string[]} */
+  const files = []
+  try {
+    for (let i = 0; i < 300; i++) {
+      const file = await writeModernRollout(env, `rollout-locked-${i}.jsonl`, modernConversation(`locked-${i}`))
+      await fs.chmod(file, 0o000)
+      files.push(file)
+    }
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    for (let minute = 0; minute < 3; minute++) await assert.rejects(collect(provider.run(ctx)), /300 Codex rollout file/)
+    assert.equal(entries.filter((e) => e.message === 'codex.backfill.rollout_read_failed').length, 256)
+    const scans = entries.filter((e) => e.message === 'codex.backfill.scan_complete')
+    assert.ok(scans.every((e) => e.fields?.files_read_failing === 300), 'files past the cap are still counted')
+  } finally {
+    await Promise.all(files.map((file) => fs.chmod(file, 0o644).catch(() => {})))
+    await env.cleanup()
+  }
+})
+
+test('with on_join false the sweep records new sessions but not prior history', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-old.jsonl', modernConversation('old'))
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir, config: { backfill: { on_join: false } } })
+    const fresh = modernConversation('fresh')
+    const now = Date.now()
+    fresh.items = fresh.items.map((item, i) => ({ ...item, timestamp: new Date(now + 1000 + i).toISOString() }))
+    await writeModernRollout(env, 'rollout-fresh.jsonl', fresh)
+    const { ctx } = runContext()
+    ctx.sweep = true
+    const swept = await collect(provider.run(ctx))
+    // @ref LLP 0466#on-join [tests]: the sweep records without importing declined history
+    assert.deepEqual(swept.items.map((item) => value(item).session_id), ['fresh'])
+    ctx.sweep = false
+    assert.equal((await collect(provider.run(ctx))).items.length, 2, 'manual import is not floored')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('scheduled capture waits for delayed usage before committing an active assistant response', async () => {
+  const env = await stageEnv()
+  try {
+    const file = await writeModernRollout(env, 'rollout-active.jsonl', {
+      meta: { id: 'active', originator: 'codex-tui' },
+      items: [
+        { type: 'event_msg', payload: { type: 'task_started' } },
+        { payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] } },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx } = runContext()
+    ctx.sweep = true
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    await fs.appendFile(file, JSON.stringify({ type: 'event_msg', payload: {
+      type: 'token_count', info: { last_token_usage: { input_tokens: 20, cached_input_tokens: 5, output_tokens: 3 } },
+    } }) + '\n')
+    const { items } = await collect(provider.run(ctx))
+    assert.equal(items.length, 1)
+    const rows = await materialize(items[0])
+    const attrs = typeof rows[0].attributes === 'string' ? JSON.parse(rows[0].attributes) : rows[0].attributes
+    assert.equal(attrs.usage.input_tokens, 15)
+    assert.equal(attrs.usage.output_tokens, 3)
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+  } finally {
+    await env.cleanup()
+  }
 })
 
 test('modern rollout projects into canonical ai_gateway_messages rows', async () => {
@@ -356,7 +617,7 @@ test('backfill skips a session whose cwd is .hypignore-ignored', async () => {
     assert.ok(drop, 'expected a usage_policy_drop log entry')
     assert.equal(drop?.fields?.operation, 'usage_policy_drop')
     assert.equal(drop?.fields?.conversation_id, 'sess-ignored')
-    assert.equal(drop?.fields?.governed_by, '/work/repo/.hypignore')
+    assert.equal(drop?.fields?.governed_by, path.resolve('/work/repo/.hypignore'))
     const scanDone = logs.find((e) => e.message === 'codex.backfill.scan_complete')
     assert.equal(scanDone?.fields?.sessions_projected, 0)
     assert.equal(scanDone?.fields?.sessions_ignored, 1)
@@ -515,6 +776,150 @@ test('token_count event folds per-turn usage (net of cache) onto the turn assist
       reasoning_tokens: 189,
       total_tokens: 14245,
     })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+for (const sweep of [false, true]) {
+  for (const deliveryBeforeUsage of [false, true]) {
+    test(`delivered assistant records are excluded from ${sweep ? 'scheduled capture' : 'manual import'} ${deliveryBeforeUsage ? 'before' : 'after'} usage`, async () => {
+      const env = await stageEnv()
+      try {
+        const doc = modernConversation('sess-delivery')
+        doc.meta.cli_version = '0.159.0'
+        const started = { type: 'event_msg', payload: { type: 'task_started' } }
+        const usage = { type: 'event_msg', payload: {
+          type: 'token_count', info: { last_token_usage: {
+            input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: 110,
+          } },
+        } }
+        const complete = { type: 'event_msg', payload: { type: 'task_complete' } }
+        const deliveries = [
+          ['codex:code-mode-delivery:v1:complete', 'Here are the files.'],
+          ['codex:code-mode-delivery:v1:incomplete:retained prefix',
+            'The content of a confirmed assistant message is unavailable. Do not infer what was asked or authorized.'],
+        ].map(([marker, text], index) => ({
+          metadata: { delivered_assistant_message: marker, user_input_order: index + 1 },
+          payload: {
+            type: 'message', role: 'assistant', id: `nested-send-${index}`,
+            content: [{ type: 'output_text', text }],
+            internal_chat_message_metadata_passthrough: { turn_id: 't-1' },
+          },
+        }))
+        const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+        await writeModernRollout(env, 'rollout-delivery.jsonl', {
+          ...doc, items: [started, ...doc.items, usage, complete],
+        })
+        const baselineContext = runContext()
+        baselineContext.ctx.sweep = sweep
+        const baseline = await collect(provider.run(baselineContext.ctx))
+        const expectedRows = await materialize(baseline.items[0])
+
+        await writeModernRollout(env, 'rollout-delivery.jsonl', {
+          ...doc, items: [started, ...doc.items,
+            ...(deliveryBeforeUsage ? [...deliveries, usage] : [usage, ...deliveries]), complete],
+        })
+        const { ctx, entries } = runContext()
+        ctx.sweep = sweep
+        const { items } = await collect(provider.run(ctx))
+        assert.equal(items.length, 1)
+        const rows = await materialize(items[0])
+        assert.deepEqual(rows, expectedRows, 'synthetic records must not change row identity, content or usage')
+        const usageRows = rows.filter(row => /** @type {any} */ (row.attributes)?.usage)
+        assert.equal(usageRows.length, 1)
+        assert.equal(usageRows[0].content_text, 'Here are the files.')
+        assert.equal(/** @type {any} */ (usageRows[0].attributes).usage.total_tokens, 110)
+        assert.equal(entries.find(entry => entry.message === 'codex.backfill.session_projected')?.fields?.message_count, 4)
+        // The drop must be visible to an operator, like every other drop on
+        // this path. Two delivery records were filtered out of one session.
+        assert.equal(entries.find(entry => entry.message === 'codex.backfill.scan_complete')?.fields?.delivery_evidence_skipped, 2)
+
+        // Existing live rows already carry usage. Import must not add another
+        // usage carrier under a nested send's distinct message/part id.
+        const storage = {
+          async discoverCachePartitions() { return [{ path: '/fixture', rowCount: expectedRows.length }] },
+          async *readRows() { yield* expectedRows },
+        }
+        const materializer = aiGatewayBackfillMaterializer()
+        assert.deepEqual(await materializer.materialize(items[0], /** @type {any} */ ({
+          env: {}, log: captureLog().log, storage, runId: 'delivery-dedup', runToken: {},
+        })), [])
+      } finally {
+        await env.cleanup()
+      }
+    })
+  }
+}
+
+test('the send_message tool result survives the delivery filter that shares its metadata key', async () => {
+  const env = await stageEnv()
+  try {
+    // Upstream shape, from openai/codex `rollout_reconstruction_tests.rs`
+    // (`recorded_questions_share_queued_input_order_across_resume`): the
+    // GENUINE `function_call_output` for a Code Mode send carries the delivered
+    // text verbatim under the same `delivered_assistant_message` envelope key
+    // the synthetic assistant record marks itself with. Keying the skip on that
+    // field alone drops a real tool result.
+    await writeModernRollout(env, 'rollout-delivery-output.jsonl', {
+      meta: { id: 'sess-delivery-output', cli_version: '0.159.0' },
+      items: [
+        { payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'ready?' }] } },
+        { payload: { type: 'function_call', call_id: 'first', name: 'user_messaging_send_message', arguments: '{"text":"Continue?"}' } },
+        {
+          metadata: { delivered_assistant_message: 'Continue?' },
+          payload: { type: 'function_call_output', call_id: 'first', output: 'Sent.' },
+        },
+        {
+          metadata: { delivered_assistant_message: 'codex:code-mode-delivery:v1:complete', user_input_order: 1 },
+          payload: {
+            type: 'message', role: 'assistant', id: 'nested-send-0',
+            content: [{ type: 'output_text', text: 'Continue?' }],
+            internal_chat_message_metadata_passthrough: { turn_id: 't-1' },
+          },
+        },
+        { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: {
+          input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: 110,
+        } } } },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    const { items } = await collect(provider.run(ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => row.role), ['user', 'assistant', 'tool'])
+    assert.equal(rowsByRole(rows, 'tool')[0].content_text, 'Sent.')
+    // The send's own call is still an eligible carrier, so skipping the
+    // evidence record costs the turn its row but never its usage.
+    const carriers = rows.filter(row => /** @type {any} */ (row.attributes)?.usage)
+    assert.equal(carriers.length, 1)
+    assert.equal(carriers[0].role, 'assistant')
+    assert.equal(/** @type {any} */ (carriers[0].attributes).usage.total_tokens, 110)
+    assert.equal(entries.find(entry => entry.message === 'codex.backfill.scan_complete')?.fields?.delivery_evidence_skipped, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('ordinary assistant messages keep their text when delivery metadata is absent or null', async () => {
+  const env = await stageEnv()
+  try {
+    const text = 'The content of a confirmed assistant message is unavailable. Do not infer what was asked or authorized.'
+    const metadata = [undefined, null, {}, { user_input_order: 1 }, { delivered_assistant_message: null },
+      // Not a `codex:code-mode-delivery:v1:` marker, so not delivery evidence.
+      { delivered_assistant_message: text }]
+    await writeModernRollout(env, 'rollout-unmarked.jsonl', {
+      meta: { id: 'sess-unmarked' },
+      items: metadata.map((metadata, index) => ({
+        metadata,
+        payload: { type: 'message', role: 'assistant', id: `ordinary-${index}`, content: [{ type: 'output_text', text }] },
+      })),
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.equal(rows.length, metadata.length)
+    assert.ok(rows.every(row => row.content_text === text))
   } finally {
     await env.cleanup()
   }
@@ -926,6 +1331,150 @@ test('encrypted reasoning is never projected; only plaintext summary is kept', a
   }
 })
 
+test('compacted checkpoints preserve summary identity, chronology and usage across imports', async () => {
+  const env = await stageEnv()
+  try {
+    const summary = {
+      type: 'message', id: 'msg-summary', role: 'user',
+      content: [{ type: 'input_text', text: 'Decision changed: use the local cache.' }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'], create_time: 1779667203 },
+    }
+    const tokenCount = { type: 'token_count', info: { last_token_usage: { input_tokens: 100, cached_input_tokens: 60, output_tokens: 10 } } }
+    await writeModernRollout(env, 'rollout-compact.jsonl', {
+      meta: { id: 'thread-compact', session_id: 'session-compact', cwd: '/work/repo', timestamp: '2026-05-25T00:00:00.000Z' },
+      items: [
+        { timestamp: '2026-05-25T00:00:01.000Z', payload: { type: 'message', id: 'before', role: 'assistant', content: 'Earlier decision' } },
+        { type: 'event_msg', payload: tokenCount },
+        {
+          type: 'compacted', timestamp: '2026-05-25T00:00:03.000Z',
+          payload: {
+            message: summary.content[0].text,
+            replacement_history: [{ type: 'message', role: 'user', content: 'Retained prompt, not a summary' }, summary],
+            compaction_response_id: 'resp-compact', window_number: 2, window_id: 'window-2',
+            latest_token_usage_record: { last_token_usage: { output_tokens: 9999 } },
+          },
+        },
+        // Recomputed usage after compaction must not re-bill the previous turn.
+        { type: 'event_msg', payload: tokenCount },
+        { timestamp: '2026-05-25T00:00:04.000Z', payload: summary },
+        { timestamp: '2026-05-25T00:00:05.000Z', payload: { type: 'message', id: 'after-user', role: 'user', content: 'Continue' } },
+        { timestamp: '2026-05-25T00:00:06.000Z', payload: { type: 'message', id: 'after', role: 'assistant', content: 'Using the local cache' } },
+        { type: 'event_msg', payload: tokenCount },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const first = await collect(provider.run(runContext().ctx))
+    const second = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(first.items[0])
+    assert.deepEqual(await materialize(second.items[0]), rows)
+    assert.deepEqual(rows.map((r) => r.message_id), ['before', 'msg-summary', 'after-user', 'after'])
+    const compact = rows[1]
+    assert.equal(compact.content_text, summary.content[0].text)
+    assert.equal(compact.is_compact_summary, true)
+    assert.equal(compact.provider_type, 'compacted')
+    assert.equal(compact.provider_subtype, 'compaction.summary')
+    assert.equal(compact.session_id, 'session-compact')
+    assert.equal(compact.conversation_id, 'thread-compact')
+    assert.equal(compact.message_created_at, '2026-05-25T00:00:03.000Z')
+    assert.deepEqual(compact.compact_metadata, { compaction_response_id: 'resp-compact', window_number: 2, window_id: 'window-2' })
+    assert.deepEqual(/** @type {any} */ (compact.attributes).codex.content_item_kinds, ['compaction.summary'])
+    assert.deepEqual(rows[2].previous_message_id, ['msg-summary'])
+    assert.equal(/** @type {any} */ (compact.attributes)?.usage, undefined)
+    assert.equal(rows.filter((r) => /** @type {any} */ (r.attributes)?.usage).length, 2)
+    assert.equal(/** @type {any} */ (rows[3].attributes).usage.input_tokens, 40)
+    assert.ok(!JSON.stringify(rows).includes('Retained prompt'))
+
+    const projector = createCodexExchangeProjector({ resolver: createUsagePolicyResolver({ existsSync: () => false }) })
+    const live = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+    const liveRows = await live.projectExchange(/** @type {any} */ ({
+      path: '/v1/responses', provider: 'openai',
+      request_headers: JSON.stringify({ 'x-codex-turn-metadata': JSON.stringify({ session_id: 'session-compact', thread_id: 'thread-compact' }) }),
+      request_body: JSON.stringify({ input: [summary] }),
+    }))
+    assert.equal(liveRows[0].part_id, compact.part_id, 'live and backfill converge on the native summary part')
+    assert.equal(liveRows[0].session_id, compact.session_id)
+    assert.equal(liveRows[0].conversation_id, compact.conversation_id)
+    assert.deepEqual(/** @type {any} */ (liveRows[0].attributes).codex.content_item_kinds, ['compaction.summary'])
+
+    const ignored = createCodexBackfillProvider({ homeDir: env.homeDir, resolver: ignoringResolver('/work/repo') })
+    assert.equal((await collect(ignored.run(runContext().ctx))).items.length, 0)
+    const windowed = await collect(provider.run(runContext({ since: '2026-05-25T00:00:03.000Z', until: '2026-05-25T00:00:03.000Z' }).ctx))
+    assert.equal((await materialize(windowed.items[0]))[0].message_id, 'msg-summary')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a checkpoint inside a turn closes it, so a later token_count bills nothing before it', async () => {
+  const env = await stageEnv()
+  try {
+    const tokenCount = { type: 'token_count', info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }
+    await writeModernRollout(env, 'rollout-midturn-compact.jsonl', {
+      meta: { id: 'thread-midturn-compact' },
+      items: [
+        { timestamp: '2026-05-25T00:00:01.000Z', payload: { type: 'message', id: 'before', role: 'assistant', content: 'Earlier answer' } },
+        { type: 'compacted', timestamp: '2026-05-25T00:00:02.000Z', payload: { message: '' } },
+        { type: 'event_msg', payload: tokenCount },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const rows = await materialize((await collect(provider.run(runContext().ctx))).items[0])
+    assert.deepEqual(rows.map((r) => r.message_id), ['before'])
+    assert.equal(/** @type {any} */ (rows[0].attributes)?.usage, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('legacy compacted plaintext and its later input replay share fallback identity', async () => {
+  const env = await stageEnv()
+  try {
+    // Codex's compact/summary_prefix.md, also used before content_item_kinds.
+    const text = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\nUse the revised decision.'
+    await writeModernRollout(env, 'rollout-legacy-compact.jsonl', {
+      meta: { id: 'legacy-compact' },
+      items: [
+        { type: 'compacted', timestamp: '2026-05-25T00:00:01.000Z', payload: { message: text } },
+        { timestamp: '2026-05-25T00:00:02.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } },
+      ],
+    })
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].content_text, text)
+    assert.equal(rows[0].is_compact_summary, true)
+    assert.equal(rows[0].message_created_at, '2026-05-25T00:00:01.000Z')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('empty and opaque compaction checkpoints do not import retained history or reasoning as summaries', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-opaque-compact.jsonl', {
+      meta: { id: 'opaque-compact' },
+      items: [
+        { type: 'compacted', payload: { message: '', replacement_history: [{ type: 'message', role: 'user', content: 'Old summary', internal_chat_message_metadata_passthrough: { content_item_kinds: ['compaction.summary'] } }, { type: 'compaction', id: 'cmp-1', encrypted_content: 'opaque-state' }] } },
+        { type: 'compacted', payload: { message: '   ' } },
+        { type: 'compacted', payload: { message: { text: 'Unsupported wrapper' } } },
+        { payload: { type: 'compaction', id: 'cmp-2', encrypted_content: 'opaque-state', content: 'Unsupported plaintext' } },
+        { payload: { type: 'compaction_summary', encrypted_content: 'opaque-state' } },
+        { payload: { type: 'context_compaction', encrypted_content: 'opaque-state' } },
+        { payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Reasoning summary' }] } },
+      ],
+    })
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].part_type, 'reasoning')
+    assert.equal(rows[0].is_compact_summary, undefined)
+    assert.ok(!JSON.stringify(rows).includes('opaque-state'))
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('since bound filters out items older than the window', async () => {
   const env = await stageEnv()
   try {
@@ -1011,4 +1560,572 @@ test('diagnostic-only history source is detected but not used as canonical', asy
   } finally {
     await env.cleanup()
   }
+})
+
+
+test('backfill refreshes exclusions and keys on the Codex container rather than thread ID', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-test.jsonl', {
+      meta: { id: 'thread-id', session_id: 'container-id', cwd: '/work', timestamp: '2026-05-20T10:00:00Z' },
+      items: [{ payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] } }],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir, ignoredSessions: new SessionIgnoreSet(env.homeDir) })
+    const writer = new SessionIgnoreSet(env.homeDir)
+    writer.add('thread-id')
+    assert.equal((await collect(provider.run(runContext().ctx))).items.length, 1)
+    writer.add('container-id')
+    const run = runContext()
+    assert.equal((await collect(provider.run(run.ctx))).items.length, 0)
+    assert.ok(run.entries.some(e => e.message === 'codex.backfill.session_ignore_drop'))
+    writer.delete('container-id')
+    assert.equal((await collect(provider.run(runContext().ctx))).items.length, 1)
+  } finally { await env.cleanup() }
+})
+
+test('scheduled repair covers markerless 1.38 configs but skips gateway, manual and dry runs', async () => {
+  const env = await stageEnv()
+  try {
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    const original = 'model_provider = "custom"\n[model_providers.custom]\nname = "Private"\nbase_url = "https://example.invalid/v1"\nenv_key = "PRIVATE_KEY"\n'
+    await fs.writeFile(configPath, original)
+    for (const scenario of [
+      { config: { capture_mode: 'gateway' }, sweep: true, dryRun: false },
+      { config: { capture_mode: 'transcript' }, sweep: false, dryRun: false },
+      { config: { capture_mode: 'transcript' }, sweep: true, dryRun: true },
+    ]) {
+      const { ctx } = runContext()
+      Object.assign(ctx, { sweep: scenario.sweep, dryRun: scenario.dryRun })
+      const provider = createCodexBackfillProvider({ homeDir: env.homeDir, config: scenario.config })
+      await collect(provider.run(ctx))
+      assert.equal(await fs.readFile(configPath, 'utf8'), original)
+    }
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    await collect(provider.run(ctx))
+    const repaired = await fs.readFile(configPath, 'utf8')
+    assert.ok(repaired.startsWith(original))
+    assert.match(repaired, /\[model_providers.hypaware\]\nname = "OpenAI"/)
+    assert.ok(entries.some(e => e.message === 'codex.capture.provider_repaired'))
+    const before = await fs.stat(configPath)
+    await collect(provider.run(ctx))
+    assert.equal((await fs.stat(configPath)).mtimeMs, before.mtimeMs)
+    assert.equal(await fs.readFile(configPath, 'utf8'), repaired)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('content_item_kinds is promoted onto each user row and merges with the exchange namespace', async () => {
+  const env = await stageEnv()
+  try {
+    /** @type {Array<{ timestamp: string, payload: Record<string, unknown> }>} */
+    const rolloutItems = [
+      {
+        timestamp: '2026-10-20T10:00:00.000Z',
+        payload: {
+          type: 'message', role: 'user',
+          content: [{ type: 'input_text', text: '# AGENTS.md\nbe terse' }, { type: 'input_text', text: '<environment_context>cwd</environment_context>' }],
+          internal_chat_message_metadata_passthrough: { content_item_kinds: ['agents_md.instructions', 'environments.environment_context'] },
+        },
+      },
+      {
+        timestamp: '2026-10-20T10:00:01.000Z',
+        payload: {
+          type: 'message', role: 'user',
+          content: [{ type: 'input_text', text: 'look at this' }, { type: 'input_image', image_url: 'data:image/png;base64,AA==' }, { type: 'input_text', text: 'and fix it' }],
+          internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text', 'user.image', 'user.text'] },
+        },
+      },
+      {
+        timestamp: '2026-10-20T10:00:02.000Z',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'older rollout, no metadata' }] },
+      },
+      {
+        timestamp: '2026-10-20T10:00:03.000Z',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] },
+      },
+    ]
+    await writeModernRollout(env, '2026/10/20/rollout-kinds.jsonl', { ...modernConversation('sess-kinds'), items: rolloutItems })
+
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    assert.equal(items.length, 1)
+    const rows = await materialize(items[0])
+    const userRows = rowsByRole(rows, 'user')
+    assert.equal(userRows.length, 5, 'two text parts + two text parts (image dropped) + one')
+    const attrsOf = (/** @type {string} */ text) => {
+      const row = userRows.find((r) => r.content_text === text)
+      assert.ok(row, text)
+      return /** @type {any} */ (row.attributes)
+    }
+
+    // Harness-injected content under the user role is labeled as such.
+    assert.deepEqual(attrsOf('# AGENTS.md\nbe terse').codex.content_item_kinds, ['agents_md.instructions', 'environments.environment_context'])
+    // An image-attached turn keeps the full array, not a truncated one.
+    assert.deepEqual(attrsOf('look at this').codex.content_item_kinds, ['user.text', 'user.image', 'user.text'])
+    // Message-level codex keys merge with the exchange-level namespace rather
+    // than replacing it.
+    assert.equal(attrsOf('look at this').codex.thread_source, 'user')
+    assert.equal(attrsOf('look at this').codex.identity_source, 'gateway_fallback')
+    assert.equal(attrsOf('look at this').gateway.source, 'backfill')
+    // A rollout without the metadata gets no key: missing means unknown.
+    assert.equal(attrsOf('older rollout, no metadata').codex.content_item_kinds, undefined)
+    assert.equal(attrsOf('older rollout, no metadata').codex.thread_source, 'user')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// Paginated Codex history (and a migrated legacy one) records a turn's
+// messages as completed TurnItems: `event_msg` `item_completed` with a
+// `UserMessage` or `AgentMessage` whose content blocks are not Responses
+// blocks. A resumed thread can append only those, so a parser that reads
+// `response_item` alone drops the new turns while the scan reports ok.
+// @ref LLP 0567#turn-items [tests]: completed TurnItems are captured, not skipped
+const PAGINATED_THREAD = '01a0835d-0000-7000-8000-000000000001'
+const PAGINATED_ROLLOUT = '01a0ab78-0000-7000-8000-000000000002'
+
+/**
+ * A September thread resumed in October, with only completed TurnItems for
+ * the new turn. `prefix` adds an old ordinary response item before it.
+ *
+ * @param {{ prefix?: boolean }} [options]
+ */
+function resumedPaginatedThread(options = {}) {
+  /** @param {string} at @param {Record<string, unknown>} payload */
+  const event = (at, payload) => ({ type: 'event_msg', timestamp: at, payload })
+  /** @param {string} at @param {Record<string, unknown>} item */
+  const completed = (at, item) => event(at, {
+    type: 'item_completed',
+    thread_id: PAGINATED_THREAD,
+    turn_id: 'turn-oct',
+    item,
+    completed_at_ms: Date.parse(at),
+  })
+  return {
+    meta: { id: PAGINATED_THREAD, timestamp: '2026-09-16T10:00:00.000Z', originator: 'Codex Desktop', history_mode: 'paginated' },
+    items: [
+      ...(options.prefix
+        ? [{ timestamp: '2026-09-16T10:00:05.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'old user' }] } }]
+        : []),
+      event('2026-10-30T19:00:00.000Z', { type: 'task_started', turn_id: 'turn-oct' }),
+      completed('2026-10-30T19:00:01.000Z', { type: 'UserMessage', id: 'user-1', content: [{ type: 'text', text: 'new user', text_elements: [] }] }),
+      completed('2026-10-30T19:00:09.000Z', { type: 'AgentMessage', id: 'assistant-1', content: [{ type: 'Text', text: 'new assistant' }], phase: 'final_answer' }),
+      event('2026-10-30T19:00:10.000Z', { type: 'token_count', info: { last_token_usage: { input_tokens: 40, output_tokens: 7 } } }),
+      event('2026-10-30T19:00:10.000Z', { type: 'task_complete', turn_id: 'turn-oct' }),
+    ],
+  }
+}
+
+test('completed TurnItems in a resumed paginated thread are captured by import and by the sweep', async () => {
+  for (const prefix of [false, true]) {
+    for (const sweep of [false, true]) {
+      const env = await stageEnv()
+      try {
+        await writeModernRollout(
+          env,
+          `2026/09/16/rollout-2026-09-16T10-00-00-${PAGINATED_THREAD}_${PAGINATED_ROLLOUT}.jsonl`,
+          resumedPaginatedThread({ prefix })
+        )
+        const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+        const { ctx } = runContext({ since: '2026-10-01T00:00:00.000Z' })
+        if (sweep) ctx.sweep = true
+        const { items } = await collect(provider.run(ctx))
+        const label = `prefix=${prefix} sweep=${sweep}`
+        assert.equal(items.length, 1, label)
+        const exchange = value(items[0])
+        assert.equal(exchange.session_id, PAGINATED_THREAD, label)
+        assert.equal(exchange.conversation_id, PAGINATED_THREAD, label)
+        const rows = await materialize(items[0])
+        const users = rowsByRole(rows, 'user')
+        const assistants = rowsByRole(rows, 'assistant')
+        assert.deepEqual(users.map((r) => r.content_text), ['new user'], label)
+        assert.deepEqual(assistants.map((r) => r.content_text), ['new assistant'], label)
+        assert.equal(users[0].message_id, 'user-1', label)
+        assert.equal(assistants[0].message_id, 'assistant-1', label)
+        assert.equal(String(users[0].message_created_at), '2026-10-30T19:00:01.000Z', label)
+        assert.equal(String(assistants[0].message_created_at), '2026-10-30T19:00:09.000Z', label)
+        assert.equal(/** @type {any} */ (assistants[0].attributes)?.usage?.output_tokens, 7, label)
+      } finally {
+        await env.cleanup()
+      }
+    }
+  }
+})
+
+/**
+ * @param {string} threadId
+ * @param {string} turnId
+ * @param {string} at
+ * @param {Record<string, unknown>} item
+ */
+function completedItem(threadId, turnId, at, item) {
+  return { type: 'event_msg', timestamp: at, payload: { type: 'item_completed', thread_id: threadId, turn_id: turnId, item, completed_at_ms: Date.parse(at) } }
+}
+
+/** @param {string} at @param {Record<string, unknown>} payload */
+function eventMsg(at, payload) {
+  return { type: 'event_msg', timestamp: at, payload }
+}
+
+test('a turn written as response items is projected from them alone, whatever TurnItems mirror it', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000011'
+  const env = await stageEnv()
+  try {
+    // Turn 1: a fresh paginated turn, response items plus their mirrors.
+    // Turn 2: a migrated legacy turn. The raw prompt sits before the implicit
+    // turn it starts, and the mirrors carry per-thread `item-N` ids.
+    // Turn 3: a resumed turn with TurnItems only.
+    await writeModernRollout(env, `2026/10/20/rollout-2026-10-20T10-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-20T10:00:00.000Z', history_mode: 'paginated' },
+      items: [
+        eventMsg('2026-10-20T10:00:01.000Z', { type: 'task_started', turn_id: 't1' }),
+        { timestamp: '2026-10-20T10:00:01.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'first prompt' }] } },
+        completedItem(thread, 't1', '2026-10-20T10:00:01.000Z', { type: 'UserMessage', id: 'u-1', content: [{ type: 'text', text: 'first prompt' }] }),
+        { timestamp: '2026-10-20T10:00:02.000Z', payload: { type: 'function_call', name: 'shell', arguments: '{"cmd":"ls"}', call_id: 'call-1' } },
+        { timestamp: '2026-10-20T10:00:03.000Z', payload: { type: 'function_call_output', call_id: 'call-1', output: 'a.txt' } },
+        { timestamp: '2026-10-20T10:00:04.000Z', payload: { type: 'message', role: 'assistant', id: 'msg-1', content: [{ type: 'output_text', text: 'first answer' }] } },
+        completedItem(thread, 't1', '2026-10-20T10:00:04.000Z', { type: 'AgentMessage', id: 'a-1', content: [{ type: 'Text', text: 'first answer' }] }),
+        eventMsg('2026-10-20T10:00:05.000Z', { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 3 } } }),
+        eventMsg('2026-10-20T10:00:05.000Z', { type: 'task_complete', turn_id: 't1' }),
+        { timestamp: '2026-10-20T10:01:00.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'second prompt' }] } },
+        eventMsg('2026-10-20T10:01:00.000Z', { type: 'task_started', turn_id: 'rollout-9' }),
+        completedItem(thread, 'rollout-9', '2026-10-20T10:01:00.000Z', { type: 'UserMessage', id: 'item-1', content: [{ type: 'text', text: 'second prompt' }] }),
+        { timestamp: '2026-10-20T10:01:02.000Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'second answer' }] } },
+        completedItem(thread, 'rollout-9', '2026-10-20T10:01:02.000Z', { type: 'AgentMessage', id: 'item-2', content: [{ type: 'Text', text: 'second answer' }] }),
+        eventMsg('2026-10-20T10:01:03.000Z', { type: 'task_complete', turn_id: 'rollout-9' }),
+        eventMsg('2026-10-30T09:00:00.000Z', { type: 'task_started', turn_id: 't3' }),
+        completedItem(thread, 't3', '2026-10-30T09:00:00.000Z', { type: 'UserMessage', id: 'u-3', content: [{ type: 'text', text: 'third prompt' }] }),
+        completedItem(thread, 't3', '2026-10-30T09:00:02.000Z', { type: 'Reasoning', id: 'r-3', summary_text: ['thinking it over'], raw_content: ['hidden'] }),
+        completedItem(thread, 't3', '2026-10-30T09:00:03.000Z', { type: 'AgentMessage', id: 'a-3', content: [{ type: 'Text', text: 'third answer' }] }),
+        eventMsg('2026-10-30T09:00:04.000Z', { type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 5 } } }),
+        eventMsg('2026-10-30T09:00:04.000Z', { type: 'task_complete', turn_id: 't3' }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    for (const sweep of [false, true]) {
+      const { ctx } = runContext()
+      if (sweep) ctx.sweep = true
+      const { items } = await collect(provider.run(ctx))
+      if (sweep) {
+        // The manual import above did not fingerprint the file, so the sweep reads it.
+        assert.equal(items.length, 1)
+      }
+      const rows = await materialize(items[0])
+      const texts = rows.map(row => `${row.role}:${row.content_text}`)
+      assert.deepEqual(texts, [
+        'user:first prompt',
+        `assistant:${rows[1].content_text}`,
+        'tool:a.txt',
+        'assistant:first answer',
+        'user:second prompt',
+        'assistant:second answer',
+        'user:third prompt',
+        'assistant:thinking it over',
+        'assistant:third answer',
+      ])
+      assert.equal(rows[1].provider_type, 'function_call')
+      assert.ok(!rows.some(row => String(row.content_text).includes('hidden')), 'raw reasoning content is not recorded')
+      const usage = rows.filter(row => /** @type {any} */ (row.attributes)?.usage)
+      assert.deepEqual(usage.map(row => row.content_text), ['first answer', 'third answer'])
+      assert.equal(rows.find(row => row.content_text === 'third answer')?.message_id, 'a-3')
+      assert.equal(rows.find(row => row.content_text === 'third answer')?.provider_type, 'AgentMessage')
+      assert.equal(new Set(rows.map(row => row.part_id)).size, rows.length)
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('migrated item-N ids do not become row identity, and another thread\'s TurnItems are not this thread\'s rows', async () => {
+  const threads = ['01a0835d-0000-7000-8000-000000000021', '01a0835d-0000-7000-8000-000000000022']
+  const env = await stageEnv()
+  try {
+    for (const [index, thread] of threads.entries()) {
+      await writeModernRollout(env, `2026/10/21/rollout-2026-10-21T10-00-0${index}-${thread}.jsonl`, {
+        meta: { id: thread, timestamp: '2026-10-21T10:00:00.000Z' },
+        items: [
+          eventMsg('2026-10-21T10:00:01.000Z', { type: 'task_started', turn_id: 'rollout-1' }),
+          completedItem(thread, 'rollout-1', '2026-10-21T10:00:01.000Z', { type: 'UserMessage', id: 'item-1', content: [{ type: 'text', text: `prompt ${index}` }] }),
+          completedItem(threads[1 - index], 'rollout-1', '2026-10-21T10:00:01.500Z', { type: 'UserMessage', id: 'item-9', content: [{ type: 'text', text: 'not this thread' }] }),
+          eventMsg('2026-10-21T10:00:02.000Z', { type: 'task_complete', turn_id: 'rollout-1' }),
+        ],
+      })
+    }
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx } = runContext()
+    const { items } = await collect(provider.run(ctx))
+    assert.equal(items.length, 2)
+    const rows = (await Promise.all(items.map(materialize))).flat()
+    assert.deepEqual(rows.map(row => row.content_text).sort(), ['prompt 0', 'prompt 1'])
+    assert.ok(rows.every(row => row.message_id !== 'item-1'))
+    assert.equal(new Set(rows.map(row => row.part_id)).size, 2)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('TurnItems with no projection are counted by type in scan_complete, and an unfinished TurnItem turn is deferred by the sweep', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000031'
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, `2026/10/22/rollout-2026-10-22T10-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-22T10:00:00.000Z' },
+      items: [
+        eventMsg('2026-10-22T10:00:01.000Z', { type: 'task_started', turn_id: 't1' }),
+        completedItem(thread, 't1', '2026-10-22T10:00:01.000Z', { type: 'UserMessage', id: 'u-1', content: [{ type: 'text', text: 'run it' }] }),
+        completedItem(thread, 't1', '2026-10-22T10:00:02.000Z', { type: 'CommandExecution', id: 'c-1', command: 'secret-looking command' }),
+        completedItem(thread, 't1', '2026-10-22T10:00:03.000Z', { type: 'FutureThing', id: 'f-1', body: 'secret-looking body' }),
+        completedItem(thread, 't1', '2026-10-22T10:00:04.000Z', { type: 'AgentMessage', id: 'a-1', content: [{ type: 'Text', text: 'done' }] }),
+        eventMsg('2026-10-22T10:00:05.000Z', { type: 'task_complete', turn_id: 't1' }),
+        eventMsg('2026-10-22T10:01:00.000Z', { type: 'task_started', turn_id: 't2' }),
+        completedItem(thread, 't2', '2026-10-22T10:01:00.000Z', { type: 'UserMessage', id: 'u-2', content: [{ type: 'text', text: 'still going' }] }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const { items } = await collect(provider.run(ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => row.content_text), ['run it', 'done'])
+    const scan = entries.findLast(entry => entry.message === 'codex.backfill.scan_complete')?.fields
+    assert.equal(scan?.sessions_deferred, 1)
+    assert.equal(scan?.completed_items_unsupported, 2)
+    assert.equal(scan?.completed_item_unsupported_types, 'CommandExecution,other')
+    assert.ok(!JSON.stringify(entries).includes('secret-looking'), 'the diagnostic carries no content')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a turn stopped before any model output records its prompt once, and a TurnItem keeps its own completion time', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000041'
+  const env = await stageEnv()
+  try {
+    /** @param {string} turnId @param {string} at @param {Record<string, unknown>} item @param {number} completedAt */
+    const completedAt = (turnId, at, item, completedAt) => {
+      const record = completedItem(thread, turnId, at, item)
+      return { ...record, payload: { ...record.payload, completed_at_ms: completedAt } }
+    }
+    await writeModernRollout(env, `2026/10/23/rollout-2026-10-23T10-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-23T10:00:00.000Z', history_mode: 'paginated' },
+      items: [
+        // Codex writes the person's prompt both as a raw user message and as
+        // its UserMessage mirror, then the turn is aborted before any reply.
+        eventMsg('2026-10-23T10:00:01.000Z', { type: 'task_started', turn_id: 'a1' }),
+        {
+          timestamp: '2026-10-23T10:00:01.000Z',
+          payload: {
+            type: 'message', role: 'user', id: 'msg-u1', content: [{ type: 'input_text', text: 'stop early' }],
+            internal_chat_message_metadata_passthrough: { content_item_kinds: ['user.text'] },
+          },
+        },
+        completedItem(thread, 'a1', '2026-10-23T10:00:01.000Z', { type: 'UserMessage', id: 'u-1', content: [{ type: 'text', text: 'stop early' }] }),
+        eventMsg('2026-10-23T10:00:02.000Z', { type: 'turn_aborted', turn_id: 'a1' }),
+        // A TurnItem-only turn whose completion times differ from the record
+        // times; a zero completion time is Codex's default for a missing one.
+        eventMsg('2026-10-23T10:05:00.000Z', { type: 'task_started', turn_id: 'a2' }),
+        completedAt('a2', '2026-10-23T10:05:00.000Z', { type: 'UserMessage', id: 'u-2', content: [{ type: 'text', text: 'later prompt' }] }, Date.parse('2026-10-23T10:04:30.000Z')),
+        completedAt('a2', '2026-10-23T10:05:09.000Z', { type: 'AgentMessage', id: 'a-2', content: [{ type: 'Text', text: 'later answer' }] }, 0),
+        eventMsg('2026-10-23T10:05:10.000Z', { type: 'task_complete', turn_id: 'a2' }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => `${row.role}:${row.content_text}`), ['user:stop early', 'user:later prompt', 'assistant:later answer'])
+    assert.equal(rows[0].message_id, 'msg-u1')
+    assert.equal(String(rows[1].message_created_at), '2026-10-23T10:04:30.000Z')
+    assert.equal(String(rows[2].message_created_at), '2026-10-23T10:05:09.000Z')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('only a turn\'s own prompt or model output decides it: harness context, a prompt between turns and a missing turn id suppress nothing', async () => {
+  const thread = '01a0835d-0000-7000-8000-000000000051'
+  const env = await stageEnv()
+  try {
+    /** @param {string} at @param {string} text @param {string[]} kinds */
+    const userMessage = (at, text, kinds) => ({
+      timestamp: at,
+      payload: {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text }],
+        internal_chat_message_metadata_passthrough: { content_item_kinds: kinds },
+      },
+    })
+    /** @param {string} text */
+    const agent = text => ({ type: 'AgentMessage', content: [{ type: 'Text', text }] })
+    /** @param {string} text */
+    const user = text => ({ type: 'UserMessage', content: [{ type: 'text', text }] })
+    await writeModernRollout(env, `2026/10/23/rollout-2026-10-23T11-00-00-${thread}.jsonl`, {
+      meta: { id: thread, timestamp: '2026-10-23T11:00:00.000Z', history_mode: 'paginated' },
+      items: [
+        // Turn b1 is TurnItems only, with harness context written raw.
+        eventMsg('2026-10-23T11:00:01.000Z', { type: 'task_started', turn_id: 'b1' }),
+        userMessage('2026-10-23T11:00:01.000Z', 'AGENTS.md says hello', ['contextual.agents_md']),
+        completedItem(thread, 'b1', '2026-10-23T11:00:02.000Z', user('first prompt')),
+        completedItem(thread, 'b1', '2026-10-23T11:00:03.000Z', agent('first answer')),
+        eventMsg('2026-10-23T11:00:04.000Z', { type: 'task_complete', turn_id: 'b1' }),
+        // A raw prompt written before the next turn starts belongs to no turn.
+        userMessage('2026-10-23T11:01:00.000Z', 'gap prompt', ['user.text']),
+        // Turn b2 searched the web: its raw evidence wins over its mirrors.
+        eventMsg('2026-10-23T11:01:01.000Z', { type: 'task_started', turn_id: 'b2' }),
+        { timestamp: '2026-10-23T11:01:02.000Z', payload: { type: 'web_search_call', id: 'ws-1', status: 'completed' } },
+        completedItem(thread, 'b2', '2026-10-23T11:01:02.000Z', user('gap prompt')),
+        completedItem(thread, 'b2', '2026-10-23T11:01:03.000Z', agent('mirrored answer')),
+        eventMsg('2026-10-23T11:01:04.000Z', { type: 'task_complete', turn_id: 'b2' }),
+        // A TurnItem with no turn id at all, after the last turn ended.
+        eventMsg('2026-10-23T11:02:00.000Z', { type: 'item_completed', thread_id: thread, item: agent('unowned answer') }),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => `${row.role}:${row.content_text}`), [
+      'user:AGENTS.md says hello',
+      'user:first prompt',
+      'assistant:first answer',
+      'user:gap prompt',
+      'assistant:unowned answer',
+    ])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+
+// @ref LLP 0583#bounded-projection [tests]: batching must retain a late usage carrier and stable positions
+test('streamed rollout batches preserve usage, indices, and tool links across batch boundaries', async () => {
+  const env = await stageEnv()
+  try {
+    /** @type {Array<{ type?: string, timestamp: string, payload: Record<string, unknown> }>} */
+    const items = Array.from({ length: 300 }, (_, i) => ({
+      timestamp: '2026-11-04T15:00:00.000Z',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `prompt-${i}` }] },
+    }))
+    items.splice(100, 0, { timestamp: '2026-11-04T15:00:00.000Z', payload: {
+      type: 'function_call', call_id: 'cross-batch', name: 'echo', arguments: '{}' },
+    })
+    items.push({ timestamp: '2026-11-04T15:00:00.000Z', payload: {
+      type: 'function_call_output', call_id: 'cross-batch', output: 'done' },
+    })
+    items.push({ type: 'event_msg', timestamp: '2026-11-04T15:00:01.000Z', payload: {
+      type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 7 } } },
+    })
+    await writeModernRollout(env, 'rollout-batches.jsonl', { meta: { id: 'batched' }, items })
+    const { ctx, entries } = runContext()
+    const result = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    assert.ok(result.items.length > 1, 'a long conversation is emitted in bounded batches')
+    const messages = result.items.flatMap(item => value(item).messages)
+    assert.equal(messages.length, 302)
+    assert.ok(result.items.every(item => value(item).messages.length <= 128))
+    assert.deepEqual(messages.map(message => message.message_index), Array.from({ length: 302 }, (_, i) => i))
+    assert.equal(messages[100].attributes.usage.output_tokens, 7, 'usage reaches the earlier tool call before its batch is written')
+    assert.equal(messages.filter(message => message.attributes?.usage).length, 1)
+    const materializer = aiGatewayBackfillMaterializer()
+    const materializerCtx = /** @type {any} */ ({ log: captureLog().log, env: {}, storage: {}, runToken: {} })
+    const rows = []
+    for (const item of result.items) rows.push(...await materializer.materialize(item, materializerCtx))
+    assert.deepEqual(rows[128].previous_message_id, [rows[127].message_id])
+    assert.equal(rows.at(-1)?.tool_call_id, rows[100].tool_call_id)
+    assert.equal(entries.at(-1).fields.sessions_projected, 1)
+  } finally { await env.cleanup() }
+})
+
+// @ref LLP 0583#failures [tests]: a budget failure cannot masquerade as a successful empty scan
+test('an oversized record fails visibly while healthy rollouts still import', async () => {
+  const env = await stageEnv()
+  try {
+    await fs.mkdir(env.sessionsDir, { recursive: true })
+    await fs.writeFile(path.join(env.sessionsDir, 'rollout-a-large.jsonl'), JSON.stringify({
+      type: 'event_msg', payload: { type: 'padding', text: 'x'.repeat(16 * 1024 * 1024) },
+    }) + '\n')
+    await writeModernRollout(env, 'rollout-z-healthy.jsonl', modernConversation('healthy'))
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const yielded = []
+    await assert.rejects(async () => {
+      for await (const item of createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx)) {
+        if (item.type !== 'event') yielded.push(item)
+      }
+    }, /1 Codex rollout file/)
+    assert.equal(yielded.length, 1)
+    assert.equal(value(yielded[0]).conversation_id, 'healthy')
+    assert.equal(entries.at(-1).fields.status, 'failed')
+    assert.equal(entries.at(-1).fields.files_read_failing, 1)
+    assert.match(entries.find(entry => entry.message === 'codex.backfill.rollout_read_failed').fields.error, /record.*limit/i)
+  } finally { await env.cleanup() }
+})
+
+
+// @ref LLP 0583#bounded-projection [tests]: framing decodes complete UTF-8 lines and tolerates an incomplete live suffix
+test('streamed records preserve UTF-8 across chunk boundaries and ignore a truncated tail', async () => {
+  const env = await stageEnv()
+  try {
+    const text = 'x'.repeat(65_490) + '🙂漢字'.repeat(30)
+    const file = await writeModernRollout(env, 'rollout-utf8.jsonl', { meta: { id: 'utf8' }, items: [
+      { payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } },
+    ] })
+    const content = await fs.readFile(file, 'utf8')
+    await fs.writeFile(file, content.replaceAll('\n', '\r\n') + '{"type":"response_item","payload":')
+    const { ctx } = runContext()
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    assert.equal((await materialize(items[0]))[0].content_text, text)
+  } finally { await env.cleanup() }
+})
+
+test('a wholly unparsable nonempty rollout fails rather than reporting an empty successful scan', async () => {
+  const env = await stageEnv()
+  try {
+    await fs.mkdir(env.sessionsDir, { recursive: true })
+    await fs.writeFile(path.join(env.sessionsDir, 'rollout-invalid.jsonl'), 'not json\n')
+    const { ctx } = runContext()
+    await assert.rejects(collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx)), /no readable JSON records/)
+  } finally { await env.cleanup() }
+})
+
+
+test('a partial first JSONL record does not hide the complete records after it', async () => {
+  const env = await stageEnv()
+  try {
+    const file = await writeModernRollout(env, 'rollout-leading-partial.jsonl', modernConversation('leading-partial'))
+    await fs.writeFile(file, '{\n' + await fs.readFile(file, 'utf8'))
+    const { ctx } = runContext()
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    assert.equal(value(items[0]).messages.length, 4)
+  } finally { await env.cleanup() }
+})
+
+test('legacy parsing reads only the initial file extent when a writer appends during the read', async (t) => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeLegacyRollout(env, 'rollout-legacy-growing.json', {
+      session: { id: 'legacy-growing' }, items: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'initial snapshot' }] }],
+    })
+    const open = fs.open.bind(fs)
+    let appended = false
+    t.mock.method(fs, 'open', async (...args) => {
+      const handle = await open(...args)
+      if (args[0] === filePath) {
+        const read = handle.read.bind(handle)
+        t.mock.method(handle, 'read', async (...readArgs) => {
+          const result = await read(...readArgs)
+          if (!appended) {
+            appended = true
+            await fs.appendFile(filePath, 'concurrent append outside the initial extent')
+          }
+          return result
+        })
+      }
+      return handle
+    })
+    const { ctx } = runContext()
+    const { items } = await collect(createCodexBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    assert.equal((await materialize(items[0]))[0].content_text, 'initial snapshot')
+    assert.equal(appended, true)
+  } finally { await env.cleanup() }
 })

@@ -17,14 +17,26 @@ import { readObservabilityEnv } from '../observability/env.js'
 export async function runVersion(argv, ctx) {
   const parsed = parseCoreCommandArgv('version', argv, ctx)
   if (!parsed.ok) return parsed.code
+  const info = versionInfo(ctx.env)
+  ctx.stdout.write(`hypaware ${info.version}\n`)
+  ctx.stdout.write(`  node:     ${info.node}\n`)
+  ctx.stdout.write(`  platform: ${info.platform} ${info.arch}\n`)
+  ctx.stdout.write(`  hyp_home: ${info.hypHome}\n`)
+  return 0
+}
+
+/**
+ * The environment `hyp version` reports, shared with `hyp status` so the two
+ * never disagree about which install answered.
+ *
+ * @param {Record<string, string | undefined>} env
+ * @returns {{ version: string, node: string, platform: string, arch: string, hypHome: string }}
+ */
+export function versionInfo(env) {
   const require = createRequire(import.meta.url)
   const { version } = require('../../../package.json')
-  const { hypHome } = readObservabilityEnv(ctx.env)
-  ctx.stdout.write(`hypaware ${version}\n`)
-  ctx.stdout.write(`  node:     ${process.version}\n`)
-  ctx.stdout.write(`  platform: ${process.platform} ${process.arch}\n`)
-  ctx.stdout.write(`  hyp_home: ${hypHome}\n`)
-  return 0
+  const { hypHome } = readObservabilityEnv(env)
+  return { version, node: process.version, platform: process.platform, arch: process.arch, hypHome }
 }
 
 /**

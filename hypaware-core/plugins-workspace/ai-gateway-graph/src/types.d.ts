@@ -22,6 +22,8 @@ export interface ContractRule {
   columns?: string[]
   where?: RulePredicate
   toRow(row: Record<string, unknown>): GraphRow | null
+  /** Optional bounded fan-out; engine prefers this over toRow. */
+  toRows?(row: Record<string, unknown>): GraphRow[]
 }
 
 /**
@@ -90,5 +92,6 @@ export interface GraphKit {
 /** The `hypaware.context-graph` capability value, as this connector consumes it. */
 export interface ContextGraphCapability {
   registerContract(contract: unknown): void
+  project(sourceDataset: string, options?: { signal?: AbortSignal }): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
   kit: GraphKit
 }

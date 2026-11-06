@@ -2,14 +2,18 @@
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
 import {
+  DESKTOP_3P_SWEPT_SESSIONS_MAX,
+  claudeDesktop3pSessionRoots,
   createDesktop3pDirsCache,
   findDesktop3pProjectsDirs,
+  loadAgentMeta,
   loadTranscript,
 } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 
@@ -43,11 +47,14 @@ function nestedSandboxProjectsDir(homeDir) {
   )
 }
 
-/** First-party layout observed on Desktop app 1.40609.1. */
-function firstPartySandboxProjectsDir(homeDir) {
+/**
+ * First-party layout observed on Desktop app 1.40609.1. The sandbox id
+ * varies so a test can stage the home a later conversation adds.
+ */
+function firstPartySandboxProjectsDir(homeDir, sandboxId = 'ghi789') {
   return path.join(
     homeDir, 'Library', 'Application Support', 'Claude',
-    'local-agent-mode-sessions', '99990000', '00000000', 'local_ghi789',
+    'local-agent-mode-sessions', '99990000', '00000000', `local_${sandboxId}`,
     '.claude', 'projects', 'sandbox-outputs'
   )
 }
@@ -442,12 +449,33 @@ test('createDesktop3pDirsCache serves cached roots within the TTL and re-sweeps 
     assert.equal(second.cached, true)
     assert.deepEqual(second.dirs, [path.dirname(sibling)])
 
-    // A forced refresh, and any get after the TTL, sweep fresh.
-    const refreshed = cache.get(homeDir, { refresh: true })
-    assert.equal(refreshed.cached, false)
-    assert.deepEqual(refreshed.dirs.sort(), [path.dirname(sibling), path.dirname(nested)].sort())
+    // A forced re-sweep for a session none of the cached dirs held, and any
+    // get after the TTL, sweep fresh.
+    const refreshed = cache.refreshFor(homeDir, 'sess-missing', true)
+    assert.deepEqual([...refreshed ?? []].sort(), [path.dirname(sibling), path.dirname(nested)].sort())
     nowMs = 2000
     assert.equal(cache.get(homeDir).cached, false)
+
+    // The forced sweep is spent per session per container list, so a home
+    // landing after its own session was memoised is not found at once. Both
+    // routes back are what bound that wait, and neither was pinned: another
+    // session's sweep sees the list change and drops the memo, and failing
+    // that the TTL re-sweeps. Without one of them a memoised session would
+    // never upgrade. `true` throughout is the `cached` a `get()` at this
+    // instant hands back: the sweep at 2000 is inside the TTL.
+    nowMs = 2001
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing', true)?.length, 2)
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing', true), null, 'the established miss is spent')
+    await fs.mkdir(firstPartySandboxProjectsDir(homeDir, 'late0000'), { recursive: true })
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing', true), null, 'and stays spent against that list')
+    assert.equal(cache.refreshFor(homeDir, 'sess-other', true)?.length, 3, 'another session still sees the new home')
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing', true)?.length, 3, 'whose sweep re-arms the memoised one')
+
+    // With no other session to force a sweep, the TTL is the backstop.
+    await fs.mkdir(firstPartySandboxProjectsDir(homeDir, 'late0001'), { recursive: true })
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing', true), null)
+    nowMs = 4000
+    assert.equal(cache.get(homeDir).dirs.length, 4, 'the TTL finds the late home unaided')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }
@@ -471,6 +499,286 @@ test('loadTranscript finds a sandbox home created after the root cache was prime
     await writeTranscriptAt(nestedSandboxProjectsDir(homeDir), 'sess-b', desktop3pRows('sess-b'))
     const second = await loadTranscript({ projectsDir, sessionId: 'sess-b', homeDir })
     assert.equal(second.length, 2, 'refresh-on-miss finds the new sandbox home')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Count the container discoveries a body performs. Every
+ * `findDesktop3pProjectsDirs` sweep reads each of the three session roots
+ * exactly once, so a readdir of a path named for a root is the sweep's
+ * signature, whether or not that root exists.
+ *
+ * @template T
+ * @param {() => Promise<T>} body
+ * @returns {Promise<{ result: T, sweeps: number }>}
+ */
+async function countSweeps(body) {
+  const real = fsSync.readdirSync
+  let rootReads = 0
+  // @ts-expect-error instrumented for the duration of the body
+  fsSync.readdirSync = (dir, opts) => {
+    if (String(dir).endsWith('local-agent-mode-sessions')) rootReads += 1
+    return real(dir, opts)
+  }
+  try {
+    const result = await body()
+    return { result, sweeps: rootReads / claudeDesktop3pSessionRoots('/x').length }
+  } finally {
+    fsSync.readdirSync = real
+  }
+}
+
+// Issue #1758. A session that will never match (SDK/headless traffic with no
+// transcript, a harness aux exchange, a wire-only reminder) misses inside the
+// cached root list, and the forced re-sweep re-stamped the cache's `atMs`, so
+// the miss never settled into the TTL: every settle pass re-walked the whole
+// container, and twice per exchange once `loadAgentMeta` grew the same leg.
+// One sweep per session per container list is the bound, and a sandbox home
+// that appears after the list was cached is still found on the settle that
+// asks for it.
+test('a never-matching session sweeps the container once, not once per settle', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-resweep-'))
+  try {
+    const projectsDir = path.join(homeDir, '.claude', 'projects')
+    await fs.mkdir(projectsDir, { recursive: true })
+    await writeTranscriptAt(siblingSandboxProjectsDir(homeDir), 'sess-a', desktop3pRows('sess-a'))
+    await writeTranscriptAt(nestedSandboxProjectsDir(homeDir), 'sess-b', desktop3pRows('sess-b'))
+    await writeTranscriptAt(firstPartySandboxProjectsDir(homeDir), 'sess-c', desktop3pRows('sess-c'))
+
+    // What one settle pass of an exchange does: both loaders resolve the same
+    // session, each through the shared root cache.
+    const settle = async (/** @type {string} */ sessionId) => {
+      const entries = await loadTranscript({ projectsDir, sessionId, homeDir })
+      const meta = loadAgentMeta({
+        transcriptPath: path.join(homeDir, 'unresolvable', `${sessionId}.jsonl`),
+        projectsDir,
+        sessionId,
+        homeDir,
+      })
+      return { entries, meta }
+    }
+
+    // Primes the module-level root cache for this home.
+    assert.equal((await loadTranscript({ projectsDir, sessionId: 'sess-a', homeDir })).length, 2)
+
+    const first = await countSweeps(() => settle('sess-never'))
+    const second = await countSweeps(() => settle('sess-never'))
+    assert.equal(first.result.entries.length, 0)
+    assert.equal(second.result.entries.length, 0)
+    assert.ok(
+      first.sweeps + second.sweeps <= 1,
+      `two settles of one never-matching session force at most one container sweep, got ${first.sweeps + second.sweeps}`
+    )
+    assert.equal(second.sweeps, 0, 'the established miss costs no sweep at all')
+
+    // A new conversation starts: its sandbox home appears after the cached
+    // list was swept, and it is still found and upgraded, transcript and
+    // sidecar both. The memo is per session, not a container-wide stop.
+    const lateDir = firstPartySandboxProjectsDir(homeDir, 'late0000')
+    await writeTranscriptAt(lateDir, 'sess-late', desktop3pRows('sess-late'))
+    await fs.mkdir(path.join(lateDir, 'sess-late', 'subagents'), { recursive: true })
+    await fs.writeFile(
+      path.join(lateDir, 'sess-late', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ toolUseId: 'toolu_late' }),
+      'utf8'
+    )
+    const late = await countSweeps(() => settle('sess-late'))
+    assert.equal(late.result.entries.length, 2, 'the new sandbox home is found')
+    assert.equal(late.result.meta.get('sa1')?.tool_use_id, 'toolu_late', 'and its sidecar with it')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+// Issue #1795. Both loaders take the 3p leg in one settle pass, and the leg
+// is gated on the root list having been served from cache. A `get()` that
+// has to sweep (a cold home, or one whose TTL just rolled over) therefore
+// settled no miss: nothing remembered that this session had already been
+// walked for, so the second loader forced a walk of the identical container.
+// The walk a session's own `get()` made is the walk it spends.
+test('a never-matching session spends the walk its own get() made, not a second one', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-cold-'))
+  try {
+    const projectsDir = path.join(homeDir, '.claude', 'projects')
+    await fs.mkdir(projectsDir, { recursive: true })
+    await writeTranscriptAt(siblingSandboxProjectsDir(homeDir), 'sess-a', desktop3pRows('sess-a'))
+    await writeTranscriptAt(nestedSandboxProjectsDir(homeDir), 'sess-b', desktop3pRows('sess-b'))
+    await writeTranscriptAt(firstPartySandboxProjectsDir(homeDir), 'sess-c', desktop3pRows('sess-c'))
+
+    // One settle pass of an exchange, unprimed: the container has never been
+    // swept for this home, so the first loader's `get()` sweeps it.
+    const settle = async (/** @type {string} */ sessionId) => {
+      const entries = await loadTranscript({ projectsDir, sessionId, homeDir })
+      const meta = loadAgentMeta({
+        transcriptPath: path.join(homeDir, 'unresolvable', `${sessionId}.jsonl`),
+        projectsDir,
+        sessionId,
+        homeDir,
+      })
+      return { entries, meta }
+    }
+
+    const first = await countSweeps(() => settle('sess-never'))
+    assert.equal(first.result.entries.length, 0)
+    assert.equal(first.sweeps, 1, 'the two loaders of one settle pass walk the container once')
+    const second = await countSweeps(() => settle('sess-never'))
+    assert.equal(second.sweeps, 0, 'and the established miss still costs no walk at all')
+
+    // The walk remains one per session, not a container-wide stop: a home
+    // that appears after that list was swept is still found.
+    const lateDir = firstPartySandboxProjectsDir(homeDir, 'late1795')
+    await writeTranscriptAt(lateDir, 'sess-late', desktop3pRows('sess-late'))
+    const late = await countSweeps(() => settle('sess-late'))
+    assert.equal(late.result.entries.length, 2, 'the new sandbox home is found')
+    assert.equal(late.sweeps, 1, 'by one walk: the loader that found it does not walk again, nor does the one after')
+
+    // A session found inside the list costs nothing at all: it is the miss
+    // that buys a walk, and `loadAgentMeta` has located it whether or not
+    // the session has written a sidecar yet (it has not here).
+    const settled = await countSweeps(() => settle('sess-late'))
+    assert.equal(settled.result.entries.length, 2)
+    assert.equal(settled.result.meta.size, 0)
+    assert.equal(settled.sweeps, 0, 'a located session walks nothing')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+// The same defect at the TTL rollover the issue names, where the sweeping
+// `get()` is a re-sweep rather than a cold one. Real time cannot be wound
+// forward through the module-level cache the loaders share, so this replays
+// their leg against an injectable clock: each loader asks `get()` for the
+// roots, misses inside them, and hands `refreshFor` the `cached` it got.
+test('a settle exactly at the TTL rollover walks the container once, not twice', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-rollover-'))
+  try {
+    await fs.mkdir(siblingSandboxProjectsDir(homeDir), { recursive: true })
+    let nowMs = 0
+    const cache = createDesktop3pDirsCache({ ttlMs: 1000, now: () => nowMs })
+    /** @type {boolean[]} */
+    let served = []
+    /** One loader's leg: resolve the roots, miss inside them, settle the miss. */
+    const loaderLeg = (/** @type {string} */ sessionId) => {
+      const { cached } = cache.get(homeDir)
+      served.push(cached)
+      return cache.refreshFor(homeDir, sessionId, cached)
+    }
+    const settle = (/** @type {string} */ sessionId) => {
+      served = []
+      return countSweeps(async () => {
+        loaderLeg(sessionId)
+        loaderLeg(sessionId)
+      })
+    }
+
+    cache.get(homeDir)
+    nowMs = 500
+    assert.equal(cache.get(homeDir).cached, true)
+    nowMs = 1000
+    const rollover = await settle('sess-never')
+    // `atMs` is stamped by the sweep alone, so the hit served at 500 left the
+    // expiry where it was and this pass opens on it.
+    assert.deepEqual(served, [false, true], 'the pass opens expired, and the second loader is served that sweep')
+    assert.equal(rollover.sweeps, 1, 'the rollover walk settles the pass; the second loader repeats nothing')
+
+    // Inside the new TTL that miss is spent, and a session that never missed
+    // still buys the walk that finds a home added since. That walk finds the
+    // container moving, which settles no miss by the standing rule, so this
+    // pass makes the second one too: the walk that observes a settled
+    // container is the one the session spends.
+    nowMs = 1001
+    assert.equal((await settle('sess-never')).sweeps, 0, 'the established miss costs no walk')
+    await fs.mkdir(firstPartySandboxProjectsDir(homeDir, 'late1795'), { recursive: true })
+    const other = await settle('sess-other')
+    assert.equal(other.sweeps, 2, 'a walk that found the container moving settles no miss')
+    assert.equal(cache.get(homeDir).dirs.length, 2, 'and the home added since is in the list')
+    assert.equal((await settle('sess-other')).sweeps, 0, 'the settled miss is spent')
+
+    // The same rule holds when it is the rollover walk that finds the
+    // container moving: it settles no miss either, so the session keeps the
+    // walk, and the second loader's is the one that observes a settled
+    // container and spends it.
+    nowMs = 2001
+    await fs.mkdir(firstPartySandboxProjectsDir(homeDir, 'later1795'), { recursive: true })
+    const moving = await settle('sess-moving')
+    assert.deepEqual(served, [false, true])
+    assert.equal(moving.sweeps, 2, 'a rollover walk that found the container moving settles no miss')
+    assert.equal((await settle('sess-moving')).sweeps, 0, 'which the settled walk then spends')
+
+    // Both arms write the same capped memo, so a daemon seeing an unbounded
+    // stream of never-matching sessions cannot grow it with uptime: oldest
+    // out first, and an evicted session costs one walk, never a wrong answer.
+    for (let i = 0; i < 1100; i++) cache.refreshFor(homeDir, `sess-${i}`, false)
+    assert.equal(cache.refreshFor(homeDir, 'sess-1099', true), null, 'the newest miss is remembered')
+    assert.ok(cache.refreshFor(homeDir, 'sess-0', true), 'the oldest was evicted and walks again')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+// Each loader settles its own pass: `loadAgentMeta` hands `refreshFor` the
+// verdict of its own `get()`, not the other loader's, so a pass that reaches
+// it with the container unswept still costs one walk rather than two.
+test('loadAgentMeta alone spends the walk its own get() made', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-meta-cold-'))
+  try {
+    const projectsDir = path.join(homeDir, '.claude', 'projects')
+    await fs.mkdir(projectsDir, { recursive: true })
+    await writeTranscriptAt(siblingSandboxProjectsDir(homeDir), 'sess-a', desktop3pRows('sess-a'))
+    await writeTranscriptAt(firstPartySandboxProjectsDir(homeDir), 'sess-c', desktop3pRows('sess-c'))
+
+    const meta = await countSweeps(async () => loadAgentMeta({
+      transcriptPath: path.join(homeDir, 'unresolvable', 'sess-never.jsonl'),
+      projectsDir,
+      sessionId: 'sess-never',
+      homeDir,
+    }))
+    assert.equal(meta.result.size, 0)
+    assert.equal(meta.sweeps, 1, 'the walk its get() made is the walk it spends')
+
+    // Spending it means settling the miss, which is what this loader gating
+    // on its own `cached` alone would skip: the next pass inside the TTL is
+    // served that same list and must not walk the container over again.
+    const again = await countSweeps(async () => loadAgentMeta({
+      transcriptPath: path.join(homeDir, 'unresolvable', 'sess-never.jsonl'),
+      projectsDir,
+      sessionId: 'sess-never',
+      homeDir,
+    }))
+    assert.equal(again.result.size, 0)
+    assert.equal(again.sweeps, 0, 'and the settled miss keeps the next pass free')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+// The `!cached` arm reaches `remember` for every session a TTL rollover
+// re-settles, and the memo already holds those sessions. At the cap, an
+// unguarded re-add deleted the oldest peer first and then added a member
+// already present, so one innocent session lost its slot (and one walk)
+// per rollover. The invariant: remembering a session the memo already
+// holds changes nothing. Built on a fresh cache filled to exactly the cap
+// through the arm under test, so the oldest member is `sess-0` by
+// construction and no assertion depends on a boundary survivor index.
+test('re-remembering a memoised session at the cap evicts no peer', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-cap-'))
+  try {
+    await fs.mkdir(siblingSandboxProjectsDir(homeDir), { recursive: true })
+    const cache = createDesktop3pDirsCache({ ttlMs: 1000, now: () => 0 })
+    cache.get(homeDir)
+    for (let i = 0; i < DESKTOP_3P_SWEPT_SESSIONS_MAX; i++) cache.refreshFor(homeDir, `sess-${i}`, false)
+    assert.equal(cache.refreshFor(homeDir, 'sess-0', true), null, 'the memo sits exactly at the cap with the oldest still held')
+
+    // A rollover re-settles a session the memo already holds.
+    cache.refreshFor(homeDir, 'sess-512', false)
+    assert.equal(cache.refreshFor(homeDir, 'sess-0', true), null, 'a present member re-added costs no peer its slot')
+
+    // A genuinely new session at the cap still takes the oldest slot, so
+    // the guard did not unbound the memo or reorder eviction.
+    cache.refreshFor(homeDir, 'sess-new', false)
+    assert.ok(cache.refreshFor(homeDir, 'sess-0', true), 'a genuinely new session evicts oldest-first as before')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }

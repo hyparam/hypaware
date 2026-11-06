@@ -7,11 +7,10 @@
  * That is harmless only if the two producers agree on row identity, and
  * these tests pin both halves of that promise:
  *
- * 1. the proxy projector (native transcript identity) and the telemetry
- *    projection (`message.uuid` identity) yield the SAME `part_id`s for the
- *    same session content, and
- * 2. the OTEL producer's pre-write dedupe drops every part the proxy
- *    already stored, so the overlap lands as one row set.
+ * 1. the proxy projector and settled telemetry rows yield the SAME
+ *    `part_id`s for the same session content, and
+ * 2. pre-write and flush-time dedupe drop the parts the proxy already stored,
+ *    so the overlap lands as one row set.
  *
  * The mirror direction needs no separate fixture: the proxy's flush-time
  * dedupe asks the same committed-`part_id` membership question
@@ -19,7 +18,7 @@
  * either arrival order collapse.
  *
  * @ref LLP 0262#migration [tests]: a session captured by both producers dedupes to one row set
- * @ref LLP 0252#projection-unchanged [tests]: producer overlap collapses on part_id before the write
+ * @ref LLP 0559#assistant-identity [tests]: confirmed text identity collapses at flush
  */
 
 import assert from 'node:assert/strict'
@@ -33,7 +32,10 @@ import {
   createAiGatewayMessageProjector,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
+import { createClaudeSettlementEnricher } from '../../hypaware-core/plugins-workspace/claude/src/settle.js'
+import { transcriptEntryFromRow } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 import { flattenClaudeTelemetryEvents } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/events.js'
 import { projectClaudeTelemetryEvents } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/projection.js'
 
@@ -224,9 +226,23 @@ function makeStorage(seed = {}) {
   }
 }
 
+/** @param {Record<string, unknown>[]} rows @param {ReturnType<typeof makeStorage>} storage */
+async function settleOtelRows(rows, storage) {
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerSettlementEnricher(createClaudeSettlementEnricher({
+    homeDir: '/tmp/overlap-unused', stateFile: '/tmp/overlap-unused/context.jsonl',
+    transcriptLoader: /** @type {any} */ ({ load: async () => [transcriptEntryFromRow({
+      type: 'assistant', sessionId: SESSION, uuid: ASSISTANT_UUID,
+      message: { role: 'assistant', id: 'msg_overlap', content: [{ type: 'text', text: RESPONSE_TEXT }] },
+    })] }),
+  }))
+  return aiGatewayDatasetRegistration(state).settleBatch?.(rows, /** @type {any} */ ({ storage }))
+}
+
 test('the proxy rows and the OTEL rows for one session share part identity', async () => {
   const proxyRows = await proxyRowsForSession()
-  const otelRows = aiGatewayRowsFromProjectedExchange(otelProjectionForSession())
+  const otelRows = await settleOtelRows(aiGatewayRowsFromProjectedExchange(otelProjectionForSession()), makeStorage())
+  assert.ok(otelRows)
 
   assert.equal(proxyRows.length, 2)
   assert.deepEqual(
@@ -250,8 +266,8 @@ test('a session the proxy already stored lands once: the OTEL producer writes no
   const api = createAiGatewayApi(createGatewayState(), { storage: /** @type {any} */ (storage) })
 
   const result = await api.recordProjectedExchange(/** @type {any} */ (otelProjectionForSession()))
-  assert.deepEqual(result, { rowsWritten: 0, rowsSkipped: 2 })
-  assert.equal(storage.appended.length, 0)
+  assert.deepEqual(result, { rowsWritten: 1, rowsSkipped: 1 })
+  assert.deepEqual(await settleOtelRows(storage.appended, storage), [])
 })
 
 test('a half-stored overlap fills only the gap', async () => {
@@ -264,5 +280,6 @@ test('a half-stored overlap fills only the gap', async () => {
 
   const result = await api.recordProjectedExchange(/** @type {any} */ (otelProjectionForSession()))
   assert.deepEqual(result, { rowsWritten: 1, rowsSkipped: 1 })
-  assert.deepEqual(storage.appended.map((r) => r.part_id), [`${ASSISTANT_UUID}#0`])
+  const settled = await settleOtelRows(storage.appended, storage)
+  assert.deepEqual(settled?.map((r) => r.part_id), [`${ASSISTANT_UUID}#0`])
 })

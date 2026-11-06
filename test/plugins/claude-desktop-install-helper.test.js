@@ -2,7 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,7 +12,7 @@ import {
   activate,
 } from '../../hypaware-core/plugins-workspace/claude-desktop/src/index.js'
 import { resolveHypBin } from '../../hypaware-core/plugins-workspace/claude-desktop/src/inputs.js'
-import { shellQuote } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
+import { HELPER_GENERATED_MARKER, shellQuote } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 import { isNpxBinPath } from '../../src/core/cli/global_install.js'
 
 /**
@@ -60,6 +60,11 @@ function fakeCtx(opts) {
  * @param {any} [config]
  * @param {NodeJS.ProcessEnv} [env]
  */
+// The npxRig below models the POSIX npm global layout, whose bin is a symlink
+// into the global root; win32 npm writes .cmd shims instead, and an
+// unprivileged win32 process cannot create the fixture's symlink at all.
+const SKIP_POSIX_LINK_RIG = process.platform === 'win32' && 'the rig models the POSIX npm global layout (symlinked bin)'
+
 async function invoke(run, argv, config, env) {
   let out = ''
   let err = ''
@@ -139,7 +144,7 @@ test('status reports the helper as not installed until install-helper runs', asy
 })
 
 // @ref LLP 0116#helper-contract [tests]: Desktop is the only observer of a rotted wrapper, so status has to read the file rather than stat it
-test('status reports a wrapper whose baked interpreter rotted away, rather than "installed"', async () => {
+test('status reports a wrapper whose baked interpreter rotted away, rather than "installed"', { skip: process.platform === 'win32' && 'the sh wrapper and its baked interpreter line are POSIX artifacts' }, async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-'))
   const { ctx, commands } = fakeCtx({ stateDir, mode: 'org_key' })
   await activate(ctx)
@@ -230,7 +235,11 @@ function managerRoot(dir, lockfile) {
  * `/usr/local/bin`, so on a machine carrying both, the shim is what a `$PATH`
  * walk meets first and the durable install is what it meets second.
  *
- * @param {{ installedBin?: boolean | 'shim' | 'mjs', shimAhead?: boolean }} [opts]
+ * `'link'` makes that second `hypaware` what those managers actually install:
+ * not a second copy but a symlink into the global root the entry script is
+ * already in, so the two spellings are one file.
+ *
+ * @param {{ installedBin?: boolean | 'shim' | 'mjs', shimAhead?: boolean | 'link' }} [opts]
  */
 function npxRig(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-bin-'))
@@ -284,7 +293,10 @@ function npxRig(opts = {}) {
 
   const shimDir = path.join(root, 'pnpm-ish')
   const shimBin = path.join(shimDir, 'hypaware')
-  if (opts.shimAhead) writeExecutable(shimBin)
+  if (opts.shimAhead === 'link') {
+    fs.mkdirSync(shimDir, { recursive: true })
+    fs.symlinkSync(pnpmGlobalCliPath, shimBin)
+  } else if (opts.shimAhead) writeExecutable(shimBin)
 
   return {
     stateDir: root,
@@ -315,8 +327,9 @@ function npxRig(opts = {}) {
  * @param {TestContext} t
  * @param {{ stateDir: string, env: NodeJS.ProcessEnv, cleanup: () => void }} rig
  * @param {string} entry
+ * @param {NodeJS.ProcessEnv} [envExtra] laid over the rig's environment, for the override lane
  */
-async function runInstallHelperWithEntry(t, rig, entry) {
+async function runInstallHelperWithEntry(t, rig, entry, envExtra) {
   const realArgv1 = process.argv[1]
   process.argv[1] = entry
   t.after(() => { process.argv[1] = realArgv1 })
@@ -328,12 +341,12 @@ async function runInstallHelperWithEntry(t, rig, entry) {
     commands.get('client claude-desktop install-helper').run,
     [],
     undefined,
-    rig.env,
+    { ...rig.env, ...envExtra },
   )
   return { ...result, body: fs.readFileSync(path.join(rig.stateDir, HELPER_BASENAME), 'utf8') }
 }
 
-test('the generated wrapper records the installed CLI, not the npx cache path', async (t) => {
+test('the generated wrapper records the installed CLI, not the npx cache path', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   const rig = npxRig({ installedBin: true })
   assert.equal(isNpxBinPath(rig.npxCliPath, rig.env), true, 'rig did not build an npx entrypoint')
 
@@ -380,7 +393,7 @@ test('a $PATH entry node cannot run is declined, not recorded as durable', async
   assert.match(err, /npx cache/)
 })
 
-test('a shim in front of a durable install does not end the search', async (t) => {
+test('a shim in front of a durable install does not end the search', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // The shim test above only proves a shim is not recorded. It is not enough:
   // the walk stops at the first `hypaware` it meets, so testing runnability on
   // that single answer throws away the search instead of continuing it. pnpm,
@@ -399,7 +412,7 @@ test('a shim in front of a durable install does not end the search', async (t) =
   assert.equal(err, '', 'a durable path was found, so there is nothing to repair')
 })
 
-test('the runnability test tracks what node loads, not this package\'s bin name', async (t) => {
+test('the runnability test tracks what node loads, not this package\'s bin name', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // The check asks whether `node <path>` can run the target, so it accepts
   // every extension node loads and not just the one `package.json` names
   // today. Pinned to `hypaware.js`, a later rename of the bin entry would put
@@ -420,7 +433,7 @@ test('the runnability test tracks what node loads, not this package\'s bin name'
 // nothing on this machine reporting it. The walk already refuses these
 // directories on the `$PATH` side; before this the entrypoint check did not,
 // so the path was baked into the wrapper flagged durable and nothing warned.
-test('the wrapper records the installed CLI, not a project-local node_modules path', async (t) => {
+test('the wrapper records the installed CLI, not a project-local node_modules path', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   const rig = npxRig({ installedBin: true })
 
   const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.projectCliPath)
@@ -429,6 +442,65 @@ test('the wrapper records the installed CLI, not a project-local node_modules pa
   assert.ok(body.includes(rig.globalBin), `wrapper does not run the installed CLI: ${body}`)
   assert.ok(!body.includes(rig.projectCliPath), `wrapper was pinned to the project tree: ${body}`)
   assert.equal(err, '', 'a durable path is not worth warning about')
+})
+
+// Issue #1623. The walk compares no versions, so a project that deliberately
+// pins `hypaware` has its wrapper written against whatever older global copy
+// is installed. Baking the pinned copy instead is the defect the test above
+// exists to prevent, so what the swap owes the operator is a notice and not a
+// different answer: both paths, and `HYPAWARE_BIN` as the way to pin one.
+test('a repointed wrapper reports the swap and names the override', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
+  const rig = npxRig({ installedBin: true })
+
+  const { code, out, err, body } = await runInstallHelperWithEntry(t, rig, rig.projectCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(body.includes(rig.globalBin), `wrapper does not run the installed CLI: ${body}`)
+  const notice = out.split('\n').find((line) => line.includes('HYPAWARE_BIN'))
+  assert.ok(notice, `no repoint notice on stdout: ${out}`)
+  assert.ok(notice.includes(rig.globalBin), `notice omits the recorded path: ${notice}`)
+  assert.ok(
+    notice.includes(fs.realpathSync(rig.projectCliPath)),
+    `notice omits the entry script that ran: ${notice}`,
+  )
+  // On stdout beside the path it just reported, because nothing here is going
+  // to rot: this command's stderr means the recorded path will stop existing.
+  assert.equal(err, '')
+})
+
+// The other half again, for the spelling case the string compare got wrong.
+// A pnpm or yarn global root carries the manifest that makes it read ephemeral
+// (issue #1625), so it comes down the walk, and the name that walk finds is a
+// link into that same root. One install, two spellings: nothing was swapped
+// and there is nothing to disclose.
+test('one install reached by two spellings reports no swap', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
+  const rig = npxRig({ installedBin: true, shimAhead: 'link' })
+  t.after(() => rig.cleanup())
+
+  const resolved = resolveHypBin(rig.env, rig.pnpmGlobalCliPath)
+
+  // Still the durable name rather than the versioned directory behind it: the
+  // resolution is for the verdict, not for what gets baked into the wrapper.
+  assert.equal(resolved.binPath, rig.shimBin)
+  assert.equal(
+    resolved.repointedFrom,
+    undefined,
+    `one install reported as a swap off ${resolved.repointedFrom}`,
+  )
+})
+
+test('a wrapper recorded as it stands reports no swap', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
+  // The other half of the contract. An ordinary durable entry script is never
+  // repointed, so there is nothing to disclose and a notice would be noise.
+  const rig = npxRig({ installedBin: true })
+  const durable = path.join(rig.stateDir, 'opt', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(durable)
+
+  const { code, out, err } = await runInstallHelperWithEntry(t, rig, durable)
+
+  assert.equal(code, 0)
+  assert.doesNotMatch(out, /HYPAWARE_BIN/, out)
+  assert.equal(err, '')
 })
 
 test('with no CLI installed the project-local wrapper says what will break it', async (t) => {
@@ -479,7 +551,7 @@ for (const manager of ['pnpm', 'yarn']) {
   })
 }
 
-test('a HypAware clone is not a project-local install', async (t) => {
+test('a HypAware clone is not a project-local install', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // `node <clone>/bin/hypaware.js` is the normal development entrypoint and
   // carries a `package.json` of its own. It is not under a `node_modules`, so
   // a developer never gets the warning and their wrapper is never repointed.
@@ -496,7 +568,7 @@ test('a HypAware clone is not a project-local install', async (t) => {
   assert.equal(err, '')
 })
 
-test('an ordinary durable install is recorded as it stands', async (t) => {
+test('an ordinary durable install is recorded as it stands', { skip: SKIP_POSIX_LINK_RIG }, async (t) => {
   // The one regression that would be worse than the bug: repointing a working
   // install at some other `hypaware` that happens to be on `$PATH`.
   const rig = npxRig({ installedBin: true })
@@ -511,21 +583,114 @@ test('an ordinary durable install is recorded as it stands', async (t) => {
   assert.equal(err, '')
 })
 
-test('an explicit binary override wins over both', (t) => {
+test('an explicit binary override wins over both', { skip: SKIP_POSIX_LINK_RIG }, (t) => {
   const rig = npxRig({ installedBin: true })
   t.after(() => rig.cleanup())
   const cases = [
-    { override: { HYP_BIN: '/custom/hyp' }, expected: '/custom/hyp' },
-    { override: { HYPAWARE_BIN: '/preferred/hyp', HYP_BIN: '/custom/hyp' }, expected: '/preferred/hyp' },
+    { override: { HYP_BIN: '/custom/hyp' }, expected: '/custom/hyp', overrideVar: 'HYP_BIN' },
+    { override: { HYPAWARE_BIN: '/preferred/hyp', HYP_BIN: '/custom/hyp' }, expected: '/preferred/hyp', overrideVar: 'HYPAWARE_BIN' },
     // The emptiness test above trims, so the value taken has to trim too:
     // ` /custom/hyp` is not absolute, and `path.resolve` would silently anchor
     // it to whatever directory install-helper ran in.
-    { override: { HYP_BIN: '  /custom/hyp  ' }, expected: '/custom/hyp' },
+    { override: { HYP_BIN: '  /custom/hyp  ' }, expected: '/custom/hyp', overrideVar: 'HYP_BIN' },
   ]
-  for (const { override, expected } of cases) {
+  for (const { override, expected, overrideVar } of cases) {
     assert.deepEqual(resolveHypBin({ ...rig.env, ...override }, rig.npxCliPath), {
       binPath: path.resolve(expected),
       ephemeral: false,
+      // Which variable named it, so a diagnostic about the value can say which
+      // knob to turn, and whether `node <path>` could load it: neither of
+      // these takes the choice of copy back off the operator.
+      overrideVar,
+      nodeRunnable: false,
     })
   }
 })
+
+// Issue #1811. An override settles WHICH copy of the CLI the wrapper runs. It
+// cannot settle whether `node` can parse that file, and pnpm, volta and asdf
+// all put a shell script or a compiled shim at the name a `$PATH` walk meets:
+// the exact value a pnpm or yarn user reaches for when told to pin the copy
+// they mean. Baked into `exec <node> <shim>` it is a SyntaxError on the
+// wrapper's first run, which Desktop reports as a failed credential helper and
+// nothing on this machine reports at all - the same outcome `runsUnderNode`
+// exists to keep off the `$PATH` lane. So the override is honoured to the
+// letter instead of through an interpreter it was never going to survive.
+test('an override node cannot load is exec\'d directly, not handed to node', {
+  skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts',
+}, async (t) => {
+  const rig = npxRig({ installedBin: true, shimAhead: true })
+
+  const { code, err, body } = await runInstallHelperWithEntry(
+    t, rig, rig.npxCliPath, { HYPAWARE_BIN: rig.shimBin },
+  )
+
+  assert.equal(code, 0)
+  assert.ok(
+    body.includes(`exec ${shellQuote(rig.shimBin)} claude-account credential`),
+    `the override was not run as the operator named it: ${body}`,
+  )
+  assert.ok(!body.includes(process.execPath), `the shim was handed to node: ${body}`)
+  // Desktop runs the wrapper as a bare executable (LLP 0116#helper-contract),
+  // so the only check that settles "can Desktop run this" is running it. A
+  // wrapper is what this issue is about, not what the parser thinks of one.
+  const ran = spawnSync(path.join(rig.stateDir, HELPER_BASENAME), [], { encoding: 'utf8' })
+  assert.equal(ran.status, 0, `Desktop could not run the wrapper: ${ran.stderr}`)
+  // Read once, by whoever is at the terminal now, and naming the variable
+  // rather than only the path: the repair is to change what it names.
+  assert.match(err, /HYPAWARE_BIN/)
+  assert.match(err, new RegExp(rig.shimBin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+})
+
+test('a runnable override is still baked as the interpreter plus the script, byte for byte', {
+  skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts',
+}, async (t) => {
+  // The one regression that would be worse than the bug: changing the wrapper
+  // written for an override that always worked.
+  const rig = npxRig({ installedBin: true })
+  const override = path.join(rig.stateDir, 'opt', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(override)
+
+  const { code, err, body } = await runInstallHelperWithEntry(
+    t, rig, rig.npxCliPath, { HYPAWARE_BIN: override },
+  )
+
+  assert.equal(code, 0)
+  assert.equal(body, [
+    '#!/bin/sh',
+    HELPER_GENERATED_MARKER,
+    '# Claude Desktop runs this with no arguments and reads stdout.',
+    `exec ${shellQuote(process.execPath)} ${shellQuote(override)} claude-account credential`,
+    '',
+  ].join('\n'))
+  assert.equal(err, '', 'an override node can load is not worth a word')
+})
+
+// The other half of "a runnable override is unchanged", and the half an
+// extension test alone gets wrong: a real JavaScript entry script that carries
+// no extension. `node <path>` loads it, the wrapper baked the absolute
+// interpreter for it and worked, and dropping that interpreter would rest it
+// on Desktop's stripped environment carrying a `node` - the failure the
+// interpreter is baked in to avoid. The shebang is what tells it apart from
+// the pnpm/volta/asdf shims above, which have `#!/bin/sh` or none at all.
+test('an extensionless node script override keeps its absolute interpreter', {
+  skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts',
+}, async (t) => {
+  const rig = npxRig({ installedBin: true })
+  const override = path.join(rig.stateDir, 'opt', 'bin', 'hypaware')
+  fs.mkdirSync(path.dirname(override), { recursive: true })
+  fs.writeFileSync(override, '#!/usr/bin/env node\nprocess.stdout.write("{}")\n')
+  fs.chmodSync(override, 0o755)
+
+  const { code, err, body } = await runInstallHelperWithEntry(
+    t, rig, rig.npxCliPath, { HYPAWARE_BIN: override },
+  )
+
+  assert.equal(code, 0)
+  assert.ok(
+    body.includes(`exec ${shellQuote(process.execPath)} ${shellQuote(override)} claude-account credential`),
+    `a node script lost its interpreter on its extension alone: ${body}`,
+  )
+  assert.equal(err, '', 'an override node can load is not worth a word')
+})
+

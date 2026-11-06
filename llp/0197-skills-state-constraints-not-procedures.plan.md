@@ -2,6 +2,7 @@
 
 **Type:** plan
 **Status:** Active
+**Extended-by:** LLP 0563 (one shared client skill source)
 **Systems:** Plugins, Reports, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-06

@@ -180,13 +180,9 @@ export function argvToParams(inputSchema, argv, opts = {}) {
       return { ok: false, error: `unknown flag --${flag}` }
     }
     if (prop.type === 'boolean') {
-      if (inlineVal === undefined) {
-        params[propName] = true
-      } else if (inlineVal === 'true' || inlineVal === 'false') {
-        params[propName] = inlineVal === 'true'
-      } else {
-        return { ok: false, error: `--${flag} expects true|false (got ${inlineVal})` }
-      }
+      const read = booleanFlagValue(flag, inlineVal)
+      if (!read.ok) return read
+      params[propName] = read.value
       continue
     }
     let value = inlineVal
@@ -223,6 +219,23 @@ export function argvToParams(inputSchema, argv, opts = {}) {
   if (missing) return { ok: false, error: `missing required ${missing}` }
 
   return { ok: true, params }
+}
+
+/**
+ * Read one boolean flag the way the codec does: a bare `--flag` is true,
+ * `--flag=true` / `--flag=false` carry their value, and any other inline
+ * value is a usage error. Exported for argv readers that cannot run the
+ * whole codec, so a malformed value refuses there too instead of reading
+ * as false (issue #2440).
+ *
+ * @param {string} flag flag name as typed, without the leading dashes
+ * @param {string | undefined} inlineVal the text after `=`, or undefined for a bare flag
+ * @returns {{ ok: true, value: boolean } | { ok: false, error: string }}
+ */
+export function booleanFlagValue(flag, inlineVal) {
+  if (inlineVal === undefined) return { ok: true, value: true }
+  if (inlineVal === 'true' || inlineVal === 'false') return { ok: true, value: inlineVal === 'true' }
+  return { ok: false, error: `--${flag} expects true|false (got ${inlineVal})` }
 }
 
 /**
@@ -391,6 +404,14 @@ function resolveFlag(props, flag) {
 
 /**
  * @param {VerbInputProperty} prop
+ * @param {number} n
+ */
+function withinBounds(prop, n) {
+  return (prop.minimum === undefined || n >= prop.minimum) && (prop.maximum === undefined || n <= prop.maximum)
+}
+
+/**
+ * @param {VerbInputProperty} prop
  * @param {string} value
  * @param {string} label
  * @returns {{ ok: true, value: unknown } | { ok: false, error: string }}
@@ -399,10 +420,14 @@ function coerceValue(prop, value, label) {
   switch (prop.type) {
     case 'integer': {
       const n = Number(value)
-      const noun = prop.minimum === 1
-        ? 'a positive integer'
-        : prop.minimum !== undefined ? `an integer >= ${prop.minimum}` : 'an integer'
-      if (!Number.isInteger(n) || (prop.minimum !== undefined && n < prop.minimum)) {
+      // `Number.isInteger` accepts exponent notation, so `1e30` is an integer
+      // here; a declared `maximum` is what bounds it (issue #972).
+      const noun = prop.maximum !== undefined
+        ? prop.minimum !== undefined ? `an integer from ${prop.minimum} to ${prop.maximum}` : `an integer <= ${prop.maximum}`
+        : prop.minimum === 1
+          ? 'a positive integer'
+          : prop.minimum !== undefined ? `an integer >= ${prop.minimum}` : 'an integer'
+      if (!Number.isInteger(n) || !withinBounds(prop, n)) {
         return { ok: false, error: `${label} expects ${noun} (got ${value})` }
       }
       return { ok: true, value: n }
@@ -410,8 +435,11 @@ function coerceValue(prop, value, label) {
     case 'number': {
       const n = Number(value)
       if (!Number.isFinite(n)) return { ok: false, error: `${label} expects a number (got ${value})` }
-      if (prop.minimum !== undefined && n < prop.minimum) {
-        return { ok: false, error: `${label} expects a number >= ${prop.minimum} (got ${value})` }
+      if (!withinBounds(prop, n)) {
+        const noun = prop.maximum === undefined
+          ? `a number >= ${prop.minimum}`
+          : prop.minimum === undefined ? `a number <= ${prop.maximum}` : `a number from ${prop.minimum} to ${prop.maximum}`
+        return { ok: false, error: `${label} expects ${noun} (got ${value})` }
       }
       return { ok: true, value: n }
     }

@@ -8,7 +8,8 @@
 **Revised:** 2026-06-15
 **Related:** LLP 0005, LLP 0006, LLP 0013, LLP 0015, LLP 0016, LLP 0021
 **Extended-by:** [LLP 0392](./0392-github-capture-projects-automatically.spec.md)
-(source-scoped projection capability and automatic GitHub projection)
+(source-scoped projection capability and automatic GitHub projection),
+LLP 0428 (precise evidence, bounded action derivation and explicit refresh)
 
 > `@hypaware/context-graph` materializes a node/edge **activity graph** from any
 > source that contributes a projection contract. The first is `ai_gateway_messages`
@@ -148,6 +149,10 @@ The graph plugin still registers no source or timer, but a source may now
 request its own dataset projection through the capability, so GitHub capture
 runs one inside the daemon tick that captured the rows.
 
+**Extended-by:** [LLP 0512](./0512-local-session-graph-projects-automatically.spec.md#lifecycle).
+The AI gateway connector also requests automatic local session projection from
+its daemon source. The graph engine itself still owns no background timer.
+
 ## Merge policy
 
 Duplicate rows for the same id (same entity seen by multiple rules/runs) merge
@@ -158,6 +163,8 @@ The policy is order-independent because the contract SELECTs have no stable
 ordering; the same inputs must produce the same merged row regardless of scan
 order, or re-projection and compaction would disagree. Projection-time and
 compaction-time merging share the same function for the same reason.
+
+**Extended-by:** [LLP 0564](./0564-skill-evidence-updates.spec.md#incremental-evidence) permits incremental merges for existing skill relationships.
 
 ## Pre-write dedup
 

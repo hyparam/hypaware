@@ -187,7 +187,7 @@ async function withTempHome(fn) {
   }
 }
 
-test('accept, write succeeds, restart fails: names the restart step, the backup path, and the resume instruction; does not retry the enable', async () => {
+test('accept, write succeeds, restart fails: names the restart step, the backup path, and the resume instruction; does not retry the enable', { skip: process.platform === 'win32' && 'the sandbox shim mocks launchd/systemd supervision, which win32 does not have' }, async () => {
   await withTempHome(async (home) => {
     writeLocalConfig(home)
     // The marker makes `serviceDaemonStatus` report installed, so the flow goes
@@ -254,7 +254,7 @@ test('accept, write succeeds, in-process activation fails: the activation report
   })
 })
 
-test('accept, the write itself fails: the guided remedy still prints, because nothing was written to contradict', async () => {
+test('accept, the write itself fails: the guided remedy still prints, because nothing was written to contradict', { skip: process.platform === 'win32' && 'chmod 0o500 does not make a directory unwritable on win32' }, async () => {
   await withTempHome(async (home) => {
     writeLocalConfig(home)
     // The third exit below `enableClientAdapter`, and the one that is NOT a

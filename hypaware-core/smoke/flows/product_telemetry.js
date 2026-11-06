@@ -12,12 +12,13 @@ import {
   installObservability
 } from '../../../src/core/observability/index.js'
 import {
-  writePolicy,
+  effectivePolicy,
   productRoot
 } from '../../../src/core/product_telemetry/policy.js'
 import { createOutbox } from '../../../src/core/product_telemetry/outbox.js'
 import { createDelivery } from '../../../src/core/product_telemetry/delivery.js'
 import { validateBatch } from '../../../src/core/product_telemetry/contract.js'
+import { centralSeedPath } from '../../../src/core/config/apply.js'
 
 /** @param {{harness:any,expect:any}} args */
 export async function run({ harness, expect }) {
@@ -80,7 +81,14 @@ export async function run({ harness, expect }) {
       expires_at: Date.now() / 1000 + 86400
     })
   )
-  writePolicy(root, 'organization', { url, identityPath })
+  const seed = centralSeedPath(path.dirname(root))
+  fs.mkdirSync(path.dirname(seed), { recursive: true })
+  fs.writeFileSync(seed, JSON.stringify({
+    version: 2,
+    sinks: { central: { plugin: '@hypaware/central', config: {
+      url, identity: { persisted_path: identityPath }
+    } } }
+  }))
   const signal = (smoke_step, status) =>
     log.info('product.smoke.step', {
       dev_run_id: harness.devRunId,
@@ -89,6 +97,8 @@ export async function run({ harness, expect }) {
       status
     })
   try {
+    expect.that('enrollment enables organization telemetry automatically', effectivePolicy(root),
+      (policy) => policy.mode === 'organization' && policy.reason === 'enrolled_organization')
     signal('invoke', 'ok')
     let output = ''
     const code = await dispatch(['--version'], {

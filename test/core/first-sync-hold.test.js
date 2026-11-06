@@ -133,22 +133,22 @@ test('the rendered deadline names its time zone, never a bare wall-clock time (L
 })
 
 test('the rendered deadline reads as a full local date, time and zone in a pinned zone', (t) => {
-  // The formatter renders in the host locale by design, so pin the shape only
-  // where "Jul 23, 2026, 11:59 PM PDT" is what that locale spells.
+  // Pin the date, time and zone in en-US, allowing ICU's comma or "at"
+  // connector and ordinary or non-breaking spaces between the parts.
   if (Intl.DateTimeFormat().resolvedOptions().locale !== 'en-US') {
     t.skip('host locale is not en-US; the zone-token case above covers every locale')
     return
   }
   const deadlineMs = Date.UTC(2026, 6, 24, 6, 59, 0)
-  assert.equal(
+  assert.match(
     withTimeZone('America/Los_Angeles', () => formatFirstSyncDeadline(deadlineMs)),
-    'Jul 23, 2026, 11:59 PM PDT',
+    /^Jul\s23,\s2026(?:,\s|\sat\s)11:59\sPM\sPDT$/u,
   )
   // The same instant on a host left on UTC renders a different wall clock and
   // says so, which is the ambiguity the zone exists to remove.
-  assert.equal(
+  assert.match(
     withTimeZone('UTC', () => formatFirstSyncDeadline(deadlineMs)),
-    'Jul 24, 2026, 6:59 AM UTC',
+    /^Jul\s24,\s2026(?:,\s|\sat\s)6:59\sAM\sUTC$/u,
   )
 })
 

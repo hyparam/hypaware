@@ -6,6 +6,7 @@
 // repo root.
 
 // Runtime value exports (mirror src/core/index.js).
+export { cachePurgeCleanupStatus } from './cache/purge-cleanup.js'
 export * from './observability/index.js'
 export {
   createConfigRegistry,
@@ -24,6 +25,9 @@ export {
   CAP_HTTP_ENDPOINT,
 } from './config/validate.js'
 export { buildPluginCatalog } from './plugin_catalog.js'
+export { deleteMatchingRowsAtUrl } from './cache/iceberg/store.js'
+export { purgeCache } from './cache/purge.js'
+export { createSessionPurgeStore, filterPurgedSessions } from './cache/session-purges.js'
 export {
   partitionSpecForDeclaration,
   validatePartitionSpecStability,

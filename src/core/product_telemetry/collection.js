@@ -3,7 +3,21 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { performance } from 'node:perf_hooks'
-import { COMMANDS, ERROR_CODES, METRICS, validateBatch } from './contract.js'
+import {
+  AGENT_SHELL_MARKERS,
+  COMMANDS,
+  MAX_QUERY_DATASETS,
+  MCP_TOOLS,
+  METRICS,
+  QUERY_DATASETS,
+  QUERY_FIELDS,
+  QUERY_LOCATIONS,
+  QUERY_SURFACES,
+  QUERY_TOOLS,
+  V2_ERROR_CODES,
+  isQueryCommand,
+  validateBatch
+} from './contract.js'
 
 export const PRODUCT_VERSION = createRequire(import.meta.url)(
   '../../../package.json'
@@ -79,12 +93,13 @@ export function productEvent(name, input = {}, now = Date.now()) {
     ['success', 'failure', 'degraded', 'cancelled'],
     'failure'
   )
-  const error_code = label(input.error_code, ERROR_CODES)
+  const error_code = label(input.error_code, V2_ERROR_CODES)
   let attributes
   switch (name) {
-    case 'cli.invocation':
+    case 'cli.invocation': {
+      const command = label(input.command, COMMANDS, 'unknown')
       attributes = {
-        command: label(input.command, COMMANDS, 'unknown'),
+        command,
         invocation_kind: label(
           input.invocation_kind,
           ['execution', 'help', 'version', 'unknown'],
@@ -96,9 +111,22 @@ export function productEvent(name, input = {}, now = Date.now()) {
           ['zero', 'nonzero', 'signal', 'cancelled'],
           'nonzero'
         ),
-        duration_ms: bounded(input.duration_ms)
+        duration_ms: bounded(input.duration_ms),
+        ...(input.query && isQueryCommand(command) ? queryFields(input.query) : {})
       }
       break
+    }
+    case 'mcp.tool_call': {
+      const tool = label(input.tool, MCP_TOOLS)
+      attributes = {
+        tool,
+        outcome,
+        error_code,
+        duration_ms: Math.round(bounded(input.duration_ms)),
+        ...(input.query && QUERY_TOOLS.includes(tool) ? queryFields(input.query) : {})
+      }
+      break
+    }
     case 'installation.inventory':
       attributes = {
         adapters: [
@@ -208,9 +236,160 @@ export function productEvent(name, input = {}, now = Date.now()) {
   }
 }
 
-/** @param {Record<string, any>} resource @param {Record<string, any>[]} records @param {number} [now] */
-export function productBatch(resource, records, now = Date.now()) {
-  const batch = { schema_version: 1, batch_id: randomUUID(), resource, records }
+/**
+ * The four query fields, each from its fixed list. Table names outside the
+ * list become `other`; nothing else about the query is read.
+ * @ref LLP 0561#query [implements]: bounded answers only, never query text, columns, filters or rows
+ * @param {{datasets?: unknown, location?: unknown, rows?: unknown, surface?: unknown}} input
+ */
+export function queryFields(input) {
+  const datasets = []
+  if (Array.isArray(input.datasets)) {
+    for (const value of input.datasets) {
+      const name = label(value, QUERY_DATASETS)
+      if (!datasets.includes(name)) datasets.push(name)
+      if (datasets.length === MAX_QUERY_DATASETS) break
+    }
+  }
+  return {
+    datasets,
+    location: label(input.location, QUERY_LOCATIONS, 'local'),
+    rows: rowsBucket(input.rows),
+    surface: label(input.surface, QUERY_SURFACES, 'unknown')
+  }
+}
+
+// Tools whose result names no dataset read a fixed one.
+const TOOL_DATASETS = /** @type {Record<string, string[]>} */ ({
+  grep_search: ['ai_gateway_messages'],
+  graph_neighbors: ['node', 'edge']
+})
+
+/**
+ * Query fields for a finished query, read from its result's shape only: the
+ * datasets it lists (else the tool's own) and the length of its row list.
+ * @param {string} tool @param {unknown} value @param {'local'|'remote'} location @param {string} surface
+ */
+export function queryResult(tool, value, location, surface) {
+  const r = /** @type {Record<string, unknown>} */ (
+    value && typeof value === 'object' ? value : {}
+  )
+  const list = Array.isArray(r.rows)
+    ? r.rows
+    : Array.isArray(r.hits)
+      ? r.hits
+      : Array.isArray(r.neighbors)
+        ? r.neighbors
+        : null
+  return {
+    datasets: Array.isArray(r.datasets) ? r.datasets : (TOOL_DATASETS[tool] ?? []),
+    location,
+    rows: list ? list.length : undefined,
+    surface
+  }
+}
+
+/** @param {unknown} count */
+export function rowsBucket(count) {
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0)
+    return 'unknown'
+  if (count === 0) return '0'
+  if (count <= 10) return '1-10'
+  if (count <= 100) return '11-100'
+  if (count <= 1000) return '101-1000'
+  return '>1000'
+}
+
+/**
+ * `agent_shell` when a known agent harness marker is set, else `cli`.
+ * @param {NodeJS.ProcessEnv} env
+ */
+export function cliSurface(env) {
+  for (const marker of AGENT_SHELL_MARKERS) if (env[marker]) return 'agent_shell'
+  return 'cli'
+}
+
+const ERRNO_CODES = /** @type {Record<string, string>} */ ({
+  ENOSPC: 'disk_full',
+  EDQUOT: 'disk_full',
+  ETIMEDOUT: 'timeout',
+  ECONNREFUSED: 'unavailable',
+  ECONNRESET: 'unavailable',
+  ENOTFOUND: 'unavailable',
+  EAI_AGAIN: 'unavailable',
+  EHOSTUNREACH: 'unavailable',
+  ENETUNREACH: 'unavailable',
+  // Typed errors raised in this repo, by their stable `code`.
+  query_budget_exceeded: 'budget_exceeded',
+  timestamp_literal_uncoercible: 'query_failed',
+  invalid_grant: 'unauthorized',
+  service_token_revoked: 'revoked',
+  service_account_disabled: 'revoked'
+})
+const ERROR_NAMES = /** @type {Record<string, string>} */ ({
+  TimeoutError: 'timeout',
+  ServiceCommandTimeoutError: 'timeout',
+  GrepQueryError: 'query_failed',
+  QueryExecutionBudgetError: 'budget_exceeded'
+})
+
+/**
+ * Map a thrown value onto the finite error codes by its class name or `code`
+ * (its own, then its `cause`'s), never by message text. Unclassified is null so
+ * the caller picks its own fallback.
+ * @ref LLP 0561#errors [implements]: classify by error class or code, never message text
+ * @param {unknown} error @returns {string | null}
+ */
+export function errorCode(error) {
+  for (let e = error, depth = 0; e && typeof e === 'object' && depth < 3; depth++) {
+    const err = /** @type {{code?: unknown, name?: unknown, cause?: unknown}} */ (e)
+    if (typeof err.code === 'string' && Object.hasOwn(ERRNO_CODES, err.code))
+      return ERRNO_CODES[err.code]
+    if (typeof err.name === 'string' && Object.hasOwn(ERROR_NAMES, err.name))
+      return ERROR_NAMES[err.name]
+    e = err.cause
+  }
+  return null
+}
+
+/**
+ * The v1 projection of records built in the v2 shape: no `mcp.tool_call`, no
+ * query fields, and `budget_exceeded` folded to `query_failed`.
+ * @param {Record<string, any>[]} records
+ */
+function asV1(records) {
+  const out = []
+  for (const record of records) {
+    if (record.kind !== 'event') {
+      out.push(record)
+      continue
+    }
+    if (record.name === 'mcp.tool_call') continue
+    let attributes = record.attributes
+    if (record.name === 'cli.invocation' && Object.hasOwn(attributes, 'rows')) {
+      attributes = { ...attributes }
+      for (const key of QUERY_FIELDS) delete attributes[key]
+    }
+    if (attributes.error_code === 'budget_exceeded')
+      attributes = { ...attributes, error_code: 'query_failed' }
+    out.push(attributes === record.attributes ? record : { ...record, attributes })
+  }
+  return out
+}
+
+/**
+ * @param {Record<string, any>} resource @param {Record<string, any>[]} records @param {number} [now]
+ * @param {1|2} [version] 2 only once the receiver has advertised it
+ */
+export function productBatch(resource, records, now = Date.now(), version = 1) {
+  const wire = version === 2 ? records : asV1(records)
+  if (wire.length === 0) return null
+  const batch = {
+    schema_version: version,
+    batch_id: randomUUID(),
+    resource,
+    records: wire
+  }
   return validateBatch(batch, now, resource['service.role'] === 'server') ===
     null
     ? batch

@@ -218,14 +218,16 @@ test('the installed plugin reads the session through the SDK route contract and 
         },
       },
     }
-    const hooks = await module.HypAware({ client, directory: '/work/probe', worktree: '/work/probe', project: { id: 'proj' } })
+    const hooks = await module.default.server({ client, directory: '/work/probe', worktree: '/work/probe', project: { id: 'proj' } })
     hooks.event({ event: { type: 'message.part.updated', properties: { part: { sessionID: 'ses_1', id: 'part_1' } } } })
     await waitFor(() => received.length === 1)
 
-    assert.deepEqual(calls, [
+    assert.deepEqual(calls.map(([name, args]) => [name, { path: args.path }]), [
       ['get', { path: { id: 'ses_1' } }],
       ['messages', { path: { id: 'ses_1' } }],
     ])
+    assert.equal(calls[0][1].signal, calls[1][1].signal)
+    assert.ok(calls[0][1].signal instanceof AbortSignal)
     assert.equal(received[0].url, '/snapshot')
     assert.equal(received[0].body.session.id, 'ses_1')
     assert.equal(received[0].body.trigger, 'message.part.updated')
@@ -235,8 +237,97 @@ test('the installed plugin reads the session through the SDK route contract and 
     // missing cwd rather than a failed read.
     client.session.get = async () => ({ error: { name: 'UnknownError' }, request: {}, response: {} })
     hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
-    await new Promise((resolve) => setTimeout(resolve, 150))
+    await new Promise((resolve) => setTimeout(resolve, 1100))
     assert.equal(received.length, 1)
+    hooks.dispose()
+
+    // V2 supplies unwrapped values, flat route inputs, a separate request
+    // options argument and an abortable event iterator.
+    const v2Calls = []
+    const cleanup = await module.default.setup({
+      location: { directory: '/work/v2' },
+      session: {
+        async get(input, options) {
+          v2Calls.push(['get', input, options])
+          return { id: 'ses_v2', location: { directory: '/work/v2' } }
+        },
+        async context(input, options) {
+          v2Calls.push(['context', input, options])
+          return [{ id: 'msg_v2', type: 'user', text: 'V2 fixture' }]
+        },
+      },
+      event: {
+        async *subscribe({ signal }) {
+          yield { type: 'session.step.ended', data: { sessionID: 'ses_v2' } }
+          await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))
+        },
+      },
+    })
+    await waitFor(() => received.length === 2)
+    await cleanup()
+    assert.deepEqual(v2Calls.map(([name, input]) => [name, input]), [
+      ['get', { sessionID: 'ses_v2' }], ['context', { sessionID: 'ses_v2' }],
+    ])
+    assert.equal(v2Calls[0][2].signal, v2Calls[1][2].signal)
+    assert.equal(received[1].body.session.location.directory, '/work/v2')
+    assert.equal(received[1].body.messages[0].text, 'V2 fixture')
+    assert.equal(received[1].body.entrypoint, 'unknown')
+
+    // V2 boots one setup per location in one server and every subscription
+    // sees every event, so only one live setup may schedule a snapshot.
+    /** @type {Array<(event: object) => void>} */
+    const feeds = []
+    /** @param {string} directory */
+    const v2Context = (directory) => ({
+      location: { directory },
+      session: {
+        async get() { return { id: 'ses_shared', location: { directory: '/work/shared' } } },
+        async context() { return [{ id: 'msg_shared', type: 'user', text: directory }] },
+      },
+      event: {
+        async *subscribe({ signal }) {
+          /** @type {object[]} */
+          const queue = []
+          /** @type {(() => void) | undefined} */
+          let notify
+          feeds.push(event => { queue.push(event); notify?.() })
+          signal.addEventListener('abort', () => notify?.(), { once: true })
+          while (!signal.aborted) {
+            const next = queue.shift()
+            if (next) yield next
+            else await new Promise(resolve => { notify = () => resolve(undefined) })
+          }
+        },
+      },
+    })
+    const closeA = await module.default.setup(v2Context('/work/a'))
+    const closeB = await module.default.setup(v2Context('/work/b'))
+    await waitFor(() => feeds.length === 2)
+    for (const feed of feeds) feed({ type: 'session.updated', data: { sessionID: 'ses_shared' } })
+    await waitFor(() => received.length === 3)
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    assert.equal(received.length, 3)
+    assert.equal(received[2].body.messages[0].text, '/work/a')
+
+    // Closing the scheduling setup hands the stream to the next live one.
+    await closeA()
+    feeds[1]({ type: 'session.updated', data: { sessionID: 'ses_shared' } })
+    await waitFor(() => received.length === 4)
+    assert.equal(received[3].body.messages[0].text, '/work/b')
+    await closeB()
+
+    // A subscription that ends while its setup lives must not keep the lead.
+    const closeD = await module.default.setup({
+      ...v2Context('/work/d'),
+      event: { async *subscribe() { throw new Error('subscribe failed') } },
+    })
+    const closeE = await module.default.setup(v2Context('/work/e'))
+    await waitFor(() => feeds.length === 3)
+    feeds[2]({ type: 'session.updated', data: { sessionID: 'ses_shared' } })
+    await waitFor(() => received.length === 5)
+    assert.equal(received[4].body.messages[0].text, '/work/e')
+    await closeE()
+    await closeD()
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)))
     await fs.rm(home, { recursive: true, force: true })

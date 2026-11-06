@@ -5,33 +5,12 @@ import path from 'node:path'
 
 import { isConfirmedSymlinkVia } from './cache/paths.js'
 import { Attr, getLogger } from './observability/index.js'
+import { captureSpoolRoot } from './runtime/paths.js'
 import { errCode } from './util/json_util.js'
 
 /**
  * @import { Dirent } from 'node:fs'
  */
-
-/**
- * The capture-spool root under the HypAware home: `<hyp-home>/spool`.
- *
- * A client that writes raw request/response bodies for us drops them into a
- * directory beneath it, one per client (`spool/claude-bodies` today). Core
- * knows the root; the client directories are the plugins'. That split is what
- * lets `hyp purge` empty every spool without naming a plugin, and what bounds
- * the directory a detach may sweep from a path it read out of a settings file.
- *
- * @ref LLP 0253#spool-location [implements]: a path under the HypAware home is
- *   what `hyp purge` and detach can find without being told
- */
-const SPOOL_ROOT_DIRNAME = 'spool'
-
-/**
- * @param {string} hypHome
- * @returns {string}
- */
-export function captureSpoolRoot(hypHome) {
-  return path.join(hypHome, SPOOL_ROOT_DIRNAME)
-}
 
 /**
  * Whether `dir` names a capture spool this install owns: an absolute path

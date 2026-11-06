@@ -1309,3 +1309,72 @@ test('transcript toolUseResult is promoted onto the backfilled row', async () =>
     await env.cleanup()
   }
 })
+
+test('transcript origin and promptSource are promoted onto the backfilled row', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'repo-a', 'sess-origin', [
+      {
+        sessionId: 'sess-origin',
+        uuid: 'u-typed',
+        parentUuid: null,
+        type: 'user',
+        origin: { kind: 'human' },
+        promptSource: 'typed',
+        message: { role: 'user', content: 'edit the file' },
+        timestamp: '2026-10-20T10:00:00.000Z',
+      },
+      {
+        sessionId: 'sess-origin',
+        uuid: 'u-asst',
+        parentUuid: 'u-typed',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_x', name: 'Edit', input: { file_path: '/work/a.txt' } }],
+        },
+        timestamp: '2026-10-20T10:00:05.000Z',
+      },
+      {
+        sessionId: 'sess-origin',
+        uuid: 'u-result',
+        parentUuid: 'u-asst',
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'ok' }] },
+        toolUseResult: { filePath: '/work/a.txt' },
+        timestamp: '2026-10-20T10:00:06.000Z',
+      },
+      {
+        sessionId: 'sess-origin',
+        uuid: 'u-notify',
+        parentUuid: 'u-result',
+        type: 'user',
+        origin: { kind: 'task-notification' },
+        promptSource: 'system',
+        message: { role: 'user', content: '<task-notification>agent done</task-notification>' },
+        timestamp: '2026-10-20T10:00:07.000Z',
+      },
+    ])
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const [item] = await collectItems(provider.run(runContext().ctx))
+    assert.ok(item)
+
+    const rows = await materialize(item)
+    const byId = new Map(rows.map((r) => [r.message_id, /** @type {any} */ (r.attributes)?.claude]))
+
+    // A typed turn carries the positive human marker, verbatim.
+    assert.deepEqual(byId.get('u-typed').origin, { kind: 'human' })
+    assert.equal(byId.get('u-typed').prompt_source, 'typed')
+    // An injected user-role turn carries its own kind, so it is not
+    // mistaken for a human prompt.
+    assert.deepEqual(byId.get('u-notify').origin, { kind: 'task-notification' })
+    assert.equal(byId.get('u-notify').prompt_source, 'system')
+    // Lines without the fields gain nothing, and keep what they had.
+    assert.equal(byId.get('u-result').origin, undefined)
+    assert.equal(byId.get('u-result').prompt_source, undefined)
+    assert.deepEqual(byId.get('u-result').tool_use_result, { filePath: '/work/a.txt' })
+    assert.equal(byId.get('u-asst')?.origin, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})

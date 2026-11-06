@@ -97,3 +97,14 @@ export interface DatasetRolloutStore {
     previous?: DatasetRolloutRecord | null,
   ): Promise<DatasetRolloutRecord>
 }
+
+/** Internal shared refresh ownership, not a server wire contract. */
+export interface RefreshLease {
+  finish(error?: unknown): void
+}
+
+export interface RefreshOperation {
+  lifetime: { signal: AbortSignal, abort(reason: unknown): void, dispose(): void }
+  consumers: Set<RefreshLease>
+  cancelled?: RefreshLease
+}

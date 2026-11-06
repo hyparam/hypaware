@@ -15,6 +15,7 @@ rule), [LLP 0058](./0058-oidc-login-client.decision.md) (#d7 the refusal
 taxonomy), [LLP 0129](./0129-init-wizard-fork.decision.md)
 (#failed-join-returns-to-fork the fork this classification drives);
 hyparam/hypaware#1165, PR #1152, hyparam/hypaware-server#402
+**Extended-by:** LLP 0543 (the decision on both problems; see #decision)
 
 > The poll login lane reports two outcomes that are not what happened. A
 > server too old to have the poll endpoint is reported as a retriable local
@@ -28,7 +29,8 @@ hyparam/hypaware#1165, PR #1152, hyparam/hypaware-server#402
 > LLP 0179's outcome vocabulary and LLP 0342 D3's promise that those codes are
 > untouched, the second by LLP 0342 D3's single delivery, which LLP 0342 D4
 > leans on for its security argument. This document states both gaps, carries
-> the reproductions, and lays out the option space. It decides nothing.
+> the reproductions, and lays out the option space. Both are now decided: see
+> #decision.
 
 ## Context {#context}
 
@@ -338,6 +340,22 @@ and a real refusal occasionally reports as a timeout, most likely for the
 slowest users. Buys: re-running recovers both (a fresh flight, and the refusal
 stated properly the second time), and the failure is safe in every respect that
 matters.
+
+## Decision {#decision}
+
+**Problem 1 took option A.** `'no_poll_endpoint'` is a typed outcome reason,
+classified definitive, with its own `printJoinFailure` sentence; the headless
+hint no longer prints on any poll-lane failure. Recorded in
+[LLP 0543](./0543-a-stale-server-is-a-definitive-login-outcome.decision.md)
+(#typed, #failed, #sentence, #telemetry, #no-headless-hint).
+
+**Lost delivery took option A, built server-side as repeat pickup.**
+hypaware-server LLP 0505 #pickup (extending hypaware-server LLP 0325 D2),
+implemented by hyparam/hypaware-server#1327, merged 2026-10-06: a settled
+`complete` is re-served with the same code until it is redeemed or expires,
+and a settled `failed` is re-served with the same reason until its original
+TTL (#1223). No client change, no acknowledgment endpoint, no lifetime change.
+Recorded in [LLP 0543#pickup](./0543-a-stale-server-is-a-definitive-login-outcome.decision.md#pickup).
 
 ## What this does not cover {#not-covered}
 

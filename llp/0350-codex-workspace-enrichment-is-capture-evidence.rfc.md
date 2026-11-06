@@ -7,7 +7,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-09-01
 **Related:** LLP 0032, LLP 0049, LLP 0050, LLP 0069, LLP 0083, LLP 0121,
-LLP 0151, LLP 0160;
+LLP 0151, LLP 0160, LLP 0506;
 hyparam/hypaware#1189, hyparam/hypaware#492, hyparam/hypaware#481,
 hyparam/hypaware#476, PR #477, PR #1076, PR #1198;
 hyparam/hypaware-server#413 (server LLP 0327, out of tree)
@@ -319,6 +319,10 @@ paragraph records verified behaviour of the code and takes none of the options.
 
 Nothing. It exists so the question is asked once, in the corpus, with the
 evidence attached, rather than a third time in a PR review.
+
+**Answered by:
+[LLP 0506](./0506-codex-enrichment-needs-a-covering-unignored-workspace.decision.md#decision)** -
+(B) and (C) together, scoped to Codex (Phil, 2026-10-05, on #1189).
 
 The call needed is a single choice among the options above, and it is the same
 call #492 has been waiting on since PR #477, now with a changed price. Whoever

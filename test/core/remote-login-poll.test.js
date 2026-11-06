@@ -96,11 +96,92 @@ test('a generic unknown_path 404 (stale server) fails loudly with the upgrade me
   await assert.rejects(poller.waitForCode(), /does not support poll login yet - upgrade hypaware-server/)
 })
 
+// The stale server is no server refusal, so it must not borrow the D7
+// channel: it travels as the poller's own typed kind.
+// @ref LLP 0543#typed [tests]:
+test('the stale-server error carries kind no_poll_endpoint and no callbackError', async () => {
+  const { fetchImpl } = scriptedFetch([
+    { status: 404, body: { error: 'unknown_path' } },
+  ])
+  const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl })
+  const err = await poller.waitForCode().then(() => assert.fail('expected a rejection'), (e) => e)
+  assert.equal(err.kind, 'no_poll_endpoint')
+  assert.equal(err.callbackError, undefined)
+})
+
+test('the poller types its other rejections too: a D7 refusal and a timeout', async () => {
+  const refused = startLoginPoller({
+    identityBase: 'https://h/v1/identity',
+    state: 's',
+    fetchImpl: scriptedFetch([{ status: 200, body: { status: 'failed', error: 'no_membership' } }]).fetchImpl,
+  })
+  const refusal = await refused.waitForCode().then(() => assert.fail('expected a rejection'), (e) => e)
+  assert.equal(refusal.kind, 'no_membership')
+  assert.equal(refusal.callbackError, 'no_membership')
+
+  const { sleep } = recordingSleep()
+  const pending = startLoginPoller({
+    identityBase: 'https://h/v1/identity',
+    state: 's',
+    fetchImpl: scriptedFetch([{ status: 200, body: { status: 'pending' } }]).fetchImpl,
+    timeoutMs: 0,
+    sleep,
+  })
+  const timeout = await pending.waitForCode().then(() => assert.fail('expected a timeout'), (e) => e)
+  assert.equal(timeout.kind, 'timeout')
+  assert.equal(timeout.callbackError, undefined)
+})
+
+// A settled response whose body the client could not read is transient, and
+// the server serves the same outcome again, so the next poll collects it.
+// @ref LLP 0543#pickup [tests]:
+test('a settled response lost mid-body is collected from the repeat pickup', async () => {
+  for (const settled of [
+    { status: 'complete', code: 'cd_again' },
+    { status: 'failed', error: 'no_membership' },
+  ]) {
+    let calls = 0
+    const fetchImpl = /** @type {any} */ (async () => {
+      calls += 1
+      return {
+        status: 200,
+        headers: { get: () => null },
+        text: async () => {
+          if (calls === 1) throw new Error('socket hang up')
+          return JSON.stringify(settled)
+        },
+      }
+    })
+    const { sleep } = recordingSleep()
+    const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, sleep })
+    if (settled.status === 'complete') {
+      assert.deepEqual(await poller.waitForCode(), { code: 'cd_again' })
+    } else {
+      await assert.rejects(poller.waitForCode(), (/** @type {any} */ err) => err.callbackError === 'no_membership')
+    }
+    assert.equal(calls, 2)
+  }
+})
+
 test('times out when the flight never settles', async () => {
   const { fetchImpl } = scriptedFetch([{ status: 200, body: { status: 'pending' } }])
   const { sleep } = recordingSleep()
   const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, timeoutMs: 0, sleep })
   await assert.rejects(poller.waitForCode(), /timed out waiting for the browser login/)
+})
+
+test('the timeout says how to recover without claiming the sign-in worked', async () => {
+  const { fetchImpl } = scriptedFetch([{ status: 200, body: { status: 'pending' } }])
+  const { sleep } = recordingSleep()
+  const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, timeoutMs: 0, sleep })
+  const err = await poller.waitForCode().then(() => assert.fail('expected a timeout'), (e) => e)
+  assert.match(err.message, /^timed out waiting for the browser login to complete/)
+  assert.match(err.message, /finish any steps left in the browser, then retry the sign-in/)
+  assert.match(err.message, /if the browser already said setup succeeded, continue with that setup instead of starting it over/)
+  assert.doesNotMatch(err.message, /signed in|login succeeded|setup succeeded\./)
+  // Still a local failure: no server code rides it, so the CLI keeps its
+  // retriable login_failed classification.
+  assert.equal(err.callbackError, undefined)
 })
 
 test('a 429 sleeps for the retry-after hint instead of the poll interval', async () => {
