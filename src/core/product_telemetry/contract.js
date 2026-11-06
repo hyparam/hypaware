@@ -241,7 +241,8 @@ export const AGENT_SHELL_MARKERS = Object.freeze([
   'CODEX_THREAD_ID',
   'CODEX_SANDBOX',
   'GEMINI_CLI',
-  'CURSOR_AGENT'
+  'CURSOR_AGENT',
+  'GROK_SESSION_ID'
 ])
 const QUERY_COMMANDS = new Set(COMMANDS.filter((c) => c.startsWith('query ')))
 /** @param {string} command */
