@@ -34,7 +34,7 @@ import {
   sessionEntrypoint,
 } from '../../../../src/core/backfill/entrypoint_owner.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
-import { openCodeTranscriptSession, readOpenCodeClaudeSessions } from './opencode_ownership.js'
+import { openCodeToolEvidenceApplies, openCodeTranscriptSession, readOpenCodeClaudeSessions } from './opencode_ownership.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
@@ -272,10 +272,15 @@ async function* runClaudeBackfill(args) {
   let openCodeSessions
   try {
     openCodeSessions = candidates.length === 0 ? new Set() : await readOpenCodeClaudeSessions(args.homeDir, ctx.env)
-  } catch {
+  } catch (err) {
+    // A runtime code or this module's fixed token, never the message: SQLite
+    // and filesystem messages can carry paths or record contents.
+    const code = /** @type {{ code?: unknown }} */ (err)?.code
+    const message = err instanceof Error ? err.message : ''
     log.error('claude.backfill.ownership_read_failed', {
       component: 'plugin.claude.backfill', operation: 'ownership_gate',
       owner_client: 'opencode', error_kind: 'ownership_read_failed', status: 'error',
+      error_code: typeof code === 'string' ? code : /^opencode_ownership_[a-z_]+$/.test(message) ? message : 'unknown',
     })
     throw new Error('OpenCode Claude session ownership could not be read; Claude history import stopped to protect OpenCode privacy')
   }
@@ -373,10 +378,13 @@ async function* runClaudeBackfill(args) {
     /** @type {Map<string, Set<string>>} */
     const forks = new Map()
     const transcriptOwnedSessions = new Set()
+    /** @type {Set<string> | undefined} */
+    let toolEvidenceSessions
     try {
       entries = await loadTranscriptFile(filePath, row => {
-        const id = openCodeTranscriptSession(row)
-        if (id) transcriptOwnedSessions.add(id)
+        const evidence = openCodeTranscriptSession(row)
+        if (evidence?.launched) transcriptOwnedSessions.add(evidence.sessionId)
+        else if (evidence) (toolEvidenceSessions ??= new Set()).add(evidence.sessionId)
         if (!isPlainObject(row) || typeof row.sessionId !== 'string' || !isPlainObject(row.forkedFrom)
             || typeof row.forkedFrom.sessionId !== 'string') return
         const parent = row.forkedFrom.sessionId
@@ -400,6 +408,14 @@ async function* runClaudeBackfill(args) {
       continue
     }
 
+    // Evidence rows such as `api-request-shape` carry no entrypoint, so read
+    // the session's the way the entrypoint gate below does.
+    for (const id of toolEvidenceSessions ?? []) {
+      if (!transcriptOwnedSessions.has(id)
+          && openCodeToolEvidenceApplies(sessionEntrypoint(entries.filter(entry => entry.sessionId === id)))) {
+        transcriptOwnedSessions.add(id)
+      }
+    }
     for (const id of transcriptOwnedSessions) ownSession(id)
     const pending = [...forks.keys()].filter(id => openCodeSessions.has(id))
     const reached = new Set(pending)

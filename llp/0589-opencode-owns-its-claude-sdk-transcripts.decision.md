@@ -39,8 +39,9 @@ first model reply, tool call, or saved provider UUID mapping. SDK forks keep
 the same value. A currently running OpenCode must restart to load the updated
 managed plugin, as the attach command already instructs.
 
-This assignment lives in OpenCode's process. It does not change the user's
-shell or standalone SDK environment. Native OpenCode snapshot frontend
+This assignment lives in OpenCode's process. Shells and standalone SDK apps
+started outside OpenCode are unaffected; OpenCode's own child processes
+inherit the value (see [limits](#limits)). Native OpenCode snapshot frontend
 attribution still reads `OPENCODE_CLIENT`; the new value labels only the
 embedded Claude transcript. The value is not a manifest admission claim:
 Claude must refuse this producer entirely, not import a second copy labeled
@@ -52,7 +53,11 @@ fail-open rule.
 Extend LLP 0140 for a shared-tree session with stronger native ownership
 evidence: the explicit OpenCode launch entrypoint, an exact UUID in OpenCode's
 Claude Agent KV namespace, or structured OpenCode MCP declarations, calls or
-attribution in the transcript. Native SDK
+attribution in the transcript. Tool and attribution evidence count only when
+the session's entrypoint is an SDK mode (`sdk-*`) or missing: any Claude Code
+user can name an MCP server `opencode`, so an interactive `cli` session stays
+Claude's. Evidence rows such as `api-request-shape` carry no entrypoint, so
+the session's entrypoint decides. Native SDK
 fork ancestry propagates this ownership in both directions. Read a currently
 mapped transcript before its ancestors, following their filenames as the
 upstream SDK does, so an ancestor cannot be projected before its ownership is
@@ -92,6 +97,17 @@ launch marker. Process-local data roots or custom database paths invisible to
 HypAware likewise cannot supply historical UUID mappings. Existing captured
 or exported copies are not recalled.
 
+OpenCode's child processes, including tool shells, inherit
+`CLAUDE_CODE_ENTRYPOINT=opencode`. A `claude` or SDK app started from an
+OpenCode tool shell is therefore stamped `opencode` and skipped by Claude
+backfill. This is an accepted residual.
+
+On Node 22.12, `node:sqlite` needs a flag. With an OpenCode database present,
+every Claude history import fails closed there.
+
+Opening an OpenCode database prints Node's SQLite `ExperimentalWarning` on
+stderr. It is harmless; HypAware does not override process warnings to hide it.
+
 ## Real-client validation {#validation}
 
 On macOS arm64, official OpenCode CLI and Desktop 2.2.3 ran their real Claude
@@ -120,6 +136,9 @@ not, so the launch marker removes reliance on optional emission shape rather
 than claiming that baseline failed. OpenCode's first-turn attempt with Claude
 2.1.283 was refused by its upstream initialization-version check; no successful
 real OpenCode turn on that older binary is claimed.
+
+Hosted authentication and request headers with the `opencode` entrypoint were
+not exercised; only the fixture endpoint was.
 
 ## CPU and memory {#cost}
 

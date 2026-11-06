@@ -345,6 +345,35 @@ test('OpenCode tool provenance outside the requested window excludes the whole S
   } finally { await env.cleanup() }
 })
 
+test('OpenCode tool evidence owns SDK or unmarked sessions, never a Claude Code CLI session', async () => {
+  const env = await stageEnv()
+  try {
+    // Any Claude Code user can name an MCP server `opencode`. The evidence row
+    // carries no entrypoint, so the session's own entrypoint decides.
+    for (const entrypoint of ['cli', 'sdk-ts', undefined]) {
+      const id = `mcp-${entrypoint}`
+      /** @type {Record<string, any>[]} */
+      const rows = conversationRows(id).map(row => ({ ...row, entrypoint }))
+      rows[1].attributionMcpServer = 'opencode'
+      rows[1].message.content = [{ type: 'tool_use', id: 'tool-1', name: 'mcp__opencode__read', input: {} }]
+      await writeTranscript(env, 'repo', id, [
+        ...rows,
+        { type: 'api-request-shape', sessionId: id, shape: { tools: [{ name: 'mcp__opencode__read' }] } },
+      ])
+    }
+    // A fork of the CLI session inherits no ownership from that evidence.
+    await writeTranscript(env, 'repo', 'cli-fork', conversationRows('cli-fork').map(row => ({ ...row,
+      entrypoint: 'cli', forkedFrom: { sessionId: 'mcp-cli', messageUuid: row.uuid },
+    })))
+    const provider = createClaudeBackfillProvider({ ...env, deriveRepo: async () => ({}) })
+    const { ctx, entries } = runContext()
+    const items = await collectItems(provider.run(ctx))
+    assert.deepEqual(items.map(item => item.provenance?.native_id).sort(), ['cli-fork', 'mcp-cli'])
+    assert.deepEqual(entries.filter(entry => entry.message === 'claude.backfill.foreign_session_drop')
+      .map(entry => entry.fields?.session_id).sort(), ['mcp-sdk-ts', 'mcp-undefined'])
+  } finally { await env.cleanup() }
+})
+
 test('OpenCode persisted UUID ownership excludes text-only SDK sessions and refreshes each run', async () => {
   const env = await stageEnv()
   const { DatabaseSync } = await import('node:sqlite')
@@ -405,7 +434,10 @@ test('an unreadable OpenCode ownership record stops Claude import before any row
       ctx.env.OPENCODE_DB = file
       await assert.rejects(collectItems(provider.run(ctx)), /ownership could not be read/)
       assert.equal(entries.filter(entry => entry.message === 'claude.backfill.session_projected').length, 0)
-      assert.equal(entries.find(entry => entry.message === 'claude.backfill.ownership_read_failed')?.fields?.error_kind, 'ownership_read_failed')
+      const failed = entries.find(entry => entry.message === 'claude.backfill.ownership_read_failed')?.fields
+      assert.equal(failed?.error_kind, 'ownership_read_failed')
+      // A sanitized cause: a runtime code or fixed token, never a path or value.
+      assert.ok(['ERR_SQLITE_ERROR', 'opencode_ownership_record_budget'].includes(String(failed?.error_code)), String(failed?.error_code))
       assert.deepEqual(await fs.readFile(file), before, 'the ownership reader never changes OpenCode storage')
     }
   } finally {

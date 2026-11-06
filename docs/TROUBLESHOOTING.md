@@ -210,7 +210,7 @@ See [querying](QUERYING.md) for searches, session drill-downs, and bounded SQL.
 could not read one or more files on its last run:
 
 ```output
-codex history import failed on its last run, so some history may be missing. Anything it could read was still imported. The next scheduled run retries, and this clears once a run succeeds.
+codex history import failed on its last run, so some history may be missing. Rows read before the failure may have been imported; see the logged error for the cause. The next scheduled run retries, and this clears once a run succeeds.
 ```
 
 Files that could be read were still imported. A file that failed is retried on

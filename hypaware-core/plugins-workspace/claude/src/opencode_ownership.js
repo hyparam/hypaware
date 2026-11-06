@@ -52,7 +52,12 @@ export async function readOpenCodeClaudeSessions(homeDir, env) {
       if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') continue
       throw error
     }
-    const { DatabaseSync } = await import('node:sqlite')
+    // Node 22.12 ships node:sqlite only behind a flag. Name that cause, and
+    // still stop: an unread store is not an absent one.
+    let DatabaseSync
+    try { ({ DatabaseSync } = await import('node:sqlite')) } catch {
+      throw new Error('opencode_ownership_sqlite_unavailable')
+    }
     const db = new DatabaseSync(file, { readOnly: true })
     try {
       db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 100')
@@ -77,15 +82,17 @@ export async function readOpenCodeClaudeSessions(homeDir, env) {
  * Structured provenance only, never a search through prompt or reply text.
  * The managed plugin's launch marker exists from the first user line.
  * Older unmarked sessions can retain tool declarations, calls or attribution.
- * Forks copy that same evidence.
- * @ref LLP 0589#ownership [implements]: tool provenance survives UUID changes and is independent of entrypoint
+ * Forks copy that same evidence. Tool evidence returns `launched: false`: any
+ * Claude Code user can name an MCP server `opencode`, so the caller weighs it
+ * against the session's entrypoint with {@link openCodeToolEvidenceApplies}.
+ * @ref LLP 0589#ownership [implements]: tool provenance survives UUID changes but counts only for SDK or missing entrypoints
  * @param {unknown} row
- * @returns {string | undefined}
+ * @returns {{ sessionId: string, launched: boolean } | undefined}
  */
 export function openCodeTranscriptSession(row) {
   if (!isPlainObject(row) || typeof row.sessionId !== 'string') return undefined
   // @ref LLP 0589#launch-provenance [implements]: a known launcher labels the first persisted line, before any tool or mapping exists
-  if (row.entrypoint === 'opencode') return row.sessionId
+  if (row.entrypoint === 'opencode') return { sessionId: row.sessionId, launched: true }
   const message = isPlainObject(row.message) ? row.message : undefined
   const shape = row.type === 'api-request-shape' && isPlainObject(row.shape) ? row.shape : undefined
   const tools = shape?.tools
@@ -93,7 +100,21 @@ export function openCodeTranscriptSession(row) {
   if (row.attributionMcpServer === 'opencode'
       || (Array.isArray(tools) && tools.some(tool => isPlainObject(tool) && isOpenCodeTool(tool.name)))
       || (message?.role === 'assistant' && Array.isArray(content) && content.some(block => isPlainObject(block) && block.type === 'tool_use' && isOpenCodeTool(block.name)))) {
-    return row.sessionId
+    return { sessionId: row.sessionId, launched: false }
   }
   return undefined
+}
+
+/**
+ * OpenCode drives Claude through the Agent SDK, whose modes Claude stamps as
+ * `sdk-*` (older transcripts carry none). An interactive entrypoint such as
+ * `cli` is a person using Claude Code itself, whatever its MCP servers are
+ * named. Takes the session's entrypoint, not the evidence row's:
+ * `api-request-shape` rows carry none.
+ * @ref LLP 0589#ownership [implements]: tool and attribution evidence count only for SDK or missing entrypoints
+ * @param {string | undefined} entrypoint
+ * @returns {boolean}
+ */
+export function openCodeToolEvidenceApplies(entrypoint) {
+  return entrypoint === undefined || entrypoint.startsWith('sdk-')
 }
