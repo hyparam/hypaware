@@ -364,8 +364,8 @@ test('a settings-only entry refuses with how to attach, not a detach loop', asyn
     const { outcome } = await runAttach(staged)
     assert.equal(outcome.status, 'refused')
     const reason = outcome.status === 'refused' ? outcome.reason : ''
-    assert.match(reason, /models\.providers\.anthropic in .* holds only your own settings \(headers\.anthropic-workspace-id, request\), with no HypAware route, so HypAware will not edit it\./)
-    assert.match(reason, /copy those settings, remove models\.providers\.anthropic, attach again, then add them back/)
+    assert.match(reason, /models\.providers\.anthropic in .* holds only your own settings \(headers\.anthropic-workspace-id, request\), with no baseUrl, so HypAware will not edit it\./)
+    assert.match(reason, /To attach, copy those settings, remove models\.providers\.anthropic, run 'hyp client attach openclaw', then add those settings back to the new entry\./)
     // The routed entry keeps the existing advice; only it mentions detach.
     assert.match(reason, /models\.providers\.openai already exists/)
     assert.equal(reason.match(/hyp client detach/g)?.length, 1)
@@ -373,6 +373,29 @@ test('a settings-only entry refuses with how to attach, not a detach loop', asyn
     assert.deepEqual(await readConfig(staged.settingsPath), before)
   } finally {
     await fs.rm(staged.homeDir, { recursive: true, force: true })
+  }
+})
+
+test('an empty entry refuses with remove-then-attach, and two settings-only keys share one recovery', async () => {
+  /** @type {Array<[unknown, RegExp]>} */
+  const cases = [
+    [{ anthropic: {} }, /^models\.providers\.anthropic in .* is empty, with no baseUrl, so HypAware will not edit it\. To attach, remove models\.providers\.anthropic, then run 'hyp client attach openclaw'\.$/],
+    [{ anthropic: { request: {} }, openai: { headers: { 'OpenAI-Organization': 'org-x' } } },
+      /^models\.providers\.anthropic in .* holds only your own settings \(request\), with no baseUrl, so HypAware will not edit it\. models\.providers\.openai in .* holds only your own settings \(headers\.OpenAI-Organization\), with no baseUrl, so HypAware will not edit it\. To attach, copy those settings, remove models\.providers\.anthropic and models\.providers\.openai, run 'hyp client attach openclaw', then add those settings back to the new entries\.$/],
+  ]
+  for (const [providers, expected] of cases) {
+    const before = { models: { providers } }
+    const staged = await stage(before)
+    try {
+      const { outcome } = await runAttach(staged)
+      assert.equal(outcome.status, 'refused')
+      const reason = outcome.status === 'refused' ? outcome.reason : ''
+      assert.match(reason, expected)
+      assert.doesNotMatch(reason, /copy those settings.*copy those settings|org-x/)
+      assert.deepEqual(await readConfig(staged.settingsPath), before)
+    } finally {
+      await fs.rm(staged.homeDir, { recursive: true, force: true })
+    }
   }
 })
 

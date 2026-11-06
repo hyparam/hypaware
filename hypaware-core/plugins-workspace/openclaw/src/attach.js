@@ -279,16 +279,23 @@ function refusalReason(config, keys, settingsPath) {
       `Remove it by hand or run 'hyp client detach ${CLIENT_NAME}' first.`
     )
   }
+  if (settingsOnly.length === 0) return parts.join(' ')
+  let hasSettings = false
   for (const key of settingsOnly) {
     const names = settingNames(/** @type {Record<string, unknown>} */ (container[key]))
+    if (names.length > 0) hasSettings = true
     const holds = names.length > 0 ? `holds only your own settings (${names.join(', ')})` : 'is empty'
     parts.push(
-      `models.providers.${key} in ${settingsPath} ${holds}, with no HypAware ` +
-      `route, so HypAware will not edit it. To attach, copy those settings, ` +
-      `remove models.providers.${key}, attach again, then add them back to ` +
-      `the new entry.`
+      `models.providers.${key} in ${settingsPath} ${holds}, with no baseUrl, ` +
+      `so HypAware will not edit it.`
     )
   }
+  const remove = `remove models.providers.${settingsOnly.join(' and models.providers.')}`
+  const command = `'hyp client attach ${CLIENT_NAME}'`
+  const entries = settingsOnly.length > 1 ? 'the new entries' : 'the new entry'
+  parts.push(hasSettings
+    ? `To attach, copy those settings, ${remove}, run ${command}, then add those settings back to ${entries}.`
+    : `To attach, ${remove}, then run ${command}.`)
   return parts.join(' ')
 }
 
