@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { WIN32_TASK_FOLDER, defaultLogDir } from './platform.js'
-import { ServiceOpError, defaultSleep, ensureFsOp, ensureOk, runServiceCommand } from './service_ops.js'
+import { ServiceOpError, defaultSleep, ensureFsOp, ensureOk, runServiceCommand, underTestRunner } from './service_ops.js'
 
 /**
  * @import {
@@ -443,16 +443,69 @@ export async function startTask(options) {
 }
 
 /**
- * End the running task. This is `TerminateProcess` on the daemon - the hard
- * stop a graceful `hyp daemon stop` escalates to only after its file-channel
- * request times out (LLP 0584 #stop), never the routine path.
- * @param {{ label?: string, sid?: string, taskName?: string, schtasks?: SchtasksAdapter }} options
+ * End the running task, then kill the daemon it launched. `schtasks /End`
+ * terminates the process Task Scheduler tracks - `wscript` (D2's launcher) -
+ * but not the node daemon `wscript` spawned, which is orphaned and keeps
+ * running (measured on a real host). So the hard stop must reach node itself
+ * (see {@link killOrphanedDaemon}); without this, a wedged `hyp daemon stop`
+ * would End the launcher, report success, and leave the daemon alive - the
+ * broken promise LLP 0584 #stop exists to prevent.
+ *
+ * @param {{ label?: string, sid?: string, taskName?: string, homeDir?: string, schtasks?: SchtasksAdapter }} options
  * @returns {Promise<void>}
+ * @ref LLP 0584#stop [implements]: the /End hard stop reaches node, which ending the wscript launcher does not
  */
 export async function stopTask(options) {
   const schtasks = options.schtasks ?? realSchtasks
   const taskName = resolveTaskName(options)
   ensure(await schtasks.end(taskName), `end scheduled task ${taskName}`)
+  await killOrphanAfterEnd(options.homeDir)
+}
+
+/**
+ * Kill the daemon orphaned by a `schtasks /End` (see {@link stopTask}), guarded
+ * so a test never reaches the host's real daemon. The `process.kill` of the pid
+ * file's daemon is the same host hazard a real service-manager spawn is, so it
+ * wears the LLP 0181 guard: skipped under the test runner unless
+ * `HYP_ALLOW_REAL_SERVICE_MANAGER=1`.
+ *
+ * @param {string} [homeDir]
+ * @returns {Promise<void>}
+ */
+async function killOrphanAfterEnd(homeDir) {
+  if (underTestRunner() && process.env.HYP_ALLOW_REAL_SERVICE_MANAGER !== '1') return
+  const { stateRootFromEnv } = await import('../runtime/paths.js')
+  await killOrphanedDaemon(stateRootFromEnv(process.env, homeDir))
+}
+
+/**
+ * Kill the daemon named by the pid file under `stateRoot`, but only when the
+ * LLP 0515 identity check does not prove the pid is someone else's: an unclean
+ * shutdown can leave a stale pid file, and pid numbers are reused, so a pid we
+ * cannot confirm is treated as the daemon (fail-closed) while one that is
+ * provably not `daemon run` is left alone. `process.kill` with the default
+ * signal is `TerminateProcess` on win32, the hard stop this path is already in.
+ *
+ * Process interactions are injectable for the unit test; the default reads the
+ * real pid file and signals the real pid.
+ *
+ * @param {string} stateRoot
+ * @param {{ readPidFile?: (r: string) => ({ pid: number } | null), processIsAlive?: (p: number) => boolean, isDaemonProcess?: (p: number) => (boolean | null), kill?: (p: number) => void }} [deps]
+ * @returns {Promise<boolean>} whether a kill was issued
+ * @ref LLP 0515#identity [implements]: only a pid the `daemon run` check does not disown is killed
+ */
+export async function killOrphanedDaemon(stateRoot, deps = {}) {
+  const pid = await import('./pid.js')
+  const readPidFile = deps.readPidFile ?? pid.readPidFile
+  const processIsAlive = deps.processIsAlive ?? pid.processIsAlive
+  const isDaemonProcess = deps.isDaemonProcess ?? pid.isDaemonProcess
+  const kill = deps.kill ?? ((p) => { process.kill(p) })
+  let entry
+  try { entry = readPidFile(stateRoot) } catch { return false } // a corrupt pid file is status's to report, not this stop's
+  if (!entry || !processIsAlive(entry.pid)) return false
+  if (isDaemonProcess(entry.pid) === false) return false
+  try { kill(entry.pid) } catch { /* already gone, or a race with its own exit */ }
+  return true
 }
 
 /**
@@ -483,6 +536,10 @@ export async function restartTask(options) {
   const outcome = await requestStop()
   if (outcome !== 'stopped') {
     await schtasks.end(taskName).catch(function() { /* best-effort; it may not be running */ })
+    // /End terminates the wscript launcher, not the node daemon it spawned
+    // (stopTask), so the orphan must be killed too - otherwise the /Run below
+    // starts a second daemon beside the one still running.
+    await killOrphanAfterEnd(options.homeDir)
   }
   // The daemon process is gone once the stop returns, but the task can read
   // Running for a moment longer, and `IgnoreNew` drops a `/Run` that lands

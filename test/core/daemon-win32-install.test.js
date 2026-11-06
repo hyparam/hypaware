@@ -23,6 +23,7 @@ import {
   startTask,
   stopTask,
   restartTask,
+  killOrphanedDaemon,
   isTaskInstalled,
   taskStatus,
 } from '../../src/core/daemon/win32.js'
@@ -195,6 +196,34 @@ test('start/stop map to run and end', async () => {
   assert.deepEqual(s.calls.map(c => c.verb), ['run'])
   const e = fakeSchtasks(); await stopTask({ sid: SID, schtasks: e.adapter })
   assert.deepEqual(e.calls.map(c => c.verb), ['end'])
+})
+
+// @ref LLP 0584#stop [tests]: /End orphans node under the wscript launcher, so the hard stop kills the pid, identity-checked (LLP 0515)
+test('killOrphanedDaemon kills the daemon pid only when the identity check does not disown it', async () => {
+  /** @param {object} over */
+  const run = async (over) => {
+    /** @type {number[]} */
+    const killed = []
+    const base = {
+      readPidFile: () => ({ pid: 4242 }),
+      processIsAlive: () => true,
+      isDaemonProcess: () => true,
+      kill: (/** @type {number} */ p) => { killed.push(p) },
+    }
+    const issued = await killOrphanedDaemon('C:/state', { ...base, ...over })
+    return { killed, issued }
+  }
+  // alive + confirmed daemon -> killed.
+  assert.deepEqual((await run({})).killed, [4242])
+  // unreadable command line (null) is fail-closed: treated as the daemon, killed.
+  assert.deepEqual((await run({ isDaemonProcess: () => null })).killed, [4242])
+  // provably not our daemon -> never killed.
+  assert.deepEqual((await run({ isDaemonProcess: () => false })).killed, [])
+  // no pid file, or a dead pid -> nothing to kill.
+  assert.deepEqual((await run({ readPidFile: () => null })).killed, [])
+  assert.deepEqual((await run({ processIsAlive: () => false })).killed, [])
+  // a corrupt pid file is status's to report, not this stop's: swallowed.
+  assert.equal((await run({ readPidFile: () => { throw new Error('malformed') } })).issued, false)
 })
 
 const RUNNING = { exitCode: 0, stdout: '"HOST","\\hypaware\\sid","N/A","Running",...', stderr: '' }
