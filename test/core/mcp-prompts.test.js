@@ -135,6 +135,10 @@ test('over http with the contracts bound and no report-publish: all three listed
   const text = textOf(await get(s, 'fix_recommendation', { id: ID }))
   assert.ok(text.includes(`1. Call get_recommendation with id ${ID} and include_evidence set.`))
   assert.ok(text.endsWith(`4. ${HAND_OFF}`))
+  // The ten-character base32 id a server minting under its LLP 0690 lists
+  // renders the same way; the hex ID above is a report published before it.
+  const SHORT = 'hyprec-qcyx22sjav'
+  assert.ok(textOf(await get(s, 'fix_recommendation', { id: SHORT })).includes(`1. Call get_recommendation with id ${SHORT} and include_evidence set.`))
   assert.ok(!text.includes('set_recommendation_status'))
   // `hyp report` reaches the text only inside the hand-off, as the person's command, never as a step.
   assert.ok(!text.replace(HAND_OFF, '').includes('hyp report'))
@@ -252,6 +256,9 @@ test('each malformed request is -32602', async () => {
     ['fix_recommendation', undefined],
     ['fix_recommendation', { id: 'rec-0123456789abcdef' }],
     ['fix_recommendation', { id: 'hyprec-0123456789ABCDEF' }],
+    ['fix_recommendation', { id: 'hyprec-qcyx22sja' }],
+    ['fix_recommendation', { id: 'hyprec-qcyx22sjai' }],
+    ['fix_recommendation', { id: 'rec-qcyx22sjav' }],
     ['fix_recommendation', { id: `${ID}0` }],
     ['fix_recommendation', { id: `${ID}\n` }],
     ['check_team_history', {}],

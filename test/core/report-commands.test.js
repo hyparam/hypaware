@@ -1280,7 +1280,38 @@ test('get and fix still admit the pre-rename rec- form and pass it to the server
   {
     const { ctx, err } = ctxWith()
     assert.equal(await runReportFix(['xrec-0123456789abcdef'], ctx, fixDeps().deps), 2)
-    assert.match(err.join(''), /is not a recommendation id .*hyprec-0123456789abcdef/)
+    assert.match(err.join(''), /is not a recommendation id .*hyprec-qcyx22sjav/)
+  }
+})
+
+test('get and fix admit the ten-character base32 id a server minting under its LLP 0690 lists, and still refuse near misses', async (t) => {
+  // Server LLP 0690 shortened the digest spelling to ten Crockford base32
+  // characters; the hex forms above stay valid on reports published before
+  // it. The CLI's grammar is whatever a live server mints, so both pass.
+  const SHORT = 'hyprec-qcyx22sjav'
+  const { calls } = stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === '/v1/reports') return { status: 200, json: { reports: [{ ...REPORT, recommendations: [{ id: SHORT, page: 'recommendation-batch-the-retries' }] }] } }
+    if (p === `/v1/reports/_recommendations/${SHORT}`) return { status: 200, json: { recommendation: { id: SHORT, page: 'recommendation-batch-the-retries' }, report: REPORT } }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') return { status: 200, body: new TextEncoder().encode(PAGE) }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportGet([SHORT], ctx), 0)
+    assert.equal(out.join(''), `${PAGE}\n---\n\n## Status\n\nState: open (never marked)\n`)
+    assert.equal(calls[0].url.pathname, `/v1/reports/_recommendations/${SHORT}`)
+  }
+  {
+    const { ctx } = ctxWith()
+    const { deps, launches } = fixDeps()
+    assert.equal(await runReportFix([SHORT], ctx, deps), 0)
+    assert.match(launches[0].prompt, new RegExp('`hyp report get ' + SHORT + '`'))
+  }
+  for (const near of ['hyprec-qcyx22sja', 'hyprec-qcyx22sjavv', 'hyprec-qcyx22sjai', 'hyprec-QCYX22SJAV', 'rec-qcyx22sjav']) {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportFix([near], ctx, fixDeps().deps), 2, near)
+    assert.match(err.join(''), /is not a recommendation id/)
   }
 })
 
