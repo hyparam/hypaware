@@ -32,6 +32,7 @@ export async function attach(opts) {
     configPath = defaultConfigPath(),
     baseUrl = `http://127.0.0.1:${port}/backend-api/codex`,
     providerName = 'HypAware Codex Gateway',
+    dryRun = false,
   } = opts
   validatePort(port)
   validateVersion(version)
@@ -40,7 +41,9 @@ export async function attach(opts) {
 
   const { content, mtimeMs } = await readConfig(configPath)
   const prepared = prepareAttach(content, port, version, { baseUrl, providerName })
-  await writeAtomic(configPath, prepared.content, mtimeMs)
+  // A dry run plans against the same file the write would use and reports the
+  // same answer, without touching it.
+  if (!dryRun) await writeAtomic(configPath, prepared.content, mtimeMs)
 
   /** @type {CodexAttachResult} */
   const result = { changed: true }
