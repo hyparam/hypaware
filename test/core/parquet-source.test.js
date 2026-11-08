@@ -657,3 +657,45 @@ test('aggregate over the source', async () => {
   const rows = await run(source, 'SELECT COUNT(*) AS n FROM t')
   assert.equal(Number(rows[0].n), 5)
 })
+
+// --- column types for literal typing -------------------------------------------
+
+/** @type {ColumnSpec[]} */
+const TS_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'name', type: 'STRING', nullable: false },
+  { name: 'at', type: 'TIMESTAMP', nullable: true },
+]
+const TS_ROWS = [
+  { id: 1, name: 'a', at: new Date('2026-08-17T09:00:00Z') },
+  { id: 2, name: 'b', at: new Date('2026-08-18T21:00:00Z') },
+  { id: 3, name: 'c', at: null },
+]
+
+test('a parquet source reports timestamp and string column types', async () => {
+  const source = await parquetSourceFromRows(TS_COLUMNS, TS_ROWS)
+  assert.deepEqual(source.schema?.fields.map((f) => [f.name, f.dataType.type, f.nullable]), [
+    ['id', 'unknown', false],
+    ['name', 'string', false],
+    ['at', 'date', true],
+  ])
+})
+
+test('a raw string bound on a timestamp column is left to the engine, not pushed', async () => {
+  const source = await parquetSourceFromRows(TS_COLUMNS, TS_ROWS)
+  for (const where of ["at >= '2026-08-18'", "'2026-08-18' <= at", "at IN ('2026-08-18T21:00:00Z')", "NOT (at < '2026-08-18')"]) {
+    const scan = source.scan({ where: whereOf(`SELECT id FROM t WHERE ${where}`) })
+    assert.equal(scan.appliedWhere, false, where)
+    let rows = 0
+    for await (const _ of scan.rows()) rows++
+    assert.equal(rows, 3, where)
+  }
+  // a typed bound still pushes and prunes
+  assert.equal(source.scan({ where: whereOf("SELECT id FROM t WHERE at >= TIMESTAMP '2026-08-18'") }).appliedWhere, true)
+})
+
+test('a bare string bound on a timestamp column selects its rows with no rewrite', async () => {
+  const source = await parquetSourceFromRows(TS_COLUMNS, TS_ROWS, { rowGroupSize: 1 })
+  assert.deepEqual((await run(source, "SELECT id FROM t WHERE at >= '2026-08-18' ORDER BY id")).map((r) => Number(r.id)), [2])
+  assert.deepEqual((await run(source, "SELECT id FROM t WHERE at < '2026-08-18T00:00:00Z' ORDER BY id")).map((r) => Number(r.id)), [1])
+})

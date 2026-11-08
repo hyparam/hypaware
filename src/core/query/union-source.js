@@ -187,6 +187,11 @@ export function unionSources(sources) {
   if (preparedSchema) {
     union.schema = preparedSchema
     union.prepareScan = (request) => prepareUnionScan({ union, sources, schema: preparedSchema, request })
+  } else {
+    // Row-only partitions that agree still advertise their column types, so
+    // squirreling can type literals before pushdown. A drifted union has none.
+    const schema = commonSchema(sources, columns)
+    if (schema) union.schema = schema
   }
   // The column-stream hook is offered only when EVERY partition can stream
   // a column; a mixed union stays row-based so the engine's fallback owns
@@ -303,13 +308,26 @@ export function unionSources(sources) {
  * @ref LLP 0294#partition-union [implements]: only aligned schemas expose one logical prepared union
  */
 function commonPreparedSchema(sources, columns) {
+  if (!sources.every((source) => source.prepareScan)) return undefined
+  return commonSchema(sources, columns)
+}
+
+/**
+ * The schema every partition shares, in the union's column order, or
+ * undefined when any partition lacks one or they disagree.
+ *
+ * @param {ScannableDataSource[]} sources
+ * @param {string[]} columns
+ * @returns {RelationSchema | undefined}
+ */
+function commonSchema(sources, columns) {
   if (sources.length === 0) return undefined
   const first = sources[0]
-  if (!first.schema || !first.prepareScan) return undefined
+  if (!first.schema) return undefined
   if (!schemaMatchesColumns(first.schema, columns)) return undefined
   for (let i = 1; i < sources.length; i++) {
     const source = sources[i]
-    if (!source.schema || !source.prepareScan) return undefined
+    if (!source.schema) return undefined
     if (!schemasAreCompatible(first.schema, source.schema)) return undefined
   }
   return first.schema

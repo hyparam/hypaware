@@ -34,7 +34,7 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 
 /**
  * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
- * @import { AsyncDataSource, ExprNode, ScanColumnResults, SelectStatement, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ColumnDemand, ExprNode, ScanColumnResults, SelectStatement, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 // The same fixture `test/core/parquet-source.test.js` uses, so the two
@@ -461,6 +461,64 @@ test('a filtered cache scan still prunes whole data files', async () => {
     const prunedCast = await scanOpening('ts > CAST(8000 AS BIGINT)')
     assert.deepEqual(prunedCast.ids.sort((a, b) => a - b), [3, 4])
     assert.equal(prunedCast.dataFiles, 1, `cast-bounded scan opened ${prunedCast.dataFiles} data files`)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+/** @type {ColumnSpec[]} */
+const TS_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'at', type: 'TIMESTAMP', nullable: true },
+]
+const TS_ROWS = [
+  { id: 1, at: new Date('2026-08-17T09:00:00Z') },
+  { id: 2, at: new Date('2026-08-18T21:00:00Z') },
+  { id: 3, at: null },
+]
+
+test('a raw string bound on a timestamp column is left to the engine by the cache tier', async () => {
+  const dir = await makeTmpDir('ts-literal')
+  try {
+    const tablePath = path.join(dir, 'table')
+    await appendRowsToTable(tablePath, TS_COLUMNS, TS_ROWS)
+    const source = await dataSourceForTable(tablePath)
+    assert.ok(source && source.scanColumn && source.prepareScan, 'expected a committed iceberg table')
+    for (const where of ["at >= '2026-08-18'", "'2026-08-18' <= at", "at IN ('2026-08-18T21:00:00Z')", "NOT (at < '2026-08-18')"]) {
+      const scan = source.scan({ columns: ['id', 'at'], where: whereOf(`SELECT id FROM t WHERE ${where}`) })
+      assert.equal(scan.appliedWhere, false, where)
+      assert.equal(scan.appliedLimitOffset, false, where)
+      let rows = 0
+      for await (const _ of scan.rows()) rows++
+      assert.equal(rows, 3, where)
+      const column = await drainColumn(source.scanColumn({ column: 'id', where: whereOf(`SELECT id FROM t WHERE ${where}`) }))
+      assert.equal(column.appliedWhere, false, where)
+      assert.equal(column.values.length, 3, where)
+    }
+    // A typed bound still pushes.
+    assert.equal(source.scan({ where: whereOf("SELECT id FROM t WHERE at >= TIMESTAMP '2026-08-18'") }).appliedWhere, true)
+    // The prepared path withholds the raw bound and every range hint, handing
+    // all of them back as residual so the engine filters before it slices.
+    const fields = /** @type {NonNullable<typeof source.schema>} */ (source.schema).fields
+    /** @type {ColumnDemand[]} */
+    const columns = fields.filter((f) => f.name === 'id' || f.name === 'at')
+      .map((f) => ({ field: f.id, phase: 0, mode: 'required', purpose: 'output' }))
+    const filter = whereOf("SELECT id FROM t WHERE at >= '2026-08-18'")
+    const prepared = source.prepareScan({ columns, filter, limit: 1, offset: 1 })
+    assert.deepEqual(prepared.residual, { filter, limit: 1, offset: 1 })
+    assert.equal(prepared.properties.exactRows, undefined)
+    let selected = 0
+    for await (const batch of prepared.batches()) {
+      const sel = batch.selection
+      selected += sel.type === 'all' ? sel.length : sel.type === 'range' ? sel.end - sel.start : sel.indices.length
+    }
+    assert.equal(selected, 3, 'the source returns every row unfiltered and unsliced')
+    // A schemaless wrapper (a drifted union, a legacy adapter) hands the bound
+    // down untyped; the engine still answers it.
+    const rowOnly = { columns: source.columns, numRows: source.numRows, scan: source.scan.bind(source) }
+    assert.deepEqual(await ids(rowOnly, "SELECT id FROM t WHERE at >= '2026-08-18' ORDER BY id"), [2])
+    assert.deepEqual(await ids(rowOnly, "SELECT id FROM t WHERE at < '2026-08-18T00:00:00Z' ORDER BY id"), [1])
+    assert.deepEqual(await ids(source, "SELECT id FROM t WHERE at >= '2026-08-18' ORDER BY id"), [2])
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

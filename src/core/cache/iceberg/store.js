@@ -44,6 +44,7 @@ import {
   validatePartitionSpecStability,
 } from '../../iceberg/partition-spec.js'
 import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
+import { withheldStringTimestampBounds } from '../../query/string-timestamp-bounds.js'
 
 /**
  * @import { ColumnSpec, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
@@ -914,7 +915,9 @@ export async function dataSourceForTable(tablePath) {
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return null
   const pinned = await pinSnapshotManifests(resolver, metadata)
-  return icebergDataSource({ tableUrl: url, metadata, resolver: pinned, lister })
+  // icebird would turn a raw string bound on a timestamp column into a filter
+  // that matches nothing and still report it applied.
+  return withheldStringTimestampBounds(await icebergDataSource({ tableUrl: url, metadata, resolver: pinned, lister }))
 }
 
 /**

@@ -287,9 +287,11 @@ function withHeapBudget(source, guard) {
       }
     },
   }
+  // Forward the schema even for a row-only source: squirreling reads its
+  // column types to type literals before pushdown.
+  if (source.schema) bounded.schema = source.schema
   if (source.schema && source.prepareScan) {
     const prepareScan = source.prepareScan
-    bounded.schema = source.schema
     bounded.prepareScan = budgetedPrepareScan((request) => prepareScan.call(source, request), guard)
   }
   forwardBudgetedScanColumn(bounded, source, guard)

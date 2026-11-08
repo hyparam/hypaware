@@ -237,6 +237,11 @@ export function withLocalOnlyVisibility(source, opts) {
       guarded.prepareScan = prepareSuppressedScan(source.prepareScan.bind(source), guarded.schema, declaredContent, report)
     }
   }
+  // A row-path wrapper keeps the column types (suppressed content may be
+  // null) so squirreling can still type literals before pushdown.
+  if (schema && !guarded.schema) {
+    guarded.schema = { fields: schema.fields.map(field => declaredContent.includes(field.name) ? { ...field, nullable: true } : field) }
+  }
   return guarded
 }
 
