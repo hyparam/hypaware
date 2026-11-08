@@ -34,7 +34,7 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 
 /**
  * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
- * @import { AsyncDataSource, ExprNode, ScanColumnResults, SelectStatement, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ColumnDemand, ExprNode, ScanColumnResults, SelectStatement, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 // The same fixture `test/core/parquet-source.test.js` uses, so the two
@@ -496,6 +496,22 @@ test('a raw string bound on a timestamp column is left to the engine by the cach
     }
     // A typed bound still pushes.
     assert.equal(source.scan({ where: whereOf("SELECT id FROM t WHERE at >= TIMESTAMP '2026-08-18'") }).appliedWhere, true)
+    // The prepared path withholds the raw bound and every range hint, handing
+    // all of them back as residual so the engine filters before it slices.
+    const fields = /** @type {NonNullable<typeof source.schema>} */ (source.schema).fields
+    /** @type {ColumnDemand[]} */
+    const columns = fields.filter((f) => f.name === 'id' || f.name === 'at')
+      .map((f) => ({ field: f.id, phase: 0, mode: 'required', purpose: 'output' }))
+    const filter = whereOf("SELECT id FROM t WHERE at >= '2026-08-18'")
+    const prepared = source.prepareScan({ columns, filter, limit: 1, offset: 1 })
+    assert.deepEqual(prepared.residual, { filter, limit: 1, offset: 1 })
+    assert.equal(prepared.properties.exactRows, undefined)
+    let selected = 0
+    for await (const batch of prepared.batches()) {
+      const sel = batch.selection
+      selected += sel.type === 'all' ? sel.length : sel.type === 'range' ? sel.end - sel.start : sel.indices.length
+    }
+    assert.equal(selected, 3, 'the source returns every row unfiltered and unsliced')
     // A schemaless wrapper (a drifted union, a legacy adapter) hands the bound
     // down untyped; the engine still answers it.
     const rowOnly = { columns: source.columns, numRows: source.numRows, scan: source.scan.bind(source) }
