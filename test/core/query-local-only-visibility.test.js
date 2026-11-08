@@ -423,6 +423,32 @@ test('native visibility drops an entirely withheld batch and propagates policy f
   await assert.rejects(async () => { for await (const _ of scan.batches({ signal: controller.signal })) {} }, /query cancelled/)
 })
 
+test('each distinct cwd is resolved once per query, on both scan paths', async () => {
+  const rows = [...ROWS, { id: 5, cwd: '/w/full', msg: 'full-3' }, { id: 6, cwd: '/w/lo', msg: 'lo-2' }]
+  for (const native of [false, true]) {
+    /** @type {string[]} */
+    const calls = []
+    const inner = fakeResolver(CLASSES)
+    /** @type {UsagePolicyResolver} */
+    const counting = { ...inner, resolve(cwd) { calls.push(cwd); return inner.resolve(cwd) } }
+    for (let i = 0; i < 2; i++) {
+      const out = await executeQuerySql({
+        query: 'SELECT id FROM t ORDER BY id',
+        registry: registryFor(native ? nativeSource(rows, { type: 'all', length: rows.length }) : memorySource(rows)),
+        storage: /** @type {any} */ ({}),
+        refresh: 'never',
+        usagePolicyResolver: counting,
+        callerCwd: '/w/full',
+      })
+      assert.deepEqual(out.rows.map((r) => r.id), [1, 2, 5])
+      assert.equal(out.localOnly.withheldRows, 3)
+    }
+    // Per query: the caller cwd plus each distinct row cwd, and nothing carries over.
+    const perQuery = ['/w/full', '/w/full', '/w/lo', '/w/ig']
+    assert.deepEqual(calls.sort(), [...perQuery, ...perQuery].sort(), native ? 'native' : 'row')
+  }
+})
+
 test('sources mixing cwd and content suppression retain the row path', async () => {
   const rows = [{ id: 1, cwd: null, msg: 'secret' }]
   const native = nativeSource(rows, { type: 'all', length: 1 })
