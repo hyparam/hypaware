@@ -916,3 +916,23 @@ test('SELECT * pads each partition row to the union column list, so a drifted ke
     'padding an absent cell with undefined renders identically to omitting the key'
   )
 })
+
+test('a union of row-only partitions that agree advertises their column types', async () => {
+  /** @type {ColumnSpec[]} */
+  const columns = [
+    { name: 'id', type: 'INT64', nullable: false },
+    { name: 'at', type: 'TIMESTAMP', nullable: true },
+  ]
+  const a = await parquetSourceFromRows(columns, [{ id: 1, at: new Date('2026-08-17T00:00:00Z') }])
+  const b = await parquetSourceFromRows(columns, [{ id: 2, at: new Date('2026-08-19T00:00:00Z') }])
+  const union = unionSources([a, b])
+  assert.equal(union.prepareScan, undefined)
+  assert.deepEqual(union.schema?.fields.map((f) => f.dataType.type), ['unknown', 'date'])
+  const rows = await collect(executeSql({ tables: { t: union }, query: "SELECT id FROM t WHERE at >= '2026-08-18'" }))
+  assert.deepEqual(rows.map((r) => Number(r.id)), [2])
+
+  const drifted = await parquetSourceFromRows([...columns, { name: 'extra', type: 'STRING', nullable: true }], [{ id: 3, at: null, extra: 'x' }])
+  assert.equal(unionSources([a, drifted]).schema, undefined)
+  const driftRows = await collect(executeSql({ tables: { t: unionSources([a, b, drifted]) }, query: "SELECT id FROM t WHERE at >= '2026-08-18'" }))
+  assert.deepEqual(driftRows.map((r) => Number(r.id)), [2])
+})

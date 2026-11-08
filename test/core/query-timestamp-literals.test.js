@@ -164,14 +164,16 @@ test('string comparisons on non-TIMESTAMP columns are left exactly as written', 
   assert.deepEqual(await ids("SELECT id FROM ai_gateway_messages WHERE date > '2026-08-17' ORDER BY id"), [2, 3, 4])
   // a value no timestamp parser accepts: still a plain string comparison
   assert.deepEqual(await ids("SELECT id FROM ai_gateway_messages WHERE date = 'not-a-day' ORDER BY id"), [])
-  // ...and a dataset that types the same name as STRING keeps that meaning
+  // ...and a dataset that declares the name STRING is not rewritten. The file
+  // still stores TIMESTAMP, and the source reports that type, so the engine
+  // types the literal from the data rather than from the declaration
   /** @type {DatasetSchema} */
   const stringSchema = {
     columns: COLUMNS.map((c) => (c.name === 'message_created_at' ? { ...c, type: 'STRING' } : c)),
   }
   assert.deepEqual(
     await ids("SELECT id FROM ai_gateway_messages WHERE message_created_at >= '2026-08-18T21:00:00Z' ORDER BY id", { schema: stringSchema }),
-    []
+    [3, 4]
   )
 })
 

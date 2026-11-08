@@ -7,9 +7,9 @@ import { asyncRow } from 'squirreling'
 import { whereToParquetFilter } from './parquet-pushdown.js'
 
 /**
- * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
+ * @import { AsyncBuffer, FileMetaData, SchemaTree } from 'hyparquet'
  * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ScanOptions, ScanResults, SqlPrimitive } from 'squirreling'
+ * @import { ExprNode, RelationSchema, ScanOptions, ScanResults, SqlPrimitive, SqlType } from 'squirreling'
  */
 
 /**
@@ -42,15 +42,33 @@ export function parquetDataSource(file, metadata) {
   const schema = parquetSchema(metadata)
   const columns = schema.children.map((c) => c.element.name)
   const physicalColumns = new Set(columns)
+  /** @type {RelationSchema} */
+  const relationSchema = {
+    fields: schema.children.map((child, id) => ({
+      id,
+      name: child.element.name,
+      dataType: sqlType(child),
+      nullable: child.element.repetition_type !== 'REQUIRED',
+    })),
+  }
+  const dateColumns = new Set(relationSchema.fields.filter((f) => f.dataType.type === 'date').map((f) => f.name))
   return {
     numRows: Number(metadata.num_rows),
     columns,
+    // Types let squirreling cast a string bound on a timestamp column to
+    // TIMESTAMP before it reaches scan(), so the pushed filter prunes.
+    schema: relationSchema,
     /**
      * @param {ScanOptions} hints
      * @returns {ScanResults}
      */
     scan(hints) {
-      const filter = hints.where ? whereToParquetFilter(hints.where) : undefined
+      // A wrapper or drifted union that drops the schema can still hand down a
+      // raw string bound on a timestamp column. hyparquet would compare Date
+      // cells to the string and match nothing, so leave that WHERE to the
+      // engine, which types the literal per row.
+      const pushable = hints.where && !comparesStringToColumn(hints.where, dateColumns)
+      const filter = pushable ? whereToParquetFilter(hints.where) : undefined
       const appliedWhere = Boolean(filter)
       // Only claim LIMIT/OFFSET pushdown when no WHERE is involved.
       // With a WHERE present the engine owns LIMIT/OFFSET so it applies
@@ -137,4 +155,48 @@ function abortError() {
   const err = new Error('Aborted')
   err.name = 'AbortError'
   return err
+}
+
+/**
+ * The SQL type hyparquet's default conversion produces for a top-level column:
+ * Date for timestamp and date annotations (and legacy INT96), string for
+ * string annotations. Everything else, nested columns included, stays unknown.
+ *
+ * @param {SchemaTree} node
+ * @returns {SqlType}
+ */
+function sqlType(node) {
+  if (node.children.length) return { type: 'unknown' }
+  const { type, converted_type: converted, logical_type: logical } = node.element
+  if (logical?.type === 'TIMESTAMP' || logical?.type === 'DATE' || type === 'INT96' ||
+    converted === 'TIMESTAMP_MILLIS' || converted === 'TIMESTAMP_MICROS' || converted === 'DATE') {
+    return { type: 'date' }
+  }
+  if (logical?.type === 'STRING' || converted === 'UTF8') return { type: 'string' }
+  return { type: 'unknown' }
+}
+
+/**
+ * True when the predicate compares one of `columns` with a string literal,
+ * directly or in an IN list, anywhere under AND/OR/NOT.
+ *
+ * @param {ExprNode} node
+ * @param {Set<string>} columns
+ * @returns {boolean}
+ */
+function comparesStringToColumn(node, columns) {
+  if (!columns.size) return false
+  /** @param {ExprNode} expr */
+  const isColumn = (expr) => expr.type === 'identifier' && columns.has(expr.name)
+  /** @param {ExprNode} expr */
+  const isString = (expr) => expr.type === 'literal' && typeof expr.value === 'string'
+  if (node.type === 'binary') {
+    if (node.op === 'AND' || node.op === 'OR') {
+      return comparesStringToColumn(node.left, columns) || comparesStringToColumn(node.right, columns)
+    }
+    return isColumn(node.left) && isString(node.right) || isString(node.left) && isColumn(node.right)
+  }
+  if (node.type === 'unary') return comparesStringToColumn(node.argument, columns)
+  if (node.type === 'in valuelist') return isColumn(node.expr) && node.values.some(isString)
+  return false
 }
