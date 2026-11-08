@@ -487,6 +487,7 @@ test('a raw string bound on a timestamp column is left to the engine by the cach
     for (const where of ["at >= '2026-08-18'", "'2026-08-18' <= at", "at IN ('2026-08-18T21:00:00Z')", "NOT (at < '2026-08-18')"]) {
       const scan = source.scan({ columns: ['id', 'at'], where: whereOf(`SELECT id FROM t WHERE ${where}`) })
       assert.equal(scan.appliedWhere, false, where)
+      assert.equal(scan.appliedLimitOffset, false, where)
       let rows = 0
       for await (const _ of scan.rows()) rows++
       assert.equal(rows, 3, where)

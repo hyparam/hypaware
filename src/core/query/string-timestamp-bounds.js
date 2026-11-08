@@ -63,8 +63,8 @@ export function withheldStringTimestampBounds(source) {
     scan(options) {
       if (!raw(options.where)) return source.scan(options)
       // Without a WHERE the source would claim LIMIT/OFFSET over unfiltered
-      // rows, so withhold those too and let the engine slice.
-      return source.scan({ ...options, where: undefined, limit: undefined, offset: undefined })
+      // rows, so withhold those and that claim too, and let the engine slice.
+      return { ...source.scan({ ...options, where: undefined, limit: undefined, offset: undefined }), appliedLimitOffset: false }
     },
   }
   const { scanColumn, prepareScan } = source
