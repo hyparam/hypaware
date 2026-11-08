@@ -383,7 +383,7 @@ export async function runWizardFirstAsk(opts) {
         if (launchers.length === 0) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-launcher')
-          return { launched: false, reason: /** @type {const} */ ('no-launcher') }
+          return { launched: false, reason: 'no-launcher' }
         }
 
         // Checked before anything that could launch: with no rows there is
@@ -395,7 +395,7 @@ export async function runWizardFirstAsk(opts) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-rows')
           writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
-          return { launched: false, reason: /** @type {const} */ ('no-rows') }
+          return { launched: false, reason: 'no-rows' }
         }
         // `HYP_NO_TUI` is the same veto the prompt runtime honours. Reading
         // it here rather than letting `select()` throw keeps a deliberate
@@ -406,7 +406,7 @@ export async function runWizardFirstAsk(opts) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'not-interactive')
           writeSuggestedPrompts({ stdout, footer: 'ask' })
-          return { launched: false, reason: /** @type {const} */ ('not-interactive') }
+          return { launched: false, reason: 'not-interactive' }
         }
 
         // One blank line so the frame does not sit flush against the
@@ -417,7 +417,7 @@ export async function runWizardFirstAsk(opts) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'declined')
           writeSuggestedPrompts({ stdout, footer: 'ask' })
-          return { launched: false, reason: /** @type {const} */ ('declined') }
+          return { launched: false, reason: 'declined' }
         }
 
         span.setAttribute('client', chosen.launcher.client)
@@ -448,7 +448,7 @@ export async function runWizardFirstAsk(opts) {
             span.setAttribute('status', 'skipped')
             span.setAttribute('skip_reason', 'no-evidence')
             opts.stderr?.write('Nothing was started: the question is answered from evidence HypAware gathers first, and none could be gathered. Check `hyp status`, then run `hyp ask` again.\n')
-            return { launched: false, reason: /** @type {const} */ ('no-evidence') }
+            return { launched: false, reason: 'no-evidence' }
           }
         }
         stdout.write(`\nStarting ${chosen.launcher.label}${cwd ? ` in ${cwd}` : ''}...\n\n`)
@@ -468,7 +468,7 @@ export async function runWizardFirstAsk(opts) {
           span.setAttribute('launched', false)
           opts.stderr?.write(`Could not start ${chosen.launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
           writeSuggestedPrompts({ stdout, footer: 'no-launch' })
-          return { launched: false, reason: /** @type {const} */ ('spawn-failed') }
+          return { launched: false, reason: 'spawn-failed' }
         }
         span.setAttribute('launched', true)
         return {
@@ -485,7 +485,7 @@ export async function runWizardFirstAsk(opts) {
         } catch {
           // the stream itself is failing; the step is a courtesy, not a gate
         }
-        return { launched: false, reason: /** @type {const} */ ('error') }
+        return { launched: false, reason: 'error' }
       }
     },
     { component: 'wizard' }

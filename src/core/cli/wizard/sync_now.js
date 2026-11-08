@@ -51,7 +51,7 @@ export async function runWizardSyncNow(opts) {
         if (typeof opts.deadline !== 'number') {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-hold')
-          return { asked: false, reason: /** @type {const} */ ('no-hold') }
+          return { asked: false, reason: 'no-hold' }
         }
         // A real terminal on both ends, not merely an "interactive" flag: the
         // confirmation sends data off the machine, so it is started only where
@@ -67,7 +67,7 @@ export async function runWizardSyncNow(opts) {
           // cannot prompt still owes the reader the deadline and the way
           // out, so the skip states both (LLP 0188 #never-silent).
           writeHeldStatement(opts, opts.deadline)
-          return { asked: false, reason: /** @type {const} */ ('not-interactive') }
+          return { asked: false, reason: 'not-interactive' }
         }
 
         // @ref LLP 0203#no-new-consent [implements]: sync owns the plan and the only confirmation
@@ -83,16 +83,16 @@ export async function runWizardSyncNow(opts) {
         if (code === SYNC_HELD_NO_DESTINATIONS_EXIT) {
           span.setAttribute('released', false)
           writeNoDestinations(opts, stillHeld ?? opts.deadline)
-          return { asked: true, released: false, reason: /** @type {const} */ ('no-destinations') }
+          return { asked: true, released: false, reason: 'no-destinations' }
         }
         span.setAttribute('released', stillHeld === null)
         if (stillHeld !== null) {
           if (code !== 0) {
             writeHeldStatement(opts, stillHeld)
-            return { asked: true, released: false, reason: /** @type {const} */ ('sync-failed') }
+            return { asked: true, released: false, reason: 'sync-failed' }
           }
           writeStillHeld(opts, stillHeld)
-          return { asked: true, released: false, reason: /** @type {const} */ ('sync-declined') }
+          return { asked: true, released: false, reason: 'sync-declined' }
         }
         return { asked: true, released: true }
       } catch (err) {
@@ -114,7 +114,7 @@ export async function runWizardSyncNow(opts) {
         } catch {
           // Nowhere left to say it.
         }
-        return { asked: false, reason: /** @type {const} */ ('error') }
+        return { asked: false, reason: 'error' }
       }
     },
     { component: 'wizard' }

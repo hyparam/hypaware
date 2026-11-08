@@ -382,7 +382,7 @@ test('dispatch routes hyp init <installed-preset> even when preset args include 
       cwd: hypHome,
       workspaceDir: path.join(hypHome, 'no-bundled'),
       // Keeps the setup gate (#975) from refusing on a win32 host.
-      platform: /** @type {const} */ ('linux'),
+      platform: 'linux',
     })
 
     assert.equal(exitCode, 0)
@@ -400,7 +400,7 @@ test('dispatch routes hyp init <installed-preset> even when preset args include 
       cwd: hypHome,
       workspaceDir: path.join(hypHome, 'no-bundled'),
       // Keeps the setup gate (#975) from refusing on a win32 host.
-      platform: /** @type {const} */ ('linux'),
+      platform: 'linux',
     })
     assert.equal(optExit, 0, optStderr.text())
     assert.equal(optStdout.text(), 'preset:--retention-days,45,--from-file=mine.json,--client,codex,--yes\n')

@@ -94,7 +94,7 @@ async function run(argv, env = {}) {
     registry,
     kernel,
     // Keeps the setup gate (#975) from refusing on a win32 host.
-    platform: /** @type {const} */ ('linux'),
+    platform: 'linux',
   })
   return { code, stdout: stdout.text(), stderr: stderr.text() }
 }

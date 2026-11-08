@@ -9,7 +9,7 @@ import { asyncRow } from 'squirreling'
 import { executeQuerySql, QueryExecutionBudgetError, resolveHeapBudgetBytes } from '../../src/core/query/sql.js'
 
 /**
- * @import { AsyncDataSource, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, RelationSchema, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /**
@@ -351,8 +351,9 @@ test('the budget decoration preserves the scan receiver', async () => {
 // @ref LLP 0294#transparent-wrappers [tests]: the heap decoration samples native batches without forcing the source back through scan()
 test('the prepared native-batch path stays lit through the budget decoration', async () => {
   let preparedCalls = 0
+  /** @type {RelationSchema} */
   const schema = {
-    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'number' }), nullable: false }],
+    fields: [{ id: 7, name: 'a', dataType: { type: 'number' }, nullable: false }],
   }
   /** @type {AsyncDataSource} */
   const source = {
@@ -388,8 +389,9 @@ test('the prepared native-batch path stays lit through the budget decoration', a
 })
 
 test('a prepared-only source keeps its scanColumn fast path through the budget decoration', async () => {
+  /** @type {RelationSchema} */
   const schema = {
-    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'string' }), nullable: false }],
+    fields: [{ id: 7, name: 'a', dataType: { type: 'string' }, nullable: false }],
   }
   /** @type {string[]} */
   const scanColumnCalls = []
@@ -422,8 +424,9 @@ test('a prepared-only source keeps its scanColumn fast path through the budget d
 
 test('the native budget guard samples a lazy column immediately after materialization', async () => {
   const rowCount = 200_000
+  /** @type {RelationSchema} */
   const schema = {
-    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'string' }), nullable: false }],
+    fields: [{ id: 7, name: 'a', dataType: { type: 'string' }, nullable: false }],
   }
   let readCalls = 0
   /** @type {AsyncDataSource} */
@@ -470,8 +473,9 @@ test('the native budget guard samples a lazy column immediately after materializ
 })
 
 test('a governable prepared-only source refuses restricted visibility without a row scan', async () => {
+  /** @type {RelationSchema} */
   const schema = {
-    fields: [{ id: 7, name: 'content', dataType: /** @type {const} */ ({ type: 'string' }), nullable: true }],
+    fields: [{ id: 7, name: 'content', dataType: { type: 'string' }, nullable: true }],
   }
   /** @type {AsyncDataSource} */
   const source = {
@@ -499,10 +503,11 @@ test('a governable prepared-only source refuses restricted visibility without a 
 // column here and hand the caller the prepared scan unfiltered.
 // @ref LLP 0105 [tests]: the visibility gate is decided on the column list the engine actually plans from
 test('the local-only gate reads a prepared source schema, not its narrower columns list', async () => {
+  /** @type {RelationSchema} */
   const schema = {
     fields: [
-      { id: 1, name: 'id', dataType: /** @type {const} */ ({ type: 'number' }), nullable: false },
-      { id: 2, name: 'content', dataType: /** @type {const} */ ({ type: 'string' }), nullable: true },
+      { id: 1, name: 'id', dataType: { type: 'number' }, nullable: false },
+      { id: 2, name: 'content', dataType: { type: 'string' }, nullable: true },
     ],
   }
   /** @type {AsyncDataSource} */

@@ -115,7 +115,7 @@ test('hyp init on a configured install fronts the picker with the summary menu',
     stdin: /** @type {any} */ (Readable.from(['\n'])),
     env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', HYP_NO_TUI: '1' },
     // Keeps the setup gate (#975) from refusing on a win32 host.
-    platform: /** @type {const} */ ('linux'),
+    platform: 'linux',
   })
 
   assert.equal(code, 0, stderr.text())
@@ -142,7 +142,7 @@ test('hyp init first run presents the pathway fork; a spent stdin quits untouche
     stdin: /** @type {any} */ (Readable.from([])),
     env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', HYP_NO_TUI: '1' },
     // Keeps the setup gate (#975) from refusing on a win32 host.
-    platform: /** @type {const} */ ('linux'),
+    platform: 'linux',
   })
 
   assert.equal(code, 0, stderr.text())
@@ -176,7 +176,7 @@ test('hyp init: choosing "See full status" renders the status report and exits 0
     stdin: /** @type {any} */ (Readable.from(['2\n'])),
     env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', HYP_NO_TUI: '1' },
     // Keeps the setup gate (#975) from refusing on a win32 host.
-    platform: /** @type {const} */ ('linux'),
+    platform: 'linux',
   })
 
   assert.equal(code, 0, stderr.text())

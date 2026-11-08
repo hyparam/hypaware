@@ -10,6 +10,8 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 import { gascityInitPreset } from '../../hypaware-core/plugins-workspace/gascity/src/init.js'
 
+/** @import { DispatchOptions } from '../../src/core/cli/types.js' */
+
 // `init` writes the user-owned local layer; the overwrite guard is the
 // non-destructive half of #111. @ref LLP 0031#local-layer-writers [tests]:
 
@@ -30,6 +32,7 @@ async function makeHome() {
     hypHome,
     stdout,
     stderr,
+    /** @type {DispatchOptions} */
     opts: {
       stdout,
       stderr,
@@ -37,7 +40,7 @@ async function makeHome() {
       env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
       // The guard under test is platform-independent; the injected platform
       // keeps the setup preflight (#975) from refusing on a win32 host.
-      platform: /** @type {const} */ ('linux'),
+      platform: 'linux',
     },
   }
 }
