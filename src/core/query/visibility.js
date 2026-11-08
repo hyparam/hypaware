@@ -157,6 +157,23 @@ export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
 export function withLocalOnlyVisibility(source, opts) {
   const { resolver, callerRank, report } = opts
   const hasCwd = source.columns.includes('cwd')
+  // Rows repeat a few hundred cwds across millions of rows, and resolve()
+  // normalizes the path before its own lookup. Memoize the verdict per
+  // distinct cwd for this wrapper, which sql.js builds once per query.
+  /** @type {Map<unknown, boolean>} */
+  const withheldByCwd = new Map()
+  /**
+   * @param {unknown} cwd
+   * @returns {boolean}
+   */
+  function withheld(cwd) {
+    let verdict = withheldByCwd.get(cwd)
+    if (verdict === undefined) {
+      verdict = cwdWithheldFromCaller(resolver, callerRank, cwd)
+      withheldByCwd.set(cwd, verdict)
+    }
+    return verdict
+  }
   const declaredContent = opts.contentColumns.filter((c) => source.columns.includes(c))
 
   /** @type {ScannableDataSource} */
@@ -187,7 +204,7 @@ export function withLocalOnlyVisibility(source, opts) {
               // (LocalOnlyListUnreadableError); let it propagate so the query
               // fails loudly rather than silently resolving to "nothing
               // withheld", matching the export seam's fail-safe polarity.
-              if (cwdWithheldFromCaller(resolver, callerRank, cwd)) {
+              if (withheld(cwd)) {
                 report.withheldRows += 1
                 continue
               }
@@ -214,7 +231,7 @@ export function withLocalOnlyVisibility(source, opts) {
     schema.fields.every((field, index) => field.name === source.columns[index])) {
     if (hasCwd && declaredContent.length === 0) {
       guarded.schema = schema
-      guarded.prepareScan = prepareVisibleScan(source.prepareScan.bind(source), schema, opts)
+      guarded.prepareScan = prepareVisibleScan(source.prepareScan.bind(source), schema, { withheld, report })
     } else if (!hasCwd && declaredContent.length > 0) {
       guarded.schema = { fields: schema.fields.map(field => declaredContent.includes(field.name) ? { ...field, nullable: true } : field) }
       guarded.prepareScan = prepareSuppressedScan(source.prepareScan.bind(source), guarded.schema, declaredContent, report)
@@ -268,10 +285,10 @@ function prepareSuppressedScan(prepareScan, schema, contentColumns, report) {
  *
  * @param {PrepareScan} prepareScan
  * @param {RelationSchema} schema
- * @param {{ resolver: UsagePolicyResolver, callerRank: number, report: LocalOnlyVisibilityReport }} opts
+ * @param {{ withheld: (cwd: unknown) => boolean, report: LocalOnlyVisibilityReport }} opts
  * @returns {PrepareScan}
  */
-function prepareVisibleScan(prepareScan, schema, { resolver, callerRank, report }) {
+function prepareVisibleScan(prepareScan, schema, { withheld, report }) {
   const cwdField = /** @type {NonNullable<ReturnType<typeof schema.fields.find>>} */ (schema.fields.find((field) => field.name === 'cwd'))
   return (request) => {
     const columns = request.columns.map((demand) => demand.field === cwdField.id
@@ -307,7 +324,7 @@ function prepareVisibleScan(prepareScan, schema, { resolver, callerRank, report 
           let kept = 0
           for (let i = 0; i < count; i++) {
             if (i % 4096 === 0) signal?.throwIfAborted()
-            if (cwdWithheldFromCaller(resolver, callerRank, valueAt(cwd, i))) {
+            if (withheld(valueAt(cwd, i))) {
               report.withheldRows++
               if (!indices) {
                 indices = new Uint32Array(count)
