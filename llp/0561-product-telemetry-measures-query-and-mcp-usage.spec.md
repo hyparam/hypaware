@@ -133,7 +133,7 @@ can classify onto the existing codes. The mapping is by error `code` or class
 | `unavailable` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH` |
 | `unauthorized` | `invalid_grant` |
 | `revoked` | `service_token_revoked`, `service_account_disabled` |
-| `query_failed` | `GrepQueryError`, `timestamp_literal_uncoercible`; and any other failure a query verb's operation or query tool throws |
+| `query_failed` | `GrepQueryError`; and any other failure a query verb's operation or query tool throws |
 | `budget_exceeded` | `QueryExecutionBudgetError` (`query_budget_exceeded`) |
 
 One code is added: `budget_exceeded`, for a query refused by its execution

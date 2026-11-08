@@ -9,6 +9,7 @@
 filter; this one settles what the WHERE holds by the time that converter sees
 it), LLP 0015, LLP 0098
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
+**Superseded-by:** [LLP 0591](./0591-engine-types-timestamp-literals.decision.md) (#decision only: squirreling now types the literal and the kernel rewrite is removed; what is typed and the refusal still stand)
 
 > Before a parsed statement reaches the engine or the pushdown converter, the
 > kernel gives every bare string literal sitting opposite a `TIMESTAMP` column

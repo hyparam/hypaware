@@ -321,7 +321,6 @@ const ERRNO_CODES = /** @type {Record<string, string>} */ ({
   ENETUNREACH: 'unavailable',
   // Typed errors raised in this repo, by their stable `code`.
   query_budget_exceeded: 'budget_exceeded',
-  timestamp_literal_uncoercible: 'query_failed',
   invalid_grant: 'unauthorized',
   service_token_revoked: 'revoked',
   service_account_disabled: 'revoked'

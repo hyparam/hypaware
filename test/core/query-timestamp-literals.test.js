@@ -9,13 +9,7 @@ import assert from 'node:assert/strict'
 // passing only on a UTC host. Set before the first Date is constructed.
 process.env.TZ = 'UTC'
 
-import { parseSql } from 'squirreling'
-
 import { executeQuerySql } from '../../src/core/query/sql.js'
-import {
-  TimestampLiteralError,
-  coerceTimestampLiterals,
-} from '../../src/core/query/timestamp-literals.js'
 import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 
 /**
@@ -128,8 +122,8 @@ test('a string bound on a TIMESTAMP column selects the rows it names (issue #860
     ["message_created_at NOT IN ('2026-08-17T09:00:00Z')", [2, 3, 4]],
     ["date = '2026-08-18' AND message_created_at >= '2026-08-18T21:00:00Z'", [3, 4]],
     ["NOT (message_created_at >= '2026-08-18T21:00:00Z')", [1, 2]],
-    // the space-separated form is ordinary SQL, and neither parser accepts it
-    // raw, so the coercion normalizes the separator rather than refusing
+    // the space-separated form is ordinary SQL, so it selects rows rather
+    // than being refused
     ["message_created_at >= '2026-08-18 21:00:00Z'", [3, 4]],
     // minute precision is a legal ISO instant both evaluators already parse,
     // so it must select rows rather than be refused as uncoercible
@@ -164,9 +158,9 @@ test('string comparisons on non-TIMESTAMP columns are left exactly as written', 
   assert.deepEqual(await ids("SELECT id FROM ai_gateway_messages WHERE date > '2026-08-17' ORDER BY id"), [2, 3, 4])
   // a value no timestamp parser accepts: still a plain string comparison
   assert.deepEqual(await ids("SELECT id FROM ai_gateway_messages WHERE date = 'not-a-day' ORDER BY id"), [])
-  // ...and a dataset that declares the name STRING is not rewritten. The file
-  // still stores TIMESTAMP, and the source reports that type, so the engine
-  // types the literal from the data rather than from the declaration
+  // ...and when a dataset declares the name STRING while the file stores
+  // TIMESTAMP, the source reports the stored type, so the engine types the
+  // literal from the data rather than from the declaration
   /** @type {DatasetSchema} */
   const stringSchema = {
     columns: COLUMNS.map((c) => (c.name === 'message_created_at' ? { ...c, type: 'STRING' } : c)),
@@ -177,8 +171,8 @@ test('string comparisons on non-TIMESTAMP columns are left exactly as written', 
   )
 })
 
-// A typed literal already worked (LLP 0222) and must keep working unchanged:
-// the coercion produces the same node, so the two spellings agree.
+// A typed literal already worked (LLP 0222) and must keep working unchanged,
+// and a bare string must select the same rows.
 test('an explicitly typed literal and a bare string agree', async () => {
   const typed = await ids("SELECT id FROM ai_gateway_messages WHERE message_created_at >= TIMESTAMP '2026-08-18T21:00:00Z' ORDER BY id")
   const bare = await ids("SELECT id FROM ai_gateway_messages WHERE message_created_at >= '2026-08-18T21:00:00Z' ORDER BY id")
@@ -191,48 +185,8 @@ test('an explicitly typed literal and a bare string agree', async () => {
 test('a literal that is not a timestamp is refused, not silently pruned (issue #860)', async () => {
   await assert.rejects(
     ids("SELECT id FROM ai_gateway_messages WHERE message_created_at >= 'yesterday'"),
-    (err) => {
-      assert.ok(err instanceof TimestampLiteralError)
-      assert.equal(err.code, 'timestamp_literal_uncoercible')
-      assert.equal(err.column, 'message_created_at')
-      assert.equal(err.literal, 'yesterday')
-      assert.match(err.message, /YYYY-MM-DD/)
-      return true
-    }
+    /Cannot compare TIMESTAMP to string 'yesterday', expected YYYY-MM-DD/
   )
-})
-
-// --- rewrite shape -----------------------------------------------------------
-
-/**
- * @param {string} sql
- * @param {any} registry
- */
-function whereOfRewritten(sql, registry) {
-  const statement = /** @type {any} */ (parseSql({ query: sql }))
-  coerceTimestampLiterals(statement, registry)
-  return statement
-}
-
-test('the rewrite emits the same cast node a typed literal parses to', () => {
-  const registry = registryForMessages()
-  const rewritten = whereOfRewritten(
-    "SELECT id FROM ai_gateway_messages WHERE message_created_at >= '2026-08-18T21:00:00Z'",
-    registry
-  )
-  assert.equal(rewritten.where.right.type, 'cast')
-  assert.equal(rewritten.where.right.toType, 'TIMESTAMP')
-  assert.equal(rewritten.where.right.expr.value, '2026-08-18T21:00:00Z')
-})
-
-test('a bound inside a subquery is typed against the subquery own table', () => {
-  const registry = registryForMessages()
-  const rewritten = whereOfRewritten(
-    "SELECT id FROM ai_gateway_messages WHERE id IN (SELECT id FROM ai_gateway_messages WHERE message_created_at >= '2026-08-18T21:00:00Z')",
-    registry
-  )
-  assert.equal(rewritten.where.subquery.where.right.type, 'cast')
-  assert.equal(rewritten.where.subquery.where.right.toType, 'TIMESTAMP')
 })
 
 test('a bound inside a subquery selects the rows it names', async () => {
@@ -243,76 +197,6 @@ test('a bound inside a subquery selects the rows it names', async () => {
     ),
     [3, 4]
   )
-})
-
-test('the rewrite does not reach into a subquery typed by another table', () => {
-  const registry = registryForMessages()
-  // `other` is not a registered dataset, so nothing in its scope is typed.
-  const rewritten = whereOfRewritten(
-    "SELECT id FROM ai_gateway_messages WHERE id IN (SELECT id FROM other WHERE message_created_at >= '2026-08-18T21:00:00Z')",
-    registry
-  )
-  const inner = rewritten.where.subquery.where
-  assert.equal(inner.right.type, 'literal', 'the inner scope has no TIMESTAMP columns to type against')
-})
-
-test('a CTE shadowing a dataset name does not borrow the dataset schema', () => {
-  const registry = registryForMessages()
-  const rewritten = whereOfRewritten(
-    "WITH ai_gateway_messages AS (SELECT 1 AS message_created_at) " +
-    "SELECT message_created_at FROM ai_gateway_messages WHERE message_created_at >= '2026-08-18T21:00:00Z'",
-    registry
-  )
-  assert.equal(rewritten.query.where.right.type, 'literal')
-})
-
-// squirreling resolves a CTE reference case-insensitively (it keys its CTE
-// plans by `name.toLowerCase()`), so the shadow check has to as well or the
-// dataset's schema is borrowed for columns the CTE actually supplies.
-test('a CTE shadows a dataset name whatever case it is written in', () => {
-  const registry = registryForMessages()
-  const rewritten = whereOfRewritten(
-    "WITH Ai_Gateway_Messages AS (SELECT '2026-08-18' AS message_created_at) " +
-    "SELECT message_created_at FROM ai_gateway_messages WHERE message_created_at >= '2026-08-18T21:00:00Z'",
-    registry
-  )
-  assert.equal(rewritten.query.where.right.type, 'literal')
-})
-
-// A qualified reference resolves through its qualifier. A joined derived table
-// can expose a column that shares a dataset column's name and not its type;
-// typing it from the dataset would compare a string cell to a Date, which is
-// false for every row - the silently-wrong answer this whole change exists to
-// prevent, just pointed the other way.
-test('a qualified reference to a derived table is not typed from the dataset', () => {
-  const registry = registryForMessages()
-  const rewritten = whereOfRewritten(
-    'SELECT m.id FROM ai_gateway_messages m ' +
-    'JOIN (SELECT id, date AS message_created_at FROM ai_gateway_messages) s ON m.id = s.id ' +
-    "WHERE s.message_created_at >= '2026-08-18'",
-    registry
-  )
-  assert.equal(rewritten.where.right.type, 'literal')
-})
-
-test('a qualified reference to the base table is typed by the name it is reachable under', () => {
-  const registry = registryForMessages()
-  // With no alias the table's own name is the qualifier...
-  const byName = whereOfRewritten(
-    "SELECT id FROM ai_gateway_messages WHERE ai_gateway_messages.message_created_at >= '2026-08-18T21:00:00Z'",
-    registry
-  )
-  assert.equal(byName.where.right.type, 'cast')
-  // ...and once it is aliased, the alias is, exactly as squirreling resolves
-  // it. The base name under an alias is not a second spelling of the same
-  // relation: the engine rejects it ('Table "ai_gateway_messages" not found
-  // ... Available tables: m'), so typing through it can only ever type the
-  // wrong relation.
-  const byAlias = whereOfRewritten(
-    "SELECT m.id FROM ai_gateway_messages m WHERE m.message_created_at >= '2026-08-18T21:00:00Z'",
-    registry
-  )
-  assert.equal(byAlias.where.right.type, 'cast')
 })
 
 // The same Date-against-string comparison is false for every row wherever it
@@ -397,120 +281,7 @@ test('a bound on a call that carries the column type selects the rows it names',
   assert.deepEqual(wrong, [])
 })
 
-// The other direction: a call whose result is not the column's type must not
-// pull the coercion through it, and a call that types from one argument only
-// must not type from the others. Both would coerce against the wrong column,
-// which returns wrong rows rather than none.
-test('a call that does not carry the column type leaves the literal alone', () => {
-  const registry = registryForMessages()
-  /** @type {[string, string][]} */
-  const cases = [
-    // EPOCH returns a number, not the column's type
-    ["SELECT id FROM ai_gateway_messages WHERE epoch(message_created_at) >= '2026-08-18'", 'where'],
-    // DATE_TRUNC's first argument is the unit, and MIN_BY takes only its first
-    // argument's type, so the timestamp in the key position types nothing
-    ["SELECT id FROM ai_gateway_messages GROUP BY id HAVING min_by(id, message_created_at) >= '2026-08-18'", 'having'],
-    // a function nobody declared type-preserving
-    ["SELECT id FROM ai_gateway_messages WHERE upper(message_created_at) >= '2026-08-18'", 'where'],
-  ]
-  for (const [sql, clause] of cases) {
-    const rewritten = whereOfRewritten(sql, registry)
-    assert.equal(rewritten[clause].right.type, 'literal', sql)
-  }
-  // ...while the same call with the column in the type-carrying position is typed
-  const typed = whereOfRewritten(
-    "SELECT id FROM ai_gateway_messages GROUP BY id HAVING min_by(message_created_at, id) >= '2026-08-18T21:00:00Z'",
-    registry
-  )
-  assert.equal(typed.having.right.type, 'cast')
-})
-
 // --- scopes whose relations disagree, and correlated references --------------
-
-// Two in-scope datasets that type every shared name differently leave nothing
-// for an unqualified reference to agree on. That must not disable the
-// qualified path: `m.message_created_at` names one relation and one type, and
-// skipping it returns zero rows on matching data, which is issue #860 again.
-test('a qualified reference is typed even when the in-scope datasets agree on nothing', async () => {
-  const registry = registryForBoth()
-  const sql =
-    'SELECT m.id FROM ai_gateway_messages m JOIN node o ON m.id = o.id ' +
-    "WHERE m.message_created_at >= '2026-08-18T21:00:00Z' ORDER BY m.id"
-  assert.equal(whereOfRewritten(sql, registry).where.right.type, 'cast')
-  const out = await executeQuerySql({ query: sql, registry, storage })
-  assert.deepEqual(out.rows.map((row) => Number(row.id)), [3, 4])
-  // and the STRING side of the same scope keeps its string comparison
-  const other = whereOfRewritten(
-    "SELECT m.id FROM ai_gateway_messages m JOIN node o ON m.id = o.id WHERE o.message_created_at >= 'n4'",
-    registry
-  )
-  assert.equal(other.where.right.type, 'literal')
-})
-
-// An alias replaces the base table name, so a *different* relation is free to
-// carry that base name as its own. Recording an aliased relation under both
-// names let the second one overwrite the first in `byRelation`, and the bound
-// was then typed from a dataset the qualifier does not name: the query lost
-// rows the identical query without the rewrite returns, which is issue #860's
-// own signature produced by its fix.
-test('an alias that shadows another relation table name keeps its own columns', async () => {
-  const registry = registryForBoth()
-  const sql =
-    'SELECT m.id FROM node ai_gateway_messages JOIN ai_gateway_messages m ON m.id = ai_gateway_messages.id ' +
-    "WHERE ai_gateway_messages.message_created_at >= '2026-08-18' ORDER BY m.id"
-  // the qualifier names the STRING column of `node`, so the literal stays one
-  assert.equal(whereOfRewritten(sql, registry).where.right.type, 'literal')
-  const out = await executeQuerySql({ query: sql, registry, storage })
-  assert.deepEqual(out.rows.map((row) => Number(row.id)), [3, 4])
-  // and a bound no timestamp parser accepts stays an ordinary string
-  // comparison rather than being refused outright
-  const plain =
-    'SELECT m.id FROM node ai_gateway_messages JOIN ai_gateway_messages m ON m.id = ai_gateway_messages.id ' +
-    "WHERE ai_gateway_messages.message_created_at >= 'n4' ORDER BY m.id"
-  const plainOut = await executeQuerySql({ query: plain, registry, storage })
-  assert.deepEqual(plainOut.rows.map((row) => Number(row.id)), [4])
-})
-
-// A correlated reference resolves outward, so a bound written on the enclosing
-// select's column from inside an EXISTS is a bound on a TIMESTAMP column. The
-// inner FROM cannot name it, and leaving it a string is the silent empty
-// result again.
-// @ref LLP 0272#scope [tests]: a qualified reference resolves through its qualifier, outward
-test('a correlated reference into the enclosing select is typed', async () => {
-  const registry = registryForBoth()
-  const sql =
-    'SELECT m.id FROM ai_gateway_messages m WHERE EXISTS (' +
-    "SELECT 1 FROM node o WHERE o.id = m.id AND m.message_created_at >= '2026-08-18T21:00:00Z') ORDER BY m.id"
-  assert.equal(whereOfRewritten(sql, registry).where.subquery.where.right.right.type, 'cast')
-  const out = await executeQuerySql({ query: sql, registry, storage })
-  assert.deepEqual(out.rows.map((row) => Number(row.id)), [3, 4])
-})
-
-// The outward walk stops at the first relation the inner select binds, schema
-// or not. An inner alias that shadows an enclosing one must keep its own
-// (unknown) columns rather than borrow the enclosing relation's types.
-test('an inner alias does not borrow an enclosing relation that shares its name', () => {
-  const registry = registryForBoth()
-  const rewritten = whereOfRewritten(
-    'SELECT m.id FROM ai_gateway_messages m WHERE EXISTS (' +
-    "SELECT 1 FROM (SELECT id, 'n' AS message_created_at FROM node) m WHERE m.message_created_at >= '2026-08-18')",
-    registry
-  )
-  assert.equal(rewritten.where.subquery.where.right.type, 'literal')
-})
-
-// A relation in FROM or JOIN resolves entirely against its own tables: SQL
-// gives it no view of the enclosing select, so it must not inherit one here
-// either.
-test('a derived table in FROM does not see the enclosing select scope', () => {
-  const registry = registryForBoth()
-  const rewritten = whereOfRewritten(
-    'SELECT s.id FROM ai_gateway_messages m JOIN (' +
-    "SELECT id FROM node WHERE m.message_created_at >= '2026-08-18T21:00:00Z') s ON m.id = s.id",
-    registry
-  )
-  assert.equal(rewritten.joins[0].subquery.query.where.right.type, 'literal')
-})
 
 // --- relations the registry cannot name: CTEs and derived tables -------------
 
@@ -590,34 +361,10 @@ test('a CTE that renames another type onto a TIMESTAMP column name keeps its str
   )
 })
 
-// An inner select the walk cannot read end to end supplies nothing at all,
-// rather than a partial column list a later name could be mis-typed against.
-// @ref LLP 0280#complete [tests]: a partially-readable inner select contributes no types
-test('an inner select that cannot be read completely types nothing', () => {
-  const registry = registryForMessages()
-  /** @type {string[]} */
-  const cases = [
-    // `other` is not a registered dataset, so the CTE's own columns are unknown
-    "WITH c AS (SELECT * FROM other) SELECT id FROM c WHERE message_created_at >= '2026-08-18T21:00:00Z'",
-    // an output column with neither an alias nor a bare name cannot be placed
-    // in the list, so the list is not a list
-    'SELECT id FROM (SELECT id, message_created_at, upper(date) FROM ai_gateway_messages) t ' +
-    "WHERE message_created_at >= '2026-08-18T21:00:00Z'",
-    // a table function names columns this walk cannot enumerate
-    'WITH c AS (SELECT * FROM unnest([1, 2])) SELECT id FROM c ' + "WHERE message_created_at >= '2026-08-18T21:00:00Z'",
-  ]
-  for (const sql of cases) {
-    const rewritten = whereOfRewritten(sql, registry)
-    const where = rewritten.type === 'with' ? rewritten.query.where : rewritten.where
-    assert.equal(where.right.type, 'literal', sql)
-  }
-})
-
 // LLP 0272 also named the unqualified correlated reference as a residual. It is
 // not the same defect: the engine does not resolve an unqualified name into an
 // enclosing select at all, so the query raises rather than returning zero rows,
-// and it raises identically whether the literal is typed or bare. Typing it
-// could not change the answer, which is why the rewrite leaves it alone.
+// and it raises identically whether the literal is typed or bare.
 // @ref LLP 0280#unqualified-correlated [tests]: the engine rejects the shape either way, so there is no silent answer to fix
 test('an unqualified correlated reference is rejected by the engine, typed or bare', async () => {
   const registry = registryForEdges()
@@ -691,14 +438,11 @@ test('an ambiguous name does not refuse a string bound that is not a timestamp',
 
 // --- a set operation's own ORDER BY ------------------------------------------
 
-// `rewriteStatement` walked a compound statement's two branches and stopped,
-// so a bound written in the `UNION`-level `ORDER BY` never reached the rewrite
-// and kept comparing a Date to a string. That comparison is false for every
-// row, so the sort key collapses to one value and the result comes back in the
-// wrong order, quietly: the rows are all there, which is why it reads as
-// working. LLP 0272 #scope already settles that every clause is rewritten
-// alike, `ORDER BY` named among them; a set operation's own `ORDER BY` is one
-// of those clauses and was simply not visited.
+// A bound written in the `UNION`-level `ORDER BY` once kept comparing a Date
+// to a string. That comparison is false for every row, so the sort key
+// collapses to one value and the result comes back in the wrong order,
+// quietly: the rows are all there, which is why it reads as working. LLP 0272
+// #scope settles that every clause is typed alike, `ORDER BY` among them.
 // @ref LLP 0272#scope [tests]: a bound in a set operation's own ORDER BY is typed like one in a branch's
 test("a bound in a set operation's own ORDER BY is typed", async () => {
   const branches =
@@ -746,8 +490,8 @@ test("a set operation's ORDER BY is not typed from one side alone", async () => 
   /** @type {[string, number[]][]} */
   const cases = [
     // the right side hands a STRING up under the same name, so the pair is not
-    // a TIMESTAMP and the literal is not rewritten. The engine then types it
-    // per row: timestamp cells compare as timestamps, the string cell as a string
+    // a TIMESTAMP. The engine types the literal per row: timestamp cells
+    // compare as timestamps, the string cell as a string
     [
       'SELECT id, message_created_at FROM ai_gateway_messages ' +
       'UNION ALL SELECT id, date AS message_created_at FROM ai_gateway_messages WHERE id = 1 ' +
@@ -784,7 +528,7 @@ test("an uncoercible literal in a set operation's ORDER BY is refused", async ()
       'UNION ALL SELECT id, message_created_at FROM ai_gateway_messages WHERE id = 1 ' +
       "ORDER BY CASE WHEN message_created_at >= 'yesterday' THEN 0 ELSE 1 END, id"
     ),
-    TimestampLiteralError
+    /Cannot compare TIMESTAMP to string 'yesterday'/
   )
 })
 
@@ -832,7 +576,7 @@ test("a qualified bound in a set operation's ORDER BY is not typed from one side
       'UNION ALL SELECT id, date AS message_created_at FROM ai_gateway_messages n WHERE id = 1 ' +
       "ORDER BY m.message_created_at >= '2026-08-18' DESC, id"
     ),
-    // not rewritten, so the engine types the literal per row as above
+    // the engine types the literal per row, as above
     [2, 3, 4, 1, 1]
   )
 })
@@ -845,74 +589,6 @@ test("an uncoercible qualified literal in a set operation's ORDER BY is refused"
       'UNION ALL SELECT id, message_created_at FROM ai_gateway_messages WHERE id = 1 ' +
       "ORDER BY m.message_created_at >= 'yesterday' DESC, id"
     ),
-    TimestampLiteralError
+    /Cannot compare TIMESTAMP to string 'yesterday'/
   )
-})
-
-// A qualifier an enclosing select binds is a correlated reference, which the
-// evaluator resolves against the outer row before it falls back to the bare
-// output column. Typing it from the compound's own columns would hand a `Date`
-// to the outer STRING the qualifier actually names, which is the wrong
-// coercion this file exists to avoid.
-// @ref LLP 0272#scope [tests]: a correlated qualifier in a set operation's ORDER BY still resolves outward
-test("an enclosing relation's alias is not read as a set operation's own column", () => {
-  const registry = registryForMessages()
-  const rewritten = whereOfRewritten(
-    // Both branches export the TIMESTAMP under the name the outer relation
-    // gives a STRING, so reading the qualifier as "ignore me" would type the
-    // literal against the outer column it actually names.
-    'SELECT id FROM ai_gateway_messages o WHERE id IN (' +
-    'SELECT id, message_created_at AS date FROM ai_gateway_messages ' +
-    'UNION ALL SELECT id, message_created_at AS date FROM ai_gateway_messages ' +
-    "ORDER BY o.date >= '2026-08-18')",
-    registry
-  )
-  const orderBy = rewritten.where.subquery.orderBy[0].expr
-  assert.equal(orderBy.right.type, 'literal', 'o.date is the outer STRING column, not the compound output')
-})
-
-// A qualifier that is itself an output column is struct field access, read
-// before the bare-name fallback, and this walk cannot type what it holds.
-// @ref LLP 0272#scope [tests]: a qualifier an output column shadows is left alone
-test('an output column the qualifier names is not read as a qualifier', () => {
-  const registry = registryForMessages()
-  const branch = 'SELECT message_created_at AS m, message_created_at FROM ai_gateway_messages'
-  const rewritten = whereOfRewritten(
-    branch + ' UNION ALL ' + branch + " ORDER BY m.message_created_at >= '2026-08-18T21:00:00Z'",
-    registry
-  )
-  assert.equal(rewritten.orderBy[0].expr.right.type, 'literal')
-})
-
-// The same shape with a TIMESTAMP outer column is typed, which is what proves
-// the guard above resolves outward rather than simply refusing everything.
-// @ref LLP 0272#scope [tests]: the outward walk still types a correlated qualifier in this clause
-test("an enclosing relation's TIMESTAMP column is typed from a set operation's ORDER BY", () => {
-  const registry = registryForMessages()
-  const rewritten = whereOfRewritten(
-    'SELECT id FROM ai_gateway_messages o WHERE id IN (' +
-    'SELECT id FROM ai_gateway_messages UNION ALL SELECT id FROM ai_gateway_messages ' +
-    "ORDER BY o.message_created_at >= '2026-08-18T21:00:00Z')",
-    registry
-  )
-  const orderBy = rewritten.where.subquery.orderBy[0].expr
-  assert.equal(orderBy.right.type, 'cast')
-  assert.equal(orderBy.right.toType, 'TIMESTAMP')
-})
-
-// The two guards can meet: a qualifier an output column shadows can also be an
-// enclosing relation's alias. The evaluator reads struct access before it reads
-// the outer row, so the outward walk has to stop rather than type the name from
-// that enclosing relation.
-// @ref LLP 0272#scope [tests]: a shadowed qualifier stops the outward walk instead of borrowing an enclosing relation
-test('a shadowed qualifier does not borrow an enclosing relation of the same name', () => {
-  const registry = registryForMessages()
-  const branch = 'SELECT id, message_created_at AS m FROM ai_gateway_messages'
-  const rewritten = whereOfRewritten(
-    'SELECT id FROM ai_gateway_messages m WHERE id IN (' +
-    branch + ' UNION ALL ' + branch + " ORDER BY m.message_created_at >= '2026-08-18T21:00:00Z')",
-    registry
-  )
-  const orderBy = rewritten.where.subquery.orderBy[0].expr
-  assert.equal(orderBy.right.type, 'literal')
 })
