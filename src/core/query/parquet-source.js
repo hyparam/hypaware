@@ -5,11 +5,12 @@ import { compressors } from 'hyparquet-compressors'
 import { asyncRow } from 'squirreling'
 
 import { whereToParquetFilter } from './parquet-pushdown.js'
+import { comparesStringToColumn, dateColumns } from './string-timestamp-bounds.js'
 
 /**
  * @import { AsyncBuffer, FileMetaData, SchemaTree } from 'hyparquet'
  * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ExprNode, RelationSchema, ScanOptions, ScanResults, SqlPrimitive, SqlType } from 'squirreling'
+ * @import { RelationSchema, ScanOptions, ScanResults, SqlPrimitive, SqlType } from 'squirreling'
  */
 
 /**
@@ -51,7 +52,7 @@ export function parquetDataSource(file, metadata) {
       nullable: child.element.repetition_type !== 'REQUIRED',
     })),
   }
-  const dateColumns = new Set(relationSchema.fields.filter((f) => f.dataType.type === 'date').map((f) => f.name))
+  const timestampColumns = dateColumns(relationSchema)
   return {
     numRows: Number(metadata.num_rows),
     columns,
@@ -67,7 +68,7 @@ export function parquetDataSource(file, metadata) {
       // raw string bound on a timestamp column. hyparquet would compare Date
       // cells to the string and match nothing, so leave that WHERE to the
       // engine, which types the literal per row.
-      const pushable = hints.where && !comparesStringToColumn(hints.where, dateColumns)
+      const pushable = hints.where && !comparesStringToColumn(hints.where, timestampColumns)
       const filter = pushable ? whereToParquetFilter(hints.where) : undefined
       const appliedWhere = Boolean(filter)
       // Only claim LIMIT/OFFSET pushdown when no WHERE is involved.
@@ -174,29 +175,4 @@ function sqlType(node) {
   }
   if (logical?.type === 'STRING' || converted === 'UTF8') return { type: 'string' }
   return { type: 'unknown' }
-}
-
-/**
- * True when the predicate compares one of `columns` with a string literal,
- * directly or in an IN list, anywhere under AND/OR/NOT.
- *
- * @param {ExprNode} node
- * @param {Set<string>} columns
- * @returns {boolean}
- */
-function comparesStringToColumn(node, columns) {
-  if (!columns.size) return false
-  /** @param {ExprNode} expr */
-  const isColumn = (expr) => expr.type === 'identifier' && columns.has(expr.name)
-  /** @param {ExprNode} expr */
-  const isString = (expr) => expr.type === 'literal' && typeof expr.value === 'string'
-  if (node.type === 'binary') {
-    if (node.op === 'AND' || node.op === 'OR') {
-      return comparesStringToColumn(node.left, columns) || comparesStringToColumn(node.right, columns)
-    }
-    return isColumn(node.left) && isString(node.right) || isString(node.left) && isColumn(node.right)
-  }
-  if (node.type === 'unary') return comparesStringToColumn(node.argument, columns)
-  if (node.type === 'in valuelist') return isColumn(node.expr) && node.values.some(isString)
-  return false
 }

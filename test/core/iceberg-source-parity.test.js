@@ -466,6 +466,47 @@ test('a filtered cache scan still prunes whole data files', async () => {
   }
 })
 
+/** @type {ColumnSpec[]} */
+const TS_COLUMNS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'at', type: 'TIMESTAMP', nullable: true },
+]
+const TS_ROWS = [
+  { id: 1, at: new Date('2026-08-17T09:00:00Z') },
+  { id: 2, at: new Date('2026-08-18T21:00:00Z') },
+  { id: 3, at: null },
+]
+
+test('a raw string bound on a timestamp column is left to the engine by the cache tier', async () => {
+  const dir = await makeTmpDir('ts-literal')
+  try {
+    const tablePath = path.join(dir, 'table')
+    await appendRowsToTable(tablePath, TS_COLUMNS, TS_ROWS)
+    const source = await dataSourceForTable(tablePath)
+    assert.ok(source && source.scanColumn && source.prepareScan, 'expected a committed iceberg table')
+    for (const where of ["at >= '2026-08-18'", "'2026-08-18' <= at", "at IN ('2026-08-18T21:00:00Z')", "NOT (at < '2026-08-18')"]) {
+      const scan = source.scan({ columns: ['id', 'at'], where: whereOf(`SELECT id FROM t WHERE ${where}`) })
+      assert.equal(scan.appliedWhere, false, where)
+      let rows = 0
+      for await (const _ of scan.rows()) rows++
+      assert.equal(rows, 3, where)
+      const column = await drainColumn(source.scanColumn({ column: 'id', where: whereOf(`SELECT id FROM t WHERE ${where}`) }))
+      assert.equal(column.appliedWhere, false, where)
+      assert.equal(column.values.length, 3, where)
+    }
+    // A typed bound still pushes.
+    assert.equal(source.scan({ where: whereOf("SELECT id FROM t WHERE at >= TIMESTAMP '2026-08-18'") }).appliedWhere, true)
+    // A schemaless wrapper (a drifted union, a legacy adapter) hands the bound
+    // down untyped; the engine still answers it.
+    const rowOnly = { columns: source.columns, numRows: source.numRows, scan: source.scan.bind(source) }
+    assert.deepEqual(await ids(rowOnly, "SELECT id FROM t WHERE at >= '2026-08-18' ORDER BY id"), [2])
+    assert.deepEqual(await ids(rowOnly, "SELECT id FROM t WHERE at < '2026-08-18T00:00:00Z' ORDER BY id"), [1])
+    assert.deepEqual(await ids(source, "SELECT id FROM t WHERE at >= '2026-08-18' ORDER BY id"), [2])
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
 /**
  * @param {AsyncIterable<ArrayLike<SqlPrimitive>> | ScanColumnResults} raw
  * @returns {Promise<{ appliedWhere: boolean, values: unknown[] }>}
