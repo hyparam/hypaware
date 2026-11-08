@@ -744,12 +744,13 @@ test("a set operation's ORDER BY is not typed from one side alone", async () => 
   /** @type {[string, number[]][]} */
   const cases = [
     // the right side hands a STRING up under the same name, so the pair is not
-    // a TIMESTAMP and the comparison stays the string one it was written as
+    // a TIMESTAMP and the literal is not rewritten. The engine then types it
+    // per row: timestamp cells compare as timestamps, the string cell as a string
     [
       'SELECT id, message_created_at FROM ai_gateway_messages ' +
       'UNION ALL SELECT id, date AS message_created_at FROM ai_gateway_messages WHERE id = 1 ' +
       "ORDER BY CASE WHEN message_created_at >= '2026-08-18' THEN 0 ELSE 1 END, id",
-      [1, 1, 2, 3, 4],
+      [2, 3, 4, 1, 1],
     ],
     // both sides rename a STRING onto the TIMESTAMP column's name: typing that
     // from the dataset would compare a string cell to a Date
@@ -829,7 +830,8 @@ test("a qualified bound in a set operation's ORDER BY is not typed from one side
       'UNION ALL SELECT id, date AS message_created_at FROM ai_gateway_messages n WHERE id = 1 ' +
       "ORDER BY m.message_created_at >= '2026-08-18' DESC, id"
     ),
-    [1, 1, 2, 3, 4]
+    // not rewritten, so the engine types the literal per row as above
+    [2, 3, 4, 1, 1]
   )
 })
 
