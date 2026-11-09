@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-10
 **Related:** LLP 0306, LLP 0045, LLP 0050, LLP 0035, LLP 0256, LLP 0359
+**Extended-by:** LLP 0593 (explicit managed Cloud VM capture)
 
 ## Evidence and scope {#capture}
 

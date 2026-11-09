@@ -15,6 +15,7 @@ import { createProjectedExchangeWriter } from '../../hypaware-core/plugins-works
 import { activate } from '../../hypaware-core/plugins-workspace/cursor/src/index.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { readObservabilityEnv } from '../../src/core/observability/env.js'
+import { pluginStateDir } from '../../src/core/runtime/paths.js'
 import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 /** @param {'cli' | 'editor'} [frontend] */
@@ -317,10 +318,10 @@ test('activate() persists session ignores to the shared store, honors saved ones
       /** @type {any} */ let provider
       /** @type {any} */ let source
       await activate(/** @type {any} */ ({
-        env, config: {}, log: silent, configRegistry: { registerSection() {} },
+        env, config: {}, paths: { stateDir: pluginStateDir(stateDir, '@hypaware/cursor') }, log: silent, configRegistry: { registerSection() {} },
         query: { getDataset: () => true }, backfillMaterializers: { get: () => true },
         backfills: { register(p) { provider = p } }, sources: { register(s) { source = s } },
-        commands: { get: () => true }, skills: { register() {} }, clients: { registerClient() {} },
+        commands: { get: () => true, register() {} }, skills: { register() {} }, clients: { registerClient() {} },
       }))
       return { provider, source }
     }

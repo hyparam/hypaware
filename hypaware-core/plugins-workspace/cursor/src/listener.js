@@ -17,18 +17,23 @@ import { cursorCwd, projectCursorHook } from './projector.js'
 import { findCursorSession, safeError, CursorReadError } from './native.js'
 import { createCursorDecoder } from './native_decoder.js'
 import { cursorAdmission } from './recovery.js'
+import { CURSOR_CLOUD_EVENTS, projectCursorCloudHook, redactCursorCloud, startCursorCloudRecovery } from './cloud.js'
+import { cursorCloudConnectionCurrent } from './cloud-state.js'
 
 /** @import { CursorReadOptions } from '../../../../hypaware-core/plugins-workspace/cursor/src/types.js' */
+/** @import { CursorCloudSource } from '../../../../hypaware-core/plugins-workspace/cursor/src/types.js' */
 
 /** @import { PluginActivationContext, StartedSource, AiGatewayProjectedExchange } from '../../../../hypaware-plugin-kernel-types.js' */
 
 const MAX_BYTES = 1024 * 1024
 const MAX_REQUESTS = 4
 
-/** @param {{ localOnlyListPath?: string, ignoredSessions?: Set<string>, readOptions?: CursorReadOptions, recoveryDelayMs?: number, decoderIdleMs?: number, activeRecoveries?: Set<string> }} deps */
+/** @param {{ localOnlyListPath?: string, ignoredSessions?: Set<string>, readOptions?: CursorReadOptions, recoveryDelayMs?: number, decoderIdleMs?: number, activeRecoveries?: Set<string>, cloud?: CursorCloudSource }} deps */
 export function createStartCursorSource(deps = {}) {
   /** @param {PluginActivationContext} ctx @returns {Promise<StartedSource>} */
   return async (ctx) => {
+    const cloud = deps.cloud
+    let cloudReady = !cloud
     const ignoredSessions = deps.ignoredSessions ?? new Set()
     let policy = createUsagePolicyResolver({ localOnlyListPath: deps.localOnlyListPath })
     const counts = { callbacks: 0, rows_written: 0, rows_skipped: 0, policy_drops: 0, session_drops: 0, missing_cwd: 0, incomplete: 0, lifecycle_events: 0, unknown_entrypoints: 0, missing_transcripts: 0, rejected: 0, failures: 0, subagent_events: 0 }
@@ -177,7 +182,7 @@ export function createStartCursorSource(deps = {}) {
       if (isMisdirectedHost(req, { name: '@hypaware/cursor', log: ctx.log })) return reject(req, res, 421)
       if (!url) return reject(req, res, 400)
       if (isControlPath(url.pathname)) return control(req, res, url)
-      if (req.method === 'GET' && url.pathname === '/') return send(res, 200, { name: 'hypaware/cursor', status: 'ready' })
+      if (req.method === 'GET' && url.pathname === '/') return send(res, 200, { name: 'hypaware/cursor', status: cloudReady ? 'ready' : 'starting', mode: cloud ? 'cloud' : 'native', ...(cloud ? { agent_id: cloud.connection.agentId, cwd: cloud.connection.cwd } : {}) })
       if (req.method !== 'POST' || url.pathname !== '/hook') return reject(req, res, 404)
       if ((req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') {
         counts.rejected++
@@ -220,10 +225,19 @@ export function createStartCursorSource(deps = {}) {
           // periodically, including during streams of dropped callbacks.
           if (counts.callbacks % 1024 === 0) policy = createUsagePolicyResolver({ localOnlyListPath: deps.localOnlyListPath })
           lastEventAt = new Date().toISOString()
-          counts.unknown_entrypoints++
-          if (!event.transcript_path) counts.missing_transcripts++
+          if (!cloud) {
+            counts.unknown_entrypoints++
+            if (!event.transcript_path) counts.missing_transcripts++
+          }
           if (hook === 'subagentStart' || hook === 'subagentStop') counts.subagent_events++
-          const cwd = cursorCwd(event)
+          let cwd = cursorCwd(event)
+          if (cloud && cwd) {
+            try {
+              if (!Array.isArray(event.workspace_roots) || event.workspace_roots.length !== 1 || typeof event.workspace_roots[0] !== 'string' ||
+                  await realpath(event.workspace_roots[0]) !== cloud.connection.cwd) cwd = undefined
+              else cwd = await realpath(cwd)
+            } catch { cwd = undefined }
+          }
           const session = typeof event.conversation_id === 'string' ? event.conversation_id : ''
           const skip = (reason) => {
             span.setAttribute('status', 'skipped')
@@ -235,7 +249,7 @@ export function createStartCursorSource(deps = {}) {
             skip('missing_or_ambiguous_cwd')
             return
           }
-          if (!session || session.length > 256 || typeof hook !== 'string' || !CURSOR_EVENTS.includes(hook)) {
+          if (!session || session.length > 256 || typeof hook !== 'string' || !(cloud ? CURSOR_CLOUD_EVENTS : CURSOR_EVENTS).includes(hook)) {
             counts.incomplete++
             skip('unsupported_hook')
             return
@@ -243,6 +257,9 @@ export function createStartCursorSource(deps = {}) {
           // Check once before projection, and again inside the serialized
           // write so a session ignored while queued cannot slip through.
           const admission = async () => {
+            if (cloud && !cloudReady) return 'cloud_not_ready'
+            if (cloud && (!await cursorCloudConnectionCurrent(cloud.stateDir, cloud.connection) || stopped || cwd !== cloud.connection.cwd)) return 'cloud_scope_or_disconnected'
+            if (cloud && ignoredSessions.has(cloud.connection.agentId)) { counts.session_drops++; return 'session_ignored' }
             if (sessionIgnoreLoadError(ignoredSessions) || ignoredSessions.has(session)) {
               counts.session_drops++
               return 'session_ignored'
@@ -254,8 +271,11 @@ export function createStartCursorSource(deps = {}) {
             }
             // @ref LLP 0399#file-content: one cwd governs export, so drop
             // file observations outside it or under a stricter file policy.
-            if (hook === 'beforeReadFile') {
-              const file = event.file_path
+            const cloudRead = cloud && (hook === 'postToolUse' || hook === 'postToolUseFailure') && event.tool_name === 'Read'
+            if (hook === 'beforeReadFile' || hook === 'afterFileEdit' || cloudRead) {
+              const input = isPlainObject(event.tool_input) ? event.tool_input : undefined
+              const supplied = cloudRead ? input?.path ?? input?.file_path : event.file_path
+              const file = cloudRead && typeof supplied === 'string' && cwd ? path.resolve(cwd, supplied) : supplied
               if (typeof file !== 'string' || file.length > 4096 || !path.isAbsolute(file)) {
                 counts.incomplete++
                 return 'invalid_file_path'
@@ -285,11 +305,12 @@ export function createStartCursorSource(deps = {}) {
           }
           // @ref LLP 0399#identity: the native store owns conversation rows.
           // Hook-only response/tool IDs cannot safely join native Shell IDs.
-          scheduleRecovery(session, cwd, event)
-          const projection = projectCursorHook(raw)
+          if (!cloud) scheduleRecovery(session, cwd, event)
+          const projected = cloud ? projectCursorCloudHook(raw, cloud.connection, ctx.env) : projectCursorHook(raw)
+          const projection = projected && cloud ? redactCursorCloud(projected, ctx.env) : projected
           if (hook !== 'beforeReadFile' && !projection) {
             counts.lifecycle_events++
-            skip('native_recovery_scheduled')
+            skip(cloud ? 'cloud_api_owns_main_text_or_unsupported' : 'native_recovery_scheduled')
             return
           }
           // Only admitted file observations and complete terminal usage write
@@ -339,20 +360,37 @@ export function createStartCursorSource(deps = {}) {
     server.requestTimeout = 3000
     server.headersTimeout = 3000
     const bound = await listenAndResolve(server, '127.0.0.1', cursorListenPort(ctx.config), 'hypaware/cursor')
+    let cloudRecovery
+    if (cloud) {
+      try {
+        cloudRecovery = await startCursorCloudRecovery(ctx, cloud, async () => await cursorCloudConnectionCurrent(cloud.stateDir, cloud.connection) && !stopped &&
+          !sessionIgnoreLoadError(ignoredSessions) && !ignoredSessions.has(cloud.connection.agentId) &&
+          policy.resolve(cloud.connection.cwd).class !== 'ignore', ignoredSessions)
+        cloudReady = true
+      } catch (error) {
+        await new Promise(resolve => server.close(resolve))
+        server.closeAllConnections()
+        throw error
+      }
+    }
     return {
       async status() {
+        const recovery = cloudRecovery?.status()
         return {
-          state: 'ready', rowsWritten: counts.rows_written, lastError: sessionIgnoreLoadError(ignoredSessions) ?? lastError,
+          state: recovery?.cloud_state === 'degraded' ? 'degraded' : 'ready', rowsWritten: counts.rows_written + (recovery?.api_rows_written ?? 0), lastError: sessionIgnoreLoadError(ignoredSessions) ?? recovery?.cloud_error ?? lastError,
           details: { ...counts, ...recoveryCounts, pending_recovery: pending.size, listen_host: bound.host, listen_port: bound.port, control_routes: [SESSION_IGNORE_ROUTE],
             active_requests: active, last_event_at: lastEventAt ?? null,
             coverage: 'native_sessions_and_file_observations', frontend: 'native_store', usage_supported: true,
             history_recovery: 'native_store', response_identity: 'native_turn_step',
             assistant_segments: 'native_checkpoint',
+            ...(cloud ? { ...recovery, coverage: 'cloud_api_text_and_hook_observations', frontend: 'cloud',
+              history_recovery: 'conversation_api', response_identity: 'native_api_message', assistant_segments: 'stable_completed_api_snapshots', usage_supported: false, agent_id: cloud.connection.agentId } : {}),
           },
         }
       },
       async stop() {
         stopped = true
+        await cloudRecovery?.stop()
         clearTimeout(recoveryTimer)
         clearTimeout(decoderIdleTimer)
         pending.clear()

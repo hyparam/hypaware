@@ -1,6 +1,7 @@
 // @ts-check
 
 import os from 'node:os'
+import fs from 'node:fs/promises'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
@@ -13,6 +14,9 @@ import { attachCursorHooks } from './attach.js'
 import { cursorListenPort, validateCursorConfig } from './config.js'
 import { createStartCursorSource } from './listener.js'
 import { createCursorBackfillProvider } from './recovery.js'
+import { cursorCloudConnectionPath, readCursorCloudConnection } from './cloud-state.js'
+import { registerCursorCloudCommands } from './cloud-commands.js'
+import { CursorCloudError } from './cloud-client.js'
 
 /** @import { ClientAttachContext, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -37,16 +41,27 @@ export async function activate(ctx) {
   const localPolicyPath = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
   const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
   const activeRecoveries = new Set()
-  ctx.backfills.register(createCursorBackfillProvider({ env: ctx.env, localOnlyListPath: localPolicyPath, ignoredSessions, activeRecoveries, config: ctx.config }))
+  const cloudConfigured = await fs.lstat(cursorCloudConnectionPath(ctx.paths.stateDir)).then(() => true, error => {
+    if (error.code === 'ENOENT') return false
+    throw error
+  })
+  if (!cloudConfigured) ctx.backfills.register(createCursorBackfillProvider({ env: ctx.env, localOnlyListPath: localPolicyPath, ignoredSessions, activeRecoveries, config: ctx.config }))
   ctx.sources.register({
     name: CLIENT_NAME,
     plugin: PLUGIN_NAME,
     summary: 'Cursor native recovery and file observations for editor and CLI',
     configSection: CURSOR_CONFIG_SECTION,
-    start: createStartCursorSource({ localOnlyListPath: localPolicyPath, ignoredSessions, activeRecoveries }),
+    async start(sourceCtx) {
+      const connection = cloudConfigured ? await readCursorCloudConnection(ctx.paths.stateDir) : undefined
+      if (cloudConfigured && !connection) throw new CursorCloudError('cloud_disconnected')
+      return createStartCursorSource({ localOnlyListPath: localPolicyPath, ignoredSessions, activeRecoveries,
+        ...(connection ? { cloud: { connection, stateDir: ctx.paths.stateDir } } : {}),
+      })(sourceCtx)
+    },
   })
 
   registerSessionCommands(ctx)
+  registerCursorCloudCommands(ctx)
   registerSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
 
   // @ref LLP 0306#endpoint-free-clients [implements]: install native hooks

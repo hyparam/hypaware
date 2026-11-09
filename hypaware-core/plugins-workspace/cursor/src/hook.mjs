@@ -15,7 +15,13 @@ try {
     if (bytes > MAX_BYTES) throw new Error('payload_limit')
     chunks.push(chunk)
   }
-  const event = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  /** @type {string[]} */
+  const secrets = []
+  if (process.argv[3] === 'cloud') for (const secret of [process.env.CURSOR_API_KEY, process.env.HYP_CI_TOKEN]) if (secret && secret.length >= 8) secrets.push(secret)
+  const event = JSON.parse(Buffer.concat(chunks).toString('utf8'), process.argv[3] === 'cloud' ? (key, value) => {
+    if (/^(thinking|reasoning|analysis|signature)$/i.test(key)) return undefined
+    return typeof value === 'string' ? secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value
+  } : undefined)
   // @ref LLP 0399#identity: allocate once before retry; repeated identical
   // file callbacks remain distinct observations.
   const body = JSON.stringify({ delivery_id: randomUUID(), observed_at: new Date().toISOString(), event })

@@ -26,3 +26,23 @@ export interface CursorReadOptions {
   editorDb?: string
   cliRoot?: string
 }
+
+export interface CursorCloudConnection {
+  version: 1
+  agentId: string
+  repository: string
+  cwd: string
+}
+
+export interface CursorCloudConversation {
+  id: string
+  messages: { id: string, type: string, text: string }[]
+}
+
+export interface CursorCloudSource {
+  connection: CursorCloudConnection
+  stateDir: string
+  fetcher?: typeof fetch
+  intervalMs?: number
+  readMetadata?: (env: NodeJS.ProcessEnv, signal?: AbortSignal) => Promise<{ agentId: string, repository: string }>
+}

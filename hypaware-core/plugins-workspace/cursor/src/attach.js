@@ -21,12 +21,12 @@ export function cursorHooksPath(opts = {}) {
 }
 
 /**
- * @param {{ endpoint: string, version: string, env?: NodeJS.ProcessEnv, homeDir?: string, dryRun?: boolean }} opts
+ * @param {{ endpoint: string, version: string, env?: NodeJS.ProcessEnv, homeDir?: string, dryRun?: boolean, settingsPath?: string, cloud?: boolean, events?: readonly string[] }} opts
  * @ref LLP 0399#attachment: exact commands in the shared JSON undo record
  *   own individual array entries, never the user's hooks file
  */
 export async function attachCursorHooks(opts) {
-  const settingsPath = cursorHooksPath(opts)
+  const settingsPath = opts.settingsPath ?? cursorHooksPath(opts)
   let raw
   let mtime
   try {
@@ -41,6 +41,9 @@ export async function attachCursorHooks(opts) {
     throw markActionRefused(new Error('Cursor hooks must be a version 1 JSON object with a hooks object'))
   }
   const old = value._hypaware
+  if (old !== undefined && isPlainObject(old) && (old.scope === 'cursor-cloud') !== (opts.cloud === true)) {
+    throw markActionRefused(new Error('Cursor hook ownership belongs to a different capture mode'))
+  }
   if (old !== undefined && (!isPlainObject(old) || !isPlainObject(old.managed) || !Array.isArray(old.managed.hook_entries))) {
     throw markActionRefused(new Error('Cursor _hypaware marker is not a readable managed hook record'))
   }
@@ -56,9 +59,9 @@ export async function attachCursorHooks(opts) {
   // the URL scheme out of its config; the standalone sender restores it.
   const endpoint = new URL(opts.endpoint)
   if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1') throw new Error('Cursor requires a loopback HTTP endpoint')
-  const command = [process.execPath, hookPath, endpoint.host].map(quote).join(' ')
+  const command = [process.execPath, hookPath, endpoint.host, ...(opts.cloud ? ['cloud'] : [])].map(quote).join(' ')
   const entries = []
-  for (const event of CURSOR_EVENTS) {
+  for (const event of opts.events ?? CURSOR_EVENTS) {
     if (hooks[event] !== undefined && !Array.isArray(hooks[event])) {
       throw markActionRefused(new Error(`Cursor ${event} hooks must be an array`))
     }
@@ -74,6 +77,7 @@ export async function attachCursorHooks(opts) {
     version: opts.version,
     attached_at: isPlainObject(old) && typeof old.attached_at === 'string' ? old.attached_at : new Date().toISOString(),
     managed: { hook_entries: entries },
+    ...(opts.cloud ? { scope: 'cursor-cloud' } : {}),
   }
   const body = JSON.stringify(value, null, 2) + '\n'
   const changed = raw !== body
