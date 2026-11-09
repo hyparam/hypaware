@@ -736,7 +736,15 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
               const cleanupLayout = { ...lockedLayout, commitEmpty: true, nextDirName: () => nextName,
                 cursorAfter: (nextDir, rows, outcome) => ({ ...lockedCursor,
                   ...lockedLayout.cursorAfter(nextDir, rows, outcome), layout: /** @type {const} */ ('source-table'), tableDir: nextDir }) }
-              const rewritten = await compactGeneration(r.path, cleanupLayout, cfg, null, lockedTableInfo, undefined, false)
+              // The fresh table is created from the current schema. Once a
+              // newer flush has evolved the columns in, its first schema holds
+              // them and the partition is never due again, so the purge
+              // rewrite fills them too (LLP 0590#old-rows).
+              const purgeBackfill = columnBackfill && columnBackfillDue(columnBackfill, firstSchemaColumnNames(lockedTableInfo.metadata))
+                ? columnBackfill
+                : undefined
+              backfillApplied = purgeBackfill !== undefined
+              const rewritten = await compactGeneration(r.path, cleanupLayout, cfg, null, lockedTableInfo, undefined, false, purgeBackfill)
               // Flush the atomic cursor publication before the old generation
               // can become eligible for physical reclamation on a later tick.
               // 'r+', not 'r': Windows refuses fsync on a read-only handle (EPERM).

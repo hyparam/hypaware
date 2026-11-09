@@ -13,6 +13,7 @@ import path from 'node:path'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
 import { readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { queueCacheCleanup } from '../../src/core/cache/purge-cleanup.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
@@ -153,6 +154,32 @@ test('maintenance backfills a legacy epoch-layout partition', async () => {
     assert.deepEqual(rows.map((r) => r.output_tokens == null ? null : Number(r.output_tokens)).sort(), [5517, null])
     const second = await maintainCache({ cacheRoot, compactOnly: true, getColumnBackfill: () => backfill })
     assert.equal(second.totalCompacted, 0)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// A newer flush evolves the columns into an old table in place. A purge
+// rewrite then creates the fresh table from that current schema, so it must
+// fill them as well: the new table's first schema holds them and the
+// partition is never due again.
+test('a purge rewrite of an evolved old partition backfills it', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-usage-backfill-purge-'))
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=claude'], OLD_COLUMNS,
+      [row({ message_id: 'm-old', part_id: 'p1', request_id: 'req_1' }, usage(5517))], { declaration })
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=claude'], NEW_COLUMNS,
+      [{ ...row({ message_id: 'm-new', part_id: 'p2', request_id: 'req_2' }, usage(40)), output_tokens: 40 }], { declaration })
+    await queueCacheCleanup(cacheRoot, partitionDir(cacheRoot))
+    const opts = { cacheRoot, compactOnly: true, getDeclaration: () => declaration, getColumnBackfill: () => backfill }
+    const report = await maintainCache(opts)
+    assert.equal(report.partitions[0].backfilled, true)
+    const rows = await readRowsFromTable(liveTableDir(partitionDir(cacheRoot)))
+    assert.deepEqual(
+      rows.map((r) => [r.message_id, r.output_tokens == null ? null : Number(r.output_tokens)]).sort(),
+      [['m-new', 40], ['m-old', 5517]]
+    )
+    assert.equal((await maintainCache(opts)).totalCompacted, 0)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
