@@ -186,18 +186,36 @@ redone from it. Run on a copy of the local Claude partition, the backfill
 counted exactly the usage rows less the duplicate copies found by SQL, in
 every month (34,304 rows for October: 34,536 usage rows less 232 copies).
 
-This is enough because the copies share a partition. On the remote, every
-duplicated response from October 2026 has both copies on the same date, and
-both Claude lanes share the `client_name` partition; 9 of about 27,000 span two
-gateways and stay counted twice. The duplicated local rows keep their
-duplicated content, which this RFC does not repair; only their usage is
-counted once.
+This is enough because the copies almost always share a partition. On the
+remote, every duplicated response from October 2026 has both copies on the
+same date, and both Claude lanes share the `client_name` partition. On a copy
+of the server's largest org archive (7.3 million rows), the backfill matched
+the expected deduplicated totals except for 9 responses, about 7,000 output
+tokens in 682 million, whose copies fall on either side of a UTC midnight or
+days apart and so sit in different partitions; they stay counted twice. The
+duplicated rows themselves keep their duplicated content, which this RFC does
+not repair; only their usage is counted once.
 
 ### Mixed client versions {#mixed-fleet}
 
-Clients on older versions keep forwarding rows without the columns. The server
-must derive them on ingest, from the same shared function, or those rows stay
-NULL indefinitely and the old-rows gate never closes.
+Clients on older versions keep forwarding rows without the columns. The
+server's registry keeps a dataset's schema but not its settle step, so its
+mover fills the columns, with the exported `withUsageColumns`, for any
+`ai_gateway_messages` row that arrives without them. Rows from upgraded clients
+arrive filled and are stored as sent; an upgraded client's schema registration
+also merges the columns into the server catalog, so even a server not yet
+upgraded keeps their values.
+
+Rows the server already stores get the same backfill from a one-off script run
+against the stopped server (there is one): the kernel's cache maintenance with
+the backfill for the cache days, then, per org, the columns added to the
+archive table's schema and every message-day partition holding a file written
+before them rewritten through the archive's own per-day compaction, which runs
+the same backfill pass. Any later archive compaction of a partition the
+backfill has not reached fills the columns too, so routine compaction cannot
+leave a day finished with NULL columns. On a copy of the largest org (9.2 GB,
+7.3 million rows, 255 days) the archive pass took under 10 minutes, every
+day's rows came back identical, and a second run rewrote nothing.
 
 ### Rollout {#rollout}
 
@@ -251,17 +269,9 @@ bytes in a 1% local sample; `tool_use_result` about 60% in a remote sample of
 - **Column names.** Bare names match the JSON keys and read well, but queries
   often alias a sum to `input_tokens`. A `usage_` prefix avoids any confusion
   at the cost of longer SQL.
-- **Backfill cost on the server.** Measured locally (#old-rows), the backfill
-  costs one forced compaction per partition. The server's 7.3 million rows
-  have not been measured.
-- **The server.** Its registry keeps only the dataset schema, and its mover
-  writes forwarded rows without the settle step, so rows from upgraded clients
-  arrive with the columns but nothing fills them for older clients or for rows
-  already stored. Planned as a follow-up in the server repo: the mover calls
-  the exported `withUsageColumns` for rows that lack the columns, and a
-  one-off script rewrites the stored cache and archive rows with the same
-  dedupe (there is one server). Until then, server queries over older dates
-  still need the JSON.
+- **Server disk.** Rewritten archive files sit beside the replaced ones until
+  the server's reclamation removes them, so the archive pass needs free space
+  up to the archive's size (about 28 GB against 49 GB free when measured).
 
 ## References
 

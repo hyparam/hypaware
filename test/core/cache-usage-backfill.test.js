@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { maintainCache } from '../../src/core/cache/maintenance.js'
-import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
+import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
 import { readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
@@ -90,6 +90,11 @@ test('maintenance backfills old partitions and counts each response once', async
     await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=claude'], OLD_COLUMNS,
       [row(codex, usage(100)), row(codex, usage(100))], { declaration })
 
+    // Converge the partition first, so only the backfill can make it due.
+    const plain = await maintainCache({ cacheRoot, compactOnly: true, getDeclaration: () => declaration })
+    assert.equal(plain.partitions[0].backfilled, undefined)
+    assert.equal((await maintainCache({ cacheRoot, compactOnly: true, getDeclaration: () => declaration })).totalCompacted, 0)
+
     const report = await maintainCache({
       cacheRoot,
       compactOnly: true,
@@ -123,6 +128,31 @@ test('maintenance backfills old partitions and counts each response once', async
     })
     assert.equal(second.totalCompacted, 0)
     assert.equal(second.partitions[0].backfilled, undefined)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// The server's mover writes the legacy epoch layout (org=/date= partitions),
+// which has no live table stats; the backfill must still find it.
+test('maintenance backfills a legacy epoch-layout partition', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-usage-backfill-epoch-'))
+  try {
+    const segments = ['org=acme', 'date=2026-10-07']
+    await appendRowsToPartition(cacheRoot, 'ai_gateway_messages', segments, OLD_COLUMNS, [
+      row({ message_id: 'm-transcript', part_id: 'p1', request_id: 'req_1' }, usage(5)),
+      row({ message_id: 'm-other', part_id: 'p2', request_id: 'req_1', conversation_source: 'claude_code' }, usage(5517)),
+    ])
+    const dir = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', ...segments)
+    assert.equal(readCursorSync(dir).layout, undefined, 'the fixture is the epoch layout')
+    await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal((await maintainCache({ cacheRoot, compactOnly: true })).totalCompacted, 0, 'converged without the backfill')
+    const report = await maintainCache({ cacheRoot, compactOnly: true, getColumnBackfill: () => backfill })
+    assert.equal(report.partitions[0].backfilled, true)
+    const rows = await readRowsFromTable(path.join(dir, `epoch=${readCursorSync(dir).epoch}`))
+    assert.deepEqual(rows.map((r) => r.output_tokens == null ? null : Number(r.output_tokens)).sort(), [5517, null])
+    const second = await maintainCache({ cacheRoot, compactOnly: true, getColumnBackfill: () => backfill })
+    assert.equal(second.totalCompacted, 0)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

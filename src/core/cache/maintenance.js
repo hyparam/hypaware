@@ -528,8 +528,12 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   // creates a fresh table whose first schema holds the columns, so a
   // backfilled (or newer) partition is never due again.
   const columnBackfill = opts.getColumnBackfill?.(r.dataset)
-  const backfillDue = Boolean(columnBackfill && liveStats?.firstSchemaColumns &&
-    columnBackfillDue(columnBackfill, liveStats.firstSchemaColumns))
+  // The legacy epoch layout has no live stats, so its first schema costs one
+  // metadata load, paid only for a dataset that declares a backfill.
+  const firstSchemaColumns = columnBackfill
+    ? liveStats ? liveStats.firstSchemaColumns : await loadFirstSchemaColumns(liveDir)
+    : undefined
+  const backfillDue = Boolean(columnBackfill && columnBackfillDue(columnBackfill, firstSchemaColumns))
 
   if (!opts.compactOnly) {
     const expired = await expireSnapshots(liveDir, cfg, opts)
@@ -1172,6 +1176,23 @@ function firstSchemaColumnNames(metadata) {
 }
 
 /**
+ * {@link firstSchemaColumnNames} for a table this tick has no metadata for
+ * yet. Undefined when the metadata cannot be read.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<Set<string> | undefined>}
+ */
+async function loadFirstSchemaColumns(tableDir) {
+  try {
+    const { resolver, lister } = await createLocalIcebergIO()
+    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(tableDir), resolver, lister })
+    return firstSchemaColumnNames(metadata)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * `columns` with any backfilled column it lacks appended, so the rewrite's
  * new table carries them. Returns `columns` itself when there is nothing to add.
  *
@@ -1481,12 +1502,12 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   // the generation, never the full fallback rows.
   const scanOpts = tableInfo?.metadata ? { metadata: tableInfo.metadata } : undefined
   const emittedPartIds = settle ? await scanNativePartIds(oldDir, tableInfo?.metadata) : null
-  // @ref LLP 0590#dedupe [implements]: the backfill pass sees every row
-  // before any is written, through a narrow scan, so it can choose one row
-  // per group whichever comes first in scan order.
+  // @ref LLP 0590#dedupe [implements]: a narrow first scan shows the backfill
+  // every row before any is written, so the row it counts in each group does
+  // not depend on scan order.
   const backfillPass = backfill ? backfill.createPass() : null
-  if (backfill && backfillPass) {
-    for await (const row of scanRowsFromTable(oldDir, backfill.observeColumns, scanOpts)) backfillPass.observe(row)
+  if (backfillPass) {
+    for await (const row of scanRowsFromTable(oldDir, backfill?.observeColumns, scanOpts)) backfillPass.observe(row)
   }
   /** @type {Record<string, unknown>[]} */
   let fallbackBatch = []
