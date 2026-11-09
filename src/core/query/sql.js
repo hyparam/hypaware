@@ -9,7 +9,6 @@ import { Attr, getActiveSpan, getKernelInstruments, getLogger, markSpanStatus, w
 import { QUERY_FLUSH_DEBOUNCE_MS, QUERY_FLUSH_FAILURE_COOLDOWN_MS } from '../cache/spool.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { normalizeScanColumn } from './scan-column.js'
-import { coerceTimestampLiterals } from './timestamp-literals.js'
 import {
   callerSeesEverything,
   defaultQueryVisibilityResolver,
@@ -477,13 +476,6 @@ export async function executeQuerySql(args) {
         // already points at the real problem (syntax error, unknown function,
         // non-SELECT statement). Surface it verbatim rather than wrapping it.
         const statement = parseSql({ query: trimmed })
-
-        // SQL types a character literal by the operand it is compared
-        // against; neither squirreling nor the pushdown converter does, so a
-        // string bound on a TIMESTAMP column matched nothing at all until the
-        // literal is typed here, before either sees it (issue #860).
-        // @ref LLP 0272 [implements]: the one shared read path types string literals against the column's declared type
-        coerceTimestampLiterals(statement, registry)
 
         const tableNames = uniqueStrings(extractTables(statement))
         span.setAttribute('table_count', tableNames.length)

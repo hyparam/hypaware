@@ -1,13 +1,14 @@
 # LLP 0280: A CTE or derived table carries its columns' types to the bound
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Query
 **Author:** Phil / Claude
 **Date:** 2026-08-19
 **Extends:** LLP 0272 (which typed a bound from a dataset schema and named the
 relations the registry cannot name as an open residual)
 **Related:** LLP 0222, LLP 0098
+**Superseded-by:** [LLP 0591](./0591-engine-types-timestamp-literals.decision.md) (the engine types a literal per row from the value it meets, so the kernel no longer infers a CTE's or derived table's columns)
 
 > A relation the registry cannot name still supplies its columns, when the
 > inner select behind it can be read end to end. The column list a CTE or
