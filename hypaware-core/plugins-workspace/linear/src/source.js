@@ -1,7 +1,7 @@
 // @ts-check
 
 import { requireLinearRuntime } from './runtime.js'
-import { parseInterval } from './config.js'
+import { parseInterval, NO_TEAMS_MESSAGE } from './config.js'
 import { runLinearCaptureTick } from './capture.js'
 
 /** @import { StartedSource } from '../../../../hypaware-core/plugins-workspace/linear/src/types.js' */
@@ -45,8 +45,8 @@ export async function startLinearSource() {
       pending = result.pending
       if (!lastError && !result.cancelled) lastSuccessAt = new Date().toISOString()
     } catch {
-      lastError = 'linear_capture_failed'
-      rt.log.warn('linear.source_failed', { operation: 'linear.capture', error_kind: lastError })
+      lastError = 'Linear: capture failed; check local state and retry'
+      rt.log.warn('linear.source_failed', { operation: 'linear.capture', error_kind: 'linear_capture_failed' })
     } finally {
       cancel = null
       inflight = null
@@ -56,7 +56,9 @@ export async function startLinearSource() {
   schedule(Math.min(interval, 300000))
   return {
     async status() {
-      return { state: 'ready', message: rt.config.teams.length ? `polling configured Linear teams every ${rt.config.poll_interval}` : 'Set linear.teams to enable capture',
+      // Empty teams never polls; a stopped state is what makes hyp status print the hint
+      const scoped = rt.config.teams.length > 0
+      return { state: scoped ? 'ready' : 'stopped', message: scoped ? `polling configured Linear teams every ${rt.config.poll_interval}` : NO_TEAMS_MESSAGE,
         rowsWritten, ...(lastError ? { lastError } : {}),
         details: { cadence: rt.config.poll_interval, teams: rt.config.teams.length, in_flight: inflight !== null, next_tick_at: nextTickAt, last_success_at: lastSuccessAt } }
     },

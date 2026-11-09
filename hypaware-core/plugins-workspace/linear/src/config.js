@@ -3,6 +3,7 @@
 /** @import { LinearConfig } from '../../../../hypaware-core/plugins-workspace/linear/src/types.js' */
 
 export const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:19264/callback'
+export const NO_TEAMS_MESSAGE = 'No Linear teams selected, so nothing is collected. Add team keys (like ENG) to `teams` in the @hypaware/linear plugin config.'
 const KEYS = new Set(['teams', 'poll_interval', 'token_env', 'client_id', 'redirect_uri'])
 
 /** @param {unknown} value */

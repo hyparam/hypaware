@@ -46,7 +46,7 @@ export function refreshLinearToken(refreshToken, clientId, opts = {}) {
 // @ref LLP 0592#authentication [implements]: read-only public-client PKCE with a bounded loopback listener and state-bound callback
 export async function browserLogin(opts) {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(opts.clientId) || /^lin_/i.test(opts.clientId)) {
-    throw linearError('client_id', 'set linear.client_id or LINEAR_CLIENT_ID to the public ID of a registered Linear OAuth app')
+    throw linearError('client_id', '`client_id` must be the public client ID of your registered Linear OAuth app, not a token; set it in the @hypaware/linear plugin config or LINEAR_CLIENT_ID')
   }
   if (!isLoopbackRedirect(opts.redirectUri)) throw linearError('callback', 'invalid loopback redirect URI')
   const redirect = new URL(opts.redirectUri)

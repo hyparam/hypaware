@@ -37,11 +37,25 @@ test('auth/capture commands validate arguments and explain missing OAuth registr
   }
   assert.deepEqual(fs.readdirSync(f.dir), [])
   assert.equal(await runLinearLogin(['--no-browser'], f.ctx), 1)
-  assert.match(f.stderr(), /registered public OAuth client ID/)
+  assert.match(f.stderr(), /needs your own Linear OAuth app.*`client_id` in the @hypaware\/linear plugin config/)
   assert.deepEqual(fs.readdirSync(f.dir), [])
   f.rt.config.teams = []
   assert.equal(await runLinearSync([], f.ctx), 2)
-  assert.match(f.stderr(), /set linear.teams/)
+  assert.match(f.stderr(), /No Linear teams selected.*`teams` in the @hypaware\/linear plugin config/)
+  assert.doesNotMatch(f.stderr(), /linear\.teams|linear\.client_id/)
+  const source = await startLinearSource()
+  t.after(() => source.stop())
+  const status = await source.status?.()
+  assert.equal(status?.state, 'stopped', 'hyp status prints a stopped source\'s message')
+  assert.match(String(status?.message), /No Linear teams selected/)
+})
+
+test('capture failures print the fixed message and next step, not the error kind', async t => {
+  const f = fixture(t)
+  f.rt.clientFactory = undefined
+  assert.equal(await runLinearSync([], f.ctx), 1)
+  assert.match(f.stderr(), /OAuth is logged out or incomplete; run `hyp linear login`/)
+  assert.doesNotMatch(f.stderr(), /linear_auth_required/)
 })
 
 test('status verifies workspace and logout explains an active API-key override without exposing it', async t => {

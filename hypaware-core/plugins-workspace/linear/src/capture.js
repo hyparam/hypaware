@@ -143,7 +143,7 @@ export async function runLinearCaptureTick(rt, opts = {}) {
     if (opts.signal?.aborted) result.cancelled = true
     else if (deadline.aborted) result.pending = true
     else {
-      result.errors.push(kind)
+      result.errors.push(/** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind && err instanceof Error ? err.message : 'Linear: capture failed; check local state and retry')
       rt.log.warn('linear.capture_failed', { operation: 'linear.capture', smoke_step: step, error_kind: kind })
     }
   }
@@ -155,7 +155,7 @@ export async function runLinearCaptureTick(rt, opts = {}) {
       rt.log.info('linear.projection_completed', { operation: 'graph.project', source_dataset: DATASET_NAME,
         nodes_written: projected.nodesWritten, edges_written: projected.edgesWritten })
     } catch {
-      result.errors.push('linear_projection_failed')
+      result.errors.push('Linear: graph projection failed; it retries on the next sync')
       rt.log.warn('linear.projection_failed', { operation: 'graph.project', error_kind: 'linear_projection_failed' })
     }
   }

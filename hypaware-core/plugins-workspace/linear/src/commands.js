@@ -5,6 +5,7 @@ import { withSpinner } from '../../../../src/core/cli/spinner.js'
 import { requireLinearRuntime, getLinearClient } from './runtime.js'
 import { loginLinear, logoutLinear } from './auth.js'
 import { runLinearCaptureTick } from './capture.js'
+import { NO_TEAMS_MESSAGE } from './config.js'
 
 /** @import { CommandRunContext } from '../../../../hypaware-core/plugins-workspace/linear/src/types.js' */
 
@@ -16,7 +17,7 @@ export async function runLinear(_argv, ctx) {
     '  status                 verify the account and workspace\n' +
     '  backfill               restart a bounded import of configured teams\n' +
     '  sync                   resume capture and automatically project the graph\n' +
-    'Set linear.teams before collecting. Credentials never belong in config.\n')
+    'Set `teams` in the @hypaware/linear plugin config before collecting. Credentials never belong in config.\n')
   return 0
 }
 
@@ -42,6 +43,7 @@ export async function runLinearLogin(argv, ctx) {
     })
     rt.log.info('linear.login_completed', { operation: 'linear.login', status: 'ok' })
     ctx.stdout.write(`Signed in to Linear workspace ${account.workspace}.\n`)
+    if (!rt.config.teams.length) ctx.stdout.write(`${NO_TEAMS_MESSAGE}\n`)
     return 0
   } catch (err) {
     rt.log.warn('linear.login_failed', { operation: 'linear.login', error_kind: /** @type {any} */ (err)?.hypErrorKind ?? 'linear_auth_store' })
@@ -84,7 +86,7 @@ export async function runLinearStatus(argv, ctx) {
     ctx.stdout.write(`Linear credential source: ${rt.env[rt.config.token_env]?.trim() ? `environment (${rt.config.token_env})` : 'local OAuth'}.\n`)
     const account = await getLinearClient(rt).identity()
     ctx.stdout.write(`Linear workspace: ${account.workspace} (${account.workspace_id}).\n`)
-    ctx.stdout.write(rt.config.teams.length ? `Configured teams: ${rt.config.teams.join(', ')}\n` : 'Set linear.teams before collecting.\n')
+    ctx.stdout.write(rt.config.teams.length ? `Configured teams: ${rt.config.teams.join(', ')}\n` : `${NO_TEAMS_MESSAGE}\n`)
     return 0
   } catch (err) {
     ctx.stderr.write(`hyp linear status: ${message(err)}\n`)
@@ -106,7 +108,7 @@ async function capture(argv, ctx, backfill) {
   }
   const rt = requireLinearRuntime()
   if (!rt.config.teams.length) {
-    ctx.stderr.write(`hyp linear ${name}: set linear.teams before collecting\n`)
+    ctx.stderr.write(`hyp linear ${name}: ${NO_TEAMS_MESSAGE}\n`)
     return 2
   }
   const abort = new AbortController()

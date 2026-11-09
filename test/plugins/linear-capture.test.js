@@ -119,7 +119,7 @@ test('append and cursor-write failures retain replayable progress and emit the f
     fs.mkdirSync(cursorPath(f.rt.stateDir))
   }
   const writeFailed = await runLinearCaptureTick(f.rt, options)
-  assert.deepEqual(writeFailed.errors, ['linear_cursor_write'])
+  assert.deepEqual(writeFailed.errors, ['Linear: failed to persist capture progress; the next tick will replay the uncommitted page'])
   fs.rmdirSync(cursorPath(f.rt.stateDir))
   fs.renameSync(`${cursorPath(f.rt.stateDir)}.saved`, cursorPath(f.rt.stateDir))
   assert.equal(readLinearCursor(f.rt.stateDir)?.work?.stream, 'attachments')
@@ -129,7 +129,7 @@ test('projection failure retries after durable cursor advancement, including an 
   const f = fixture(t)
   const project = f.rt.graph.project
   f.rt.graph.project = async () => { throw new Error('projection failed') }
-  assert.deepEqual((await runLinearCaptureTick(f.rt, options)).errors, ['linear_projection_failed'])
+  assert.deepEqual((await runLinearCaptureTick(f.rt, options)).errors, ['Linear: graph projection failed; it retries on the next sync'])
   assert.equal(readLinearCursor(f.rt.stateDir)?.work, null)
   f.client.page = async () => page([])
   f.rt.graph.project = project
@@ -153,6 +153,6 @@ test('a cancelled page starts no append/projection and concurrent capture cannot
     fs.writeFileSync(cursorPath(f.rt.stateDir), JSON.stringify({ ...prior, generation: ISSUE_ID }))
     return page([ISSUE])
   }
-  assert.deepEqual((await runLinearCaptureTick(f.rt, options)).errors, ['linear_capture_changed'])
+  assert.deepEqual((await runLinearCaptureTick(f.rt, options)).errors, ['Linear: another capture changed the cursor; retry'])
   assert.equal(f.rows.length, 0)
 })

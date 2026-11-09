@@ -1377,7 +1377,7 @@ full historical import. Capture or projection failures return `1`.
 
 ## Collect Linear activity
 
-Plugin: `@hypaware/linear`. Explicit activation and `linear.teams` are required.
+Plugin: `@hypaware/linear`. Explicit activation and `teams` in the plugin config are required.
 See the [Linear integration](integrations/linear.md) for OAuth app registration
 and configuration.
 
@@ -1399,8 +1399,8 @@ Backfill restarts a bounded import of configured teams. Sync resumes capture
 and projects issue-to-PR links into the activity graph. Remaining work resumes
 on later sync or daemon ticks. Invalid arguments or an empty capture scope
 return `2`, capture/authentication failures return `1`, and cancellation
-returns `130`. Login requires `linear.client_id` or `LINEAR_CLIENT_ID` until
-a shared HypAware Linear OAuth application is registered.
+returns `130`. Login requires `client_id` in the plugin config or `LINEAR_CLIENT_ID`
+until a shared HypAware Linear OAuth application is registered.
 
 ## Record Ollama
 

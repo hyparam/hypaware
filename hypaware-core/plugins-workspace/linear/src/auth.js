@@ -61,7 +61,7 @@ function locked(stateDir, fn) {
 /** @param {string} stateDir @param {LoginOptions} opts */
 // @ref LLP 0592#authentication [implements]: a newer login/logout supersedes any unfinished browser authorization
 export async function loginLinear(stateDir, opts) {
-  if (!opts.clientId) throw linearError('client_id', 'set linear.client_id or LINEAR_CLIENT_ID to your registered public OAuth client ID')
+  if (!opts.clientId) throw linearError('client_id', 'login needs your own Linear OAuth app. Register one (see docs/integrations/linear.md), then put its public client ID in `client_id` in the @hypaware/linear plugin config, or set LINEAR_CLIENT_ID')
   const generation = randomUUID()
   await locked(stateDir, async () => write(stateDir, { generation, status: 'pending' }))
   const { account, ...tokens } = await browserLogin(opts)

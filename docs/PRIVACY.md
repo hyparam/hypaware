@@ -31,6 +31,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `raw-anthropic`, `raw-openai` | API requests and responses routed through the local gateway |
 | `otel` | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener |
 | `github` | Structural repository activity such as issue, pull request, commit, file, review, and comment metadata; content remains on GitHub |
+| `linear` | Structural issue metadata for configured teams (identifier, team, state, and Linear ids of the creator and assignee) and GitHub pull request links attached to those issues; titles, descriptions, and comments remain in Linear |
 
 Conversation capture includes message content, not just metadata. Depending on
 what the client exposes, records can also include system prompts, tool arguments
