@@ -196,6 +196,13 @@ days apart and so sit in different partitions; they stay counted twice. The
 duplicated rows themselves keep their duplicated content, which this RFC does
 not repair; only their usage is counted once.
 
+One known edge counts a response zero times. The scan sees a proxy fallback
+row that settlement is still holding back (LLP 0027). If that fallback holds
+the larger `output_tokens` and the same rewrite then upgrades and drops it as a
+twin, no row in its group gets the columns. It needs a pre-#2826 double carrier
+and a fallback that upgrades during that same rewrite, so it is left as is;
+the surviving row keeps its `attributes.usage`.
+
 ### Mixed client versions {#mixed-fleet}
 
 Clients on older versions keep forwarding rows without the columns. The
