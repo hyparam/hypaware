@@ -10,6 +10,8 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 import { runInitWizard } from '../../src/core/cli/wizard/index.js'
 
+/** @import { DispatchOptions } from '../../src/core/cli/types.js' */
+
 // A machine set up before LLP 0262 can still have Claude attached through
 // the gateway proxy. A setup that replaces its config with one that turns the
 // proxy off would strand that client, so every whole-config setup write
@@ -55,6 +57,7 @@ async function makeHome(seed = {}) {
     settingsPath,
     stdout,
     stderr,
+    /** @type {DispatchOptions} */
     opts: {
       stdout,
       stderr,
@@ -62,7 +65,7 @@ async function makeHome(seed = {}) {
       env: { ...process.env, HOME: home, HYP_HOME: hypHome, HYP_CONFIG: '' },
       // The preflight under test is platform-independent; the injected
       // platform keeps the setup gate (#975) from refusing on a win32 host.
-      platform: /** @type {const} */ ('linux'),
+      platform: 'linux',
     },
   }
 }

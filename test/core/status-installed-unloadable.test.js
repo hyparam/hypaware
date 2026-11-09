@@ -237,7 +237,7 @@ test('config validate reports the same kind as status for an installed plugin wh
       stderr: setupErr,
       env,
       // Keeps the setup gate (#975) from refusing on a win32 host.
-      platform: /** @type {const} */ ('linux'),
+      platform: 'linux',
     })
     assert.equal(errorKindIn(setupErr.text()), statusKind)
   } finally {

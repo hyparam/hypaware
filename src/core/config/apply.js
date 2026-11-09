@@ -11,6 +11,7 @@ import { parseConfigShape } from './schema.js'
 /**
  * @import { ConfigApplyErrorKind, ConfigStageResult, HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import {
+ *   BootEvaluation,
  *   ConfigApplyDeps,
  *   ConfigControl,
  *   ConfigControlState,
@@ -446,7 +447,7 @@ export function createConfigControl(opts) {
         status: 'ok',
         hyp_reason: 'fell_back_to_seed',
       })
-      return { action: /** @type {const} */ ('recovered_bad_active'), recovery: /** @type {const} */ ('seed') }
+      return { action: 'recovered_bad_active', recovery: 'seed' }
     }
 
     // No seed to fall back to: the operative config is all the gateway
@@ -460,7 +461,7 @@ export function createConfigControl(opts) {
       status: 'ok',
       hyp_reason: 'cleared_for_repull',
     })
-    return { action: /** @type {const} */ ('recovered_bad_active'), recovery: /** @type {const} */ ('repull') }
+    return { action: 'recovered_bad_active', recovery: 'repull' }
   }
 
   /**
@@ -547,6 +548,7 @@ export function createConfigControl(opts) {
    * manager faster than any in-process timer fires, so each relaunch
    * checks the marker first.
    * @ref LLP 0025#post-apply-probation [implements]: probation expiry is evaluated at boot, before plugin activation
+   * @returns {Promise<BootEvaluation>}
    */
   async function evaluateAtBoot() {
     const state = readState()
@@ -559,7 +561,7 @@ export function createConfigControl(opts) {
     if (recovered) return recovered
 
     const marker = state.probation
-    if (!marker) return { action: /** @type {const} */ ('none') }
+    if (!marker) return { action: 'none' }
 
     // A marker whose slot is not the operative pointer means the apply
     // crashed between persisting the marker and flipping: the new
@@ -573,16 +575,16 @@ export function createConfigControl(opts) {
         config_etag: marker.etag,
         status: 'ok',
       })
-      return { action: /** @type {const} */ ('cleared_orphan') }
+      return { action: 'cleared_orphan' }
     }
 
     if (Date.parse(marker.until) <= now()) {
       const rolledBack = rollback(marker, expiryReason(marker))
       return rolledBack
-        ? { action: /** @type {const} */ ('rolled_back') }
-        : { action: /** @type {const} */ ('rollback_no_target') }
+        ? { action: 'rolled_back' }
+        : { action: 'rollback_no_target' }
     }
-    return { action: /** @type {const} */ ('none') }
+    return { action: 'none' }
   }
 
   // Confirmation edge: clear the post-apply probation marker on the first

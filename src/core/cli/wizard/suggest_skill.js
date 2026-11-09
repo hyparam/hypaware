@@ -67,7 +67,7 @@ export async function runWizardSuggestSkill(opts) {
           if (opts.launchable !== false) {
             opts.stdout.write('Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions.\n')
           }
-          return { asked: false, reason: /** @type {const} */ ('no-rows') }
+          return { asked: false, reason: 'no-rows' }
         }
         // No client `hyp ask` could start is on PATH, so the step is silent:
         // a yes would spawn a child that finds nothing to launch, and the
@@ -76,7 +76,7 @@ export async function runWizardSuggestSkill(opts) {
         if (opts.launchable === false) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-launcher')
-          return { asked: false, reason: /** @type {const} */ ('no-launcher') }
+          return { asked: false, reason: 'no-launcher' }
         }
         // A real terminal on both ends, or an injected prompt: the yes hands
         // the terminal to a client, so it is offered only where a person can
@@ -87,7 +87,7 @@ export async function runWizardSuggestSkill(opts) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'not-interactive')
           writeVerb(opts)
-          return { asked: false, reason: /** @type {const} */ ('not-interactive') }
+          return { asked: false, reason: 'not-interactive' }
         }
 
         const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory({
@@ -122,7 +122,7 @@ export async function runWizardSuggestSkill(opts) {
         span.setAttribute('answer', answer)
         if (answer !== 'yes') {
           writeVerb(opts)
-          return { asked: true, launched: false, reason: /** @type {const} */ ('declined') }
+          return { asked: true, launched: false, reason: 'declined' }
         }
 
         const result = await runAskChild(opts)
@@ -131,14 +131,14 @@ export async function runWizardSuggestSkill(opts) {
           span.setAttribute(Attr.ERROR_KIND, 'spawn_failed')
           opts.stderr?.write(`Could not start hyp ask: ${result.error}\n`)
           writeVerb(opts)
-          return { asked: true, launched: false, reason: /** @type {const} */ ('spawn-failed') }
+          return { asked: true, launched: false, reason: 'spawn-failed' }
         }
         span.setAttribute('exit_code', result.code ?? -1)
         // `hyp ask` has already said why when it exits non-zero (nothing
         // launchable, no evidence); the verb is the only thing to add.
         if (result.code !== 0) {
           writeVerb(opts)
-          return { asked: true, launched: false, reason: /** @type {const} */ ('child-failed') }
+          return { asked: true, launched: false, reason: 'child-failed' }
         }
         return { asked: true, launched: true }
       } catch (err) {
@@ -149,7 +149,7 @@ export async function runWizardSuggestSkill(opts) {
         } catch {
           // the stream itself is failing; the line is a courtesy, not a gate
         }
-        return { asked: false, reason: /** @type {const} */ ('error') }
+        return { asked: false, reason: 'error' }
       }
     },
     { component: 'wizard' }

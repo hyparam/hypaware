@@ -198,7 +198,7 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
       if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) {
         span.setAttribute('status', 'skipped')
         span.setAttribute('skip_reason', 'no-dataset')
-        return { shown: false, reason: /** @type {const} */ ('no-dataset') }
+        return { shown: false, reason: 'no-dataset' }
       }
 
       // Sections land in `partial` as they complete, so an expired deadline
@@ -237,7 +237,7 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
             '\nSkipped the first look: summarizing this much history would hold up setup.\n' +
             'Run `hyp query overview` to see it.\n'
           )
-          return { shown: false, reason: /** @type {const} */ ('slow') }
+          return { shown: false, reason: 'slow' }
         }
 
         span.setAttribute('provider_rows', rows.providerRows.length)
@@ -249,7 +249,7 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
         if (!expired && !withheld && rows.providerRows.length === 0 && rows.dailyRows.length === 0) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'empty')
-          return { shown: false, reason: /** @type {const} */ ('empty') }
+          return { shown: false, reason: 'empty' }
         }
         if (expired) {
           span.setAttribute('partial', true)
@@ -296,7 +296,7 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
         // successful install.
         span.setAttribute('status', 'error')
         span.setAttribute(Attr.ERROR_KIND, err instanceof Error ? err.name : 'unknown')
-        return { shown: false, reason: /** @type {const} */ ('error') }
+        return { shown: false, reason: 'error' }
       }
     },
     { component: 'wizard' }

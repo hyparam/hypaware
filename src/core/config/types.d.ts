@@ -259,6 +259,12 @@ export interface ConfigControlStatus {
   runningEtag: string | null
 }
 
+/** What `ConfigControl.evaluateAtBoot` did with the probation state. */
+export interface BootEvaluation {
+  action: 'none' | 'cleared_orphan' | 'rolled_back' | 'rollback_no_target' | 'recovered_bad_active'
+  recovery?: 'seed' | 'repull'
+}
+
 /**
  * Kernel-internal handle to the apply engine. The plugin-facing subset
  * is `ConfigControlFacade`; everything else is daemon-only.
@@ -273,10 +279,7 @@ export interface ConfigControl extends ConfigControlFacade {
    * distinct slot to roll back to; `recovered_bad_active` reports the
    * consistency guard firing, with `recovery` naming how it recovered.
    */
-  evaluateAtBoot(): Promise<{
-    action: 'none' | 'cleared_orphan' | 'rolled_back' | 'rollback_no_target' | 'recovered_bad_active'
-    recovery?: 'seed' | 'repull'
-  }>
+  evaluateAtBoot(): Promise<BootEvaluation>
   /** Attach post-boot apply dependencies; `stage()` fails before this. */
   attachApplyDeps(deps: ConfigApplyDeps): void
   /** Arm the in-process probation watchdog timer when a marker is active. */
