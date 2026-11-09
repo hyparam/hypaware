@@ -95,8 +95,11 @@ still identifies a proxy attach.
 
 > **Note:** Local recording does not mean HypAware makes no network requests. Supervised
 > global installations check npm for [automatic updates](CLI.md#update-hypaware)
-> by default; those checks do not send recordings. Separately configured remote
-> destinations and diagnostic exporters can also send data.
+> by default; those checks do not send recordings. The [GitHub](integrations/github.md)
+> and [Linear](integrations/linear.md) plugins, once you sign in to them, call the
+> GitHub and Linear APIs with your own credentials to collect their data; they
+> send no recordings. Separately configured remote destinations and diagnostic
+> exporters can also send data.
 
 HypAware Cloud operators can read synced data across every org, and each
 such read is recorded in that org's audit trail. For support, they can also
