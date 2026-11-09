@@ -1775,6 +1775,31 @@ export interface DatasetRegistration {
    * @ref LLP 0312#settle-purity [implements]: maintenance probes this hook and discards the answer, so the hook must not notice being called.
    */
   resettleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
+  /**
+   * Optional columns that cache maintenance fills into rows committed before
+   * the columns existed (LLP 0590#old-rows). A partition whose table was
+   * created without any of `columns` is due for one whole-generation rewrite,
+   * which runs every row through a fresh pass: `observe` over a narrow first
+   * scan, then `apply` to each row as it is written. New rows must get the
+   * columns at settlement, so a table created after the change is never due.
+   */
+  columnBackfill?: DatasetColumnBackfill
+}
+
+export interface DatasetColumnBackfill {
+  /** The columns the backfill fills, as they are declared in the dataset schema. */
+  columns: ColumnSpec[]
+  /** The columns the first, narrow scan reads for `observe`. */
+  observeColumns: string[]
+  /** A fresh pass for one partition rewrite. */
+  createPass(): DatasetColumnBackfillPass
+}
+
+export interface DatasetColumnBackfillPass {
+  /** Sees every row of the partition, projected to `observeColumns`, before any is written. */
+  observe(row: Record<string, unknown>): void
+  /** Returns the row to write, with the backfilled columns set. Called once per written row. */
+  apply(row: Record<string, unknown>): Record<string, unknown>
 }
 
 export interface DatasetSettleContext {
