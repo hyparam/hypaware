@@ -1375,6 +1375,33 @@ hyp github sync
 Runs one poll immediately, including graph projection. It does not perform the
 full historical import. Capture or projection failures return `1`.
 
+## Collect Linear activity
+
+Plugin: `@hypaware/linear`. Explicit activation and `linear.teams` are required.
+See the [Linear integration](integrations/linear.md) for OAuth app registration
+and configuration.
+
+```text
+hyp linear login [--no-browser]
+hyp linear logout
+hyp linear status
+hyp linear backfill
+hyp linear sync
+```
+
+Login uses read-only browser OAuth with a registered loopback callback and
+automatic token refresh. `--no-browser` prints the URL; the callback still
+requires a browser on the CLI's machine. `status` verifies the account and
+workspace. Logout removes local OAuth credentials; an API-key environment
+override remains active.
+
+Backfill restarts a bounded import of configured teams. Sync resumes capture
+and projects issue-to-PR links into the activity graph. Remaining work resumes
+on later sync or daemon ticks. Invalid arguments or an empty capture scope
+return `2`, capture/authentication failures return `1`, and cancellation
+returns `130`. Login requires `linear.client_id` or `LINEAR_CLIENT_ID` until
+a shared HypAware Linear OAuth application is registered.
+
 ## Record Ollama
 
 <!-- @ref LLP 0474#setup [explains]: setup checks readiness and prints routes without loading a model; verify needs a fresh saved request and response -->

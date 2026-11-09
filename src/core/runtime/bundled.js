@@ -98,6 +98,8 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/claude-account',
   '@hypaware/claude-desktop',
   '@hypaware/github',
+  // @ref LLP 0592#scope [implements]: Linear API capture requires explicit activation and configured teams.
+  '@hypaware/linear',
   // @ref LLP 0511#onboarding: hosted collection needs a local selection as well as activation.
   '@hypaware/codex-cloud',
   // @ref LLP 0469#seams [implements]: native Ollama capture requires explicit plugins[] opt-in
