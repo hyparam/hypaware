@@ -3,7 +3,7 @@
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
 import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue, stripVolatileBlockFields } from 'hypaware/core/util'
 
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 8
 
 /**
  * @import { AiGatewayCaptureReason, AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
@@ -26,6 +26,9 @@ const DATASET_NAME = 'ai_gateway_messages'
  * partition physically lacks them; `withSchemaColumns` in `dataset.js` is the
  * only reason they stay addressable at all, and the exact value a read of one
  * yields depends on the read path (LLP 0015#multi-partition-union).
+ * `schema_version` 8 added the six token-count columns (LLP 0590), copied from
+ * the response's `attributes.usage` at settlement; an old partition gets them
+ * when maintenance backfills it.
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */
@@ -91,6 +94,14 @@ export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'is_compact_summary', type: 'BOOLEAN', nullable: true },
   { name: 'compact_metadata', type: 'JSON', nullable: true },
   { name: 'status', type: 'JSON', nullable: true },
+  // @ref LLP 0590#columns: token counts with LLP 0035's meanings, filled from
+  // the surviving usage carrier at settlement, never by a projector.
+  { name: 'input_tokens', type: 'INT64', nullable: true },
+  { name: 'output_tokens', type: 'INT64', nullable: true },
+  { name: 'cache_read_tokens', type: 'INT64', nullable: true },
+  { name: 'cache_write_tokens', type: 'INT64', nullable: true },
+  { name: 'reasoning_tokens', type: 'INT64', nullable: true },
+  { name: 'total_tokens', type: 'INT64', nullable: true },
   { name: 'attributes', type: 'JSON', nullable: true },
   { name: 'raw_frame', type: 'JSON', nullable: true },
   { name: 'date', type: 'STRING', nullable: false },

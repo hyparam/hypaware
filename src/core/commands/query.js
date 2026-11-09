@@ -620,6 +620,8 @@ export async function runQueryMaintain(argv, ctx) {
     // @ref LLP 0311#migration: the manual path runs the same one-time
     // re-partition the daemon tick would.
     getDeclaration: (dataset) => ctx.query.getDataset(dataset)?.cachePartitioning,
+    // @ref LLP 0590#old-rows: the manual path runs the same column backfill.
+    getColumnBackfill: (dataset) => ctx.query.getDataset(dataset)?.columnBackfill,
   })
   if (report.dryRun) {
     ctx.stdout.write('[dry-run]\n')
@@ -631,6 +633,7 @@ export async function runQueryMaintain(argv, ctx) {
     if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
     if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
     if (p.repartitioned) actions.push('re-partitioned to the declared layout')
+    if (p.backfilled) actions.push('backfilled new columns')
     // @ref LLP 0311#migration: a deferred migration leaves the partition on
     // its recorded layout, so the run must not read as "nothing to migrate".
     if (p.repartitionDeferred) actions.push('re-partition deferred (target layout not derivable)')

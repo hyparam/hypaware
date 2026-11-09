@@ -1081,6 +1081,8 @@ export async function runDaemon(opts = {}) {
             // one-time re-partition when a dataset's declaration demoted
             // partition columns to sortOnly.
             getDeclaration: (dataset) => boot.runtime.query.getDataset(dataset)?.cachePartitioning,
+            // @ref LLP 0590#old-rows: fill new columns into partitions written before them.
+            getColumnBackfill: (dataset) => boot.runtime.query.getDataset(dataset)?.columnBackfill,
           })
           // @ref LLP 0228#status-file-is-the-surface [implements]: the tick
           // stops discarding the report. A partition this walk deliberately
@@ -1100,6 +1102,16 @@ export async function runDaemon(opts = {}) {
               partition: JSON.stringify(p.partition),
               data_files_before: p.dataFilesBefore,
               data_files_after: p.dataFilesAfter,
+              row_count: p.rowCount,
+            })
+          }
+          // @ref LLP 0590#old-rows: the backfill, too, rewrites each old
+          // partition once, ever; the durable line is how coverage is read.
+          for (const p of report.partitions) {
+            if (!p.backfilled) continue
+            fileLog.info('daemon.cache_backfilled', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
               row_count: p.rowCount,
             })
           }

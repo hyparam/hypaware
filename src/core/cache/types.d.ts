@@ -1,4 +1,4 @@
-import type { ColumnSpec, QueryScope, QueryStorageService, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ColumnSpec, DatasetColumnBackfill, QueryScope, QueryStorageService, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ParquetWriter } from 'hyparquet-writer'
 import type { Writer } from 'hyparquet-writer/src/types.js'
 import type { PartitionSpec } from 'icebird/src/types.js'
@@ -326,6 +326,12 @@ export interface MaintenanceOptions {
    * registry (tests, bare CLI paths); no migration runs without it.
    */
   getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined
+  /**
+   * Resolve a dataset's column backfill, so the tick can rewrite a partition
+   * whose table predates the backfilled columns (LLP 0590#old-rows). Absent
+   * when the caller has no registry; no backfill runs without it.
+   */
+  getColumnBackfill?: (dataset: string) => DatasetColumnBackfill | undefined
 }
 
 /**
@@ -370,6 +376,9 @@ export interface MaintenancePartitionReport {
   // swap wrote the new generation under the declaration's partition spec
   // and sort order instead of carrying the recorded ones (LLP 0311).
   repartitioned?: boolean
+  // The rewrite filled the dataset's backfilled columns into a partition
+  // written before they existed (LLP 0590#old-rows).
+  backfilled?: boolean
   // The re-partition was due but its target layout could not be derived
   // from the table's metadata, so this tick deferred it. The partition
   // still compacts in place under its recorded spec; the layout has not

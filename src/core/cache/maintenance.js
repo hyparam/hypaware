@@ -45,7 +45,7 @@ import { createRecordRedactor } from '../sinks/redaction.js'
  *   SettleContext,
  *   StreamingTableAppend,
  * } from '../../../src/core/cache/types.js'
- * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, DatasetColumnBackfill } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../../src/core/iceberg/types.js'
  * @import { PartitionSpec, Resolver, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
@@ -522,6 +522,18 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     declaration && liveStats?.partitionSpec &&
     partitionSpecMigrationDue(declaration, liveStats.partitionSpec)
   )
+  // @ref LLP 0590#old-rows [implements]: a table created before the dataset
+  // declared its backfilled columns owes one whole-generation rewrite that
+  // fills them. Read from the metadata already loaded above; the rewrite
+  // creates a fresh table whose first schema holds the columns, so a
+  // backfilled (or newer) partition is never due again.
+  const columnBackfill = opts.getColumnBackfill?.(r.dataset)
+  // The legacy epoch layout has no live stats, so its first schema costs one
+  // metadata load, paid only for a dataset that declares a backfill.
+  const firstSchemaColumns = columnBackfill
+    ? liveStats ? liveStats.firstSchemaColumns : await loadFirstSchemaColumns(liveDir)
+    : undefined
+  const backfillDue = Boolean(columnBackfill && columnBackfillDue(columnBackfill, firstSchemaColumns))
 
   if (!opts.compactOnly) {
     const expired = await expireSnapshots(liveDir, cfg, opts)
@@ -557,7 +569,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // A due re-partition outranks the baseline gate and the recorded
     // verdict: both say "a rewrite would reproduce this layout", which is
     // exactly what the migration exists to change.
-    const compactionDue = opts.force || purgeRewrite || repartitionDue ||
+    const compactionDue = opts.force || purgeRewrite || repartitionDue || backfillDue ||
       ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg, liveStats, layout.kind))
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
@@ -620,7 +632,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       // the sorted layout every night. An explicit --force still rewrites.
       // A due re-partition also outranks the recognition: a foreign sorted
       // replace under the OLD spec is still on the old spec.
-      if (!opts.force && !purgeRewrite && !repartitionDue && foreignSortedReplace(tableInfo, cursor)) {
+      if (!opts.force && !purgeRewrite && !repartitionDue && !backfillDue && foreignSortedReplace(tableInfo, cursor)) {
         // The counter proves a rebaseline happened at all, but it carries
         // only the dataset; tagging the enclosing maintenance.partition span
         // names the partition, so a trace query finds which day re-baselined
@@ -668,6 +680,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         if (repartitionDue && declaration && repartitionTargetLayout(declaration, tableInfo)) {
           r.repartitioned = true
         }
+        if (backfillDue) r.backfilled = true
       } else {
         /** @type {Awaited<ReturnType<typeof compactGeneration>> | Awaited<ReturnType<typeof compactLiveFilesInPlace>>} */
         let result
@@ -680,6 +693,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
         // deferral that only ever shows up as a span attribute is invisible
         // to anyone who was not tracing when the tick fired.
         let repartitionDeferred = false
+        let backfillApplied = false
         try {
           result = await withPartitionMutationLock(r.path, async () => {
             // Flushes may have appended after the due check and metadata load.
@@ -703,7 +717,10 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // A due re-partition must not merge in place: an in-place commit
             // keeps the table's recorded spec, which is the thing being
             // migrated away from (LLP 0311#migration).
-            if (!opts.force && !purgeRewrite && !hasResettle && !repartitionDue && lockedLayout.kind === 'source-table') {
+            // A due backfill must not merge in place either: an in-place
+            // commit keeps the table, and with it the first schema that makes
+            // the partition due (LLP 0590#old-rows).
+            if (!opts.force && !purgeRewrite && !hasResettle && !repartitionDue && !backfillDue && lockedLayout.kind === 'source-table') {
               const inPlace = await compactLiveFilesInPlace(r.path, lockedLiveDir, lockedCursor, cfg, settle)
               if (inPlace !== 'settle-required') return inPlace
             }
@@ -719,7 +736,15 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
               const cleanupLayout = { ...lockedLayout, commitEmpty: true, nextDirName: () => nextName,
                 cursorAfter: (nextDir, rows, outcome) => ({ ...lockedCursor,
                   ...lockedLayout.cursorAfter(nextDir, rows, outcome), layout: /** @type {const} */ ('source-table'), tableDir: nextDir }) }
-              const rewritten = await compactGeneration(r.path, cleanupLayout, cfg, null, lockedTableInfo, undefined, false)
+              // The fresh table is created from the current schema. Once a
+              // newer flush has evolved the columns in, its first schema holds
+              // them and the partition is never due again, so the purge
+              // rewrite fills them too (LLP 0590#old-rows).
+              const purgeBackfill = columnBackfill && columnBackfillDue(columnBackfill, firstSchemaColumnNames(lockedTableInfo.metadata))
+                ? columnBackfill
+                : undefined
+              backfillApplied = purgeBackfill !== undefined
+              const rewritten = await compactGeneration(r.path, cleanupLayout, cfg, null, lockedTableInfo, undefined, false, purgeBackfill)
               // Flush the atomic cursor publication before the old generation
               // can become eligible for physical reclamation on a later tick.
               // 'r+', not 'r': Windows refuses fsync on a read-only handle (EPERM).
@@ -788,7 +813,14 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
               if (missing) throw compactionMetadataRefusal(lockedLayout.liveDir, missing)
             }
             repartitionApplied = targetLayout !== undefined
-            return compactGeneration(r.path, lockedLayout, cfg, settle, lockedTableInfo, targetLayout)
+            // Re-derived under the lock like the re-partition: another
+            // process may have backfilled this partition since the walk read it.
+            const lockedBackfill = columnBackfill && lockedTableInfo?.metadata &&
+              columnBackfillDue(columnBackfill, firstSchemaColumnNames(lockedTableInfo.metadata))
+              ? columnBackfill
+              : undefined
+            backfillApplied = lockedBackfill !== undefined
+            return compactGeneration(r.path, lockedLayout, cfg, settle, lockedTableInfo, targetLayout, true, lockedBackfill)
           })
         } catch (err) {
           // @ref LLP 0217#retry-on-writer-change [implements]: the attempt
@@ -850,6 +882,10 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           if (repartitionApplied) {
             r.repartitioned = true
             getActiveSpan()?.setAttribute('repartitioned', true)
+          }
+          if (backfillApplied) {
+            r.backfilled = true
+            getActiveSpan()?.setAttribute('backfilled', true)
           }
           if (result.newEpoch !== undefined) r.newEpoch = result.newEpoch
           r.rowCount = result.rowCount
@@ -1101,7 +1137,7 @@ function needsCompaction(tableDir, cfg, liveStats, layoutKind) {
  * missing outright.
  *
  * @param {string} tableDir
- * @returns {Promise<{ dataFiles: number | null, dataBytes: number | null, partitionSpec: PartitionSpec | undefined, snapshotId: string } | null>}
+ * @returns {Promise<{ dataFiles: number | null, dataBytes: number | null, partitionSpec: PartitionSpec | undefined, snapshotId: string, firstSchemaColumns: Set<string> | undefined } | null>}
  */
 async function liveTableStats(tableDir) {
   if (!tableExists(tableDir)) return null
@@ -1123,10 +1159,72 @@ async function liveTableStats(tableDir) {
       // cost a second metadata load.
       partitionSpec: currentPartitionSpec(metadata),
       snapshotId: String(currentId),
+      // The column backfill's dueness check (LLP 0590), for the same reason.
+      firstSchemaColumns: firstSchemaColumnNames(metadata),
     }
   } catch {
     return null
   }
+}
+
+/**
+ * The column names of the table's first schema: the columns the table was
+ * created with, before any later evolution added more. Undefined when the
+ * metadata records no schema.
+ *
+ * @param {TableMetadata} metadata
+ * @returns {Set<string> | undefined}
+ */
+function firstSchemaColumnNames(metadata) {
+  const schemas = metadata.schemas ?? []
+  if (schemas.length === 0) return undefined
+  let first = schemas[0]
+  for (const schema of schemas) if (schema['schema-id'] < first['schema-id']) first = schema
+  return new Set(first.fields.map((field) => field.name))
+}
+
+/**
+ * {@link firstSchemaColumnNames} for a table this tick has no metadata for
+ * yet. Undefined when the metadata cannot be read.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<Set<string> | undefined>}
+ */
+async function loadFirstSchemaColumns(tableDir) {
+  try {
+    const { resolver, lister } = await createLocalIcebergIO()
+    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(tableDir), resolver, lister })
+    return firstSchemaColumnNames(metadata)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * `columns` with any backfilled column it lacks appended, so the rewrite's
+ * new table carries them. Returns `columns` itself when there is nothing to add.
+ *
+ * @param {ColumnSpec[] | null} columns
+ * @param {DatasetColumnBackfill | undefined} backfill
+ * @returns {ColumnSpec[] | null}
+ */
+function withBackfillColumns(columns, backfill) {
+  if (!columns || !backfill) return columns
+  const have = new Set(columns.map((column) => column.name))
+  const missing = backfill.columns.filter((column) => !have.has(column.name))
+  return missing.length > 0 ? [...columns, ...missing] : columns
+}
+
+/**
+ * Whether a table created with `firstColumns` predates any column the
+ * dataset backfills.
+ *
+ * @param {DatasetColumnBackfill} backfill
+ * @param {Set<string> | undefined} firstColumns
+ */
+function columnBackfillDue(backfill, firstColumns) {
+  if (!firstColumns) return false
+  return backfill.columns.some((column) => !firstColumns.has(column.name))
 }
 
 /**
@@ -1368,9 +1466,10 @@ export function estimateRowBytes(row) {
  * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} [tableInfo]  metadata bundle loaded by the caller; null falls back to schema inference
  * @param {ReturnType<typeof repartitionTargetLayout>} [targetLayout]  re-partition migration only: write the new generation under this layout instead of carrying the recorded one
  * @param {boolean} [deduplicate] Purge rewrites preserve all surviving rows without a table-sized ID set.
+ * @param {DatasetColumnBackfill} [backfill] fill the dataset's backfilled columns into every written row (LLP 0590#old-rows)
  * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFilesBefore: number, dataFiles: number, bytesWritten?: number } | null>}
  */
-async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, targetLayout, deduplicate = true) {
+async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, targetLayout, deduplicate = true, backfill) {
   const oldDir = path.join(partitionDir, layout.liveDir)
   if (!tableExists(oldDir)) return null
 
@@ -1389,7 +1488,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
 
   const seen = new Set()
   /** @type {ColumnSpec[] | null} */
-  let columns = schemaColumns
+  let columns = withBackfillColumns(schemaColumns, backfill)
   /** @type {Record<string, unknown>[]} */
   let batch = []
   let batchBytes = 0
@@ -1411,6 +1510,13 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   // the generation, never the full fallback rows.
   const scanOpts = tableInfo?.metadata ? { metadata: tableInfo.metadata } : undefined
   const emittedPartIds = settle ? await scanNativePartIds(oldDir, tableInfo?.metadata) : null
+  // @ref LLP 0590#dedupe [implements]: a narrow first scan shows the backfill
+  // every row before any is written, so the row it counts in each group does
+  // not depend on scan order.
+  const backfillPass = backfill ? backfill.createPass() : null
+  if (backfillPass) {
+    for await (const row of scanRowsFromTable(oldDir, backfill?.observeColumns, scanOpts)) backfillPass.observe(row)
+  }
   /** @type {Record<string, unknown>[]} */
   let fallbackBatch = []
   let fallbackBatchBytes = 0
@@ -1445,6 +1551,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
       const key = rowPartId(row)
       if (key !== undefined) emittedPartIds.add(key)
     }
+    if (backfillPass) row = backfillPass.apply(row)
     batch.push(row)
     batchBytes += estimateRowBytes(row)
     if (columns && (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes)) {
@@ -1476,11 +1583,11 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   try {
     for await (const row of scanRowsFromTable(oldDir, undefined, scanOpts)) {
       if (!columns) {
-        columns = Object.keys(row).map((name) => ({
+        columns = withBackfillColumns(Object.keys(row).map((name) => ({
           name,
           type: inferColumnType(row[name]),
           nullable: true,
-        }))
+        })), backfill)
       }
       // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
       // The narrow first pass already found native twins that appear later in

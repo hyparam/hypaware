@@ -11,7 +11,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
 import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewaySettlementEnricher, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewaySettlementEnricher, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetColumnBackfill, DatasetColumnBackfillPass, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { GatewayState } from './types.js'
  */
@@ -304,6 +304,7 @@ export function aiGatewayDatasetRegistration(state) {
     createDataSource,
     settleBatch: createSettleBatch(state),
     resettleBatch: createResettleBatch(state),
+    columnBackfill: USAGE_COLUMN_BACKFILL,
   }
 }
 
@@ -332,6 +333,7 @@ export function aiGatewayDatasetRegistration(state) {
  *     it; a batch with no sweep rows reads nothing.
  *  4. Keep one usage carrier per Claude response across partial transcript
  *     reads, even when no identity upgrade was needed.
+ *  5. Copy each surviving carrier's `attributes.usage` into the token columns.
  *
  * @param {GatewayState | undefined} state
  * @returns {(rows: Record<string, unknown>[], ctx: DatasetSettleContext) => Promise<Record<string, unknown>[]>}
@@ -340,7 +342,7 @@ function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
     const plan = planSettleSelection(rows, state?.enrichers)
-    if (!plan) return retainClaudeUsageCarriers(await dedupeSweepRows(rows, ctx), ctx.storage)
+    if (!plan) return withUsageColumns(await retainClaudeUsageCarriers(await dedupeSweepRows(rows, ctx), ctx.storage))
     // @ref LLP 0085 [implements]: the settle pass may now REMOVE a row (a
     // late-resolved `.hypignore` ignore), not only upgrade its identity - the
     // filtered batch is what gets committed, so the dropped row never reaches a
@@ -356,8 +358,121 @@ function createSettleBatch(state) {
     const fresh = plan.hasFallback
       ? await dedupeByPartId(settled, ctx)
       : await dedupeSweepRows(settled, ctx)
-    return retainClaudeUsageCarriers(fresh, ctx.storage)
+    return withUsageColumns(await retainClaudeUsageCarriers(fresh, ctx.storage))
   }
+}
+
+/** The token columns, named exactly as their `attributes.usage` keys. */
+const USAGE_COLUMN_NAMES = Object.freeze([
+  'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens', 'total_tokens',
+])
+
+/**
+ * Fill the token columns from each row's `attributes.usage`, in place. Runs
+ * last, so a carrier `retainClaudeUsageCarriers` just stripped stays NULL.
+ * Rows without usage are left alone and land NULL. Exported for the server,
+ * whose ingest does not run this dataset's settle step.
+ *
+ * @ref LLP 0590#derivation [implements]: one derivation point, after the carrier is settled
+ * @param {Record<string, unknown>[]} rows
+ * @returns {Record<string, unknown>[]}
+ */
+export function withUsageColumns(rows) {
+  for (const row of rows) {
+    const usage = rowUsage(row)
+    if (usage) setUsageColumns(row, usage)
+  }
+  return rows
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {Record<string, unknown> | undefined} usage NULLs every column when absent
+ */
+function setUsageColumns(row, usage) {
+  for (const name of USAGE_COLUMN_NAMES) row[name] = usage ? usageCount(usage[name]) : null
+}
+
+/**
+ * A count the column can hold, or null. A non-integer stays only in the JSON.
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function usageCount(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) ? value : null
+}
+
+/** @param {Record<string, unknown>} row @returns {Record<string, unknown> | undefined} */
+function rowUsage(row) {
+  const attrs = typeof row.attributes === 'string' ? safeParseJson(row.attributes) : row.attributes
+  return isPlainObject(attrs) && isPlainObject(attrs.usage) ? attrs.usage : undefined
+}
+
+/**
+ * Maintenance fills the token columns into partitions written before them,
+ * counting each response once (LLP 0590#dedupe). Within the partition, usage
+ * rows are grouped: a Claude response by its request id (or API message id),
+ * any other row only with exact copies of itself (same session, message and
+ * part). One row per group gets the columns: the one with the most output
+ * tokens, first in scan order on a tie. The rest get NULL. `attributes` is
+ * written back untouched, so the repair can be redone from it.
+ *
+ * @type {DatasetColumnBackfill}
+ */
+const USAGE_COLUMN_BACKFILL = Object.freeze({
+  columns: AI_GATEWAY_MESSAGE_COLUMNS.filter((column) => USAGE_COLUMN_NAMES.includes(column.name)),
+  observeColumns: ['session_id', 'message_id', 'part_id', 'request_id', 'provider', 'role', 'client_name', 'raw_frame', 'attributes'],
+  createPass: createUsageBackfillPass,
+})
+
+/** @returns {DatasetColumnBackfillPass} */
+function createUsageBackfillPass() {
+  /** @type {Map<string, number>} largest output count seen per group, -1 for none */
+  const best = new Map()
+  /** @type {Set<string>} */
+  const counted = new Set()
+  return {
+    observe(row) {
+      const usage = rowUsage(row)
+      if (!usage) return
+      const key = usageGroupKey(row)
+      const out = usageCount(usage.output_tokens) ?? -1
+      const top = best.get(key)
+      if (top === undefined || out > top) best.set(key, out)
+    },
+    apply(row) {
+      const usage = rowUsage(row)
+      if (!usage) return row
+      const key = usageGroupKey(row)
+      const top = best.get(key)
+      // A group the observe scan never saw (a fallback the rewrite re-settled
+      // under a new identity) is counted rather than lost.
+      const wins = !counted.has(key) && (top === undefined || (usageCount(usage.output_tokens) ?? -1) >= top)
+      if (wins) counted.add(key)
+      const next = { ...row }
+      setUsageColumns(next, wins ? usage : undefined)
+      return next
+    },
+  }
+}
+
+/**
+ * The group a usage row is counted in. Claude's two lanes record one
+ * response under different message ids but the same request id, so a Claude
+ * row groups by `claudeResponseKeys`, request first. Any other row groups
+ * only with exact copies of itself: other adapters' request ids are not known
+ * to name one response.
+ *
+ * @param {Record<string, unknown>} row
+ * @returns {string}
+ */
+function usageGroupKey(row) {
+  if (claudeUsage(row)) {
+    const keys = claudeResponseKeys(row)
+    const key = keys.find((k) => k.includes('\0request\0')) ?? keys[0]
+    if (key) return key
+  }
+  return `${stringValue(row.session_id) ?? ''}\0part\0${stringValue(row.message_id) ?? ''}\0${stringValue(row.part_id) ?? ''}`
 }
 
 /**
