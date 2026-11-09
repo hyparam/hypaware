@@ -624,6 +624,12 @@ followed by the history one line per event, oldest first. A recommendation
 nobody has marked reads `State: open (never marked)`. This is the read to make
 from inside an AI client session when asked to fix a recommendation by id.
 
+Ten-character ids like `hyprec-qcyx22sjav` need HypAware 1.51.0 or newer. An
+older `hyp` refuses one: `report fix` and `report mark` say it is "not a
+recommendation id", and `report get` prints its usage line. The id is fine;
+run `hyp update` (see [updating and recovery](CLI.md#update-hypaware)) and try
+again.
+
 ```sh
 hyp report get hyprec-0123456789abcdef
 ```
