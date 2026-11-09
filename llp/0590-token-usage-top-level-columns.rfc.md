@@ -209,9 +209,14 @@ Clients on older versions keep forwarding rows without the columns. The
 server's registry keeps a dataset's schema but not its settle step, so its
 mover fills the columns, with the exported `withUsageColumns`, for any
 `ai_gateway_messages` row that arrives without them. Rows from upgraded clients
-arrive filled and are stored as sent; an upgraded client's schema registration
-also merges the columns into the server catalog, so even a server not yet
-upgraded keeps their values.
+arrive filled, but a server stores them only once its catalog holds the
+columns. An upgraded client's registration does not put them there: on a
+server that already has an `ai_gateway_messages` catalog entry, the ai-gateway
+plugin finds that entry and skips registering, and proxy forwarding sends no
+dataset registration. Until the server merges the six columns into its catalog
+(a server follow-up, which the server mover fill depends on), it stores those
+rows without the columns and a query naming them fails there. Nothing is lost:
+`attributes.usage` keeps the values the columns are derived from.
 
 Rows the server already stores get the same backfill from a one-off script run
 against the stopped server (there is one): the kernel's cache maintenance with
