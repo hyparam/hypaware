@@ -257,8 +257,8 @@ const MINT_REFUSALS = [
   {
     name: 'unmapped code with detail',
     status: 400,
-    body: { error: 'invalid_permissions', detail: 'permissions must be a non-empty set of read and report-publish' },
-    line: /hyp remote mint: mint failed \(HTTP 400 invalid_permissions\) - permissions must be a non-empty set of read and report-publish\n/,
+    body: { error: 'invalid_permissions', detail: 'permissions must be a non-empty list of distinct values from read and report-publish' },
+    line: /hyp remote mint: mint failed \(HTTP 400 invalid_permissions\) - permissions must be a non-empty list of distinct values from read and report-publish\n/,
   },
 ]
 
@@ -277,14 +277,15 @@ for (const r of MINT_REFUSALS) {
   })
 }
 
-test('mint help names both permissions and tells a personal token from a service token', () => {
+test('mint help names the two permissions and tells a personal token from a service token', () => {
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
   const help = String(registry.get('remote mint')?.help).replace(/\s+/g, ' ')
   assert.match(help, /read \(query the org's recorded history\)/)
   assert.match(help, /report-publish \(publish reports and recommendations, change a recommendation's status, and delete any report in the org\)/)
   assert.match(help, /A personal token stops working when it expires\./)
-  assert.match(help, /service token in HypAware instead: it belongs to a service account, lasts until revoked/)
+  assert.match(help, /holds two permissions: read/)
+  assert.match(help, /service token on the Service accounts page in HypAware instead: it belongs to a service account, lasts until revoked/)
 })
 
 test('a 201 without a token is an error, not a blank print', async () => {

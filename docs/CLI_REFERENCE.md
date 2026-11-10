@@ -2102,8 +2102,8 @@ For the complete join, capture, and flush workflow, see
 [CI and headless deployment](integrations/ci-and-headless.md).
 
 With `--scope query`, it mints a personal agent token instead, for a headless
-agent or CI job that queries and publishes as you. It holds both of your
-permissions until it expires or you revoke it: `read` (Query organization)
+agent or CI job that queries and publishes as you. It holds two permissions
+until it expires or you revoke it: `read` (Query organization)
 reads your organization's recorded history, and `report-publish` (Publish and
 manage reports) publishes reports and recommendations, changes a
 recommendation's status, and deletes any report in your organization.
@@ -2114,8 +2114,8 @@ need one: `hyp mcp serve --remote` already uses your session.
 
 A personal token belongs to you and expires. For an integration that should
 outlive any one person's account, an organization admin creates a service
-token in HypAware instead: it belongs to a service account and lasts until it
-is revoked. See
+token on the Service accounts page in HypAware instead: it belongs to a service
+account and lasts until it is revoked. See
 [Personal or service token](MCP.md#personal-or-service-token).
 
 ```sh

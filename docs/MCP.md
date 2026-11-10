@@ -128,13 +128,17 @@ lifetime above) or when you revoke it. Use it for a script or agent you
 run yourself.
 
 For an integration that should keep working whatever happens to one person's
-account, an organization admin creates a **service token** in HypAware
-instead. It belongs to a service account, not a person, and lasts until it is
-revoked. It can hold `read` and `report-publish` as above, and **Submit
-telemetry**, which a host needs to record and upload sessions. A service token
-is used through `hyp` (`hyp join`, or `hyp remote login --token-file`), not
-pasted into a client's `Authorization` header: `/v1/mcp` takes a personal
-token there. See
+account, an organization admin creates a **service token** on the Service
+accounts page in HypAware instead. It belongs to a service account, not a
+person, and lasts until it is revoked. It can hold `read` and
+`report-publish` as above, and **Submit telemetry**, which a host needs to
+record and upload sessions.
+
+A service token's secret is never pasted into a client's `Authorization`
+header. Store it with `hyp remote login <server> --token-file <path>`: `hyp`
+exchanges it for a one-hour access token as needed, so `hyp query --remote`
+and `hyp mcp serve --remote` work with it when it holds `read`. A host enrolls
+with it through `hyp join`. See
 [Collect as an organization service account](integrations/ci-and-headless.md#collect-as-an-organization-service-account).
 
 > **Caution:** Anyone who holds the token can read your organization's
