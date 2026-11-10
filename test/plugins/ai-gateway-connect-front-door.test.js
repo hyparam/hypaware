@@ -148,6 +148,30 @@ test('an intercepted tunnel is decrypted and served by the existing HTTP server'
   assert.equal(rig.seen[0].connectHost, HOST)
 })
 
+// The leaf follows the CONNECT authority, the name the intercept decision was
+// made about, not the ClientHello's server name. A client that verifies a
+// different name rejects the leaf, and nothing reaches the HTTP server.
+test('the intercept leaf names the CONNECT authority, not the SNI name', async (t) => {
+  const rig = await bootFrontDoor({ shouldIntercept: (host) => host === HOST })
+  t.after(() => rig.cleanup())
+
+  const { socket, statusLine } = await connectTunnel(rig.port, `${HOST}:443`)
+  assert.match(statusLine, /^HTTP\/1\.1 200 /)
+
+  /** @type {any} */
+  const err = await new Promise((resolve) => {
+    const secure = tls.connect(
+      { socket, servername: 'other.example', ca: [rig.ca.certPem], ALPNProtocols: ['http/1.1'] },
+      () => resolve(new Error('handshake accepted a leaf for the wrong name'))
+    )
+    secure.on('error', resolve)
+  })
+
+  assert.equal(err.code, 'ERR_TLS_CERT_ALTNAME_INVALID')
+  assert.equal(err.cert.subject.CN, HOST)
+  assert.equal(rig.seen.length, 0)
+})
+
 // Everything we are not deliberately capturing has to stay opaque: a proxy sees
 // all client egress, not just model traffic.
 // @ref LLP 0234#blind-tunnel-by-default [tests]
