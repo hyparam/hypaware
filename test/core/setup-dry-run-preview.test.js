@@ -34,7 +34,9 @@ function runCli(home, argv, extra = {}) {
   // USERPROFILE on win32 (hypHomeFromEnv falls back to os.homedir() when
   // HYP_HOME is unset), so setting only HOME would leak to the real profile
   // on Windows and pick up the user's actual ~/.hyp.
-  const env = { ...process.env, HOME: home, USERPROFILE: home, ...extra }
+  // Bun keeps a transpiler cache under HOME unless told not to; that is the
+  // runtime's write, not the preview's.
+  const env = { ...process.env, HOME: home, USERPROFILE: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', ...extra }
   for (const key of ['HYP_HOME', 'HYP_CONFIG', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME']) {
     if (!(key in extra)) delete env[key]
   }

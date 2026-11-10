@@ -159,6 +159,8 @@ export async function discoverBundledPlugins(opts = {}) {
     dirEntries = (await fsp.readdir(workspaceDir, { withFileTypes: true }))
       .filter((d) => d.isDirectory())
       .map((d) => path.join(workspaceDir, d.name))
+      // readdir order is the runtime's and filesystem's choice; catalog order must not be.
+      .sort()
   } catch (err) {
     if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
       return { loaded: [], failed: [], excluded: [], unknown: [] }

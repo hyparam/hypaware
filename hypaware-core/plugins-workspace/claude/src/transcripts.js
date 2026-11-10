@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
-import { canonicalJson, isPlainObject, sha256Hex, stringValue, stripVolatileBlockFields } from 'hypaware/core/util'
+import { canonicalJson, compareStrings, isPlainObject, sha256Hex, stringValue, stripVolatileBlockFields } from 'hypaware/core/util'
 
 /**
  * Claude Code JSONL transcript reader. The Claude CLI writes one
@@ -287,7 +287,8 @@ function collectNestedProjectsDirs(dir, depth, out) {
   } catch {
     return
   }
-  for (const entry of entries) {
+  // Sorted, so which home answers first does not depend on readdir order.
+  for (const entry of entries.sort(byName)) {
     if (!entry.isDirectory()) continue
     const child = path.join(dir, entry.name)
     if (entry.name === '.claude') {
@@ -955,7 +956,7 @@ function* walkJsonlFiles(dir, sessionId) {
   } catch {
     return
   }
-  for (const entry of entries) {
+  for (const entry of entries.sort(byName)) {
     const filePath = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       // A directory named for the session holds per-session files the
@@ -966,6 +967,11 @@ function* walkJsonlFiles(dir, sessionId) {
       yield filePath
     }
   }
+}
+
+/** @param {fs.Dirent} a @param {fs.Dirent} b */
+function byName(a, b) {
+  return compareStrings(a.name, b.name)
 }
 
 /**

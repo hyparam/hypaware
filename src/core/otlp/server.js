@@ -525,9 +525,12 @@ function respondJsonError(res, httpStatus, code, message) {
  */
 export function listenAndResolve(server, host, port, name = 'hypaware') {
   return new Promise((resolve, reject) => {
-    /** @param {Error} err */
+    /** @param {Error & { port?: number, address?: string }} err */
     function onError(err) {
       server.off('listening', onListening)
+      // Not every runtime's listen error says which address it was for.
+      err.port ??= port
+      err.address ??= host
       reject(err)
     }
     function onListening() {

@@ -607,7 +607,7 @@ test('s3 BlobStore refuses a body shape it cannot read rather than calling it em
   // cause, because a consumer forwards the message alone: format-iceberg's
   // `describeError` returns `err.message`.
   for (const [what, body, reason] of /** @type {Array<[string, any, RegExp]>} */ ([
-    ['a callable getReader that is not a stream', notAStream, /must be an instance of ReadableStream/],
+    ['a callable getReader that is not a stream', notAStream, /must be .*ReadableStream/],
     ['a locked ReadableStream', lockedWebStream(), /locked/],
   ])) {
     const refused = createS3BlobStore({

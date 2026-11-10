@@ -203,13 +203,9 @@ export function attachConnectFrontDoor(opts) {
         // offered, and the HTTP/1.1 server on the other side of this socket
         // cannot parse an h2 frame: the session would hang rather than fail.
         ALPNProtocols: ['http/1.1'],
-        SNICallback: (servername, cb) => {
-          try {
-            cb(null, secureContextFor(servername || target.host))
-          } catch (err) {
-            cb(/** @type {Error} */ (err))
-          }
-        },
+        // The leaf is for the authority we decided to intercept, not whatever
+        // name the ClientHello carries.
+        secureContext: secureContextFor(target.host),
       })
     } catch (err) {
       log?.warn?.('aigw.connect_terminate_failed', {

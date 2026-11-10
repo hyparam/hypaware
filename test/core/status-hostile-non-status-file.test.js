@@ -322,9 +322,9 @@ test('a long rollback etag is clamped in the --json message but whole in the --j
 // while the Attention line above it cleaned the same message (issue #2430).
 test('a hostile local config cannot drive the terminal through the verbose diagnostics block', async () => {
   const hypHome = await makeHome()
-  // A bare token first, so the parse error is the spelling that quotes the
-  // input back rather than one that only reports a position.
-  await fs.writeFile(defaultConfigPath(hypHome), `x${ERASE_LINE}\n  overall:  healthy`)
+  // The control byte first, so it is the token the parse error quotes back
+  // on every engine, rather than one that only reports a position.
+  await fs.writeFile(defaultConfigPath(hypHome), `${ERASE_LINE}\n  overall:  healthy`)
 
   const { report, text } = await render(hypHome)
   const diag = report.diagnostics.find((d) => d.kind === 'config_unreadable')
