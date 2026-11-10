@@ -71,6 +71,15 @@ test('API refuses pending snapshots, scope changes, malformed identities and unb
   await assert.rejects(read(async () => new Response('PRIVATE invalid JSON')), /cloud_api_json/)
 })
 
+test('command-line refusals keep the code first and name the next step; health-only codes stay bare', () => {
+  const metadata = new CursorCloudError('cloud_metadata_unavailable')
+  assert.equal(metadata.code, 'cloud_metadata_unavailable')
+  assert.match(metadata.message, /^cloud_metadata_unavailable - no Cursor Cloud agent found on this machine\..*'hyp attach cursor'\.$/)
+  assert.match(new CursorCloudError('cloud_connect_first').message, /^cloud_connect_first - .*'hyp cursor-cloud connect'/)
+  assert.equal(new CursorCloudError('cloud_api_http_401').message, 'cloud_api_http_401')
+  assert.equal(new CursorCloudError('toString').message, 'toString')
+})
+
 test('hook projection separates edits and tools, suppresses main text, and redacts structured thought and secret fields', () => {
   const envelope = event => ({ delivery_id: randomUUID(), observed_at: new Date().toISOString(), event: { workspace_roots: ['/synthetic'], conversation_id: agentId, ...event } })
   assert.equal(projectCursorCloudHook(envelope({ hook_event_name: 'beforeSubmitPrompt', prompt: 'FIRST_PROMPT' }), connection), undefined)

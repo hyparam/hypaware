@@ -88,9 +88,13 @@ outputs, explicit failures and file edits. Edit rows are observations containing
 the supplied old/new strings. Repeated commands keep distinct native tool IDs.
 Rows use `client_name = cursor` and `entrypoint = cloud`.
 
-Only the connected workspace and non-excluded sessions are admitted. Edits and
-file observations also enforce canonical path containment and stricter file
-policy. Ordinary command output retains workspace policy; HypAware does not
+Privacy controls work as they do for the editor. A .hypignore that excludes
+the repository root stops `connect`, and stops capture if it appears later.
+`hyp session ignore` on the agent stops its capture, including its child
+agents. Edits and file reads outside the repository, or in a local-only folder
+of a repository that syncs, are not recorded at all. Rows from a local-only
+repository stay on the VM and never sync, so they are lost when the VM is
+discarded. Ordinary command output retains workspace policy; HypAware does not
 infer which arbitrary files a shell command might have read. API recovery is
 bounded to 2 MiB and 256 messages per snapshot, with an eight-second deadline;
 larger conversations report incomplete capture. API failure retries without

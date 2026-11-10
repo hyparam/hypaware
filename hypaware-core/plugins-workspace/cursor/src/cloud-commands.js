@@ -173,7 +173,7 @@ export function registerCursorCloudCommands(ctx) {
       if (!connection) throw new CursorCloudError('cloud_connect_first')
       const result = await startCursorCloudDaemon(connection, command.env, cursorListenPort(ctx.config))
       ctx.log.info('cursor.cloud.started', { component: 'plugin.cursor', operation: 'cloud.start', status: 'ok', ...result })
-      command.stdout.write('Cursor Cloud collector listening. Use hyp status for recovery health, hyp sync --yes to verify delivery, and hyp daemon stop to stop.\n')
+      command.stdout.write("Cursor Cloud collector is running. Check health with 'hyp status --json', deliver with 'hyp sync --yes', and stop with 'hyp cursor-cloud disconnect' then 'hyp daemon stop'.\n")
       return 0
     },
   })

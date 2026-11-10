@@ -4,10 +4,31 @@ import { isPlainObject } from '../../../../src/core/util/json_util.js'
 
 /** @import { CursorCloudConnection, CursorCloudConversation } from '../../../../hypaware-core/plugins-workspace/cursor/src/types.js' */
 
+// The next step for each failure a person meets at the command line. The code
+// stays first in the message, so it can still be searched for and matched.
+/** @type {Readonly<Record<string, string>>} */
+const CLOUD_HINTS = Object.freeze({
+  cloud_requires_managed_linux_vm: "Cursor Cloud capture runs only inside a Cursor Cloud agent's Linux VM. For the Cursor editor or CLI use 'hyp attach cursor'.",
+  cloud_metadata_unavailable: "no Cursor Cloud agent found on this machine. Run this inside a Cursor Cloud agent's VM. For the Cursor editor or CLI use 'hyp attach cursor'.",
+  cloud_metadata_scope: "this VM has more than one repository, or the agent changed since connect. Cloud capture covers one agent and one repository; run 'hyp cursor-cloud disconnect', then 'hyp cursor-cloud connect'.",
+  cloud_api_key_missing_or_invalid: 'CURSOR_API_KEY is not set in this shell. Set it as a Runtime Secret for this Cursor environment and run this again.',
+  cloud_enable_cursor_with_hyp_setup_first: "Cursor is not set up. Run 'hyp setup --source cursor' first (see the Start script in the Cursor guide).",
+  cloud_connect_first: "no agent is connected. Run 'hyp cursor-cloud connect' from the repository root first.",
+  cloud_connection_invalid: "the saved connection could not be read. Run 'hyp cursor-cloud disconnect', then 'hyp cursor-cloud connect'.",
+  cloud_workspace_ignored: 'this folder has a .hypignore that excludes it, so it cannot be connected.',
+  cloud_session_ignored: "this agent's session is ignored (hyp session ignore), so it cannot be connected.",
+  cloud_listener_conflict: "another HypAware collector is already running here for a different agent or folder. Stop it with 'hyp daemon stop', then run 'hyp cursor-cloud start' again.",
+  cloud_collector_starting_try_again: 'the collector is still starting. Try again in a few seconds.',
+  cloud_daemon_start_failed: "the collector exited while starting. Run 'hyp status' for the reason.",
+  cloud_daemon_start_timeout: "the collector did not become ready in time. Run 'hyp status' for the reason, then 'hyp cursor-cloud start' again.",
+  cloud_hooks_scope: "this repository's .cursor/hooks.json is not a plain file inside the repository, so HypAware will not change it.",
+  cloud_hooks_cleanup_failed: "capture is revoked, but HypAware's hooks could not be removed from .cursor/hooks.json. Remove the entries marked _hypaware by hand.",
+})
+
 export class CursorCloudError extends Error {
   /** @param {string} code */
   constructor(code) {
-    super(code)
+    super(Object.hasOwn(CLOUD_HINTS, code) ? code + ' - ' + CLOUD_HINTS[code] : code)
     this.code = code
   }
 }
