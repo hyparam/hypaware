@@ -14,6 +14,8 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `claude` | Claude Code prompts, responses, tool calls and results, system prompts, tool definitions, and working directory where available |
 | `claude-desktop` | Claude Desktop conversations imported from local transcripts on macOS |
 | `codex` | Codex CLI and Desktop conversations imported from their shared local session files |
+| `codex-cloud` | Codex Cloud coding chats read from OpenAI's service with your existing file-backed ChatGPT login, held in memory only: user and assistant text, command calls and their outputs, and MCP calls and results; no reasoning content |
+| `chatgpt-work` | ChatGPT Work web and mobile conversations, read the same way as `codex-cloud`; they can include everyday conversations that are not about coding. Off unless you choose it |
 | `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools |
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
 | `pi` | Pi conversations from its managed extension and local session files |
@@ -28,6 +30,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `copilot` | VS Code Copilot completed spans from its local databases, for sessions with a verified local working directory |
 | `nanoclaw` | NanoClaw Claude transcripts read from an explicitly configured local installation |
 | `langgraph` | LangGraph model, tool, and graph callbacks from your application, with its working directory and Git context |
+| `ollama` | Ollama CLI and SDK chat and generate requests sent through the local capture route: system, user, and assistant text and the new response's token usage. Image bytes are omitted, and an exchange with thinking or tool calls is not saved |
 | `raw-anthropic`, `raw-openai` | API requests and responses routed through the local gateway |
 | `otel` | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener |
 | `github` | Structural repository activity such as issue, pull request, commit, file, review, and comment metadata; content remains on GitHub |
@@ -185,8 +188,10 @@ recorded a cwd for, and scopes a messaging-channel session (Telegram, Discord, S
 WhatsApp, Signal, email) under a derived `~/.hermes/channels/<source>` path
 instead; an interactive Hermes session with no recorded cwd has no scope to
 match and is recorded unconditionally. The `raw-anthropic` / `raw-openai`
-proxy and OTEL sources never supply one, so directory markings are a no-op
-for them.
+proxy, OTEL, and Ollama sources never supply one, so directory markings are a no-op
+for them. Codex Cloud and ChatGPT Work chats carry a path on OpenAI's machine,
+not yours, so local markings and `.hypignore` never classify them either;
+`hyp session ignore` and export settings still apply.
 
 > **Caution:** **A session is classed by its own directory, not by what it reads.**
 > Local SQL and search normally hide local-only rows from a caller that can
