@@ -97,7 +97,7 @@
     "hyparquet-compressors": "1.1.3",
     "hysnappy": "1.1.1",
     "icebird": "0.9.8",
-    "squirreling": "0.17.5"
+    "squirreling": "0.17.6"
   },
   "optionalDependencies": {
     "hyparquet-writer": "0.18.0",
