@@ -63,8 +63,8 @@ test('agent guide reuses detection, filters hidden/platform rows and preserves e
   assert.equal(await writeSetupGuide(f.ctx, { catalog: catalog(), platform: 'linux' }), 0)
   assert.equal(f.stderr(), '')
   const guide = f.stdout()
-  assert.match(guide, /claude \(detected\)\n    Disclosure for claude/)
-  assert.match(guide, /codex\n    Disclosure for codex/)
+  assert.match(guide, /    claude \(detected\)\n      Disclosure for claude/)
+  assert.match(guide, /    codex\n      Disclosure for codex/)
   const [preflight, flow] = guide.split('Setup flow\n')
   const [questions, commands] = flow.split('4. Configure recording for the selected apps.')
   assert.doesNotMatch(preflight, /run hyp status|Existing local config:/)
@@ -168,7 +168,7 @@ test('guide explains human handoffs and verification', async (t) => {
     'existing sessions will be imported automatically',
     'Setup handles the daemon, client attachment, skills, and history imports.',
     'hyp sync --dry-run', '--yes cannot bypass that review',
-    'Upload now (recommended)', 'Wait until midnight and run a security review',
+    'Upload now (recommended)', 'Wait until <deadline> and run a security review',
     'A review does not pause or extend it',
     'hyp query overview --json',
     'rerun the setup command from step 4 with --github --force --no-backfill',
@@ -177,6 +177,9 @@ test('guide explains human handoffs and verification', async (t) => {
     'Never ask the person to paste passwords or access tokens',
     'read and write access to all your repos', 'hyp status --json',
     'config.valid', 'daemon.running', 'client_attach', 'Setup exit 0 alone does not prove',
+    'If an existing app is local-only, offer Record everything (default) / Customize instead',
+    'Pass no --sync-client, --local-only-client or --new-folders flags',
+    'On macOS, setup may open a certificate or password dialog that only the person can answer',
   ]) assert.ok(f.stdout().includes(instruction), instruction)
   assert.doesNotMatch(f.stdout(), /Suggest a new skill|Recommend a new skill|hyp ask/)
 })

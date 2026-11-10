@@ -46,7 +46,9 @@ when cloud sharing is available, "Sync all selected apps?" with options
 "Sync all selected apps / Customize". The first skips the individual picker;
 Customize asks "What do you want to sync?" as a separate multi-select over
 the collected apps. Default to Customize when an existing app is local-only,
-otherwise to syncing all selected apps. Apps omitted from the sync selection
+otherwise to syncing all selected apps. In that case the recording-defaults
+offer is "Record everything", naming the local-only apps as staying local, and
+its accept passes no sharing flags. Apps omitted from the sync selection
 remain recorded locally; organization-required sources cannot be deselected.
 Existing local-only choices remain defaults. Tool option limits are handled
 by successive groups, preserving answers, not by replacing the picker with
@@ -63,7 +65,8 @@ Agent setup offers the same applicable choices as the attended wizard and
 reuses answers already given. It offers detected defaults or customization,
 local versus cloud collection, per-client sharing, new-folder review policy,
 optional history import, GitHub collection, the first-sync review/send-now
-offer, and the closing skill recommendation. Storage and retention remain
+offer. It does not repeat the terminal's closing skill recommendation
+(`hyp ask`). Storage and retention remain
 explained defaults, with 120 days local and 90 days cloud unless overridden.
 Cloud sync is the recommended choice, presented before local only; examples
 use cloud retention and explicitly require the separate enrollment step.

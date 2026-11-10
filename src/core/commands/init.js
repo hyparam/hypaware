@@ -248,7 +248,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
         '  See full status: show the current status, then stop. Quit: change nothing.',
         '  Reconfigure: continue below using existing choices as defaults, changing only requested settings.',
       ] : [report && !report.configValid
-        ? 'The existing config is invalid. Resolve the reported configuration problem before installing.'
+        ? 'The existing config is invalid. Run hyp status to see the configuration problem and resolve it before installing.'
         : 'Setup is not complete. Start with question 1.']),
       '',
       'Setup flow',
@@ -288,16 +288,18 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '  With detected or configured defaults, offer:',
       '    Record everything (default) / Customize',
       '    If enrolled and sharing is available: Record and sync everything (default) / Customize',
+      '    If an existing app is local-only, offer Record everything (default) / Customize instead, naming the local-only apps as staying local.',
       '    Explain: Configures <selected apps> to record through HypAware.',
       '',
-      '  Record everything:',
-      '    Keep the existing folder preference, or Sync it automatically for a new setup. Import optional history.',
+      '  Record everything (or Record and sync everything):',
+      '    Pass no --sync-client, --local-only-client or --new-folders flags, so existing sharing choices stay as they are.',
+      '    For cloud sync, keep the existing folder preference, or Sync it automatically for a new setup. Import optional history.',
       '    Explain these choices, skip the customization questions, and proceed to installation.',
       '',
       '  Customize (or no defaults):',
       '    Ask: What do you want to collect?',
       '    Use a multi-select question with the apps below as options. This answer chooses recording only.',
-      ...rows.map((row) => `  ${row.label}${detected.has(row.id) ? ' (detected)' : ''}${row.summary ? `\n    ${row.summary}` : ''}`),
+      ...rows.map((row) => `    ${row.label}${detected.has(row.id) ? ' (detected)' : ''}${row.summary ? `\n      ${row.summary}` : ''}`),
       '',
       '  Selection rules:',
       '    New setup: preselect detected apps; offer apps requiring separate setup unchecked.',
@@ -339,6 +341,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '  If a config already exists, including one created by cloud login, add --force. Setup backs it up and preserves enrollment and custom settings.',
       '  If optional history import was deferred, add --no-backfill. Automatic recovery imports still run.',
       '  Setup handles the daemon, client attachment, skills, and history imports. Do not repeat those steps with separate commands.',
+      '  On macOS, setup may open a certificate or password dialog that only the person can answer; say so, wait, and report any attach failure.',
       '  Verify the result in step 6 before reporting setup complete.',
       '',
       '5. If GitHub collection is not already configured, ask: Connect GitHub?',
@@ -361,10 +364,10 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '7. For cloud sync, finish by asking: When would you like to upload?',
       '  Show hyp sync --dry-run, then offer:',
       '    Upload now (recommended): run hyp sync in a terminal so the person can confirm the plan; --yes cannot bypass that review.',
-      '    Wait until midnight: leave the scheduled first upload in place.',
-      '    Wait until midnight and run a security review: review the recorded history for sensitive content now, keeping the scheduled upload.',
-      '  Use the actual first-sync deadline from status in the waiting options. A review does not pause or extend it.',
-      '  If no first-sync hold is active, explain the current sync state instead of offering a midnight deadline.',
+      '    Wait until <deadline>: leave the scheduled first upload in place.',
+      '    Wait until <deadline> and run a security review: review the recorded history for sensitive content now, keeping the scheduled upload.',
+      '  Use the actual first-sync deadline from status as <deadline>. A review does not pause or extend it.',
+      '  If no first-sync hold is active, explain the current sync state instead of offering a deadline.',
     ]
     const presets = ctx.initPresets.list()
     if (presets.length) {
@@ -490,7 +493,8 @@ function parseInitFlags(argv) {
   flags.localOnlyClients = /** @type {string[] | undefined} */ (parsed.params['local-only-client'])
   flags.newFolders = /** @type {'ask' | 'sync' | undefined} */ (parsed.params['new-folders'])
   const localOnly = new Set(flags.localOnlyClients)
-  if (flags.syncClients?.some(name => localOnly.has(name))) return { flags, error: 'a client cannot be both --sync-client and --local-only-client' }
+  const both = flags.syncClients?.find(name => localOnly.has(name))
+  if (both) return { flags, error: `${both} is in both --sync-client and --local-only-client; pick one` }
   flags.force = p.force
   flags.clients = /** @type {InitFlags['clients']} */ ([...new Set(p.client ?? [])])
   flags.sources = /** @type {InitFlags['sources']} */ ([...new Set(p.source ?? [])])
