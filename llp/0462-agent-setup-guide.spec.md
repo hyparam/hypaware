@@ -40,6 +40,25 @@ local setup; the guide states this and names `hyp leave`.
 
 ## Choice parity {#parity}
 
+The agent uses its multiple-choice question tool, one question at a time.
+Customize first asks "What do you want to collect?" as a multi-select, then,
+when cloud sharing is available, "Sync all selected apps?" with options
+"Sync all selected apps / Customize". The first skips the individual picker;
+Customize asks "What do you want to sync?" as a separate multi-select over
+the collected apps. Default to Customize when an existing app is local-only,
+otherwise to syncing all selected apps. Apps omitted from the sync selection
+remain recorded locally; organization-required sources cannot be deselected.
+Existing local-only choices remain defaults. Tool option limits are handled
+by successive groups, preserving answers, not by replacing the picker with
+a table and a free-text request. Without a question tool, use numbered choices.
+This agent flow separates the choices currently combined by the terminal picker.
+
+The execution step uses normal source-based `hyp setup`, including for
+reconfiguration and after cloud login. LLP 0593 extends its carry-forward
+behavior so the agent can preserve settings while setup runs its own daemon,
+attachment, skills, and history-import finale. The guide must not reconstruct
+that finale with separate commands after a `--from-file` write.
+
 Agent setup offers the same applicable choices as the attended wizard and
 reuses answers already given. It offers detected defaults or customization,
 local versus cloud collection, per-client sharing, new-folder review policy,
@@ -98,7 +117,27 @@ URL while the same command waits. Headless machines use the respective login
 command's `--no-browser` flag. If the harness cannot keep a command running,
 the agent gives it to the person and waits for their result before starting
 another sign-in. Login's existing first-sync review remains authoritative.
-Folder and client privacy choices use existing `hyp privacy` commands.
+Folder and client privacy choices are passed to unattended setup as described below.
+
+## Unattended privacy flags {#privacy-flags}
+
+`hyp setup --sync-client <source>` and `--local-only-client <source>` are
+repeatable explicit choices over the existing client policy store.
+`--new-folders ask|sync` writes the existing new-folder preference. Omitted
+flags preserve standing preferences. A source cannot appear in both lists;
+unknown source ids and attempts to opt out a team-managed source are refused.
+The flags also work with `--from-file`; presets refuse them rather than
+silently dropping choices.
+
+Validate requested policies before configuration writes, preserving unreadable
+stores. Apply after a successful config commit and before attachment, imports,
+or daemon installation. Dry runs report the action without writing policy.
+Re-read client entries at commit and preserve unrelated opt-outs. This is
+ordered saving, not a transaction across config and policy files: a failed
+policy write can leave config saved, but stops the setup finale. Changes are
+future-only and do not change folder classifications or first-sync holds.
+Use the same stores as guided setup and the privacy commands, with one catalog
+resolution and bounded passes over requested sources and existing entries.
 
 ## Observability and performance {#verification}
 

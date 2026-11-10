@@ -9,6 +9,7 @@
 **Extended-by:** LLP 0277 (a config that records no pick answer seeds like no config at all; #seed-from-config's "no config" carve-out is keyed to the pick answer, not the file)
 **Related:** LLP 0129 (the returning gate that routes a reconfigure), LLP 0137 (retention is never asked; the pathway defaults it), LLP 0011 (detection seeds, never forces), LLP 0130 (manifest-sourced picker rows), LLP 0031 (layered config), LLP 0135 (wizard orchestration), LLP 0132 (managed local additions)
 **Extended-by:** LLP 0474 (selected Ollama upstream preservation required by HYP-71)
+**Extended-by:** LLP 0593 (flag-driven setup now uses the carry-forward merge; presets and from-file remain unchanged)
 
 > `hyp init` on a configured machine regenerates the local config from
 > detection plus pathway defaults, blind to what the machine already

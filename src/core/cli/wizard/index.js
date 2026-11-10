@@ -153,6 +153,12 @@ async function runGuardedInitWizard(opts, guard) {
   let lockedResolved = true
   let managed = false
   let gateShown = false
+  if (!interactive) {
+    // @ref LLP 0593#preservation [implements]: an unattended run after login must not compose team-owned sources into the local layer
+    const resolved = await computeLockedSafe(catalog, opts)
+    locked = resolved.lockedSources
+    lockedResolved = resolved.resolved
+  }
 
   /**
    * Run the returning gate and absorb its terminal choices. Returns the
@@ -888,6 +894,11 @@ async function runGuardedInitWizard(opts, guard) {
     }
     // Past this line a cancel is a cancel over a machine that changed.
     if (!dryRun) landedConfigPath = picked.configPath
+  }
+
+  if (opts.applyPrivacy) {
+    const exitCode = await opts.applyPrivacy(dryRun)
+    if (exitCode !== 0) return { exitCode }
   }
 
   // @ref LLP 0396#combined-selection [implements]: no opt-out is cleared until the selection questions and the config write succeed

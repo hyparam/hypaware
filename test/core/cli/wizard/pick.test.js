@@ -75,6 +75,56 @@ async function mkTmp() {
   return temporaryDirectory('hypaware-wizard-pick-')
 }
 
+test('unattended reconfiguration preserves custom settings and replaces the recording selection', async () => {
+  const tmp = await mkTmp()
+  const env = hermeticEnv(tmp)
+  const catalog = await realCatalog()
+  const opts = { stdout: makeBuf(), stderr: makeBuf(), env, catalog }
+  const initial = await runWizardPick(/** @type {any} */ ({ ...opts,
+    picks: { sources: ['otel', 'codex'], exportChoice: 'local-parquet', retentionDays: 17 },
+  }))
+  const original = JSON.parse(await fs.readFile(initial.configPath, 'utf8'))
+  original.auto_update = false
+  original.query.remotes = { prod: { url: 'https://example.com' } }
+  original.plugins.find(p => p.name === '@hypaware/otel').config = { listen_port: 24318 }
+  original.sinks.local.schedule = '0 3 * * *'
+  await fs.writeFile(initial.configPath, JSON.stringify(original))
+  const picks = { sources: ['otel'], exportChoice: 'keep-local', retentionDays: 90 }
+  const refused = await runWizardPick(/** @type {any} */ ({ ...opts, picks }))
+  assert.notEqual(refused.exitCode, 0)
+  assert.deepEqual(JSON.parse(await fs.readFile(initial.configPath, 'utf8')), original)
+  const result = await runWizardPick(/** @type {any} */ ({ ...opts, picks, force: true }))
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(result.sourcesPicked, ['otel'])
+  assert.equal(result.retentionDays, 17)
+  assert.equal(result.exportPicked, 'local-parquet')
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(written.auto_update, false)
+  assert.deepEqual(written.query.remotes, original.query.remotes)
+  assert.deepEqual(written.sinks.local, original.sinks.local)
+  assert.equal(written.plugins.find(p => p.name === '@hypaware/otel').config.listen_port, 24318)
+  assert.ok(!written.plugins.some(p => p.name === '@hypaware/codex'))
+  const override = await runWizardPick(/** @type {any} */ ({ ...opts, force: true, exportOrigin: 'user',
+    picks: { ...picks, retentionDays: 31, retentionExplicit: true },
+  }))
+  assert.equal(override.retentionDays, 31)
+  assert.equal(override.exportPicked, 'keep-local')
+})
+
+test('unattended first setup preserves a remote-only config and composes the default export', async () => {
+  const tmp = await mkTmp()
+  const remotes = { prod: { url: 'https://example.com' } }
+  await seedLocalConfig(tmp, { version: 2, query: { remotes } })
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog: await realCatalog(), force: true,
+    picks: { sources: ['otel'], exportChoice: 'local-parquet', retentionDays: 90 },
+  }))
+  assert.equal(result.exitCode, 0)
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.deepEqual(written.query.remotes, remotes)
+  assert.ok(written.sinks.local)
+})
+
 test('unattended source-based Ollama add/repeat preserves unrelated config, custom upstream and recording false', async () => {
   const tmp = await mkTmp()
   const env = hermeticEnv(tmp)
