@@ -4,7 +4,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
-import { Attr, getActiveSpan } from '../observability/index.js'
+import { Attr, getActiveSpan, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import {
   ClientSyncListUnreadableError,
@@ -592,6 +592,62 @@ export async function runPolicyClient(argv, ctx) {
   }
   ctx.stdout.write(`  to upload retained history too: hyp sync --history ${name}\n`)
   return 0
+}
+
+/**
+ * Validate setup's explicit privacy choices without writing. The returned
+ * action runs after config commit and before client attachment or backfill.
+ * @param {CommandRunContext} ctx
+ * @param {{ syncClients?: string[], localOnlyClients?: string[], newFolders?: FolderAskMode }} choices
+ * @returns {Promise<((dryRun: boolean) => Promise<number>) | null>}
+ * @ref LLP 0462#privacy-flags [implements]: omitted choices preserve policy; refusal and dry runs write nothing
+ */
+export async function prepareSetupPrivacy(ctx, choices) {
+  const sync = new Set(choices.syncClients ?? [])
+  const localOnly = new Set(choices.localOnlyClients ?? [])
+  const { catalog, layered, stateDir } = await resolveClientPolicyContext(ctx)
+  for (const name of new Set([...sync, ...localOnly])) {
+    if (!catalog.pickerDescriptors.has(name) && !catalog.clientDescriptors.has(name)) {
+      ctx.stderr.write(`hyp setup: unknown privacy client '${name}'\n`)
+      return null
+    }
+    if (localOnly.has(name) && layered && classifyClientProvenance(name, layered, catalog) === 'central') {
+      ctx.stderr.write(`hyp setup: '${name}' is set by your team and cannot be kept local-only\n`)
+      return null
+    }
+  }
+  try {
+    if (sync.size || localOnly.size) await readClientSyncEntries({ stateDir })
+    if (choices.newFolders !== undefined) await readFolderAskMode({ stateDir })
+  } catch (err) {
+    if (err instanceof ClientSyncListUnreadableError) reportUnreadableClientStore(ctx, err)
+    else if (err instanceof FolderAskUnreadableError) reportUnreadableFolderAsk(ctx, err)
+    else throw err
+    return null
+  }
+  return async dryRun => withSpan('wizard.privacy.commit', {
+    [Attr.COMPONENT]: 'wizard', [Attr.OPERATION]: 'wizard.privacy.commit',
+    dry_run: dryRun, sync_count: sync.size, local_only_count: localOnly.size,
+    ...(choices.newFolders ? { folder_mode: choices.newFolders } : {}),
+  }, async () => {
+    if (dryRun) {
+      ctx.stdout.write('(dry-run) Would apply the requested client-sharing and new-folder preferences\n')
+      return 0
+    }
+    // Re-read at commit so unrelated edits made during setup survive.
+    if (sync.size || localOnly.size) {
+      const entries = (await readClientSyncEntries({ stateDir })) ?? []
+      const next = entries.filter(entry => !sync.has(entry.source) && !localOnly.has(entry.source))
+      for (const source of localOnly) next.push({ source, class: 'local-only' })
+      await writeClientSyncEntries({ stateDir, entries: next })
+      ctx.stdout.write('Client-sharing preferences saved. Changes apply to future rows; exported rows are not recalled and retained history is not uploaded.\n')
+    }
+    if (choices.newFolders !== undefined) {
+      await writeFolderAskMode({ stateDir, mode: choices.newFolders })
+      ctx.stdout.write(`New folders: ${choices.newFolders}. Existing folder classifications are unchanged.\n`)
+    }
+    return 0
+  }, { component: 'wizard' })
 }
 
 const POLICY_FOLDERS_USAGE = 'hyp privacy folders [ask|sync] [--json]'

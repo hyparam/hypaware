@@ -32,9 +32,11 @@ management.
 
 For a fresh installation, use the [unattended setup example](CLI.md#install-hypaware).
 On an existing installation, interactive `hyp setup` is the usual reconfiguration
-path. An unattended replacement
-requires `--force` and backs up the previous local file; supply the complete
-set of choices, since it is a replacement rather than an incremental patch.
+path. An unattended run over an existing file
+requires `--force` and backs up the previous local file. Source flags start
+from the existing local configuration and keep unrelated settings and
+enrollment, but `--source` names the full recording selection, so supply every
+source to keep. A preset or `--from-file` replaces the whole file.
 
 To apply a complete configuration file you have prepared:
 

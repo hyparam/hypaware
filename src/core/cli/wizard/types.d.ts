@@ -832,6 +832,8 @@ export interface RunInitWizardOptions {
   picks?: PickerPicks
   exportOrigin?: PickerExportOrigin
   force?: boolean
+  /** Apply explicit unattended privacy choices after config commit, before capture starts. */
+  applyPrivacy?: (dryRun: boolean) => Promise<number>
   /** Threaded to the configure phase's `--print-commands` passthrough. */
   printCommands?: boolean
   /**

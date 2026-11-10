@@ -165,8 +165,9 @@ hyp privacy folders        # report which is in force
 This gates the question only. In either setting, folders you already
 marked keep their class, `.hypignore` files are unaffected, and nothing
 already local-only or ignored starts syncing. The setting is host-local
-and reversible, `hyp setup` asks for it in its own step, and `hyp status`
-names it on an enrolled host.
+and reversible, `hyp setup` asks for it in its own step (unattended:
+`hyp setup --new-folders ask|sync`), and `hyp status` names it on an enrolled
+host.
 
 Three caveats apply to both surfaces:
 
@@ -205,6 +206,8 @@ hyp privacy client codex local-only
 hyp privacy client codex sync
 ```
 
+Unattended setup takes the same choice as `--local-only-client codex` or
+`--sync-client codex`, each repeatable; omitted, the current choice stays.
 Organization-managed clients cannot be changed with this local control. Use
 [directory markings](#marking-directories) for project-level exclusions.
 Returning a client to `sync` affects future exports; previously withheld history

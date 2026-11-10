@@ -8,6 +8,7 @@ import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
 import { isHelpFlag } from '../cli/group_help.js'
 import { runInitWizard } from '../cli/wizard/index.js'
 import { enableGithubCollection } from '../cli/wizard/pick.js'
+import { FOLDER_ASK_OPTIONS, folderAskTitle } from '../cli/wizard/folder_ask.js'
 import { DEFAULT_RETENTION_DAYS, LOCAL_INSTALL_RETENTION_DAYS, orderPickerDescriptors, preflightLegacyProxyAttach, visiblePickerDescriptors } from '../cli/walkthrough.js'
 import { detectPickerSources } from '../cli/detect.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
@@ -20,6 +21,8 @@ import { runBackfillProvider } from './backfill.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
 import { runStatus } from './status.js'
 import { isTty } from '../cli/stdio.js'
+import { collectHypAwareStatus } from '../daemon/status.js'
+import { prepareSetupPrivacy } from './policy.js'
 
 /**
  * @import { CommandRunContext, HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
@@ -118,7 +121,7 @@ export async function runInit(argv, ctx) {
     }
     // A preset writes its own plugin list and runs no picker finale, so these
     // choices would be dropped while setup reports success.
-    const pickerOnly = presetArgv.find((t) => /^--(github|no-backfill)(=|$)/.test(t))
+    const pickerOnly = presetArgv.find((t) => /^--(github|no-backfill|sync-client|local-only-client|new-folders)(=|$)/.test(t))
     if (pickerOnly !== undefined) {
       ctx.stderr.write(`hyp setup: ${pickerOnly.split('=')[0]} is not supported with a preset; name choices with hyp setup --yes --source instead\n`)
       return 2
@@ -194,7 +197,7 @@ function renderSetupHelp(ctx) {
 /**
  * Read-only handoff to an agent; detection suggests choices, never selects them.
  * @param {CommandRunContext} ctx
- * @param {{ catalog?: PluginCatalog, platform?: NodeJS.Platform }} [opts] test seam for presence and platform gates
+ * @param {{ catalog?: PluginCatalog, platform?: NodeJS.Platform, collectStatus?: typeof collectHypAwareStatus }} [opts] test seam for presence, platform gates, and status
  * @ref LLP 0462#guide [implements]: a flagless pipe explains choices without installing
  */
 export async function writeSetupGuide(ctx, opts = {}) {
@@ -212,114 +215,159 @@ export async function writeSetupGuide(ctx, opts = {}) {
       .filter((row) => INIT_SOURCE_CHOICES.includes(/** @type {PickerSource} */ (row.id)))
     const detected = await detectPickerSources(catalog, ctx.env, ctx.cwd)
     const configPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(readObservabilityEnv(ctx.env).hypHome)
-    let existing = 'none'
+    let configExists = false
     try {
       await fs.access(configPath)
-      existing = configPath
+      configExists = true
     } catch (err) {
-      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') existing = `${configPath} (cannot read; inspect before proceeding)`
+      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
     }
-    const suggested = rows.filter((row) => detected.has(row.id) && !row.needsSetup)
-      .map((row) => `--source ${row.id}`).join(' ')
+    const report = configExists
+      ? await (opts.collectStatus ?? collectHypAwareStatus)({ env: ctx.env, ...(opts.platform ? { platform: opts.platform } : {}) })
+      : undefined
+    // @ref LLP 0281#returning-gate [implements]: only a valid config with a recorded pick answer is a returning setup
+    const configured = !!(report?.configExists && report.configValid && report.configRecordsAnswer)
     const lines = [
       'HypAware setup guide',
-      'Choose the options with the person, then run the setup command below.',
-      'Use hyp setup --guide to read this guide even on a terminal.',
-      'Offer every applicable setup choice below, including GitHub and the closing offers.',
-      'Reuse choices the person already made; do not silently skip optional offers.',
       '',
       'HypAware records AI sessions and telemetry into a local queryable history.',
-      `Existing local config: ${existing}`,
+      ...(configured ? [
+        'HypAware is already configured:',
+        JSON.stringify({
+          configured,
+          config_valid: report.configValid,
+          cloud: !!report.layered?.hasCentral,
+          clients: report.clients.filter(client => client.configured).map(client => client.name),
+          sources: report.sources.map(source => source.name),
+          github: report.activePlugins.includes('@hypaware/github'),
+          client_sync: report.clientSync,
+          folder_ask: report.usagePolicy?.folderAsk ?? null,
+        }, null, 2),
+        'Summarize the current choices above, then offer:',
+        '  Reconfigure / See full status / Quit (default).',
+        '  See full status: show the current status, then stop. Quit: change nothing.',
+        '  Reconfigure: continue below using existing choices as defaults, changing only requested settings.',
+      ] : [report && !report.configValid
+        ? 'The existing config is invalid. Run hyp status to see the configuration problem and resolve it before installing.'
+        : 'Setup is not complete. Start with question 1.']),
       '',
-      '1. Ask what to record. Detection is a hint, not consent or proof of a working CLI.',
-      ...rows.map((row) => `  ${row.label}${detected.has(row.id) ? ' (detected)' : ''}: --source ${row.id}${row.summary ? `\n    ${row.summary}` : ''}${row.needsSetup && row.configureCommand ? `\n    After selecting this source, run hyp ${row.configureCommand} and finish its human handoffs before continuing.` : ''}`),
-      `  Other source IDs: ${INIT_SOURCE_CHOICES.filter((id) => !rows.some((row) => row.id === id)).join(', ') || 'none'}`,
-      '  --source is repeatable. --client is an equivalent for client choices.',
-      '  --yes alone selects claude + otel, regardless of detection. Name choices explicitly.',
-      '  Offer the detected choices together as defaults, or let the person customize them.',
-      '  Separately ask: collect GitHub information from AI sessions (repositories, pull requests, and more)?',
-      '    Explain before asking: HypAware only needs read access, but GitHub authorization includes private repos and grants write scope because GitHub has no read-only option.',
-      '    If yes, add --github to the setup command. If no, omit it; --yes never opts into GitHub.',
+      'Setup flow',
+      'Follow this question tree one question at a time. Wait for the answer before choosing the next branch.',
+      'Use your multiple-choice question tool for every choice, including the returning-user menu. Use multi-select for app selections.',
+      'If the tool limits the number of options, split apps into successive groups and retain every answer. If no question tool is available, use numbered choices.',
+      'Show app names and short descriptions in questions; keep command flags in the execution step. Do not substitute a table and an open-ended request for changes.',
+      'Do not present all questions together. Reuse answers already given and skip questions that do not apply.',
+      'Run each chosen step and check its result before asking the next question.',
+      // @ref LLP 0462#handoffs [implements]: complete each sign-in before continuing the question tree
+      'For sign-ins, explain what is opening, keep the command running, and wait for its result.',
+      'If the browser does not open, share the printed URL. Never run sign-ins in parallel.',
+      'If you cannot keep the command running, hand it to the person and wait for their result.',
+      'Never ask the person to paste passwords or access tokens into chat.',
       '',
-      '2. Recommend cloud sync. Offer "Cloud sync (recommended)" and "Local only".',
-      '  Cloud sync makes recorded history available across machines and to the chosen team.',
-      '  Confirm the choice before enrollment; honor an existing local-only preference.',
-      '  Setup flags alone do not enroll or disconnect a machine. Complete cloud login in step 5 if chosen.',
-      '  Existing enrollment remains; inspect hyp status first.',
-      '  To disconnect an enrolled machine, ask first, then run hyp leave.',
-      '  For cloud sync, ask which clients/folders may leave the machine before login.',
-      '  hyp privacy client <name> local-only keeps that client local (team rules can lock it).',
-      '  hyp privacy client <name> sync allows that client to sync.',
-      '  hyp privacy set <path> local-only|ignore classifies existing folders.',
-      '  hyp privacy folders ask asks once about each new folder; sync is the default.',
-      '  hyp privacy folders sync lets unclassified new folders sync without asking.',
-      '  Ask whether new folders should sync automatically or be reviewed first, then apply that choice.',
+      '1. How do you want to collect agent logs?',
+      '  Sync to the cloud (default)',
+      '    One history that follows you across machines and harnesses, and can be shared with your team. You will be asked to sign in.',
+      '  Local only',
+      '    Everything stays on this machine. You can switch to sync later by re-running hyp setup.',
+      '  Wait for the answer. Do not ask a second confirmation of this choice.',
+      '  Sync to the cloud: run hyp remote login --browser and wait for it to finish before question 2.',
+      '    Keep --browser with piped stdin. On a headless machine, use hyp remote login --no-browser.',
+      '    If an org choice is required, ask and retry with --org <name>.',
+      '    Follow the printed first-sync privacy review instructions. Do not repeat a completed login later.',
+      '    If sign-in already completed during this setup, say "Already signed in - continuing." and continue to question 2.',
+      '    If sign-in fails or is cancelled, report the outcome and ask question 1 again with the same options.',
+      '    If enrollment succeeded but daemon installation failed, report the missing background service and continue to question 2.',
+      '  Local only, when not enrolled: continue to question 2 without another question.',
+      '  Local only, when enrolled: ask "This machine syncs to the cloud. Disconnect and go local-only?"',
+      '    Options: "Yes, disconnect" (default) / "No, stay connected".',
+      '    Yes, disconnect: run hyp leave, check the result, then continue to question 2.',
+      '    No, stay connected: keep enrollment and organization-required sources, then continue to question 2.',
+      '    If disconnection fails, report that the machine is still connected and ask question 1 again.',
       '',
-      '3. Explain local storage and choose overrides only if wanted.',
-      '  --export local-parquet: local cache plus scheduled Parquet files (default).',
-      '  --export keep-local: local query cache only. configure-later defers export.',
-      `  --retention-days <n>: unattended default ${DEFAULT_RETENTION_DAYS} days; interactive local default ${LOCAL_INSTALL_RETENTION_DAYS}.`,
-      '  The unattended run imports existing history for chosen clients within the retention window.',
-      '  Offer optional history import now or later; add --no-backfill for later.',
-      '    To import deferred history later, run hyp backfill <client>.',
-      '    This skips only optional one-time imports. Scheduled recovery still imports history for sweep-backed clients.',
-      '    For those clients, explain the automatic import instead of offering a choice that cannot stop it.',
-      `  Use --retention-days ${LOCAL_INSTALL_RETENTION_DAYS} for local setup or ${DEFAULT_RETENTION_DAYS} for cloud setup unless an override was chosen.`,
-      '  It installs a per-user background service, attaches clients, and installs their skills.',
+      '2. Set up recording',
+      '  With detected or configured defaults, offer:',
+      '    Record everything (default) / Customize',
+      '    If enrolled and sharing is available: Record and sync everything (default) / Customize',
+      '    If an existing app is local-only, offer Record everything (default) / Customize instead, naming the local-only apps as staying local.',
+      '    Explain: Configures <selected apps> to record through HypAware.',
       '',
-      '4. Run the agreed choices. First preview the same command with --dry-run.',
-      ...(suggested ? [`  Example for detected sources with cloud retention (confirm choices first):`, `  hyp setup ${suggested} --export local-parquet --retention-days ${DEFAULT_RETENTION_DAYS}`] : [
-        '  No sources detected. Ask which source to use; do not fall back to --yes.',
-        `  Command shape: hyp setup --source <chosen-id> --export local-parquet --retention-days ${DEFAULT_RETENTION_DAYS}`,
-      ]),
-      '  --force backs up and replaces local config; ask before using it.',
-      '    It also allows a temporary CLI if global installation fails.',
-      '  To add GitHub to an existing setup without recomposing its sources, use',
-      '    hyp setup --from-file <existing-config-path> --github --force (preview with --dry-run first).',
-      '    This preserves other settings and only writes config; restart an already-running daemon afterward.',
-      '  --no-daemon skips service installation. --bin <path> uses an existing durable hyp binary.',
-      '  Without --bin, setup may run npm install -g hypaware to establish a durable CLI.',
-      '  Explain agent approval prompts for install/service actions and wait for approval.',
-      '  A macOS certificate/password dialog requires the person; report any attach failure.',
+      '  Record everything (or Record and sync everything):',
+      '    Pass no --sync-client, --local-only-client or --new-folders flags, so existing sharing choices stay as they are.',
+      '    For cloud sync, keep the existing folder preference, or Sync it automatically for a new setup. Import optional history.',
+      '    Explain these choices, skip the customization questions, and proceed to installation.',
       '',
-      // @ref LLP 0462#handoffs [implements]: the agent opens selected sign-ins sequentially and waits for each outcome
-      '5. Open selected sign-ins one at a time: cloud first, then GitHub if enabled and requested.',
-      '  Explain which sign-in is opening. Keep its command running while the person signs in.',
-      '  Wait for the command to finish and check its result before starting the next sign-in.',
-      '  Never run sign-ins in parallel or leave one running while starting another.',
-      '  On failure, cancellation or timeout, resolve it or ask whether to skip before continuing.',
-      '  Cloud: when sync was chosen, run hyp remote login --browser to open the sign-in page.',
-      '    Keep --browser even with piped stdin so login does not try to read a static token.',
-      '    If the browser does not open, give the person the printed URL while this command waits.',
-      '    On a headless machine, use hyp remote login --no-browser and share its URL instead.',
-      '    If an org choice is required, ask and retry with --org <name>. Do not choose for them.',
-      '    Login enables forwarding; follow the printed first-sync privacy review instructions.',
-      '  GitHub: after setup with --github, check hyp github status; if already authenticated, do not log in again.',
-      '    Otherwise run hyp github login to open its authorization page after cloud sign-in finishes or is skipped.',
-      '    Give the person the printed device code and wait for the command to finish.',
-      '    If opening fails, share the printed URL; on a headless machine use hyp github login --no-browser.',
-      '    Check hyp github status after sign-in. If the daemon was started, run hyp daemon restart to load its credentials.',
-      '  Never ask the person to paste passwords or access tokens into chat.',
-      '  If the agent cannot keep a login command running, hand that command to the person',
-      '    and wait for their result before starting any other sign-in.',
+      '  Customize (or no defaults):',
+      '    Ask: What do you want to collect?',
+      '    Use a multi-select question with the apps below as options. This answer chooses recording only.',
+      ...rows.map((row) => `    ${row.label}${detected.has(row.id) ? ' (detected)' : ''}${row.summary ? `\n      ${row.summary}` : ''}`),
       '',
-      '6. Verify with hyp status --json, including after sign-in.',
+      '  Selection rules:',
+      '    New setup: preselect detected apps; offer apps requiring separate setup unchecked.',
+      '    Reconfiguration: preselect configured apps; offer newly detected apps unchecked.',
+      '    Preselect defaults when the question tool supports it; otherwise label the current selections explicitly.',
+      '    Organization-required sources stay selected and cannot be changed here.',
+      '',
+      '  After the collection answer, if enrolled and sharing is available, ask: Sync all selected apps?',
+      '    Options: Sync all selected apps / Customize.',
+      '    Name the selected apps. Default to Sync all selected apps unless an existing app is local-only; then default to Customize.',
+      '    Sync all selected apps: enable syncing for every selected app and skip the individual sync picker.',
+      '    Customize: ask: What do you want to sync?',
+      '    Use a separate multi-select question containing only the apps chosen for collection.',
+      '    Preselect apps that already sync; for newly selected apps, default to syncing. Preserve existing local-only defaults.',
+      '    Explain: Selected apps sync to the cloud. Unselected apps are still recorded locally. Selecting none keeps all optional apps local.',
+      '    Organization-required sources always sync; name them separately and do not offer them as editable choices.',
+      '    Skip this question for local-only setup or when no selected apps have an editable sync choice.',
+      '',
+      '  After cloud customization, ask about new projects, naming the selected apps:',
+      `    ${folderAskTitle([])}`,
+      ...FOLDER_ASK_OPTIONS.map((option) => `    ${option.label}: ${option.summary}`),
+      '  Default to the existing folder preference, or Sync it automatically if none is set. Skip this question for local-only setup.',
+      '',
+      '3. On a Customize run, ask: Import the <selected apps> history already on this machine (up to <retention days> days)?',
+      '  Yes - import it now (default): Includes your existing conversation history.',
+      '  No - skip for now: You can import later.',
+      '  Ask only for apps where importing history is optional. Accepting recording defaults already answers yes.',
+      '  For apps that import history automatically, explain that existing sessions will be imported automatically.',
+      '',
+      '4. Configure recording for the selected apps.',
+      ...rows.map((row) => `  ${row.label}: --source ${row.id}${row.needsSetup && row.configureCommand ? `\n    If selected, run hyp ${row.configureCommand} and finish its human handoffs before continuing.` : ''}`),
+      '  Run hyp setup --source <selected-id> [--source <another-id>] with the complete chosen recording selection.',
+      '  Include the agreed privacy choices in the setup command:',
+      '    --sync-client <source-id> allows that source to sync; repeat for each selected sharing choice.',
+      '    --local-only-client <source-id> keeps that source local; organization-required sources cannot be opted out.',
+      '    --new-folders ask or --new-folders sync applies the new-project answer. Omit it to preserve the existing preference.',
+      `  For a first setup, use --retention-days ${LOCAL_INSTALL_RETENTION_DAYS} for local setup or ${DEFAULT_RETENTION_DAYS} for cloud setup.`,
+      '  For reconfiguration, omit retention and export flags to keep existing choices.',
+      '  If a config already exists, including one created by cloud login, add --force. Setup backs it up and preserves enrollment and custom settings.',
+      '  If optional history import was deferred, add --no-backfill. Automatic recovery imports still run.',
+      '  Setup handles the daemon, client attachment, skills, and history imports. Do not repeat those steps with separate commands.',
+      '  On macOS, setup may open a certificate or password dialog that only the person can answer; say so, wait, and report any attach failure.',
+      '  Verify the result in step 6 before reporting setup complete.',
+      '',
+      '5. If GitHub collection is not already configured, ask: Connect GitHub?',
+      '  Yes, connect GitHub (default) / Not now.',
+      '  Pulls issues, pull requests, reviews, and commits for each repo you run an AI session in. HypAware only needs read access, but GitHub has no read-only option, so it will ask for read and write access to all your repos.',
+      '  If accepted, rerun the setup command from step 4 with --github --force --no-backfill.',
+      '  Check hyp github status. Skip login if already authenticated.',
+      '  Otherwise run hyp github login to open its authorization page; share the printed device code.',
+      '  On a headless machine, use hyp github login --no-browser.',
+      '  Check hyp github status afterward and run hyp daemon restart to load the configuration and credentials.',
+      '  If Not now was chosen, continue to step 6 without changing GitHub settings.',
+      '',
+      '6. Verify the completed setup with hyp status --json.',
       '  Check config.valid, daemon.running (unless --no-daemon), sources, and client_attach.',
       '  Check configured clients and attached where attachable; report errors or trust warnings.',
       '  Setup exit 0 alone does not prove daemon installation or healthy capture.',
       '  Start a new client session for newly installed skills/settings, then check capture.',
       '  Run hyp query overview --json and show a short first look at the recorded history; disclose incomplete results.',
       '',
-      '7. Offer the same closing steps as interactive setup.',
-      '  For cloud sync, offer a privacy review and sending now versus waiting for the first-sync deadline.',
-      '    Show hyp sync --dry-run before that choice. To end an active review window early, the person',
-      '    must run hyp sync in a terminal and confirm its plan; --yes cannot bypass that review.',
-      '    If they wait, state the deadline from status/login output. Do not imply waiting disables sync.',
-      '  When history exists and a recorded CLI client can launch, ask: Suggest a new skill?',
-      '    Explain that hyp ask scans recent history and starts an AI client in a separate folder.',
-      '    If accepted, run hyp ask in an interactive terminal so the person can choose among available clients.',
-      '    If the harness cannot host the interactive client, hand the command to the person.',
-      '    With no history yet, explain that this becomes available after recording sessions.',
+      '7. For cloud sync, finish by asking: When would you like to upload?',
+      '  Show hyp sync --dry-run, then offer:',
+      '    Upload now (recommended): run hyp sync in a terminal so the person can confirm the plan; --yes cannot bypass that review.',
+      '    Wait until <deadline>: leave the scheduled first upload in place.',
+      '    Wait until <deadline> and run a security review: review the recorded history for sensitive content now, keeping the scheduled upload.',
+      '  Use the actual first-sync deadline from status as <deadline>. A review does not pause or extend it.',
+      '  If no first-sync hold is active, explain the current sync state instead of offering a deadline.',
     ]
     const presets = ctx.initPresets.list()
     if (presets.length) {
@@ -421,6 +469,9 @@ function parseInitFlags(argv) {
       'dry-run': { type: 'boolean', default: false },
       github: { type: 'boolean', default: false },
       'no-backfill': { type: 'boolean', default: false },
+      'sync-client': { type: 'array', items: { type: 'string', enum: [...INIT_SOURCE_CHOICES] } },
+      'local-only-client': { type: 'array', items: { type: 'string', enum: [...INIT_SOURCE_CHOICES] } },
+      'new-folders': { type: 'string', enum: ['ask', 'sync'] },
       force: { type: 'boolean', default: false },
       client: { type: 'array', items: { type: 'string', enum: [...INIT_CLIENT_CHOICES] } },
       source: { type: 'array', items: { type: 'string', enum: [...INIT_SOURCE_CHOICES] } },
@@ -438,6 +489,12 @@ function parseInitFlags(argv) {
   flags.dryRun = p['dry-run']
   flags.github = p.github
   flags.noBackfill = p['no-backfill']
+  flags.syncClients = /** @type {string[] | undefined} */ (parsed.params['sync-client'])
+  flags.localOnlyClients = /** @type {string[] | undefined} */ (parsed.params['local-only-client'])
+  flags.newFolders = /** @type {'ask' | 'sync' | undefined} */ (parsed.params['new-folders'])
+  const localOnly = new Set(flags.localOnlyClients)
+  const both = flags.syncClients?.find(name => localOnly.has(name))
+  if (both) return { flags, error: `${both} is in both --sync-client and --local-only-client; pick one` }
   flags.force = p.force
   flags.clients = /** @type {InitFlags['clients']} */ ([...new Set(p.client ?? [])])
   flags.sources = /** @type {InitFlags['sources']} */ ([...new Set(p.source ?? [])])
@@ -510,12 +567,15 @@ export function resolveInitSources(flags) {
  * @ref LLP 0011#non-interactive-entry [implements]: flags / preset / --from-file path that bypasses the interactive TUI
  */
 async function runPickerInit(flags, ctx) {
+  const hasPrivacy = flags.newFolders !== undefined || !!flags.syncClients?.length || !!flags.localOnlyClients?.length
+  const applyPrivacy = hasPrivacy ? await prepareSetupPrivacy(ctx, flags) : undefined
+  if (applyPrivacy === null) return 1
   // --from-file short-circuits the picker entirely. The supplied
   // config is validated and written to the canonical location;
   // wizard.pick.start / wizard.pick.write_config / wizard.pick.finish
   // spans are still emitted so the smoke contract holds.
   if (flags.fromFile) {
-    return runInitFromFile(flags, ctx)
+    return runInitFromFile(flags, ctx, applyPrivacy)
   }
 
   // `--source`, `--client`, and the `--yes` default, in one place so the
@@ -551,6 +611,7 @@ async function runPickerInit(flags, ctx) {
     },
     exportOrigin,
     force: flags.force,
+    ...(applyPrivacy ? { applyPrivacy } : {}),
     backfill: buildPickerBackfillRunner(ctx, flags.noBackfill),
     finale: {
       skipDaemon: flags.noDaemon,
@@ -582,9 +643,10 @@ function writeGithubNextStep(ctx, dryRun) {
  *
  * @param {InitFlags} flags
  * @param {CommandRunContext} ctx
+ * @param {((dryRun: boolean) => Promise<number>) | undefined} applyPrivacy
  * @returns {Promise<number>}
  */
-async function runInitFromFile(flags, ctx) {
+async function runInitFromFile(flags, ctx, applyPrivacy) {
   const { withSpan, Attr } = await import('../observability/index.js')
   const { readObservabilityEnv } = await import('../observability/env.js')
   let raw
@@ -694,6 +756,10 @@ async function runInitFromFile(flags, ctx) {
   )
 
   ctx.stdout.write(dryRun ? `(dry-run) Would write ${targetPath}\n` : `✓ Wrote ${targetPath}\n`)
+  if (applyPrivacy) {
+    const code = await applyPrivacy(dryRun)
+    if (code !== 0) return code
+  }
   if (flags.github) writeGithubNextStep(ctx, dryRun)
   return 0
 }
@@ -710,6 +776,7 @@ export const INIT_FLAG_NAMES = new Set([
   '--no-daemon',
   '--dry-run',
   '--github', '--no-backfill',
+  '--sync-client', '--local-only-client', '--new-folders',
   '--client', '--source', '--export',
   '--retention-days', '--from-file',
   '--bin', '--force',

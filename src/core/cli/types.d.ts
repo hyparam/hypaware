@@ -343,6 +343,9 @@ export interface InitFlags {
   dryRun: boolean
   github?: boolean
   noBackfill?: boolean
+  syncClients?: string[]
+  localOnlyClients?: string[]
+  newFolders?: 'ask' | 'sync'
   clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'copilot' | 'pi' | 'droid' | 'grok' | 'ollama' | 'langgraph' | 'antigravity' | 'antigravity-desktop')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined

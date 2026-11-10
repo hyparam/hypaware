@@ -115,13 +115,9 @@ export async function resolvePickSeeding(opts) {
   const obsEnv = readObservabilityEnv(env)
   const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
 
-  // Read the local config for interactive reconfiguration and the narrow
-  // source-based Ollama add/repeat path. Other unattended source choices
-  // retain their existing fresh composition behavior; from-file bypasses this phase.
-  // @ref LLP 0474#setup [implements]: source-based Ollama add/repeat carries the existing install without running attended setup
-  const local = await readLocalConfig(configPath)
-  const existing = interactive || opts.picks?.sources.includes('ollama') || local?.plugins?.some(p => p.name === '@hypaware/ollama')
-    ? local : undefined
+  // Both entry paths edit the local layer; --from-file bypasses composition.
+  // @ref LLP 0594#preservation [implements]: scripted setup preserves enrollment and custom settings through the shared merge
+  const existing = await readLocalConfig(configPath)
   // A config on disk only makes this run a reconfigure when it records a
   // pick answer. `hyp remote add` before the first `hyp init` creates a
   // config that holds only `query.remotes`; reading a seed off that file
@@ -356,8 +352,10 @@ export async function runWizardPick(opts) {
   let exportOrigin = 'default'
 
   if (opts.picks) {
-    rawSources = existing ? /** @type {PickerSource[]} */ ([...new Set([...configuredPickerSources(existing, descriptors), ...opts.picks.sources])]) : opts.picks.sources
-    exportChoice = existing && (opts.exportOrigin ?? 'default') === 'default' ? configuredExportChoice(existing) : opts.picks.exportChoice
+    // @ref LLP 0474#setup [implements]: keep the established Ollama add/repeat path additive
+    const ollamaExtension = existing && (opts.picks.sources.includes('ollama') || existing.plugins?.some(p => p.name === '@hypaware/ollama'))
+    rawSources = ollamaExtension ? /** @type {PickerSource[]} */ ([...new Set([...configuredPickerSources(existing, descriptors), ...opts.picks.sources])]) : opts.picks.sources
+    exportChoice = configured !== undefined && existing && (opts.exportOrigin ?? 'default') === 'default' ? configuredExportChoice(existing) : opts.picks.exportChoice
     retentionDays = existing && !opts.picks.retentionExplicit ? configuredRetentionDays(existing) ?? opts.picks.retentionDays : opts.picks.retentionDays
     exportOrigin = opts.exportOrigin ?? 'default'
   } else {

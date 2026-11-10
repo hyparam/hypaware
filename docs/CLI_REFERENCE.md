@@ -63,10 +63,21 @@ hyp setup [preset] [flags]
 Runs the guided setup, applies a named plugin preset, or performs an unattended
 configuration. It can write or replace the local configuration, install the
 daemon, attach clients, install client assets, and import history.
-`--force` backs up and replaces an existing configuration.
+`--force` is required to write over an existing configuration and backs it up
+first. With source flags, setup starts from the existing local configuration:
+unrelated plugins, sinks, query remotes and enrollment are kept, and omitted
+`--export` and `--retention-days` keep their recorded choices. `--source` names
+the full recording selection, so unlisted sources are removed. Presets and
+`--from-file` still replace the whole file.
 Important options include repeatable `--source` and `--client`, `--export`,
 `--retention-days`, `--from-file`, `--github`, `--no-backfill`, `--no-daemon`,
-and `--bin`. `--github` enables GitHub collection (a separate opt-in that
+and `--bin`.
+Repeatable `--sync-client <source>` and `--local-only-client <source>` set
+whether future rows from a source may sync, and `--new-folders ask|sync` sets
+how unclassified new folders are handled. Omitted, they keep the current
+preferences. A source cannot be in both lists, and a source your team requires
+cannot be kept local-only. They are applied after the configuration is written
+and before clients are attached; presets refuse them. `--github` enables GitHub collection (a separate opt-in that
 `--yes` never implies) without signing in; run `hyp github login` afterward.
 With `--from-file`, it adds GitHub to the supplied configuration and keeps its
 other settings. `--no-backfill` skips the optional one-time history imports;
