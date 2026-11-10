@@ -179,10 +179,13 @@ test('real listener and writer recover first-turn text, dedupe restart, preserve
   await until(async () => (await f.source.status()).details.api_messages === 4)
   assert.equal(f.rows.length, 9)
   assert.equal((await f.source.status()).details.native_reads, 0)
-  const before = f.apiCalls
   await fs.rm(cursorCloudConnectionPath(f.stateDir))
   assert.equal((await f.post({ ...tool, tool_use_id: 'revoked' })).status, 202)
   await until(async () => (await f.source.status()).details.cloud_state === 'withheld')
+  // A tick admitted before the removal may still finish its read, but it
+  // cannot append. Count calls only once a later tick has refused.
+  const before = f.apiCalls
+  await delay(100)
   assert.equal(f.apiCalls, before)
   assert.equal(f.rows.length, 9)
   assert.doesNotMatch(JSON.stringify(f.events), /synthetic-key|FIRST_RESPONSE|same prompt/)
