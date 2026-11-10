@@ -147,16 +147,17 @@ test('an unbounded daemon state is clamped on the daemon line', async () => {
 test('a status file that is not JSON cannot drive the terminal through the parse error', async () => {
   const { hypHome, stateRoot } = await makeHome()
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
-  // `JSON.parse` quotes an excerpt of its input back in the message, so the
+  // `JSON.parse` quotes the token it rejects back in the message, so the
   // file's own bytes reach `daemon.error` and from there the `error=` field.
+  // The control byte leads, so it is the rejected token on every engine.
   const sp = statusFilePath(stateRoot)
   await fs.mkdir(path.dirname(sp), { recursive: true })
-  await fs.writeFile(sp, 'x' + FORGE)
+  await fs.writeFile(sp, FORGE)
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.ok(report.daemon.error, 'the unparseable file surfaces as a daemon error')
   assert.ok(CONTROL_CHARS.test(report.daemon.error), 'whose message quotes the raw bytes back')
   const text = renderText(report)
   assert.ok(!CONTROL_CHARS.test(text.replace(/\n/g, '')), 'and none of them reaches the terminal')
-  assert.match(text, /error=Unexpected token/, 'the error is still reported')
+  assert.match(text, /error=.*token/i, 'the error is still reported')
 })

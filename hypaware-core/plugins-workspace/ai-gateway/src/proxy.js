@@ -140,9 +140,12 @@ export async function startProxy(opts) {
   server.on('close', () => resolveStopped())
 
   await new Promise((resolve, reject) => {
-    /** @param {Error} err */
+    /** @param {Error & { port?: number, address?: string }} err */
     function onError(err) {
       server.off('listening', onListening)
+      // Not every runtime's listen error says which address it was for.
+      err.port ??= requestedPort
+      err.address ??= host
       reject(err)
     }
     function onListening() {

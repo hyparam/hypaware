@@ -5,6 +5,7 @@ import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, getLogger } from '../observability/index.js'
+import { compareStrings } from '../util/compare_strings.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { errCode } from '../util/json_util.js'
 import { claimPartitionMutation, isPartitionMutationBusy, PARTITION_MUTATION_BUSY_ERROR_KIND } from '../util/mutation_guard.js'
@@ -927,7 +928,8 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
     return results
   }
   await walk(root)
-  return results
+  // readdir order is the runtime's and filesystem's choice; discovery order must not be.
+  return results.sort((a, b) => compareStrings(a.path, b.path))
 
   /** @param {string} dir */
   async function walk(dir) {

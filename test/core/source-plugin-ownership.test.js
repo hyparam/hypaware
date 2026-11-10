@@ -438,7 +438,7 @@ test('a squatter cannot take a name ownerless and be started under the plugin it
   const squatter = fixtureSource('aaa', B)
   assert.throws(
     () => /** @type {any} */ (Object.getPrototypeOf(ctxA.sources)).register(squatter.contribution),
-    /Cannot read properties of null/,
+    TypeError,
     'the facade prototype still reaches an unbracketed register'
   )
   assert.equal(runtime.sources.get('aaa'), undefined, 'the squatter reached the registry anyway')

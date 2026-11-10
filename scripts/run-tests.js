@@ -109,6 +109,9 @@ export function run(forwardedArgs) {
  * @returns {string[]}
  */
 export function buildNodeTestArgs(files, forwardedArgs = []) {
+  // Bun runs `node:test` files only under its own runner, and shares one
+  // process across files unless told to isolate them as `node --test` does.
+  if (process.versions.bun) return ['test', '--parallel', ...forwardedArgs, ...files]
   return ['--test', ...forwardedArgs, ...files]
 }
 

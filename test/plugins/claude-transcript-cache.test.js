@@ -314,7 +314,7 @@ test('overlapping loads of one session consume appended bytes exactly once', asy
  */
 function pathologicalLine(uuid) {
   let inner = '{"type":"text","text":"x"}'
-  for (let i = 0; i < 12_000; i++) inner = '{"a":' + inner + '}'
+  for (let i = 0; i < 200_000; i++) inner = '{"a":' + inner + '}'
   return `{"sessionId":"${SESSION}","uuid":"${uuid}","type":"user",` +
     `"message":{"role":"user","content":[${inner}]}}`
 }
