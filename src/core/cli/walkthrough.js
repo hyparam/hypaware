@@ -662,10 +662,7 @@ export function composePickerConfig(args) {
       // key entirely: a hand-written `proxy_mode: false` outranks this, and
       // an entry without the key stays without it (existing installs migrate
       // only through `hyp attach`, LLP 0244). That protection rides
-      // `args.existing`, which only the interactive reconfigure lane
-      // supplies: a non-interactive `--force` re-init composes from scratch
-      // by design (the whole-file overwrite is its own consent) and
-      // re-applies this default.
+      // `args.existing`, supplied by both guided and unattended reconfiguration.
       // @ref LLP 0243#composed-default [implements]: a picked proxy-attaching row turns the composed gateway into a proxy-mode gateway
       config: {
         upstreams,

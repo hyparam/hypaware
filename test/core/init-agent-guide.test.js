@@ -9,6 +9,9 @@ import { runInit, writeSetupGuide } from '../../src/core/commands/init.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
+import { clientSyncListPath, readClientSyncEntries, readFolderAskMode, writeClientSyncEntries, writeFolderAskMode } from '../../src/core/usage-policy/index.js'
 
 /**
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -60,27 +63,77 @@ test('agent guide reuses detection, filters hidden/platform rows and preserves e
   assert.equal(await writeSetupGuide(f.ctx, { catalog: catalog(), platform: 'linux' }), 0)
   assert.equal(f.stderr(), '')
   const guide = f.stdout()
-  assert.match(guide, /claude \(detected\): --source claude\n    Disclosure for claude/)
-  assert.match(guide, /codex: --source codex/)
+  assert.match(guide, /    claude \(detected\)\n      Disclosure for claude/)
+  assert.match(guide, /    codex\n      Disclosure for codex/)
+  const [preflight, flow] = guide.split('Setup flow\n')
+  const [questions, commands] = flow.split('4. Configure recording for the selected apps.')
+  assert.doesNotMatch(preflight, /run hyp status|Existing local config:/)
+  assert.match(preflight, /HypAware is already configured:/)
+  assert.ok(questions.indexOf('1. How do you want to collect agent logs?') < questions.indexOf('2. Set up recording'))
+  assert.doesNotMatch(questions, /--source|--github|--no-backfill|hyp privacy|hyp status/)
+  assert.ok(questions.indexOf('hyp remote login --browser') < questions.indexOf('2. Set up recording'))
+  assert.match(commands, /claude: --source claude/)
+  assert.match(commands, /codex: --source codex/)
   assert.doesNotMatch(guide, /Disclosure for claude-desktop|Disclosure for raw-openai/)
-  assert.match(guide, /Other source IDs: .*claude-desktop.*raw-openai/)
-  assert.match(guide, /hyp setup --source claude --export local-parquet --retention-days 90/)
-  assert.ok(guide.includes('Offer "Cloud sync (recommended)" and "Local only"'))
-  assert.ok(guide.includes('Confirm the choice before enrollment; honor an existing local-only preference'))
+  assert.doesNotMatch(guide, /Other source IDs:|Example for detected sources/)
+  assert.match(guide, /hyp setup --source <selected-id>/)
+  assert.ok(guide.includes('Sync to the cloud (default)'))
+  assert.ok(guide.includes('Record everything (default) / Customize'))
+  assert.ok(guide.includes('Sync it automatically:'))
+  assert.ok(questions.includes('one question at a time. Wait for the answer'))
+  assert.ok(questions.includes('Use your multiple-choice question tool for every choice'))
+  assert.ok(questions.includes('Use a separate multi-select question containing only the apps chosen for collection'))
+  assert.ok(questions.includes('Options: Sync all selected apps / Customize.'))
+  assert.ok(questions.indexOf('ask: Sync all selected apps?') < questions.indexOf('ask: What do you want to sync?'))
+  assert.ok(questions.includes('skip the individual sync picker'))
+  assert.ok(questions.indexOf('Ask: What do you want to collect?') < questions.indexOf('ask: What do you want to sync?'))
+  assert.ok(questions.indexOf('ask: What do you want to sync?') < questions.indexOf('After cloud customization, ask about new projects'))
+  assert.doesNotMatch(questions, /What do you want to collect and sync\?/)
+  assert.ok(questions.includes('skip the customization questions, and proceed to installation'))
+  assert.ok(guide.includes('Ask me the first time'))
+  assert.ok(guide.indexOf('Connect GitHub?') < guide.indexOf('6. Verify the completed setup'))
+  assert.ok(guide.indexOf('6. Verify the completed setup') < guide.indexOf('When would you like to upload?'))
+  assert.doesNotMatch(guide, /Commands for each question branch|commands in step 5/)
+  assert.ok(guide.includes('Do not ask a second confirmation of this choice'))
+  assert.ok(guide.includes('Options: "Yes, disconnect" (default) / "No, stay connected"'))
+  assert.ok(guide.includes('If sign-in fails or is cancelled, report the outcome and ask question 1 again with the same options'))
   assert.doesNotMatch(guide, /hyp setup --source claude --source codex/)
-  assert.ok(guide.includes(`Existing local config: ${configPath}`))
+  assert.doesNotMatch(guide, /Existing local config:/)
   assert.equal(await fs.readFile(configPath, 'utf8'), config)
   assert.deepEqual((await fs.readdir(f.home)).sort(), before)
 })
 
 test('with no detections the guide asks instead of selecting the --yes defaults', async (t) => {
   const f = await fixture(t)
-  assert.equal(await writeSetupGuide(f.ctx, { catalog: catalog(), platform: 'linux' }), 0)
-  assert.match(f.stdout(), /No sources detected.*do not fall back to --yes/)
-  assert.match(f.stdout(), /--yes alone selects claude \+ otel, regardless of detection/)
+  assert.equal(await writeSetupGuide(f.ctx, {
+    catalog: catalog(), platform: 'linux',
+    collectStatus: async () => { throw new Error('must not collect status without a config') },
+  }), 0)
+  assert.match(f.stdout(), /Customize \(or no defaults\)/)
+  assert.match(f.stdout(), /hyp setup --source <selected-id>/)
   assert.doesNotMatch(f.stdout(), /Example for detected sources/)
+  assert.doesNotMatch(f.stdout(), /Existing local config:/)
   assert.deepEqual(await fs.readdir(f.home), [])
 })
+
+for (const [name, config, configured] of [
+  ['remote-only', { version: 2, query: { remotes: { team: { url: 'https://example.com/mcp' } } } }, false],
+  ['recording', { version: 2, plugins: [{ name: '@hypaware/otel' }] }, true],
+]) {
+  test(`guide uses collected status for a ${name} config`, async t => {
+    const f = await fixture(t)
+    const configPath = path.join(f.home, 'hypaware-config.json')
+    const original = JSON.stringify(config)
+    await fs.writeFile(configPath, original)
+    await writeSetupGuide(f.ctx, { catalog: catalog(), platform: 'linux' })
+    const guide = f.stdout()
+    assert.equal(guide.includes('HypAware is already configured:'), configured)
+    assert.equal(guide.includes('Reconfigure / See full status / Quit (default)'), configured)
+    assert.equal(guide.includes('Setup is not complete. Start with question 1.'), !configured)
+    assert.doesNotMatch(guide.split('Setup flow\n')[0], /hyp status|hypaware-config\.json/)
+    assert.equal(await fs.readFile(configPath, 'utf8'), original)
+  })
+}
 
 test('agent guide detects LangGraph in the command project and preserves callback instructions', async t => {
   const f = await fixture(t)
@@ -90,7 +143,8 @@ test('agent guide detects LangGraph in the command project and preserves callbac
   const cat = catalog()
   cat.pickerDescriptors.set('langgraph', row({ ...manifest.contributes.picker[0], id: 'langgraph', plugin: '@hypaware/langgraph' }))
   assert.equal(await writeSetupGuide(f.ctx, { catalog: cat }), 0)
-  assert.match(f.stdout(), /LangGraph.*\(detected\): --source langgraph/)
+  assert.match(f.stdout(), /LangGraph.*\(detected\)/)
+  assert.match(f.stdout().split('4. Configure recording for the selected apps.')[1], /LangGraph.*: --source langgraph/)
   assert.match(f.stdout(), /callback.*Setup prints the code to add/)
   assert.deepEqual(await fs.readdir(f.home), ['package.json'])
 })
@@ -102,25 +156,32 @@ test('guide explains human handoffs and verification', async (t) => {
   for (const instruction of [
     'hyp remote login --browser', 'hyp remote login --no-browser',
     'run hyp github login to open', 'hyp github login --no-browser',
-    'cloud first, then GitHub if enabled and requested',
-    'Wait for the command to finish and check its result before starting the next sign-in',
+    'run hyp remote login --browser and wait for it to finish before question 2',
+    'Do not repeat a completed login later',
+    'Include the agreed privacy choices in the setup command',
     'Never run sign-ins in parallel',
-    'On failure, cancellation or timeout, resolve it or ask whether to skip',
-    'wait for their result before starting any other sign-in',
-    'Separately ask: collect GitHub information', 'add --github to the setup command',
-    '--yes never opts into GitHub', 'hyp github status',
-    'Offer optional history import now or later; add --no-backfill for later',
-    'Scheduled recovery still imports history',
-    'run hyp backfill <client>',
+    'If sign-in fails or is cancelled, report the outcome and ask question 1 again',
+    'hand it to the person and wait for their result',
+    'Connect GitHub?', 'Yes, connect GitHub (default) / Not now', 'hyp github status',
+    'Yes - import it now (default)', 'No - skip for now',
+    'If optional history import was deferred, add --no-backfill',
+    'existing sessions will be imported automatically',
+    'Setup handles the daemon, client attachment, skills, and history imports.',
     'hyp sync --dry-run', '--yes cannot bypass that review',
-    'hyp query overview --json', 'Suggest a new skill?', 'run hyp ask in an interactive terminal',
-    'hyp setup --from-file <existing-config-path> --github --force',
-    'hyp privacy folders ask', 'hyp privacy client <name> local-only',
-    'Existing enrollment remains', 'hyp leave', 'first-sync privacy review',
+    'Upload now (recommended)', 'Wait until <deadline> and run a security review',
+    'A review does not pause or extend it',
+    'hyp query overview --json',
+    'rerun the setup command from step 4 with --github --force --no-backfill',
+    '--new-folders ask', '--local-only-client <source-id>', '--sync-client <source-id>',
+    'No, stay connected: keep enrollment', 'hyp leave', 'first-sync privacy review',
     'Never ask the person to paste passwords or access tokens',
-    'private repos and grants write scope', 'hyp status --json',
+    'read and write access to all your repos', 'hyp status --json',
     'config.valid', 'daemon.running', 'client_attach', 'Setup exit 0 alone does not prove',
+    'If an existing app is local-only, offer Record everything (default) / Customize instead',
+    'Pass no --sync-client, --local-only-client or --new-folders flags',
+    'On macOS, setup may open a certificate or password dialog that only the person can answer',
   ]) assert.ok(f.stdout().includes(instruction), instruction)
+  assert.doesNotMatch(f.stdout(), /Suggest a new skill|Recommend a new skill|hyp ask/)
 })
 
 /** @type {[string, string[], boolean][]} */
@@ -132,7 +193,7 @@ for (const [name, argv, tty] of guideCases) {
   test(`setup ${name} prints a guide without reaching the wizard`, async (t) => {
     const f = await fixture(t, tty)
     assert.equal(await runInit(argv, f.ctx), 0)
-    assert.match(f.stdout(), /^HypAware setup guide\nChoose the options with the person/)
+    assert.match(f.stdout(), /^HypAware setup guide\n/)
     assert.doesNotMatch(f.stdout(), /hyp setup: setup has not run/)
     assert.equal(f.stderr(), '')
     assert.deepEqual(await fs.readdir(f.home), [])
@@ -195,4 +256,85 @@ test('GitHub opt-in from an existing config keeps settings, backs up, and does n
   const backups = (await fs.readdir(f.home)).filter((name) => name.startsWith('hypaware-config.json.bak-'))
   assert.equal(backups.length, 1)
   assert.equal(await fs.readFile(path.join(f.home, backups[0]), 'utf8'), original)
+})
+
+for (const fromFile of [false, true]) {
+  test(`setup privacy flags preserve unrelated policies and honor dry-run/refusal (from-file=${fromFile})`, async t => {
+    const f = await fixture(t)
+    const stateDir = readObservabilityEnv(f.ctx.env).stateDir
+    const before = [{ source: 'codex', class: /** @type {'local-only'} */ ('local-only') }, { source: 'cursor', class: /** @type {'local-only'} */ ('local-only') }]
+    await writeClientSyncEntries({ stateDir, entries: before })
+    await writeFolderAskMode({ stateDir, mode: 'sync' })
+    const configPath = path.join(f.home, 'hypaware-config.json')
+    const original = JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] })
+    await fs.writeFile(configPath, original)
+    const args = ['setup', ...(fromFile ? ['--from-file', configPath] : ['--source', 'otel', '--no-daemon', '--no-backfill']),
+      '--sync-client', 'codex', '--local-only-client', 'claude', '--local-only-client', 'claude', '--new-folders', 'ask']
+    const opts = { env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr, platform: /** @type {NodeJS.Platform} */ ('linux') }
+    assert.equal(await dispatch(args, opts), 1)
+    assert.equal(await fs.readFile(configPath, 'utf8'), original)
+    assert.deepEqual(await readClientSyncEntries({ stateDir }), before)
+    assert.equal(await readFolderAskMode({ stateDir }), 'sync')
+    assert.equal(await dispatch([...args, '--force', '--dry-run'], opts), 0, f.stderr())
+    assert.deepEqual(await readClientSyncEntries({ stateDir }), before)
+    assert.equal(await readFolderAskMode({ stateDir }), 'sync')
+    assert.equal(await dispatch([...args, '--force'], opts), 0, f.stderr())
+    assert.deepEqual(new Set((await readClientSyncEntries({ stateDir }))?.map(e => e.source)), new Set(['cursor', 'claude']))
+    assert.equal(await readFolderAskMode({ stateDir }), 'ask')
+    // Omission is not an instruction to reset policy.
+    assert.equal(await dispatch(['setup', '--from-file', configPath, '--force'], opts), 0, f.stderr())
+    assert.equal(await readFolderAskMode({ stateDir }), 'ask')
+    assert.deepEqual(new Set((await readClientSyncEntries({ stateDir }))?.map(e => e.source)), new Set(['cursor', 'claude']))
+  })
+}
+
+test('setup rejects invalid privacy choices before writing config', async t => {
+  const f = await fixture(t)
+  const opts = { env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr }
+  for (const args of [
+    ['--source', 'otel', '--new-folders', 'invalid'],
+    ['--source', 'otel', '--sync-client', 'unknown'],
+    ['--source', 'otel', '--sync-client', 'codex', '--local-only-client', 'codex'],
+  ]) {
+    assert.equal(await dispatch(['setup', ...args], opts), 2)
+    await assert.rejects(fs.access(path.join(f.home, 'hypaware-config.json')))
+  }
+})
+
+test('setup preserves an unreadable client policy store and refuses before config write', async t => {
+  const f = await fixture(t)
+  const stateDir = readObservabilityEnv(f.ctx.env).stateDir
+  const storePath = clientSyncListPath(stateDir)
+  await fs.mkdir(path.dirname(storePath), { recursive: true })
+  await fs.writeFile(storePath, '{broken')
+  assert.equal(await dispatch(['setup', '--source', 'otel', '--sync-client', 'codex', '--no-daemon'], {
+    env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr,
+  }), 1)
+  assert.equal(await fs.readFile(storePath, 'utf8'), '{broken')
+  await assert.rejects(fs.access(path.join(f.home, 'hypaware-config.json')))
+})
+
+test('setup cannot opt a team-managed source out of sync', async t => {
+  const f = await fixture(t)
+  const stateDir = readObservabilityEnv(f.ctx.env).stateDir
+  const seed = centralSeedPath(stateDir)
+  await fs.mkdir(path.dirname(seed), { recursive: true })
+  await fs.writeFile(seed, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/claude' }] }))
+  assert.equal(await dispatch(['setup', '--source', 'otel', '--local-only-client', 'claude', '--no-daemon'], {
+    env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr,
+  }), 1)
+  assert.match(f.stderr(), /set by your team/)
+  assert.deepEqual((await readClientSyncEntries({ stateDir })) ?? [], [])
+  await assert.rejects(fs.access(path.join(f.home, 'hypaware-config.json')))
+})
+
+test('preset setup refuses privacy flags instead of dropping them', async t => {
+  const f = await fixture(t)
+  f.ctx.initPresets = /** @type {CommandRunContext['initPresets']} */ (/** @type {unknown} */ ({
+    get: () => ({ run: () => assert.fail('preset must not run') }),
+  }))
+  for (const args of [['--new-folders', 'ask'], ['--sync-client', 'codex'], ['--local-only-client', 'claude']]) {
+    assert.equal(await runInit(['preset', ...args], f.ctx), 2)
+  }
+  assert.deepEqual(await fs.readdir(f.home), [])
 })

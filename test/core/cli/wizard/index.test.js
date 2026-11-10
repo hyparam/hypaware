@@ -17,6 +17,9 @@ import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.j
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
 import { centralSeedPath } from '../../../../src/core/config/apply.js'
+import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
+import { discoverBundledPlugins } from '../../../../src/core/runtime/bundled.js'
+import { buildPluginCatalog } from '../../../../src/core/plugin_catalog.js'
 
 // The wizard orchestrator (LLP 0135 #orchestration): gate short-circuits,
 // the fork/join loop, phase threading (locked/managed), the
@@ -1189,6 +1192,36 @@ test('runInitWizard: an abandoned join is retriable and re-presents the fork', a
 })
 
 // --- non-interactive short-circuit ---
+
+test('unattended reconfiguration commits preserved settings before running the normal finale', async () => {
+  const home = await tmpHome()
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  const remotes = { prod: { url: 'https://example.com' } }
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, query: { remotes } }))
+  const seedPath = centralSeedPath(readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/claude' }] }))
+  const { opts, calls } = wizardOpts(home, {
+    catalog, pick: runWizardPick, force: true,
+    picks: { sources: ['otel', 'claude'], exportChoice: 'local-parquet', retentionDays: 90 },
+    finaleRunner: async () => {
+      const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
+      assert.deepEqual(written.query.remotes, remotes)
+      assert.ok(written.plugins.some(p => p.name === '@hypaware/otel'))
+      assert.ok(!written.plugins.some(p => p.name === '@hypaware/claude'), 'team-owned source stays in the central layer')
+      assert.ok(written.sinks.local)
+      return { attach: [] }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.ok(result.lockedSources?.includes('claude'))
+  assert.ok(result.clientsPicked?.includes('claude'))
+  assert.deepEqual(calls, ['pick', 'configure', 'finale'])
+})
 
 test('runInitWizard: pre-baked picks skip gate, fork, and join entirely', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), {
