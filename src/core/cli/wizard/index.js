@@ -154,7 +154,7 @@ async function runGuardedInitWizard(opts, guard) {
   let managed = false
   let gateShown = false
   if (!interactive) {
-    // @ref LLP 0593#preservation [implements]: an unattended run after login must not compose team-owned sources into the local layer
+    // @ref LLP 0594#preservation [implements]: an unattended run after login must not compose team-owned sources into the local layer
     const resolved = await computeLockedSafe(catalog, opts)
     locked = resolved.lockedSources
     lockedResolved = resolved.resolved

@@ -1,4 +1,4 @@
-# LLP 0593: Unattended setup preserves the local configuration
+# LLP 0594: Unattended setup preserves the local configuration
 
 **Type:** Spec
 **Status:** Draft

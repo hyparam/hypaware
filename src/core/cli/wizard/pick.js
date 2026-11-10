@@ -116,7 +116,7 @@ export async function resolvePickSeeding(opts) {
   const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
 
   // Both entry paths edit the local layer; --from-file bypasses composition.
-  // @ref LLP 0593#preservation [implements]: scripted setup preserves enrollment and custom settings through the shared merge
+  // @ref LLP 0594#preservation [implements]: scripted setup preserves enrollment and custom settings through the shared merge
   const existing = await readLocalConfig(configPath)
   // A config on disk only makes this run a reconfigure when it records a
   // pick answer. `hyp remote add` before the first `hyp init` creates a

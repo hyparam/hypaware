@@ -54,7 +54,7 @@ a table and a free-text request. Without a question tool, use numbered choices.
 This agent flow separates the choices currently combined by the terminal picker.
 
 The execution step uses normal source-based `hyp setup`, including for
-reconfiguration and after cloud login. LLP 0593 extends its carry-forward
+reconfiguration and after cloud login. LLP 0594 extends its carry-forward
 behavior so the agent can preserve settings while setup runs its own daemon,
 attachment, skills, and history-import finale. The guide must not reconstruct
 that finale with separate commands after a `--from-file` write.
