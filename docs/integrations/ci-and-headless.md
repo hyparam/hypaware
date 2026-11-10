@@ -348,6 +348,25 @@ joined with one uploads as that account and keeps working when the person who
 set it up leaves. Run it in its own environment: on a person's machine the same
 join would replace that machine's enrollment.
 
+A service token lasts until it is revoked. Its permissions, listed on the
+Auth tokens page in HypAware, decide what it can do here:
+
+- **Submit telemetry** (`submit`) lets a host joined with `hyp join` enroll
+  and upload. The server refuses to enroll a host with a token that lacks
+  it (HTTP 403), so join only with a token that holds it.
+- **Query organization** (`read`) lets `hyp remote login --token-file` and
+  `hyp query --remote` read the organization's data, as below.
+- **Publish and manage reports** (`report-publish`) lets it publish reports
+  and standalone recommendations, change a recommendation's status, and
+  delete any report in the organization.
+
+A token holding neither `read` nor `report-publish` is refused at
+`hyp remote login` (`invalid_grant`).
+
+A personal agent token from `hyp remote mint --scope query` is different: it
+acts as the person who minted it and expires (see [MCP](../MCP.md#personal-or-service-token)).
+Use a service token for anything that should outlive one person's account.
+
 <!-- @ref LLP 0547#provision: the documented collector setup is the shipped join in its own HYP_HOME -->
 ```sh
 export HYP_HOME=/srv/hypaware-collector   # its own state root, never a person's
