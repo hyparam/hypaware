@@ -47,10 +47,46 @@ Secret; keep the key out of prompts, repository files and Build secrets. Use a
 short-lived test key first. Cursor currently offers an Admin-scoped key, so it
 can access more than the single agent HypAware reads.
 
+### Prepare the environment and credentials
+
+In [Cursor's Cloud Agents dashboard](https://cursor.com/dashboard/cloud-agents),
+open **Environments** and select or create an environment for one repository.
+Create a short-lived key in [Cursor API Keys](https://cursor.com/dashboard/api).
+
+For HypAware Cloud sync, mint an enrollment token on a computer where you are
+already signed in with `hyp remote login`:
+
+```sh
+hyp remote mint --label cursor-cloud --expires-days 30
+```
+
+The token is printed once. In the Cursor environment's **Secrets** settings,
+add the following as **Runtime Secrets**:
+
+| Name | Value |
+| --- | --- |
+| `CURSOR_API_KEY` | The key from Cursor API Keys |
+| `HYP_CI_TOKEN` | The token printed by `hyp remote mint`; omit for local-only capture |
+
+Do not put either value in an agent prompt. Replace expiring secrets before
+starting further runs. See [CI enrollment](ci-and-headless.md#one-time-mint-a-token)
+for token lifetime and host grouping.
+
+### Configure Install and Start
+
 Install HypAware in the saved environment's Build script, pinning the released
 version you want to run. Saved environment commands take precedence over a
 repository's `environment.json`; update the saved Install and Start scripts.
-Do not enroll or connect during the Build.
+Do not enroll or connect during the Build. Append this to the Install script,
+replacing `RELEASE_VERSION` with a released version containing the
+`cursor-cloud` commands:
+
+```sh
+npm install --global hypaware@RELEASE_VERSION
+```
+
+Preserve the environment's command that enters the repository directory, so
+both scripts run from its root.
 
 Set `CURSOR_API_KEY` as a Runtime Secret. For organization sync, also set the
 `HYP_CI_TOKEN` Runtime Secret. For a fresh VM, run this complete Start script
@@ -79,6 +115,17 @@ foreground daemon handles staged configuration restarts. There is no tmux or
 systemd requirement. Setup/connection must precede starting the daemon; stop an
 existing collector before changing modes. Repository hooks are runtime changes:
 keep them out of your commits and never snapshot an enrolled VM into a Build.
+
+Save the environment and trigger a new Build. Once that Build succeeds, start
+a fresh Cloud agent from it. Later agents using the environment run the Start
+script automatically and connect their own current agent and repository.
+
+### Verify capture and stop
+
+Complete a small task with a distinctive prompt, response and file edit. After
+the turn finishes, allow about a minute for text recovery, run `hyp sync --yes`,
+and find the conversation in HypAware Cloud. API retries can make this take
+longer. Keep the VM alive until the remote receipt is verified.
 
 The documented conversation API supplies completed user and assistant text,
 including the first turn that Cloud hooks can omit. Recovery checks every thirty
