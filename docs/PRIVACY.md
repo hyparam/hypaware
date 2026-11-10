@@ -14,7 +14,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `claude` | Claude Code prompts, responses, tool calls and results, system prompts, tool definitions, and working directory where available |
 | `claude-desktop` | Claude Desktop conversations imported from local transcripts on macOS |
 | `codex` | Codex CLI and Desktop conversations imported from their shared local session files |
-| `codex-cloud` | Codex Cloud coding chats read from OpenAI's service with your existing file-backed ChatGPT login, held in memory only: user and assistant text, command calls and their outputs, and MCP calls and results; no reasoning content |
+| `codex-cloud` | Codex Cloud coding chats read from OpenAI's service with the ChatGPT login Codex keeps on your host (HypAware keeps no copy of it): user and assistant text, command calls and their outputs, and MCP calls and results; no reasoning content |
 | `chatgpt-work` | ChatGPT Work web and mobile conversations, read the same way as `codex-cloud`; they can include everyday conversations that are not about coding. Off unless you choose it |
 | `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools |
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
