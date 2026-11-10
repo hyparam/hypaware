@@ -1,0 +1,83 @@
+{
+  "repository": "hyparam/hypaware",
+  "pr_number": 2916,
+  "head_sha": "20dad66b47ba21d5d335c55e0c518b07074e9775",
+  "original_body_sha256": "342406e54e431ae0e6b8099ea0a91387ce7aea0a217bb4b19dcdd91c91653f37",
+  "session_id": "01a1ae17-da97-77c1-8eed-be14be5223b2",
+  "sources": [
+    {
+      "id": "S0",
+      "title": "Upstream alert and fix request",
+      "message_id": "msg_01a1ae18-3baf-7701-bd9d-f32ab64f74bf",
+      "part_id": "msg_01a1ae18-3baf-7701-bd9d-f32ab64f74bf#7",
+      "recorded_at": "2026-11-05T23:43:06.159Z",
+      "conversation_id": "01a1ae18-38c2-7482-b67b-b27282574f71",
+      "agent_id": null,
+      "date": "2026-11-05",
+      "start_char": 146,
+      "char_count": 140,
+      "sha256": "9957003d075ac74abe1fdbd4c3d71eb3a6e9ef1c4df0f93c76a40be5ecd2c9ff",
+      "reviewed_text": "Fix the upstream-watch finding that OpenCode 2.2.3's Claude Agent provider can cause duplicate capture and bypass OpenCode privacy settings."
+    },
+    {
+      "id": "S1",
+      "message_id": "msg_01a1ae1b-c771-7e12-937b-12495b313a41",
+      "part_id": "msg_01a1ae1b-c771-7e12-937b-12495b313a41#17",
+      "recorded_at": "2026-11-05T23:46:58.545Z",
+      "sha256": "b0941b9f58de84cba28f72f71fe3f524076f80645a137349c7efb7333aaa2fc5",
+      "reviewed_text": "\n[43] assistant: The isolated runtime probe confirms that ordinary SDK and OpenCode-shaped sessions both write `entrypoint: \"sdk-ts\"`. The OpenCode tool name survives in the transcript, but it cannot identify a text-only turn. I’ll check OpenCode’s saved Claude session mapping for stronger ownership evidence.\n",
+      "title": "Shared SDK entrypoint probe",
+      "date": "2026-11-05",
+      "agent_id": null,
+      "conversation_id": "01a1ae18-38c2-7482-b67b-b27282574f71"
+    },
+    {
+      "id": "S2",
+      "message_id": "msg_01a1ae22-fa6b-7011-8b53-bbf7cd1589df",
+      "part_id": "msg_01a1ae22-fa6b-7011-8b53-bbf7cd1589df#21",
+      "recorded_at": "2026-11-05T23:54:50.347Z",
+      "sha256": "4fbfdab863f7f2837eb8bc3ab7e15738b2340314480a087990bf87d7ba20eea4",
+      "reviewed_text": "\n[84] assistant: The fix passes the focused regressions and typecheck. It uses a read-only OpenCode session index plus metadata from the existing transcript read.\n\nOne limit is confirmed: an older Claude binary can write a text-only first turn before OpenCode saves its UUID mapping, leaving no ownership marker to inspect. I’ll document that gap and the real-client validation still needed.\n",
+      "title": "Initial first-turn gap",
+      "date": "2026-11-05",
+      "agent_id": null,
+      "conversation_id": "01a1ae18-38c2-7482-b67b-b27282574f71"
+    },
+    {
+      "id": "S3",
+      "message_id": "msg_01a1ae22-fa6b-7011-8b53-bbf7cd1589df",
+      "part_id": "msg_01a1ae22-fa6b-7011-8b53-bbf7cd1589df#8",
+      "recorded_at": "2026-11-05T23:54:50.347Z",
+      "sha256": "49708214d82d37ada7428b658af54e293bcd2c755a8eaa1d1a98a77c08fbe130",
+      "reviewed_text": "[64] assistant: The failure reproduces through the real Claude backfill and materializer: the OpenCode-shaped SDK transcript produces four rows labeled `claude`, which an `opencode` local-only rule does not withhold.\n\nI’m checking three possible ownership signals: the saved Claude session UUID, MCP tool declarations, and tool-call names. The UUID mapping appears strongest; tool metadata may help with older or forked copies.\n",
+      "title": "Duplicate capture and privacy reproduction",
+      "date": "2026-11-05",
+      "agent_id": null,
+      "conversation_id": "01a1ae18-38c2-7482-b67b-b27282574f71"
+    },
+    {
+      "id": "S4",
+      "message_id": "msg_01a1ae48-3908-7351-a08d-31c59c7c95d7",
+      "part_id": "msg_01a1ae48-3908-7351-a08d-31c59c7c95d7#8",
+      "recorded_at": "2026-11-06T00:35:31.209Z",
+      "sha256": "efd6511fb1d7cc23fb6c4ed6ceaede07cd1cd0941ea006c92f2f19e3d00667c2",
+      "reviewed_text": "\n[165] assistant: The real SDK preserves an explicit OpenCode entrypoint on the first user line and on forks, before any tool or UUID mapping exists. The new regression fails on the draft code and passes with the marker. I’ve also downloaded OpenCode CLI and Desktop 2.2.3 into an isolated test directory; the installed app is unchanged.\n",
+      "title": "Launch marker before the first turn",
+      "date": "2026-11-06",
+      "agent_id": null,
+      "conversation_id": "01a1ae43-8201-7392-af4d-059c2ba4ed20"
+    },
+    {
+      "id": "S5",
+      "message_id": "msg_01a1ae50-9f3d-7360-abc6-5a4e53cc0b46",
+      "part_id": "msg_01a1ae50-9f3d-7360-abc6-5a4e53cc0b46#8",
+      "recorded_at": "2026-11-06T00:44:41.661Z",
+      "sha256": "038bfcb11333125d742d92ab4d1a0b49cdf4373df9db4b5d112eb62d728b3fd8",
+      "reviewed_text": "\n[239] assistant: The real CLI and Desktop 2.2.3 turns both passed the first-turn check: their SDK transcripts carried `entrypoint: opencode` before UUID mappings existed, and Claude backfill wrote zero rows. Export withholding kept all nine native rows local. A separate real CLI run with session ignore wrote no rows through either capture path.\n",
+      "title": "Real CLI and Desktop privacy checks",
+      "date": "2026-11-06",
+      "agent_id": null,
+      "conversation_id": "01a1ae43-8201-7392-af4d-059c2ba4ed20"
+    }
+  ]
+}
