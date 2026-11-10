@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/linear",
+  "version": "0.1.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22.12",
+  "entrypoint": "./src/index.js",
+  "description": "Local Linear issue metadata and explicit GitHub PR attachments, with browser OAuth and automatic graph projection.",
+  "permissions": ["network", "read_state", "write_state"],
+  "requires": {
+    "plugins": { "@hypaware/context-graph": "^0.1.0" },
+    "capabilities": { "hypaware.context-graph": "^1.1.0" }
+  },
+  "contributes": {
+    "datasets": [{ "name": "linear_events", "summary": "Structural Linear issue snapshots and GitHub PR attachment links" }],
+    "config_sections": [{ "section": "linear", "summary": "Explicit team scope, cadence and public OAuth application settings" }],
+    "sources": [{ "name": "linear", "summary": "Poll configured Linear teams and GitHub PR attachments" }],
+    "commands": [
+      { "name": "linear", "summary": "Linear capture and authentication" },
+      { "name": "linear login", "summary": "Sign in to Linear with read-only browser OAuth" },
+      { "name": "linear logout", "summary": "Remove local Linear OAuth credentials" },
+      { "name": "linear status", "summary": "Verify the Linear account and workspace" },
+      { "name": "linear backfill", "summary": "Import configured teams from the beginning" },
+      { "name": "linear sync", "summary": "Resume Linear capture and graph projection" }
+    ]
+  }
+}
