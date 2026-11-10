@@ -16,7 +16,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `codex` | Codex CLI and Desktop conversations imported from their shared local session files |
 | `codex-cloud` | Codex Cloud coding chats read from OpenAI's service with the ChatGPT login Codex keeps on your host (HypAware keeps no copy of it): user and assistant text, command calls and their outputs, and MCP calls and results; no reasoning content |
 | `chatgpt-work` | ChatGPT Work web and mobile conversations, read the same way as `codex-cloud`; they can include everyday conversations that are not about coding. Off unless you choose it |
-| `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools |
+| `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools; explicitly connected Cloud VMs also record API text and supplied tool/edit observations |
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
 | `pi` | Pi conversations from its managed extension and local session files |
 | `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory; no billed token usage or cost |
@@ -35,6 +35,13 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `otel` | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener |
 | `github` | Structural repository activity such as issue, pull request, commit, file, review, and comment metadata; content remains on GitHub |
 | `linear` | Structural issue metadata for configured teams (identifier, team, state, and Linear ids of the creator and assignee) and GitHub pull request links attached to those issues; titles, descriptions, and comments remain in Linear |
+
+[Cursor Cloud](integrations/cursor.md#cursor-cloud-agents-beta) is separately
+opted in with `hyp cursor-cloud connect` inside the VM. Its local grant binds
+one agent and repository, and holds no API key. The runtime key is sent only to
+Cursor's fixed API origin for conversation reads; captured rows follow the
+existing recording and export policy. Disconnect revokes new capture and
+preserves previously captured data.
 
 Conversation capture includes message content, not just metadata. Depending on
 what the client exposes, records can also include system prompts, tool arguments

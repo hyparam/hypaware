@@ -1237,6 +1237,37 @@ existing export settings. `status` prints the grant scope without credentials.
 This integration is in beta: the hosted interface may change. Keyring and API-key logins
 are unsupported. See [requirements, limits and troubleshooting](integrations/codex-cloud.md).
 
+## Cursor Cloud collection (beta)
+
+Provided by `@hypaware/cursor`, explicitly enabled inside a Cursor-managed Linux
+VM. Requires the `CURSOR_API_KEY` Runtime Secret and one canonical repository.
+Ordinary Cursor attachment does not grant Cloud access. Follow the
+[Build and Start recipe](integrations/cursor.md#cursor-cloud-agents-beta).
+
+```text
+hyp cursor-cloud connect [--dry-run]
+hyp cursor-cloud start
+hyp cursor-cloud status
+hyp cursor-cloud disconnect
+```
+
+`connect` derives the current agent and repository from local VM metadata,
+installs owned repository hooks and saves a credential-free local grant.
+`--dry-run` previews without writing hooks or the grant. There is no arbitrary
+agent-ID or account-wide discovery option.
+
+`start` starts a detached foreground collector for the grant. It requires an
+active Cursor plugin and refuses a listener belonging to another scope.
+`status` prints the saved grant, not live recovery health; use `hyp status
+--json` for the Cursor source's health and `hyp sync --yes` to flush delivery.
+`disconnect` revokes new capture, removes only owned repository hooks and
+preserves recorded data. It does not stop the daemon; use `hyp daemon stop`.
+
+Main-agent text recovers through the API after restart. Tool and edit hooks are
+best effort during downtime. There is no arbitrary historical backfill, and
+original API timestamps and usage are unavailable. See the integration guide
+for API bounds, health checks and teardown order.
+
 ## Import past client history
 
 Use backfill to import local history, list providers, or preview a scan:

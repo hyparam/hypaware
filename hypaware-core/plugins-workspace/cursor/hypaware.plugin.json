@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/cursor",
   "version": "1.0.0",
-  "description": "Cursor editor and CLI native session recovery with additional file observations. No provider routing or verified token accounting.",
+  "description": "Cursor editor and CLI native recovery, with explicitly connected Cloud VM capture and file observations.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=22.12",
@@ -46,6 +46,10 @@
       }
     ],
     "commands": [
+      { "name": "cursor-cloud connect", "summary": "Connect this Cloud agent and install owned repository hooks" },
+      { "name": "cursor-cloud disconnect", "summary": "Revoke Cloud capture and remove only owned repository hooks" },
+      { "name": "cursor-cloud status", "summary": "Show the locally connected Cursor Cloud agent" },
+      { "name": "cursor-cloud start", "summary": "Start a detached collector for the connected Cloud VM" },
       {
         "name": "session ignore",
         "category": "capture-movement",

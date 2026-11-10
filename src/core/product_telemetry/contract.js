@@ -54,6 +54,11 @@ export const COMMANDS = Object.freeze([
   'codex-cloud disconnect',
   'codex-cloud status',
   'codex-hook classify-cwd',
+  // @ref LLP 0593#scope: fixed Cloud command names only, never agent IDs or keys.
+  'cursor-cloud connect',
+  'cursor-cloud disconnect',
+  'cursor-cloud start',
+  'cursor-cloud status',
   'config',
   'config validate',
   'daemon',

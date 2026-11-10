@@ -21,8 +21,8 @@ in general.
 **Runs on** is where the agent or tool itself runs. HypAware runs on a host you
 control: install it next to an agent on a server or CI runner, and for cloud
 agents the collection route depends on the provider. Codex Cloud uses your
-existing local login; the tested Claude Code Cloud recipe runs the
-collector inside the cloud environment.
+existing local login; Cursor Cloud and the tested Claude Code Cloud recipe
+run the collector inside the cloud environment.
 
 ## Coding agents
 
@@ -50,6 +50,7 @@ HypAware 1.42.0. It includes setup, session startup, and upload after replies.
 
 | Integration | Status | Runs on | How HypAware records it | Backfill | Setup id |
 | --- | --- | --- | --- | --- | --- |
+| [Cursor Cloud](integrations/cursor.md#cursor-cloud-agents-beta) | Beta | Cursor-managed Linux VM | Completed main-agent text through the Cursor API, plus live tool and edit hooks; one explicitly connected agent and repository | Connected agent text only; no arbitrary history import | `cursor`, then `hyp cursor-cloud connect` |
 | [Codex Cloud](integrations/codex-cloud.md) | Beta | OpenAI's cloud | Hosted Codex coding chats, checked every five minutes through your local Codex login | Yes | `codex-cloud` |
 | [ChatGPT Work](integrations/codex-cloud.md#choose-during-setup) | Beta | OpenAI's cloud | Work web and mobile chats through the same collector; only under **Customize** | Yes | `chatgpt-work` |
 
