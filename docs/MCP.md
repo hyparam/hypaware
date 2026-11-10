@@ -11,8 +11,8 @@ https://api.hypaware.ai/v1/mcp
 
 There are three ways to connect to it:
 
-- **Sign in from a chat client:** add the server to Claude as a connector
-  and sign in with your HypAware account. No token, no headers, and no
+- **Sign in from a chat client:** add the server to Claude or ChatGPT and
+  sign in with your HypAware account. No token, no headers, and no
   `hyp` install. Most people start here.
 - **Agent token:** the client sends a token you mint. Use it for cloud
   agents, CI jobs, and clients that cannot sign in themselves.
@@ -49,11 +49,36 @@ and signs in. The Claude Free plan allows one custom connector.
 The menu paths follow Claude's own guide,
 [Getting started with custom connectors using remote MCP](https://support.claude.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp).
 
+### ChatGPT
+
+ChatGPT connects to custom MCP servers on the web, on Business, Enterprise
+and Edu plans. On a Business workspace, only an admin or owner can add one.
+On Enterprise and Edu, an admin can let other members add one.
+
+1. Go to [Plugins](https://chatgpt.com/plugins), select the plus button,
+   then **Add custom MCP server**.
+2. Name it `HypAware`. Under **Connection**, set **Server URL** to
+   `https://api.hypaware.ai/v1/mcp`.
+3. For authentication, choose **OAuth**. HypAware needs no client ID or
+   secret, since ChatGPT registers itself.
+4. Check **I understand and want to continue**, then select **Create as a
+   plugin**.
+5. Install the plugin. When ChatGPT asks, sign in to HypAware and click
+   **Allow**.
+6. In a chat, type `@` and pick HypAware.
+
+ChatGPT asks you to confirm before it marks a recommendation applied or
+dismissed.
+
+The steps follow OpenAI's guide,
+[Connecting custom MCP servers in ChatGPT](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt).
+
 ### What the connection can do
 
 The connection acts as you, in your organization. If you belong to more
 than one, you pick it on the Allow page. The Allow page says what the
-connection can do, with your organization's name in place of Example Co:
+connection can do, with your organization's name in place of Example Co,
+and ChatGPT in place of Claude if you connect from there:
 
 > Claude will be able to read Example Co's recorded AI sessions, including
 > other members' sessions, and its reports, and to mark recommendations as
@@ -63,11 +88,11 @@ connection can do, with your organization's name in place of Example Co:
 ### How long it lasts and how to disconnect
 
 The connection lasts 30 days, unless your server sets another lifetime.
-The Allow page shows the number. After that, Claude asks you to sign in
-again.
+The Allow page shows the number. After that, Claude or ChatGPT asks you to
+sign in again.
 
-Removing the HypAware connector in Claude's settings stops Claude using
-it. To end the connection on the server sooner, revoke it with
+Removing HypAware from Claude's connectors or ChatGPT's plugins stops that
+client using it. To end the connection on the server sooner, revoke it with
 `hyp remote tokens` (see [List and revoke tokens](#list-and-revoke-tokens)),
 or ask an admin of your organization to disconnect it.
 
@@ -164,7 +189,7 @@ hyp remote tokens revoke <connection id>
 ```
 
 Both need a `hyp remote login` session. If you connected only through
-Claude, sign in first, or remove HypAware from Claude's connectors.
+Claude or ChatGPT, sign in first, or remove HypAware from that client.
 
 ## Client setup
 
@@ -375,8 +400,8 @@ If the connection fails:
   `hyp mcp serve`. It should print a line naming the tools it serves and
   then wait; press Ctrl-C to stop it. With `--remote`, sign in first with
   `hyp remote login`.
-- **Sign-in:** after 30 days, or after the connection is revoked, click
-  **Connect** in Claude and sign in again.
+- **Sign-in:** after 30 days, or after the connection is revoked, reconnect
+  in Claude or ChatGPT and sign in again.
 - **Remote:** a `401` means the token has expired or was revoked; mint a new
   one. Check that the header reads `Bearer ` followed by the token.
 
