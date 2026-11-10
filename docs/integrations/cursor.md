@@ -1,11 +1,13 @@
 # Cursor
 
-**Status:** Supported. **Setup id:** `cursor`. **Backfill:** Yes.
+**Status:** Editor/CLI supported; Cloud beta. **Setup id:** `cursor`.
+**Backfill:** Local history; connected-agent text recovery in Cloud.
 
 HypAware records the Cursor editor and the Cursor CLI. Cursor hooks tell
 HypAware when a session changes, and HypAware then reads the session from
 Cursor's own local store, read-only. A recovery sweep every five minutes picks
-up anything the hooks missed.
+up anything the hooks missed. [Cloud agents](#cursor-cloud-agents-beta) use a
+separate opt-in collector inside their managed VM.
 
 ## What is recorded
 
@@ -45,22 +47,31 @@ Secret; keep the key out of prompts, repository files and Build secrets. Use a
 short-lived test key first. Cursor currently offers an Admin-scoped key, so it
 can access more than the single agent HypAware reads.
 
-Install HypAware in the environment's Build script, pinning the released version
-you want to run. Do not enroll or connect during the Build. In the Start script,
-from the repository root, configure a fresh VM and connect it:
+Install HypAware in the saved environment's Build script, pinning the released
+version you want to run. Saved environment commands take precedence over a
+repository's `environment.json`; update the saved Install and Start scripts.
+Do not enroll or connect during the Build.
+
+Set `CURSOR_API_KEY` as a Runtime Secret. For organization sync, also set the
+`HYP_CI_TOKEN` Runtime Secret. For a fresh VM, run this complete Start script
+from the repository root. It keeps recordings local when no enrollment token
+is supplied:
 
 ```sh
-hyp setup --source cursor --export keep-local --no-backfill --no-daemon
+set -eu
+export HYP_HOME="${HYP_HOME:-$HOME/.hyp}"
+: "${CURSOR_API_KEY:?Set the Cursor API key as a Runtime Secret}"
+hyp setup --source cursor --export keep-local --no-backfill --no-daemon --yes
+if [ -n "${HYP_CI_TOKEN:-}" ]; then
+  printf '%s' "$HYP_CI_TOKEN" | hyp join https://api.hypaware.ai --no-daemon
+fi
 hyp cursor-cloud connect
 hyp cursor-cloud start
 ```
 
-To sync to your HypAware organization, also store a CI enrollment token as the
-`HYP_CI_TOKEN` Runtime Secret. After setup and before starting, enroll with:
-
-```sh
-printf '%s' "$HYP_CI_TOKEN" | hyp join https://api.hypaware.ai --no-daemon
-```
+Run later health, sync and stop commands as the same user with the same absolute
+`HYP_HOME`. An export in the Start script does not change later agent shells.
+Do not enable shell tracing around credentials.
 
 The enrollment token is passed over stdin. The detached collector does not
 inherit it. `start` finishes so Cursor can run the agent, and the ordinary
@@ -90,6 +101,15 @@ Tool and edit hooks use the bounded local listener without a separate disk
 queue. Unconfirmed callbacks warn and allow the agent to continue. Callbacks
 missed while the collector is stopped or restarting cannot be recovered;
 main-agent text can be recovered through the API after restart.
+
+Before testing tool/edit capture, wait for startup to complete. The default
+listener's readiness check is `curl -fsS http://127.0.0.1:4321/`; it must report
+`name: hypaware/cursor`, `mode: cloud` and `status: ready`. This confirms the
+listener is accepting callbacks. `hyp cursor-cloud status` shows the saved grant;
+`hyp status --json` shows live Cursor source health, including degraded recovery.
+An API timeout retries automatically; allow additional completed snapshots
+before expecting recovered text. A successful upload alone does not prove
+capture: verify the distinctive prompt/response and edit in the remote receipt.
 
 Check health and delivery, then stop or disconnect:
 

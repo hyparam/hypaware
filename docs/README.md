@@ -30,7 +30,7 @@ specific command. To query your recordings from an MCP client instead, see
 | Category | Topics | Commands |
 | --- | --- | --- |
 | [Setup](CLI.md) | Installation, updates, background service, and uninstall | `setup`, `status`, `update`, `version`, `daemon` |
-| [Integrations](INTEGRATIONS.md) | Every supported agent and tool, its status, and how to set it up, including CI and headless hosts | `attach`, `codex-cloud`, `github`, `ollama` |
+| [Integrations](INTEGRATIONS.md) | Every supported agent and tool, its status, and how to set it up, including CI and headless hosts | `attach`, `codex-cloud`, `cursor-cloud`, `github`, `ollama` |
 | [Clients and history](CLIENTS.md) | Choosing clients, capture, history imports, detaching, and skills | `client`, `attach`, `detach`, `backfill` |
 | [Queries](QUERYING.md) | Explore recordings with your agent, search, SQL, graph and vector tools, and MCP | `ask`, `query`, `graph`, `vector`, `enrichment`, `mcp` |
 | [MCP](MCP.md) | Connect an MCP client to your recordings, locally with `hyp mcp serve` or remotely with an agent token | `mcp` |

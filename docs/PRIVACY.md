@@ -14,7 +14,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `claude` | Claude Code prompts, responses, tool calls and results, system prompts, tool definitions, and working directory where available |
 | `claude-desktop` | Claude Desktop conversations imported from local transcripts on macOS |
 | `codex` | Codex CLI and Desktop conversations imported from their shared local session files |
-| `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools |
+| `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools; explicitly connected Cloud VMs also record API text and supplied tool/edit observations |
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
 | `pi` | Pi conversations from its managed extension and local session files |
 | `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory; no billed token usage or cost |
@@ -31,6 +31,13 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `raw-anthropic`, `raw-openai` | API requests and responses routed through the local gateway |
 | `otel` | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener |
 | `github` | Structural repository activity such as issue, pull request, commit, file, review, and comment metadata; content remains on GitHub |
+
+[Cursor Cloud](integrations/cursor.md#cursor-cloud-agents-beta) is separately
+opted in with `hyp cursor-cloud connect` inside the VM. Its local grant binds
+one agent and repository, and holds no API key. The runtime key is sent only to
+Cursor's fixed API origin for conversation reads; captured rows follow the
+existing recording and export policy. Disconnect revokes new capture and
+preserves previously captured data.
 
 Conversation capture includes message content, not just metadata. Depending on
 what the client exposes, records can also include system prompts, tool arguments

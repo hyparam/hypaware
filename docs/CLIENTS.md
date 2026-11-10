@@ -19,6 +19,12 @@ root in the `@hypaware/nanoclaw` plugin configuration. It is not offered in the
 setup picker. Once configured, it recovers local v2 Claude transcripts every
 five minutes, including subagents.
 
+[Cursor Cloud](integrations/cursor.md#cursor-cloud-agents-beta) uses the bundled
+Cursor plugin with explicit `hyp cursor-cloud connect` and `start` commands
+inside the managed VM. Local Cursor attachment does not connect Cloud agents.
+Use `hyp cursor-cloud disconnect` to revoke the VM grant; ordinary local
+history-import instructions do not apply to Cloud capture.
+
 ## Choose and check a client
 
 [VS Code (GitHub Copilot)](integrations/copilot.md) uses the setup id `copilot`.
