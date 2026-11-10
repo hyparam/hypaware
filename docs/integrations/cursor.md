@@ -66,7 +66,7 @@ add the following as **Runtime Secrets**:
 | Name | Value |
 | --- | --- |
 | `CURSOR_API_KEY` | The key from Cursor API Keys |
-| `HYP_CI_TOKEN` | The token printed by `hyp remote mint`; omit for local-only capture |
+| `HYP_CI_TOKEN` | The token printed by `hyp remote mint`; omit to keep recordings on the VM only (they are lost when it is discarded) |
 
 Do not put either value in an agent prompt. Replace expiring secrets before
 starting further runs. See [CI enrollment](ci-and-headless.md#one-time-mint-a-token)
@@ -74,7 +74,7 @@ for token lifetime and host grouping.
 
 ### Configure Install and Start
 
-Install HypAware in the saved environment's Build script, pinning the released
+Install HypAware in the saved environment's Install script, pinning the released
 version you want to run. Saved environment commands take precedence over a
 repository's `environment.json`; update the saved Install and Start scripts.
 Do not enroll or connect during the Build. Append this to the Install script,
@@ -88,10 +88,8 @@ npm install --global hypaware@RELEASE_VERSION
 Preserve the environment's command that enters the repository directory, so
 both scripts run from its root.
 
-Set `CURSOR_API_KEY` as a Runtime Secret. For organization sync, also set the
-`HYP_CI_TOKEN` Runtime Secret. For a fresh VM, run this complete Start script
-from the repository root. It keeps recordings local when no enrollment token
-is supplied:
+For a fresh VM, run this complete Start script from the repository root. It
+keeps recordings local when no enrollment token is supplied:
 
 ```sh
 set -eu
