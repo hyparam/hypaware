@@ -1417,6 +1417,33 @@ hyp github sync
 Runs one poll immediately, including graph projection. It does not perform the
 full historical import. Capture or projection failures return `1`.
 
+## Collect Linear activity
+
+Plugin: `@hypaware/linear`. Explicit activation and `teams` in the plugin config are required.
+See the [Linear integration](integrations/linear.md) for OAuth app registration
+and configuration.
+
+```text
+hyp linear login [--no-browser]
+hyp linear logout
+hyp linear status
+hyp linear backfill
+hyp linear sync
+```
+
+Login uses read-only browser OAuth with a registered loopback callback and
+automatic token refresh. `--no-browser` prints the URL; the callback still
+requires a browser on the CLI's machine. `status` verifies the account and
+workspace. Logout removes local OAuth credentials; an API-key environment
+override remains active.
+
+Backfill restarts a bounded import of configured teams. Sync resumes capture
+and projects issue-to-PR links into the activity graph. Remaining work resumes
+on later sync or daemon ticks. Invalid arguments or an empty capture scope
+return `2`, capture/authentication failures return `1`, and cancellation
+returns `130`. Login requires `client_id` in the plugin config or `LINEAR_CLIENT_ID`
+until a shared HypAware Linear OAuth application is registered.
+
 ## Record Ollama
 
 <!-- @ref LLP 0474#setup [explains]: setup checks readiness and prints routes without loading a model; verify needs a fresh saved request and response -->
@@ -2133,13 +2160,21 @@ For the complete join, capture, and flush workflow, see
 [CI and headless deployment](integrations/ci-and-headless.md).
 
 With `--scope query`, it mints a personal agent token instead, for a headless
-agent or CI job that queries and publishes as you. The token reads your
-organization's recorded history and can mark recommendations, publish reports,
-and delete reports, as you, until it expires or you revoke it. `--label` names
-it, and `--expires-days` sets its lifetime; without it, the server's default
-applies. As with the CI token, only the token goes to standard output, and
-HypAware keeps no copy. At your own computer you don't need one:
-`hyp mcp serve --remote` already uses your session.
+agent or CI job that queries and publishes as you. It holds two permissions
+until it expires or you revoke it: `read` (Query organization)
+reads your organization's recorded history, and `report-publish` (Publish and
+manage reports) publishes reports and recommendations, changes a
+recommendation's status, and deletes any report in your organization.
+`--label` names it, and `--expires-days` sets its lifetime; without it, the
+server's default applies. As with the CI token, only the token goes to
+standard output, and HypAware keeps no copy. At your own computer you don't
+need one: `hyp mcp serve --remote` already uses your session.
+
+A personal token belongs to you and expires. For an integration that should
+outlive any one person's account, an organization admin creates a service
+token on the Service accounts page in HypAware instead: it belongs to a service
+account and lasts until it is revoked. See
+[Personal or service token](MCP.md#personal-or-service-token).
 
 ```sh
 hyp remote mint team --scope query --label nightly-agent

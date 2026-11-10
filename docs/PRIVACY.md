@@ -14,6 +14,8 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `claude` | Claude Code prompts, responses, tool calls and results, system prompts, tool definitions, and working directory where available |
 | `claude-desktop` | Claude Desktop conversations imported from local transcripts on macOS |
 | `codex` | Codex CLI and Desktop conversations imported from their shared local session files |
+| `codex-cloud` | Codex Cloud coding chats read from OpenAI's service with the ChatGPT login Codex keeps on your host (HypAware keeps no copy of it): user and assistant text, command calls and their outputs, and MCP calls and results; no reasoning content |
+| `chatgpt-work` | ChatGPT Work web and mobile conversations, read the same way as `codex-cloud`; they can include everyday conversations that are not about coding. Off unless you choose it |
 | `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools; explicitly connected Cloud VMs also record API text and supplied tool/edit observations |
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
 | `pi` | Pi conversations from its managed extension and local session files |
@@ -28,9 +30,11 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `copilot` | VS Code Copilot completed spans from its local databases, for sessions with a verified local working directory |
 | `nanoclaw` | NanoClaw Claude transcripts read from an explicitly configured local installation |
 | `langgraph` | LangGraph model, tool, and graph callbacks from your application, with its working directory and Git context |
+| `ollama` | Ollama CLI and SDK chat and generate requests sent through the local capture route: system, user, and assistant text and the new response's token usage. Image bytes are omitted, and an exchange with thinking or tool calls is not saved |
 | `raw-anthropic`, `raw-openai` | API requests and responses routed through the local gateway |
 | `otel` | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener |
 | `github` | Structural repository activity such as issue, pull request, commit, file, review, and comment metadata; content remains on GitHub |
+| `linear` | Structural issue metadata for configured teams (identifier, team, state, and Linear ids of the creator and assignee) and GitHub pull request links attached to those issues; titles, descriptions, and comments remain in Linear |
 
 [Cursor Cloud](integrations/cursor.md#cursor-cloud-agents-beta) is separately
 opted in with `hyp cursor-cloud connect` inside the VM. Its local grant binds
@@ -101,8 +105,11 @@ still identifies a proxy attach.
 
 > **Note:** Local recording does not mean HypAware makes no network requests. Supervised
 > global installations check npm for [automatic updates](CLI.md#update-hypaware)
-> by default; those checks do not send recordings. Separately configured remote
-> destinations and diagnostic exporters can also send data.
+> by default; those checks do not send recordings. The [GitHub](integrations/github.md)
+> and [Linear](integrations/linear.md) plugins, once signed in or given a token,
+> call the GitHub and Linear APIs with your own credentials to collect their
+> data; they send no recordings. Separately configured remote destinations and diagnostic
+> exporters can also send data.
 
 HypAware Cloud operators can read synced data across every org, and each
 such read is recorded in that org's audit trail. For support, they can also
@@ -192,8 +199,10 @@ recorded a cwd for, and scopes a messaging-channel session (Telegram, Discord, S
 WhatsApp, Signal, email) under a derived `~/.hermes/channels/<source>` path
 instead; an interactive Hermes session with no recorded cwd has no scope to
 match and is recorded unconditionally. The `raw-anthropic` / `raw-openai`
-proxy and OTEL sources never supply one, so directory markings are a no-op
-for them.
+proxy, OTEL, and Ollama sources never supply one, so directory markings are a no-op
+for them. Codex Cloud and ChatGPT Work chats carry a path on OpenAI's machine,
+not yours, so local markings and `.hypignore` never classify them either;
+`hyp session ignore` and export settings still apply.
 
 > **Caution:** **A session is classed by its own directory, not by what it reads.**
 > Local SQL and search normally hide local-only rows from a caller that can

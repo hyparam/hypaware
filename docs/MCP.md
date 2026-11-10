@@ -110,6 +110,37 @@ revoked. It can:
 It cannot change configuration, record or upload sessions, generate or
 promote a report, manage the organization, or mint more tokens.
 
+These are the token's two permissions, named as HypAware names them on the
+Auth tokens page:
+
+- `read`, **Query organization**: the reads on `/v1/mcp` and `/v1/query`.
+  `/v1/mcp` refuses a token without it.
+- `report-publish`, **Publish and manage reports**: publishing reports and
+  standalone recommendations, changing a recommendation's status, and
+  deleting any report in your organization. Marking through
+  `set_recommendation_status` needs `read` as well.
+
+### Personal or service token
+
+The token `hyp remote mint --scope query` prints is a **personal** token. It
+belongs to you, acts as you, and stops working when it expires (see its
+lifetime above) or when you revoke it. Use it for a script or agent you
+run yourself.
+
+For an integration that should keep working whatever happens to one person's
+account, an organization admin creates a **service token** on the Service
+accounts page in HypAware instead. It belongs to a service account, not a
+person, and lasts until it is revoked. It can hold `read` and
+`report-publish` as above, and **Submit telemetry**, which a host needs to
+record and upload sessions.
+
+A service token's secret is never pasted into a client's `Authorization`
+header. Store it with `hyp remote login <server> --token-file <path>`: `hyp`
+exchanges it for a one-hour access token as needed, so `hyp query --remote`
+and `hyp mcp serve --remote` work with it when it holds `read`. A host enrolls
+with it through `hyp join`. See
+[Collect as an organization service account](integrations/ci-and-headless.md#collect-as-an-organization-service-account).
+
 > **Caution:** Anyone who holds the token can read your organization's
 > history and publish or delete reports as you. Keep it in a secret store,
 > never in a file you commit.

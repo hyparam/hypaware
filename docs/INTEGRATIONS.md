@@ -80,6 +80,7 @@ HypAware 1.42.0. It includes setup, session startup, and upload after replies.
 | Integration | Status | Runs on | How HypAware records it | Backfill | Setup id |
 | --- | --- | --- | --- | --- | --- |
 | [GitHub](integrations/github.md) | Supported | GitHub's cloud | Issue, pull request, commit, file, review, and comment metadata, polled into the activity graph | Yes | `hyp github login` |
+| [Linear](integrations/linear.md) | Supported | Linear's cloud | Issue structure (identifier, team, state, assignee and creator ids) and GitHub pull request links for configured teams, polled into the activity graph; no titles, descriptions, or comments | Yes | `hyp linear login` |
 | [OpenTelemetry](integrations/opentelemetry.md) | Supported | Your machine | Logs, traces, and metrics from any OTLP/JSON exporter, stored as raw rows, not sessions | No | `otel` |
 
 ## Query and export
