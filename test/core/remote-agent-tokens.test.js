@@ -7,7 +7,9 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { runRemoteMint, runRemoteTokens, runRemoteTokensRevoke } from '../../src/core/cli/remote_commands.js'
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { writeSession, writeToken } from '../../src/core/remote/credentials.js'
 
 const FUTURE = '2999-01-01T00:00:00Z'
@@ -251,6 +253,13 @@ const MINT_REFUSALS = [
   { name: 'old server member', status: 403, body: { error: 'role_required' }, line: /'prod' does not serve agent tokens yet \(HTTP 403\)/ },
   { name: 'write capacity', status: 429, body: { error: 'org_write_capacity' }, line: /mint failed \(HTTP 429 org_write_capacity\)/ },
   { name: 'server error', status: 500, body: undefined, line: /mint failed \(HTTP 500\)/ },
+  // A refusal this CLI has no line for reaches the person as the server gave it.
+  {
+    name: 'unmapped code with detail',
+    status: 400,
+    body: { error: 'invalid_permissions', detail: 'permissions must be a non-empty list of distinct values from read and report-publish' },
+    line: /hyp remote mint: mint failed \(HTTP 400 invalid_permissions\) - permissions must be a non-empty list of distinct values from read and report-publish\n/,
+  },
 ]
 
 for (const r of MINT_REFUSALS) {
@@ -267,6 +276,17 @@ for (const r of MINT_REFUSALS) {
     assert.deepEqual(await snapshot(hypHome), before)
   })
 }
+
+test('mint help names the two permissions and tells a personal token from a service token', () => {
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  const help = String(registry.get('remote mint')?.help).replace(/\s+/g, ' ')
+  assert.match(help, /read \(query the org's recorded history\)/)
+  assert.match(help, /report-publish \(publish reports and recommendations, change a recommendation's status, and delete any report in the org\)/)
+  assert.match(help, /A personal token stops working when it expires\./)
+  assert.match(help, /holds two permissions: read/)
+  assert.match(help, /service token on the Service accounts page in HypAware instead: it belongs to a service account, lasts until revoked/)
+})
 
 test('a 201 without a token is an error, not a blank print', async () => {
   const hypHome = await tmpHome()
