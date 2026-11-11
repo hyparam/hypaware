@@ -1,0 +1,93 @@
+{
+  "repository": "hyparam/hypaware",
+  "pr_number": 2803,
+  "head_sha": "7ca4bf746b9fc3dda3621ce524302ebfe1c5667b",
+  "original_body_sha256": "837a84f6f2375e41e8e1b0c16622462e376587566bc7ddcd92dd114439bcbc36",
+  "session_id": "02790997-658b-4fce-a6f0-273626b89ffb",
+  "sources": [
+    {
+      "id": "S0",
+      "title": "Why this feature was needed",
+      "message_id": "847b3f57-6cf0-4b0b-b6a1-918bd750f129",
+      "part_id": "847b3f57-6cf0-4b0b-b6a1-918bd750f129#0",
+      "recorded_at": "2026-10-21T16:15:41.270Z",
+      "conversation_id": null,
+      "agent_id": null,
+      "date": "2026-10-21",
+      "start_char": 1151,
+      "char_count": 1074,
+      "sha256": "b0afef44177bf116788197796f76f8d3bfbe980e15f8f2d123c178489fae5920",
+      "reviewed_text": "The client already has both seams: `hyp join <url> --token-file <path>`\nwrites a seed whose `identity.bootstrap_token` the central sink exchanges,\nand `hyp remote login <name> --token-file <path>` stores a credential the\nquery path reads. Two things stop the secret from working through them\nunchanged:\n\n1. **Seed retirement drops the secret.** The first successful apply removes\n   the seed (LLP 0031#physical-layout), and the served config carries no\n   bootstrap token. From then on the collector lives on its gateway JWT and\n   refresh. A collector that is offline past the JWT lifetime, or whose\n   `identity.json` is lost, has nothing left to re-enroll with, though the\n   operator's secret is still live. A human gateway fixes that with a new\n   `hyp join`; an unattended collector cannot.\n2. **A static remote record sends the secret as a bearer.** `--token-file`\n   stores `kind: 'static'` and sends the file's bytes on every query. The\n   secret is not a JWT, so every query would 401, and a long-lived secret\n   would ride every request instead of a one-hour JWT."
+    },
+    {
+      "id": "S1",
+      "title": "How service-account access works",
+      "message_id": "14263570-3064-484e-8056-91805d44adb6",
+      "part_id": "14263570-3064-484e-8056-91805d44adb6#0",
+      "recorded_at": "2026-10-21T16:18:53.565Z",
+      "conversation_id": null,
+      "agent_id": null,
+      "date": "2026-10-21",
+      "start_char": 687,
+      "char_count": 588,
+      "sha256": "b991118dee86669f5615c2322b5a491eeef41e6365e645f06fde8f68e78639ba",
+      "reviewed_text": "hypaware-server LLP 0620 adds org service accounts. An admin mints a named\ntoken for an account and gets one secret, `hsa_<16 hex id>_<43 base64url>`,\nshown once and valid until revoked. The same secret does two jobs on the\nserver:\n\n- `POST /v1/identity/bootstrap` with it returns an ordinary gateway JWT\n  for the token's one gateway (0620#gateway-credential), so a collector\n  uploads as the service account;\n- `POST /v1/identity/token` with `grant_type: service_token` returns a\n  one-hour `read` access JWT (0620#read-credential), so a script queries\n  the org as the service account."
+    },
+    {
+      "id": "S2",
+      "title": "Saving the secret safely",
+      "message_id": "400e5f53-8046-44c8-8713-f13978aebe0b",
+      "part_id": "400e5f53-8046-44c8-8713-f13978aebe0b#0",
+      "recorded_at": "2026-10-21T16:22:28.372Z",
+      "conversation_id": null,
+      "agent_id": null,
+      "date": "2026-10-21",
+      "start_char": 5127,
+      "char_count": 950,
+      "sha256": "286a8c3bc7260532096fde393cb8c9be070e5aa72e786a2e5cc855f9960cf9b3",
+      "reviewed_text": "When `hyp join` is given a token that starts with `hsa_`, it keeps the\ntoken in a **record bound to the URL it was enrolled against**, so the\nbinding survives the loss of `identity.json`:\n\n```ts\n// <dir of identity.json>/service-token, mode 0600\ninterface KeptServiceToken {\n  version: 1\n  secret: string          // the hsa_ secret\n  central_url: string     // the join URL, canonicalized as sameCentral does\n  fingerprint: string     // fingerprintToken(secret), checked on read\n  written_at: string      // ISO\n  stopped_code?: string   // set by D3's stop; binds to this record's secret and URL; a new join drops it\n}\n```\n\n- **Private from creation.** Written with the existing `atomicWriteJson`\n  and `{ mode: 0o600, dirMode: 0o700, fsync: true }`: the temp file is\n  created at `0600` (the umask can only narrow it), chmodded to exactly\n  `0600`, synced, then renamed over the target. There is no moment when\n  the secret sits in a looser file."
+    },
+    {
+      "id": "S3",
+      "title": "Separate collector setup",
+      "message_id": "29cea75a-48d9-46ac-ae0d-7322e001c77d",
+      "part_id": "29cea75a-48d9-46ac-ae0d-7322e001c77d#0",
+      "recorded_at": "2026-10-21T16:59:19.107Z",
+      "conversation_id": null,
+      "agent_id": null,
+      "date": "2026-10-21",
+      "start_char": 2571,
+      "char_count": 297,
+      "sha256": "5770e3f3e1916ff8648f45a504a36c8959d47774a891f573e0edf4e112a97975",
+      "reviewed_text": "- A separate `HYP_HOME` keeps the service gateway off any person's machine\n  identity, local capture config and query credentials. On a person's own\n  machine the same command would replace that machine's enrollment, so the\n  docs and the hypscope copy (UX-264) say to use a dedicated environment."
+    },
+    {
+      "id": "S4",
+      "title": "Why keep only the secret",
+      "message_id": "df7ca04f-afa6-4a05-89d2-60a0e26fd0cd",
+      "part_id": "df7ca04f-afa6-4a05-89d2-60a0e26fd0cd#0",
+      "recorded_at": "2026-10-21T16:50:25.095Z",
+      "conversation_id": null,
+      "agent_id": null,
+      "date": "2026-10-21",
+      "start_char": 5422,
+      "char_count": 227,
+      "sha256": "050ac0677fd536a2d6a38ff85565d9bcd76d8e46ee67d69a23bd6c03b2afee42",
+      "reviewed_text": "- **Keep the seed for `hsa_` joins.** Retirement removes the policy token\n  from disk on purpose (LLP 0031#physical-layout); keeping the whole seed\n  also keeps a stale central layer as a fallback. One secret file is\n  smaller."
+    },
+    {
+      "id": "S5",
+      "title": "Rules for reconnecting",
+      "message_id": "7cbcba4b-e6ba-45a8-b514-4d6a3ab7c577",
+      "part_id": "7cbcba4b-e6ba-45a8-b514-4d6a3ab7c577#0",
+      "recorded_at": "2026-10-21T16:45:10.915Z",
+      "conversation_id": null,
+      "agent_id": null,
+      "date": "2026-10-21",
+      "start_char": 832,
+      "char_count": 294,
+      "sha256": "f725b1c309585d4fd6051e2422db3a2ab6239112550d82f0f0377067f1ecd723",
+      "reviewed_text": "- **Same-destination recovery.** No `identity.json`, record bound to the\n  configured URL: exactly one bootstrap with the kept secret, same gateway\n  id persisted. Refresh `401` with a matching fingerprint: one bootstrap.\n  A mismatched `bootstrap_token_fp`, or `origin: 'login'`: no bootstrap."
+    }
+  ]
+}
