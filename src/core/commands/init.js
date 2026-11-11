@@ -227,6 +227,9 @@ export async function writeSetupGuide(ctx, opts = {}) {
       : undefined
     // @ref LLP 0281#returning-gate [implements]: only a valid config with a recorded pick answer is a returning setup
     const configured = !!(report?.configExists && report.configValid && report.configRecordsAnswer)
+    // With nothing detected there is no shortlist to offer, so every app is listed.
+    const offered = rows.some((row) => detected.has(row.id)) ? rows.filter((row) => detected.has(row.id)) : rows
+    const notOffered = rows.filter((row) => !offered.includes(row))
     const lines = [
       'HypAware setup guide',
       '',
@@ -253,9 +256,9 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '',
       'Setup flow',
       'Follow this question tree one question at a time. Wait for the answer before choosing the next branch.',
-      'Use your multiple-choice question tool for every choice, including the returning-user menu. Use multi-select for app selections.',
+      'Use your multiple-choice question tool for every choice, including the returning-user menu, except the app list in question 2, which is asked in plain text.',
       'If the tool limits the number of options, split apps into successive groups and retain every answer. If no question tool is available, use numbered choices.',
-      'Show app names and short descriptions in questions; keep command flags in the execution step. Do not substitute a table and an open-ended request for changes.',
+      'Show app names and short descriptions in questions; keep command flags in the execution step. Elsewhere, do not substitute a table and an open-ended request for changes.',
       'Do not present all questions together. Reuse answers already given and skip questions that do not apply.',
       'Run each chosen step and check its result before asking the next question.',
       // @ref LLP 0462#handoffs [implements]: complete each sign-in before continuing the question tree
@@ -297,14 +300,20 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '    Explain these choices, skip the customization questions, and proceed to installation.',
       '',
       '  Customize (or no defaults):',
-      '    Ask: What do you want to collect?',
-      '    Use a multi-select question with the apps below as options. This answer chooses recording only.',
-      ...rows.map((row) => `    ${row.label}${detected.has(row.id) ? ' (detected)' : ''}${row.summary ? `\n      ${row.summary}` : ''}`),
+      '    Do not use the question tool here. List the apps below in one plain message, then ask:',
+      ...(notOffered.length
+        ? ['    "These apps were detected. Are there any you don\'t want to record?"']
+        : ['    "Which of these apps do you want to record?"']),
+      '    Wait for the reply. This answer chooses recording only.',
+      ...offered.map((row) => `    ${row.label}${detected.has(row.id) ? ' (detected)' : ''}${row.summary ? `\n      ${row.summary}` : ''}`),
+      ...(notOffered.length ? [
+        `    Not detected, so not offered: ${notOffered.map((row) => row.label).join(', ')}.`,
+        '    Name these in one sentence. Record one only if it is already configured or the person asks for it.',
+      ] : []),
       '',
       '  Selection rules:',
-      '    New setup: preselect detected apps; offer apps requiring separate setup unchecked.',
-      '    Reconfiguration: preselect configured apps; offer newly detected apps unchecked.',
-      '    Preselect defaults when the question tool supports it; otherwise label the current selections explicitly.',
+      '    New setup: record every listed app the person does not exclude; say which ones need separate setup.',
+      '    Reconfiguration: mark which listed apps are already recorded and which are newly detected, then ask the same question.',
       '    Organization-required sources stay selected and cannot be changed here.',
       '',
       '  After the collection answer, if enrolled and sharing is available, ask: Sync all selected apps?',
@@ -341,6 +350,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '  If a config already exists, including one created by cloud login, add --force. Setup backs it up and preserves enrollment and custom settings.',
       '  If optional history import was deferred, add --no-backfill. Automatic recovery imports still run.',
       '  Setup handles the daemon, client attachment, skills, and history imports. Do not repeat those steps with separate commands.',
+      '  The flags listed here are complete. Run the setup command directly; read --help or use --dry-run only if it fails.',
       '  On macOS, setup may open a certificate or password dialog that only the person can answer; say so, wait, and report any attach failure.',
       '  Verify the result in step 6 before reporting setup complete.',
       '',
@@ -362,12 +372,13 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '  Run hyp query overview --json and show a short first look at the recorded history; disclose incomplete results.',
       '',
       '7. For cloud sync, finish by asking: When would you like to upload?',
-      '  Show hyp sync --dry-run, then offer:',
-      '    Upload now (recommended): run hyp sync in a terminal so the person can confirm the plan; --yes cannot bypass that review.',
+      '  Show hyp sync --dry-run, then offer these choices and wait for the answer:',
+      '    Upload now (recommended): this answer is the person\'s permission to upload. Run hyp sync --yes; it ends the review window and uploads.',
       '    Wait until <deadline>: leave the scheduled first upload in place.',
-      '    Wait until <deadline> and run a security review: review the recorded history for sensitive content now, keeping the scheduled upload.',
+      '    Wait until <deadline> and run a security review now: review the recorded history for sensitive content, keeping the scheduled upload.',
       '  Use the actual first-sync deadline from status as <deadline>. A review does not pause or extend it.',
-      '  If no first-sync hold is active, explain the current sync state instead of offering a deadline.',
+      '  Never run hyp sync --yes unless the person chose Upload now.',
+      '  If no first-sync hold is active, still ask, offering Upload now (recommended) / Wait for the next scheduled sync.',
     ]
     const presets = ctx.initPresets.list()
     if (presets.length) {

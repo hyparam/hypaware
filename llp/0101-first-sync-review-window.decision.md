@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-13
 **Related:** LLP 0063, LLP 0069, LLP 0093, LLP 0100, LLP 0102
-**Extended-by:** LLP 0203 (#no-release: setup offers the release verb instead of only naming it), LLP 0324 (#hold: a preview-only dataset-disposition seam counts per destination without teaching the driver which sinks leave the machine), LLP 0325 (#no-release: the plan's count spends its budget as per-destination deadlines because the release is all-or-nothing); LLP 0407 (#dropped: the sync warning no longer states irreversibility or names the review window); LLP 0578 (#no-release: the daemon also clears the marker when the organization's config sets `first_sync_hold` to false)
+**Extended-by:** LLP 0203 (#no-release: setup offers the release verb instead of only naming it), LLP 0324 (#hold: a preview-only dataset-disposition seam counts per destination without teaching the driver which sinks leave the machine), LLP 0325 (#no-release: the plan's count spends its budget as per-destination deadlines because the release is all-or-nothing); LLP 0407 (#dropped: the sync warning no longer states irreversibility or names the review window); LLP 0578 (#no-release: the daemon also clears the marker when the organization's config sets `first_sync_hold` to false); LLP 0596 (#no-release: the `--yes` refusal is superseded, an unscoped `hyp sync --yes` releases the hold)
 
 > On an attended enrolling login, the sink driver exports nothing until a
 > **printed, absolute deadline**: the next local 11:59pm, rolled to the
@@ -80,7 +80,7 @@ deadline; `createSinkDriver.tick` exports nothing while `now < deadline`.**
     omits every destination the release would unblock; confirming it would
     forward the others unseen. Releasing is all-or-nothing because the hold
     is.
-  - **`--yes`** refuses while a hold is live. "Attended" is the operative
+  - **`--yes`** *(superseded by [LLP 0596 #yes-releases](./0596-yes-releases-first-sync-hold.decision.md#yes-releases): `--yes` now releases)* refuses while a hold is live. "Attended" is the operative
     word: a provisioning script is not a person, and its destination list
     scrolls past in a log nobody reads. `--yes` still works for ordinary
     syncs; what it must not buy is somebody's review window.

@@ -947,18 +947,34 @@ test('a named instance cannot release the hold: the plan it showed was not the h
   assert.deepEqual(central.exported, [])
 })
 
-test('--yes cannot release the hold: #no-release licenses an attended confirmation only', async () => {
+// @ref LLP 0596#yes-releases [tests]: an unscoped --yes ends the window like a typed y
+test('--yes releases the hold the same way a typed y does', async () => {
   const hypHome = await makeHome('yes-held')
   await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
   const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
-  const { ctx, stderr } = makeCtx({ hypHome, sinks: [sink], tty: false })
+  const { ctx } = makeCtx({ hypHome, sinks: [sink], tty: false })
 
   const code = await runSync(['--yes'], ctx)
 
+  assert.equal(code, 0)
+  assert.equal(await holdExists(hypHome), false, 'the confirmed release clears the marker')
+  assert.equal(sink.exported.length, 1)
+})
+
+test('--yes with a named instance still cannot release the hold', async () => {
+  const hypHome = await makeHome('yes-scoped-held')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const central = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const parquet = fakeSink('parquet', { dir: '/home/u/exports' })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [central, parquet], tty: false })
+
+  const code = await runSync(['parquet', '--yes'], ctx)
+
   assert.equal(code, 2)
-  assert.match(stderr.text, /--yes cannot do it/)
-  assert.ok(await holdExists(hypHome), 'a script must not end somebody else\'s review window')
-  assert.deepEqual(sink.exported, [])
+  assert.match(stderr.text, /all-or-nothing/)
+  assert.ok(await holdExists(hypHome), 'the marker must survive a scoped run')
+  assert.deepEqual(parquet.exported, [])
+  assert.deepEqual(central.exported, [])
 })
 
 test('a hold that cannot be cleared fails loudly instead of exiting 0 with nothing sent', { skip: process.platform === 'win32' && 'chmod 0o500 does not make a directory unwritable on win32' }, async () => {
@@ -1126,9 +1142,7 @@ test('a held machine with no destinations says so rather than exiting 0', async 
   assert.match(stderr.text, /run `hyp sync` again/, 'an attended caller can just rerun')
 })
 
-// "Run `hyp sync` again" is advice a `--yes` caller cannot take: with a
-// destination configured, that rerun hits the held `--yes` refusal and exits 2.
-test('the held no-destinations advice is followable by the --yes caller who got it', async () => {
+test('the held no-destinations advice is the same for a --yes caller', async () => {
   const hypHome = await makeHome('held-no-sinks-yes')
   await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
   const { ctx, stderr } = makeCtx({ hypHome, sinks: [], tty: false })
@@ -1137,13 +1151,7 @@ test('the held no-destinations advice is followable by the --yes caller who got 
 
   assert.equal(code, SYNC_HELD_NO_DESTINATIONS_EXIT)
   assert.match(stderr.text, /no destinations are configured/)
-  assert.match(stderr.text, /from a terminal/)
-  assert.match(stderr.text, /--yes cannot do it/)
-  assert.doesNotMatch(
-    stderr.text,
-    /run `hyp sync` again/,
-    'the bare rerun is what the held --yes refusal rejects'
-  )
+  assert.match(stderr.text, /run `hyp sync` again/)
   assert.ok(await holdExists(hypHome), 'nothing was sent, so the window still stands')
 })
 

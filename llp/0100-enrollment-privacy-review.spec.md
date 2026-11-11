@@ -148,6 +148,8 @@ Its job, in order:
   `enrollCentralSink` so no daemon tick can precede it, and the daemon MUST
   NOT clear the marker itself. An instance-scoped run and `--yes` MUST refuse
   to release, since the hold is driver-wide and their consent is not.
+  *(Superseded-by: [LLP 0596 #yes-releases](./0596-yes-releases-first-sync-hold.decision.md#yes-releases)
+  for `--yes` only: an unscoped `hyp sync --yes` now releases.)*
   Originally: "No export tick may run before the deadline."
 - **R3.** The skill MUST opt its own session out of capture
   ([LLP 0066](./0066-session-opt-out.spec.md)) as its first action and verify
