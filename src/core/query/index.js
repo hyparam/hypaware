@@ -4,7 +4,7 @@
 // Reading parquet/Iceberg back from a BlobStore-backed query source is
 // built on top of these helpers.
 
-export { executeQuerySql, QueryExecutionBudgetError } from './sql.js'
+export { executeQuerySql, streamQuerySql, QueryExecutionBudgetError } from './sql.js'
 export { parquetDataSource } from './parquet-source.js'
 export { whereToParquetFilter } from './parquet-pushdown.js'
 export { alignRowColumns, alignRows, unionSources, emptySource, canPushWhere, whereColumns } from './union-source.js'
