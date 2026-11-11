@@ -140,9 +140,21 @@ test('projectGraph excludes retained Claude aux rows from the graph', async () =
   // aux row whose keys are all distinct. Counts must stay 5/4.
   await withSeededGateway(async ({ registry, storage }) => {
     const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
-    const r = await projectGraph({ query: registry, storage, contracts: [contract] })
+    /** @type {string[]} */
+    const queries = []
+    /** @type {typeof executeQuerySql} */
+    const spy = (args) => {
+      queries.push(args.query)
+      return executeQuerySql(args)
+    }
+    const r = await projectGraph({ query: registry, storage, contracts: [contract], __executeSql: spy })
     assert.equal(r.nodes, 5, 'aux row mints no extra node')
     assert.equal(r.edges, 4, 'aux row mints no extra edge')
+    // The shared scan filters aux rows in SQL and never selects the heavy
+    // `attributes` column; only the pushed-down raw Skill rules carry it.
+    const shared = queries.filter((q) => q.includes(` WHERE (${contract.rowFilter.sql})`))
+    assert.equal(shared.length, 1, 'one shared scan with the pushed-down aux filter')
+    assert.ok(!shared[0].split(' FROM ')[0].includes('attributes'), 'shared scan does not select attributes')
 
     const auxNode = await executeQuerySql({
       query: `SELECT node_id FROM node WHERE natural_key = 'sess-aux'`,
@@ -153,6 +165,26 @@ test('projectGraph excludes retained Claude aux rows from the graph', async () =
     })
     assert.equal(auxNode.rows.length, 0, 'aux-tagged traffic mints no graph node')
   }, [...ROWS, AUX_ROW])
+})
+
+test('projectGraph keeps a row whose attributes are not a JSON object', async () => {
+  // auxKindOf reads unparseable or non-object attributes as "not aux", so the
+  // row is kept. The pushed-down filter must agree, and must not fail the
+  // whole scan on one such row.
+  const bad = { ...AUX_ROW, session_id: 'sess-bad', attributes: '{"claude":' }
+  const scalar = { ...AUX_ROW, session_id: 'sess-scalar', attributes: '"aux_kind"' }
+  await withSeededGateway(async ({ registry, storage }) => {
+    const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
+    await projectGraph({ query: registry, storage, contracts: [contract] })
+    const kept = await executeQuerySql({
+      query: `SELECT natural_key FROM node WHERE node_type = 'Session' AND natural_key IN ('sess-bad', 'sess-scalar') ORDER BY natural_key`,
+      registry,
+      storage,
+      refresh: 'always',
+      includeLocalOnly: true,
+    })
+    assert.deepEqual(kept.rows.map((r) => r.natural_key), ['sess-bad', 'sess-scalar'])
+  }, [...ROWS, bad, scalar])
 })
 
 test('projectGraph with no contracts writes nothing', async () => {

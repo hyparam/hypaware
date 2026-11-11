@@ -156,6 +156,11 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
       let scanCount = 0
       for (const contract of contracts) {
         const keep = contract.rowFilter?.keep
+        // A filter with a SQL form runs inside the shared scan, so its
+        // columns (the gateway's `attributes`, which holds whole tool
+        // outputs) are never materialized for every source row.
+        // @ref LLP 0096#decision [constrained-by]: heavy columns stay out of the shared scan's materialization
+        const pushed = contract.rowFilter?.sql
         const declarative = contract.rules.filter((rule) => rule.columns)
         const raw = contract.rules.filter((rule) => typeof rule.sql === 'string')
 
@@ -172,7 +177,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
             for (const col of rule.columns ?? []) columns.add(col)
             for (const col of predicateColumns(rule.where)) columns.add(col)
           }
-          for (const col of contract.rowFilter?.columns ?? []) columns.add(col)
+          if (!pushed) for (const col of contract.rowFilter?.columns ?? []) columns.add(col)
           // Cache-to-cache read: the projection's output stays in the local
           // cache, so the LLP 0105 visibility filter is bypassed here (else a
           // daemon-context projection would silently drop local-only sessions
@@ -181,7 +186,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
           // localOnlyContentColumns declaration (datasets.js).
           // @ref LLP 0105#surfaces [constrained-by]: the filter governs read surfaces; derived-cache builds keep full fidelity and the derived dataset carries its own declaration
           const result = await __executeSql({
-            query: `SELECT ${[...columns].sort().join(', ')} FROM ${contract.sourceDataset}`,
+            query: `SELECT ${[...columns].sort().join(', ')} FROM ${contract.sourceDataset}${pushed ? ` WHERE (${pushed})` : ''}`,
             registry: query,
             storage,
             config,
@@ -194,7 +199,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
           for (let i = 0; i < result.rows.length; i++) {
             if (yieldDue(i)) await yieldNow()
             const row = result.rows[i]
-            if (keep && !keep(row)) continue
+            if (keep && !pushed && !keep(row)) continue
             applyRules(row, declarative)
           }
         }
