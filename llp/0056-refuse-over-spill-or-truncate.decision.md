@@ -3,6 +3,7 @@
 **Type:** Decision
 **Status:** Accepted
 **Systems:** Query
+**Extended-by:** [LLP 0597](./0597-consume-query-output-in-scope.spec.md) (bounded output consumption inside the query lifecycle)
 **Author:** Phil / Claude
 **Date:** 2026-06-30
 **Related:** LLP 0054, LLP 0057

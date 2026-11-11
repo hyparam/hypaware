@@ -109,6 +109,49 @@ export async function withSpan(name, attrs, fn, opts = {}) {
 }
 
 /**
+ * Keep a span open through iteration and cleanup. Restore its context on each
+ * pull without leaking that context into the consumer between batches.
+ *
+ * @template T
+ * @param {string} name
+ * @param {Record<string, unknown>} attrs
+ * @param {(span: Span) => AsyncGenerator<T>} fn
+ * @param {{ component?: string }} [opts]
+ * @returns {AsyncGenerator<T>}
+ */
+export async function* withSpanIterator(name, attrs, fn, opts = {}) {
+  const sanitized = buildAttrs(attrs)
+  const span = /** @type {Span} */ (getTracer(opts.component ?? 'kernel').startActiveSpan(name, { attributes: sanitized }))
+  const ctx = { span }
+  try {
+    const iterator = fn(span)
+    try {
+      yield* {
+        [Symbol.asyncIterator]() { return this },
+        next: () => context.with(ctx, () => iterator.next()),
+        return: () => context.with(ctx, () => iterator.return(undefined)),
+        throw: (error) => context.with(ctx, () => iterator.throw(error)),
+      }
+    } finally {
+      await context.with(ctx, () => iterator.return(undefined))
+      const status = declaredStatuses.get(span) ?? sanitized.status
+      span.setStatus(typeof status !== 'string' || status === 'ok'
+        ? { code: SpanStatusCode.OK }
+        : { code: SpanStatusCode.ERROR, message: status })
+    }
+  } catch (error) {
+    const { err, message } = reportable(error)
+    try { span.recordException(err) } catch { /* preserve the original error */ }
+    span.setStatus({ code: SpanStatusCode.ERROR, message })
+    span.setAttribute('status', 'failed')
+    if (span.attributes.error_kind === undefined) span.setAttribute('error_kind', 'unhandled_exception')
+    throw err
+  } finally {
+    span.end()
+  }
+}
+
+/**
  * Run `fn` inside a fresh root span (no parent context, no propagated
  * trace). Used for unit-of-work that is logically a kernel boot or a
  * top-level command invocation.

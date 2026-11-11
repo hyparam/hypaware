@@ -3,9 +3,9 @@
 import v8 from 'node:v8'
 import vm from 'node:vm'
 
-import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
+import { executeSql as squirrelExecuteSql, extractTables, parseSql, streamRowBatches } from 'squirreling'
 
-import { Attr, getActiveSpan, getKernelInstruments, getLogger, markSpanStatus, withSpan } from '../observability/index.js'
+import { Attr, getActiveSpan, getKernelInstruments, getLogger, markSpanStatus, withSpan, withSpanIterator } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS, QUERY_FLUSH_FAILURE_COOLDOWN_MS } from '../cache/spool.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { normalizeScanColumn } from './scan-column.js'
@@ -412,6 +412,26 @@ function isThenable(value) {
  * @ref LLP 0015#query-is-intrinsic [implements]: core-owned read-only SQL over the registry; IO only via the storage service
  */
 export async function executeQuerySql(args) {
+  /** @type {ExecuteSqlResult | undefined} */
+  let result
+  for await (const batch of streamQuerySql(args)) {
+    if (!result) result = { ...batch, rows: [] }
+    for (const row of batch.rows) result.rows.push(row)
+  }
+  return /** @type {ExecuteSqlResult} */ (result)
+}
+
+/**
+ * Stream resolved result batches. Each batch includes query metadata, and an
+ * empty result still yields one batch. Consume with for-await, or explicitly
+ * close a manually pulled iterator with return(). Cleanup and terminal resource
+ * checks run on completion and early closure, before the query span ends.
+ *
+ * @param {ExecuteSqlOptions} args
+ * @returns {AsyncGenerator<ExecuteSqlResult>}
+ * @ref LLP 0597#lifecycle [implements]: the iterator owns query execution and cleanup
+ */
+export async function* streamQuerySql(args) {
   const { query, registry, storage } = args
   const refresh = args.refresh ?? 'auto'
   const scope = args.scope ?? { limit: 1_000_000 }
@@ -434,7 +454,7 @@ export async function executeQuerySql(args) {
     return visibility
   }
 
-  return withSpan(
+  yield* withSpanIterator(
     'query.execute_sql',
     {
       [Attr.COMPONENT]: 'query',
@@ -443,7 +463,7 @@ export async function executeQuerySql(args) {
       refresh_mode: refresh,
       status: 'ok',
     },
-    async (span) => {
+    async function* (span) {
       const instruments = getKernelInstruments()
       const start = Date.now()
       try {
@@ -459,17 +479,23 @@ export async function executeQuerySql(args) {
         // would read each live plugin `name` inside a comparator, the read
         // `listDatasets()` avoids (issue #1524).
         if (SHOW_TABLES.test(trimmed)) {
-          const rows = registry.listDatasets().map((dataset) => ({ name: dataset.name }))
-          span.setAttribute('row_count', rows.length)
-          instruments.queryRunsTotal.add(1, { status: 'ok' })
-          instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
-          return {
-            columns: ['name'],
-            rows,
-            datasets: [],
-            freshnessMessages: [],
-            localOnly: { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 },
+          const listed = registry.listDatasets().map((dataset) => ({ name: dataset.name }))
+          args.signal?.throwIfAborted()
+          try {
+            yield {
+              columns: ['name'],
+              rows: listed,
+              datasets: [],
+              freshnessMessages: [],
+              localOnly: { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 },
+            }
+          } finally {
+            args.signal?.throwIfAborted()
+            span.setAttribute('row_count', listed.length)
+            instruments.queryRunsTotal.add(1, { status: 'ok' })
+            instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
           }
+          return
         }
 
         // squirreling only parses read-only SELECTs, so its own error message
@@ -694,35 +720,50 @@ export async function executeQuerySql(args) {
           // The rewritten statement, not the original text: re-parsing here
           // would throw the literal typing above away.
           const results = squirrelExecuteSql({ tables, query: statement, signal: controller.signal })
-          const rows = await collect(results)
-          // Terminal budget check: the inline guard only samples every
-          // BUDGET_CHECK_ROW_STRIDE rows (and per column chunk), and the
-          // interval watchdog cannot fire during a fully synchronous run, so
-          // growth concentrated in a sub-stride tail or in finalization would
-          // otherwise return a wrongly-successful result. One check after
-          // materialization closes that window before we record success.
-          guard.check('terminal')
-          const columns = results.columns ?? []
-          span.setAttribute('row_count', rows.length)
-          span.setAttribute('caller_usage_class', localOnly.callerClass)
-          span.setAttribute('local_only_withheld_rows', localOnly.withheldRows)
-          span.setAttribute('local_only_suppressed_rows', localOnly.suppressedRows)
-          // Counts only, never content or raw paths, matching the export
-          // seam's `usage_policy.export_drop` discipline (LLP 0080 #telemetry).
-          if (localOnly.withheldRows > 0 || localOnly.suppressedRows > 0) {
-            getLogger('query').debug('usage_policy.query_withhold', {
-              [Attr.COMPONENT]: 'query',
-              caller_usage_class: localOnly.callerClass,
-              withheld_row_count: localOnly.withheldRows,
-              suppressed_row_count: localOnly.suppressedRows,
-            })
+          let rowCount = 0
+          let failed = false
+          try {
+            for await (const rows of streamRowBatches(results)) {
+              rowCount += rows.length
+              yield { columns: results.columns ?? [], rows, datasets: datasetsUsed, freshnessMessages, localOnly }
+            }
+            if (rowCount === 0) {
+              yield { columns: results.columns ?? [], rows: [], datasets: datasetsUsed, freshnessMessages, localOnly }
+            }
+          } catch (err) {
+            failed = true
+            throw err
+          } finally {
+            // Early return must run the same terminal checks as exhaustion.
+            if (!failed) {
+              controller.signal.throwIfAborted()
+              // Terminal budget check: the inline guard only samples every
+              // BUDGET_CHECK_ROW_STRIDE rows (and per column chunk), and the
+              // interval watchdog cannot fire during a fully synchronous run, so
+              // growth concentrated in a sub-stride tail or in finalization would
+              // otherwise return a wrongly-successful result. One check after
+              // materialization closes that window before we record success.
+              guard.check('terminal')
+              span.setAttribute('row_count', rowCount)
+              span.setAttribute('caller_usage_class', localOnly.callerClass)
+              span.setAttribute('local_only_withheld_rows', localOnly.withheldRows)
+              span.setAttribute('local_only_suppressed_rows', localOnly.suppressedRows)
+              // Counts only, never content or raw paths, matching the export
+              // seam's `usage_policy.export_drop` discipline (LLP 0080 #telemetry).
+              if (localOnly.withheldRows > 0 || localOnly.suppressedRows > 0) {
+                getLogger('query').debug('usage_policy.query_withhold', {
+                  [Attr.COMPONENT]: 'query',
+                  caller_usage_class: localOnly.callerClass,
+                  withheld_row_count: localOnly.withheldRows,
+                  suppressed_row_count: localOnly.suppressedRows,
+                })
+              }
+
+              const runStatus = refreshDegraded ? 'degraded' : 'ok'
+              instruments.queryRunsTotal.add(1, { status: runStatus })
+              instruments.queryDurationMs.record(Date.now() - start, { status: runStatus })
+            }
           }
-
-          const runStatus = refreshDegraded ? 'degraded' : 'ok'
-          instruments.queryRunsTotal.add(1, { status: runStatus })
-          instruments.queryDurationMs.record(Date.now() - start, { status: runStatus })
-
-          return { columns, rows, datasets: datasetsUsed, freshnessMessages, localOnly }
         } catch (err) {
           // Any abort surfaced while the budget stands tripped maps to the
           // typed refusal, whichever layer's abort check fired first.
