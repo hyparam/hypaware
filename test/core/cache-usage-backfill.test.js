@@ -185,6 +185,38 @@ test('a purge rewrite of an evolved old partition backfills it', async () => {
   }
 })
 
+test('backfill of a partition whose columns evolved out of field-id order keeps its date partitioning', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-usage-backfill-order-'))
+  try {
+    // A newer writer appends with the declared order, which places the token
+    // columns before raw_frame/attributes/date, so the evolved schema lists
+    // fields out of id order. A rewrite numbers fields by position, so the
+    // partition spec must follow `date` by name, not keep its old id.
+    const trailing = new Set(['raw_frame', 'attributes', 'date'])
+    const declaredOrder = [
+      ...OLD_COLUMNS.filter((c) => !trailing.has(c.name)),
+      ...backfill.columns,
+      ...OLD_COLUMNS.filter((c) => trailing.has(c.name)),
+    ]
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=claude'], OLD_COLUMNS,
+      [row({ message_id: 'm-old', part_id: 'p1', request_id: 'req_1' }, usage(5517))], { declaration })
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=claude'], declaredOrder,
+      [{ ...row({ message_id: 'm-new', part_id: 'p2', request_id: 'req_2', date: '2026-10-08' }, usage(40)), output_tokens: 40 }], { declaration })
+    const opts = { cacheRoot, compactOnly: true, getDeclaration: () => declaration, getColumnBackfill: () => backfill }
+    const report = await maintainCache(opts)
+    assert.equal(report.partitions[0].failed, undefined)
+    assert.equal(report.partitions[0].backfilled, true)
+    const rows = await readRowsFromTable(liveTableDir(partitionDir(cacheRoot)))
+    assert.deepEqual(
+      rows.map((r) => [r.message_id, r.date, r.output_tokens == null ? null : Number(r.output_tokens)]).sort(),
+      [['m-new', '2026-10-08', 40], ['m-old', '2026-10-07', 5517]]
+    )
+    assert.equal((await maintainCache(opts)).totalCompacted, 0)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('a partition created with the token columns is not backfilled', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-usage-backfill-fresh-'))
   try {

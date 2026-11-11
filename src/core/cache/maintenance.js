@@ -1431,6 +1431,32 @@ export function estimateRowBytes(row) {
 }
 
 /**
+ * Rebind a partition spec taken from the old generation to the field ids the
+ * replacement table will assign. A new table numbers its fields by position
+ * in `columns`, but an evolved schema can list fields out of id order (a
+ * newer writer inserts added columns where the dataset declares them), so
+ * the same id would name a different column after the rewrite. Partition
+ * fields follow their source column by name.
+ *
+ * @param {PartitionSpec | undefined} spec
+ * @param {{ fields: { id: number, name: string }[] } | undefined} oldSchema
+ * @param {ColumnSpec[] | null} columns
+ * @returns {PartitionSpec | undefined}
+ */
+function specForColumns(spec, oldSchema, columns) {
+  if (!spec || !oldSchema || !columns) return spec
+  const nameById = new Map(oldSchema.fields.map((f) => [f.id, f.name]))
+  const idByName = new Map(columns.map((c, i) => [c.name, i + 1]))
+  return {
+    ...spec,
+    fields: spec.fields.map((f) => {
+      const id = idByName.get(nameById.get(f['source-id'] ?? -1) ?? '')
+      return id === undefined ? f : { ...f, 'source-id': id }
+    }),
+  }
+}
+
+/**
  * Compact a partition by rewriting the live generation into a fresh
  * directory named by the layout, then swap the cursor to point at it.
  *
@@ -1494,11 +1520,12 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   let batchBytes = 0
   let totalRows = 0
   const maxBatchBytes = cfg.compact_batch_bytes
+  const oldSchema = tableInfo?.metadata ? currentSchema(tableInfo.metadata) : undefined
   /** @type {AppendOptions | undefined} */
   const appendOpts = targetLayout
-    ? { partitionSpec: targetLayout.partitionSpec, sortOrder: targetLayout.sortColumns.length ? targetLayout.sortColumns : undefined }
+    ? { partitionSpec: specForColumns(targetLayout.partitionSpec, oldSchema, columns), sortOrder: targetLayout.sortColumns.length ? targetLayout.sortColumns : undefined }
     : existingSpec || sortColumns
-      ? { partitionSpec: existingSpec, sortOrder: sortColumns }
+      ? { partitionSpec: specForColumns(existingSpec, oldSchema, columns), sortOrder: sortColumns }
       : undefined
 
   // A fallback may stream before its native twin, so de-twinning needs to
