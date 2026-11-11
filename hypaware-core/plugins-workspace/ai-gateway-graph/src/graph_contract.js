@@ -533,8 +533,8 @@ export function createAiGatewayGraphContract(kit) {
     // real but not user conversation, so it must not mint graph
     // Session/App/Model/Tool/File nodes or edges.
     // @ref LLP 0096#decision [implements]: the aux filter is a contract
-    // rowFilter, evaluated once per source row by the engine (both paths),
-    // instead of the old per-rule SQL prepend + toRow wrap that parsed
+    // rowFilter, evaluated once per source row by the engine (`sql` on the
+    // shared scan, `keep` on raw-SQL rules), instead of the old per-rule SQL prepend + toRow wrap that parsed
     // `attributes` once per rule per row.
     rowFilter: {
       columns: ['attributes'],
@@ -544,7 +544,11 @@ export function createAiGatewayGraphContract(kit) {
       },
       // The same test in SQL, for the shared scan: `attributes` carries
       // whole tool outputs, and selecting it for every row held gigabytes.
-      sql: "JSON_VALUE(attributes, '$.claude.aux_kind') IS NULL OR JSON_VALUE(attributes, '$.claude.aux_kind') = ''",
+      // The substring test keeps rows without the key unparsed, and
+      // JSON_VALID keeps a row whose attributes are not valid JSON (as
+      // auxKindOf does) instead of failing the whole scan; JSON_EXTRACT_SCALAR
+      // reads null, not an error, from valid JSON that is not an object.
+      sql: `attributes NOT LIKE '%"aux_kind"%' OR NOT JSON_VALID(attributes) OR JSON_EXTRACT_SCALAR(attributes, '$.claude.aux_kind') IS NULL OR JSON_EXTRACT_SCALAR(attributes, '$.claude.aux_kind') = ''`,
     },
   }
 }
