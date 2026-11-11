@@ -56,7 +56,10 @@ const GRAPH_DATASETS = [NODE_DATASET, EDGE_DATASET]
 /**
  * Compact the derived graph tables: merge duplicate node/edge rows
  * (same content-addressed id) across all committed partitions, and
- * rewrite affected partitions into sorted replacement tables.
+ * rewrite affected partitions into sorted replacement tables. A
+ * partition whose table does not yet declare the graph sort order is
+ * rewritten too, so filters on type and id can skip row groups. Once
+ * declared, appends and kernel compaction keep each file sorted.
  *
  * Duplicates are rare (projection dedups pre-write), but concurrent
  * projections or partial failures can land the same id twice, possibly
@@ -120,6 +123,8 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
   const occurrences = new Map()
   /** @type {Map<string, { cursor: PartitionCursor, tableDir: string }>} */
   const liveByPart = new Map()
+  /** @type {Set<string>} */
+  const unsortedParts = new Set()
   for (const part of partitions) {
     if (part.legacy) continue // bare table without a cursor; not a graph source-table
     // Named organizations have separate graph identity namespaces. The local
@@ -137,6 +142,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
     const tableDir = path.join(part.path, cursor.tableDir ?? 'table')
     if (!tableExists(tableDir)) continue
     liveByPart.set(part.path, { cursor, tableDir })
+    if (!await declaresSortOrder(tableDir, SORT_ORDERS[dataset])) unsortedParts.add(part.path)
     for await (const row of scanRowsFromTable(tableDir, [idCol])) {
       const id = row[idCol]
       if (typeof id !== 'string') continue
@@ -159,13 +165,15 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
     duplicateIds.add(id)
     for (const p of entry.parts) affectedParts.add(p)
   }
+  // Every id is held here; release them before the rewrites stream rows.
+  occurrences.clear()
 
-  if (duplicateIds.size === 0 || dryRun) {
+  if (duplicateIds.size === 0 && unsortedParts.size === 0 || dryRun) {
     return {
       dataset,
       duplicateIds: duplicateIds.size,
       rowsMerged: 0,
-      partitionsRewritten: dryRun ? affectedParts.size : 0,
+      partitionsRewritten: dryRun ? new Set([...affectedParts, ...unsortedParts]).size : 0,
       partitionsSkipped,
     }
   }
@@ -216,7 +224,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
   const landedIds = new Set()
   let rowsMerged = 0
   let partitionsRewritten = 0
-  const ordered = [...affectedParts].sort((a, b) => {
+  const ordered = [...new Set([...affectedParts, ...unsortedParts])].sort((a, b) => {
     const ha = mergedByPart.has(a) ? 0 : 1
     const hb = mergedByPart.has(b) ? 0 : 1
     return ha !== hb ? ha - hb : compareStrings(a, b)
@@ -231,7 +239,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
       const home = homeById.get(id)
       if (home === part || (home !== undefined && landedIds.has(id))) dropIds.add(id)
     }
-    if (dropIds.size === 0 && extraRows.length === 0) continue
+    if (dropIds.size === 0 && extraRows.length === 0 && !unsortedParts.has(part)) continue
     const result = await rewritePartition({
       partitionDir: part,
       idCol,
@@ -259,6 +267,30 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
     rowsMerged,
     partitionsRewritten,
     partitionsSkipped,
+  }
+}
+
+/**
+ * Does the table's default sort order lead with the graph sort columns
+ * it has? Unreadable metadata counts as sorted: the rewrite would only
+ * fall back to declared columns, so leave such a table to the kernel.
+ *
+ * @param {string} tableDir
+ * @param {readonly { column: string }[]} sortOrder
+ * @returns {Promise<boolean>}
+ */
+async function declaresSortOrder(tableDir, sortOrder) {
+  try {
+    const { resolver, lister } = await createLocalIcebergIO()
+    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(tableDir), resolver, lister })
+    const schema = currentSchema(metadata)
+    const order = metadata['sort-orders']?.find((o) => o['order-id'] === metadata['default-sort-order-id'])
+    const names = new Map(schema?.fields.map((f) => [f.id, f.name]))
+    const declared = order?.fields.map((f) => names.get(f['source-id'] ?? -1)) ?? []
+    const wanted = sortOrder.map((s) => s.column).filter((c) => schema?.fields.some((f) => f.name === c))
+    return wanted.length === 0 || wanted.every((c, i) => declared[i] === c)
+  } catch {
+    return true
   }
 }
 

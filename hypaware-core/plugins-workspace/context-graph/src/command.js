@@ -142,7 +142,7 @@ export async function runGraphCompact(argv, ctx) {
     for (const d of r.datasets) {
       if (dryRun) {
         ctx.stdout.write(
-          `graph compact (dry-run): ${d.dataset} - ${d.duplicateIds} duplicate id(s) across ${d.partitionsRewritten} partition(s) would be merged\n`
+          `graph compact (dry-run): ${d.dataset} - ${d.duplicateIds} duplicate id(s) would be merged, ${d.partitionsRewritten} partition(s) would be rewritten\n`
         )
       } else {
         ctx.stdout.write(

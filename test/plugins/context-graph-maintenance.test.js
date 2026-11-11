@@ -114,6 +114,40 @@ test('compactGraphTables merges cross-partition duplicates into the earliest par
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
 
+test('compactGraphTables sorts a partition that lacks the graph sort order, once', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-maint-'))
+  await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [
+    nodeRow({ node_id: 'n-3', node_type: 'Tool', natural_key: 'tool:3' }),
+    nodeRow({ node_id: 'n-2', node_type: 'App', natural_key: 'app:2' }),
+    nodeRow({ node_id: 'n-1', node_type: 'Tool', natural_key: 'tool:1' }),
+  ])
+  const storage = /** @type {any} */ ({ cacheRoot })
+  const partA = path.join(cacheRoot, 'datasets', 'node', 'source=a')
+
+  const dry = await compactGraphTables({ storage, dryRun: true })
+  assert.equal(dry.datasets.find((d) => d.dataset === 'node')?.partitionsRewritten, 1)
+  assert.equal(readCursorSync(partA).tableDir ?? 'table', 'table', 'dry run rewrites nothing')
+
+  const report = await compactGraphTables({ storage })
+  const nodeReport = report.datasets.find((d) => d.dataset === 'node')
+  assert.equal(nodeReport?.duplicateIds, 0)
+  assert.equal(nodeReport?.rowsMerged, 0)
+  assert.equal(nodeReport?.partitionsRewritten, 1)
+
+  const a = await readPartitionRows(partA)
+  assert.deepEqual(a.rows.map((r) => r.node_id), ['n-2', 'n-1', 'n-3'], 'sorted by node_type, then node_id')
+  const { resolver, lister } = await createLocalIcebergIO()
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(a.tableDir), resolver, lister })
+  const order = metadata['sort-orders']?.find((o) => o['order-id'] === metadata['default-sort-order-id'])
+  assert.equal(order?.fields.length, 2, 'table declares the graph sort order')
+
+  const again = await compactGraphTables({ storage })
+  assert.equal(again.datasets.find((d) => d.dataset === 'node')?.partitionsRewritten, 0, 'a sorted partition is left alone')
+  assert.equal(readCursorSync(partA).tableDir, a.cursor.tableDir)
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
 test('compactGraphTables is a no-op on an empty cache', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-maint-'))
   const report = await compactGraphTables({ storage: /** @type {any} */ ({ cacheRoot }) })
@@ -148,7 +182,7 @@ test('compactGraphTables refuses to touch a partition whose cursor is corrupt', 
   // dir a synthesized epoch-0 cursor would have pointed at.
   assert.deepEqual(nodeReport?.partitionsSkipped, [{ path: partB, reason: 'unreadable-cursor' }])
   assert.equal(nodeReport?.duplicateIds, 0)
-  assert.equal(nodeReport?.partitionsRewritten, 0)
+  assert.equal(nodeReport?.partitionsRewritten, 1, 'only readable partition a is rewritten, to sort it')
   assert.equal(await fs.readFile(path.join(partB, 'cursor.json'), 'utf8'), corrupt, 'cursor left as-is')
   await assert.rejects(fs.access(path.join(partB, 'table', '.retired')), 'old generation not retired')
   /** @type {Record<string, unknown>[]} */
