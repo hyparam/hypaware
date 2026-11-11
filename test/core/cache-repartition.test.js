@@ -20,7 +20,7 @@ import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
-import { currentPartitionSpec, readRowsFromTable, sortColumnsFromMetadata } from '../../src/core/cache/iceberg/store.js'
+import { currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata } from '../../src/core/cache/iceberg/store.js'
 import {
   partitionSpecForDeclaration,
   partitionSpecMigrationDue,
@@ -265,6 +265,41 @@ test('maintenance migrates a demoted-spec table by generation swap', async () =>
     })
     assert.equal(second.totalCompacted, 0)
     assert.equal(second.partitions[0].repartitioned, undefined)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a migration of a table whose columns evolved out of field-id order partitions on date', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-repartition-order-'))
+  try {
+    await seed(cacheRoot, OLD_DECLARATION, 1)
+    // A newer writer declares a column before `date`, so the evolved schema
+    // lists it there with a higher id. The rewrite numbers fields by
+    // position, so the target spec must follow `date` by name.
+    /** @type {ColumnSpec[]} */
+    const declaredOrder = [COLUMNS[0], COLUMNS[1], { name: 'tokens', type: 'INT64', nullable: true }, COLUMNS[2]]
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], declaredOrder,
+      [{ id: 99, session_id: 's-0', tokens: 40, date: '2026-08-02' }],
+      { declaration: NEW_DECLARATION }
+    )
+
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      getDeclaration: () => NEW_DECLARATION,
+    })
+    assert.equal(report.partitions[0].failed, undefined)
+    assert.equal(report.partitions[0].repartitioned, true)
+
+    const dir = partitionDir(cacheRoot)
+    const metadata = await loadTableMetadata(liveTableDir(dir))
+    const names = new Map(currentSchema(metadata)?.fields.map((f) => [f.id, f.name]))
+    const spec = currentPartitionSpec(metadata)
+    assert.deepEqual(spec?.fields.map((f) => names.get(f['source-id'] ?? -1)), ['date'], 'the spec names the date column, not the one now at its old id')
+    const rows = await readRowsFromTable(liveTableDir(dir))
+    assert.deepEqual(rows.map((r) => [r.id, r.date]).sort(), [[0, '2026-08-01'], [0, '2026-08-02'], [99, '2026-08-02']])
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
