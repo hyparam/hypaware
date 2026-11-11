@@ -67,6 +67,9 @@ export function createContractRegistry(opts = {}) {
       if (typeof filter.keep !== 'function') {
         throw new TypeError(`registerContract: ${at} keep must be a function`)
       }
+      if (filter.sql !== undefined && (typeof filter.sql !== 'string' || filter.sql.length === 0)) {
+        throw new TypeError(`registerContract: ${at} sql must be a non-empty string`)
+      }
     }
     contract.rules.forEach((rule, i) => {
       const at = `'${contract.name}' rule ${i}`

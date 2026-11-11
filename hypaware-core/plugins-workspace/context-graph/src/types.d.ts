@@ -119,6 +119,12 @@ export interface Contract {
   rowFilter?: {
     columns: string[]
     keep(row: Record<string, unknown>): boolean
+    /**
+     * Optional SQL predicate equivalent to `keep`. When set, the shared scan
+     * filters with it instead of selecting `columns`, so a heavy filter
+     * column is never materialized. Raw-SQL rules still use `keep`.
+     */
+    sql?: string
   }
 }
 

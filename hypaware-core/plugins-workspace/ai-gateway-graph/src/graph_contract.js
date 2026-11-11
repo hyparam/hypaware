@@ -39,7 +39,7 @@ const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'
  * `./graph-keys.js`).
  *
  * @param {GraphKit} kit
- * @returns {{ name: string, plugin: string, sourceDataset: string, projector: string, projectorVersion: number, rules: ContractRule[], rowFilter: { columns: string[], keep(row: Record<string, unknown>): boolean } }}
+ * @returns {{ name: string, plugin: string, sourceDataset: string, projector: string, projectorVersion: number, rules: ContractRule[], rowFilter: { columns: string[], keep(row: Record<string, unknown>): boolean, sql: string } }}
  * @ref LLP 0023#contract-contribution [implements]: a source's contract, contributed via the capability; engine + kit stay central
  */
 export function createAiGatewayGraphContract(kit) {
@@ -542,6 +542,9 @@ export function createAiGatewayGraphContract(kit) {
       keep(r) {
         return auxKindOf(r.attributes) === null
       },
+      // The same test in SQL, for the shared scan: `attributes` carries
+      // whole tool outputs, and selecting it for every row held gigabytes.
+      sql: "JSON_VALUE(attributes, '$.claude.aux_kind') IS NULL OR JSON_VALUE(attributes, '$.claude.aux_kind') = ''",
     },
   }
 }

@@ -140,9 +140,21 @@ test('projectGraph excludes retained Claude aux rows from the graph', async () =
   // aux row whose keys are all distinct. Counts must stay 5/4.
   await withSeededGateway(async ({ registry, storage }) => {
     const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
-    const r = await projectGraph({ query: registry, storage, contracts: [contract] })
+    /** @type {string[]} */
+    const queries = []
+    /** @type {typeof executeQuerySql} */
+    const spy = (args) => {
+      queries.push(args.query)
+      return executeQuerySql(args)
+    }
+    const r = await projectGraph({ query: registry, storage, contracts: [contract], __executeSql: spy })
     assert.equal(r.nodes, 5, 'aux row mints no extra node')
     assert.equal(r.edges, 4, 'aux row mints no extra edge')
+    // The shared scan filters aux rows in SQL and never selects the heavy
+    // `attributes` column; only the pushed-down raw Skill rules carry it.
+    const shared = queries.filter((q) => q.includes(' WHERE (JSON_VALUE(attributes'))
+    assert.equal(shared.length, 1, 'one shared scan with the pushed-down aux filter')
+    assert.ok(!shared[0].split(' FROM ')[0].includes('attributes'), 'shared scan does not select attributes')
 
     const auxNode = await executeQuerySql({
       query: `SELECT node_id FROM node WHERE natural_key = 'sess-aux'`,
