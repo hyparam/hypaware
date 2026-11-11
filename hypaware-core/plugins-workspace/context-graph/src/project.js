@@ -159,7 +159,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         // A filter with a SQL form runs inside the shared scan, so its
         // columns (the gateway's `attributes`, which holds whole tool
         // outputs) are never materialized for every source row.
-        // @ref LLP 0096#decision [constrained-by]: heavy columns stay out of the shared scan's materialization
+        // @ref LLP 0595#shared-scan [implements]: a row filter's sql goes in the shared scan's WHERE; its columns stay out and keep is skipped there
         const pushed = contract.rowFilter?.sql
         const declarative = contract.rules.filter((rule) => rule.columns)
         const raw = contract.rules.filter((rule) => typeof rule.sql === 'string')

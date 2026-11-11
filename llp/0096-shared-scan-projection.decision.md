@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-09
 **Related:** LLP 0095, LLP 0023, LLP 0026
+**Extended-by:** LLP 0595 (#decision items 2 and 4: a row filter may carry an equivalent `sql` predicate, which the shared scan applies in WHERE instead of selecting the filter's columns and calling `keep`; raw-SQL rules still use `keep`)
 
 > Fixes [LLP 0095](./0095-projection-read-amplification.issue.md) by changing
 > how the projection engine executes a contract, not what a contract means:
