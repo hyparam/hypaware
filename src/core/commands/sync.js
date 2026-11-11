@@ -155,19 +155,11 @@ export async function runSync(argv, ctx) {
     // advice below names a different command than the one the caller ran.
     // @ref LLP 0101#no-release [implements]: a release that cannot happen says so rather than exiting 0 having sent nothing
     if (deadline !== null && !dryRun && !history) {
-      // `--yes` is not exempt from this branch, so its advice has to be one
-      // the caller's own flag set can follow. The plain rerun is not: once a
-      // destination exists, that same command lands on the held `--yes`
-      // refusal below.
-      const rerun = yes
-        ? '  Configure a destination, then run `hyp sync` from a terminal: ending the window\n' +
-          '  early takes an interactive confirmation, so --yes cannot do it.\n'
-        : '  Configure a destination, then run `hyp sync` again.\n'
       ctx.stderr.write(
         `${SYNC_HELD_NO_DESTINATIONS_NOTICE}\n` +
         `  The first-sync review window stays open until ${formatFirstSyncDeadline(deadline)},\n` +
         '  and nothing leaves this machine while it has nowhere to go.\n' +
-        rerun
+        '  Configure a destination, then run `hyp sync` again.\n'
       )
       return SYNC_HELD_NO_DESTINATIONS_EXIT
     }
@@ -197,45 +189,32 @@ export async function runSync(argv, ctx) {
     : destinations
   const displayedInstances = new Set(displayedDestinations.map((d) => d.instance))
 
-  // Two refusals, both because the hold is driver-wide (LLP 0101 #hold)
-  // while the consent in front of it would not be. They come before the plan
-  // is rendered: a scoped plan is exactly the misleading artifact the first
-  // refusal exists to prevent, and printing "syncing now ends it early"
-  // ahead of "you cannot end it this way" reads as a contradiction.
+  // One refusal, because the hold is driver-wide (LLP 0101 #hold) while the
+  // consent in front of it would not be. It comes before the plan is
+  // rendered: a scoped plan is exactly the misleading artifact the refusal
+  // exists to prevent, and printing "syncing now ends it early" ahead of
+  // "you cannot end it this way" reads as a contradiction.
   //
   // A named instance shows a plan built from that one handle, so confirming
   // it would release every *other* destination unseen - the silent first
   // forward the hold exists to prevent. Releasing is all-or-nothing because
   // the hold is.
   //
-  // `--yes` skips the plan's whole purpose. `#no-release` licenses release by
-  // "confirmed, attended request" and "an explicit `y`"; a provisioning
-  // script satisfies neither, and its destination list scrolls past in a log
-  // nobody reads. Ordinary (unheld) syncs keep `--yes` - what it must not buy
-  // is somebody's review window.
+  // `--yes` is not refused: an unscoped `hyp sync --yes` releases exactly as
+  // a typed `y` does, so an agent that asked the person can act on the answer.
   //
   // `--dry-run` is exempt: it sends nothing, so showing a held machine what
   // one destination would export is information, not consent.
-  if (deadline !== null && !dryRun) {
-    const held = `hyp sync: the first-sync review window is open until ${formatFirstSyncDeadline(deadline)}.\n`
-    if (instance) {
-      ctx.stderr.write(
-        held +
-        `  Ending it is all-or-nothing: the hold covers every destination, so releasing it\n` +
-        `  from a run that names only '${instance}' would forward the others unseen.\n` +
-        '  Run `hyp sync` with no instance to review every destination and release,\n' +
-        '  or wait for the deadline.\n'
-      )
-      return 2
-    }
-    if (yes) {
-      ctx.stderr.write(
-        held +
-        '  Ending it early takes an interactive confirmation, so --yes cannot do it.\n' +
-        '  Run `hyp sync` from a terminal, or wait for the deadline.\n'
-      )
-      return 2
-    }
+  // @ref LLP 0596#yes-releases [implements]: --yes is the same confirmation as a typed y, hold or no hold
+  if (deadline !== null && !dryRun && instance) {
+    ctx.stderr.write(
+      `hyp sync: the first-sync review window is open until ${formatFirstSyncDeadline(deadline)}.\n` +
+      `  Ending it is all-or-nothing: the hold covers every destination, so releasing it\n` +
+      `  from a run that names only '${instance}' would forward the others unseen.\n` +
+      '  Run `hyp sync` with no instance to review every destination and release,\n' +
+      '  or wait for the deadline.\n'
+    )
+    return 2
   }
 
   // "How much, and how far back?" is the first question a consent prompt has to
@@ -341,6 +320,9 @@ export async function runSync(argv, ctx) {
       [Attr.OPERATION]: 'sync.first_sync_hold_released',
       hyp_deadline: new Date(deadline).toISOString(),
       hyp_released_early_ms: deadline - Date.now(),
+      // The on-disk difference between a person who typed `y` and a caller
+      // that passed `--yes`, which the marker cannot record once it is gone.
+      hyp_confirmed_by: yes ? 'yes-flag' : 'prompt',
       // Unfiltered, unlike the two preview lines, which count what they
       // previewed. A scoped run was refused above, so this is every
       // destination the machine has, and clearing the marker unblocks all of

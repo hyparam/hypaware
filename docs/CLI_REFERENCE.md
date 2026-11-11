@@ -769,8 +769,9 @@ hyp sync [instance] [--history <client>] [--yes] [--dry-run]
 
 Prints a destination and exclusion plan, confirms it, then forces the selected
 sink or every configured sink to export. `--dry-run` sends nothing. On a newly
-enrolled host, an interactive all-destination sync can release the
-first-sync review hold early. A single-instance sync can't release that hold.
+enrolled host, a confirmed all-destination sync (a typed `y` or `--yes`)
+releases the first-sync review hold early. A single-instance sync can't
+release that hold.
 
 `--history <client>` is a separate mode: it previews and, after its own
 confirmation, replays that client's locally retained history to the

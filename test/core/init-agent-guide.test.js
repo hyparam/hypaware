@@ -64,7 +64,8 @@ test('agent guide reuses detection, filters hidden/platform rows and preserves e
   assert.equal(f.stderr(), '')
   const guide = f.stdout()
   assert.match(guide, /    claude \(detected\)\n      Disclosure for claude/)
-  assert.match(guide, /    codex\n      Disclosure for codex/)
+  assert.match(guide, /Not detected, so not offered: .*codex/)
+  assert.doesNotMatch(guide, /Disclosure for codex/)
   const [preflight, flow] = guide.split('Setup flow\n')
   const [questions, commands] = flow.split('4. Configure recording for the selected apps.')
   assert.doesNotMatch(preflight, /run hyp status|Existing local config:/)
@@ -86,7 +87,9 @@ test('agent guide reuses detection, filters hidden/platform rows and preserves e
   assert.ok(questions.includes('Options: Sync all selected apps / Customize.'))
   assert.ok(questions.indexOf('ask: Sync all selected apps?') < questions.indexOf('ask: What do you want to sync?'))
   assert.ok(questions.includes('skip the individual sync picker'))
-  assert.ok(questions.indexOf('Ask: What do you want to collect?') < questions.indexOf('ask: What do you want to sync?'))
+  assert.ok(questions.includes('except the app list in question 2, which is asked in plain text'))
+  assert.ok(questions.includes('Do not use the question tool here.'))
+  assert.ok(questions.indexOf("Are there any you don't want to record?") < questions.indexOf('ask: What do you want to sync?'))
   assert.ok(questions.indexOf('ask: What do you want to sync?') < questions.indexOf('After cloud customization, ask about new projects'))
   assert.doesNotMatch(questions, /What do you want to collect and sync\?/)
   assert.ok(questions.includes('skip the customization questions, and proceed to installation'))
@@ -110,6 +113,9 @@ test('with no detections the guide asks instead of selecting the --yes defaults'
     collectStatus: async () => { throw new Error('must not collect status without a config') },
   }), 0)
   assert.match(f.stdout(), /Customize \(or no defaults\)/)
+  assert.match(f.stdout(), /    codex\n      Disclosure for codex/)
+  assert.doesNotMatch(f.stdout(), /Not detected, so not offered/)
+  assert.match(f.stdout(), /Which of these apps do you want to record\?/)
   assert.match(f.stdout(), /hyp setup --source <selected-id>/)
   assert.doesNotMatch(f.stdout(), /Example for detected sources/)
   assert.doesNotMatch(f.stdout(), /Existing local config:/)
@@ -167,8 +173,9 @@ test('guide explains human handoffs and verification', async (t) => {
     'If optional history import was deferred, add --no-backfill',
     'existing sessions will be imported automatically',
     'Setup handles the daemon, client attachment, skills, and history imports.',
-    'hyp sync --dry-run', '--yes cannot bypass that review',
-    'Upload now (recommended)', 'Wait until <deadline> and run a security review',
+    'read --help or use --dry-run only if it fails',
+    'hyp sync --dry-run', 'Run hyp sync --yes; it ends the review window', 'Never run hyp sync --yes unless the person chose Upload now', 'If no first-sync hold is active, still ask',
+    'Upload now (recommended)', 'Wait until <deadline> and run a security review now',
     'A review does not pause or extend it',
     'hyp query overview --json',
     'rerun the setup command from step 4 with --github --force --no-backfill',
