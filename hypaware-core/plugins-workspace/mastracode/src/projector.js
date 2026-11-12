@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import { deriveRepoFromCwd } from './git_repo.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { projectedExchangeItem } from '../../../../src/core/backfill/scan_util.js'
@@ -133,6 +134,51 @@ function processTokenUsage(metadata) {
     if (typeof value === 'number' && Number.isFinite(value)) usage[key] = value
   }
   return Object.keys(usage).length > 0 ? usage : undefined
+}
+
+/**
+ * @ref LLP 0603#accounting: cumulative counters belong on one replaceable status row
+ * @param {MastraThreadRow} thread
+ * @param {JsonObject} metadata
+ * @returns {AiGatewayProjectedMessage | undefined}
+ */
+function sessionUsageMessage(thread, metadata) {
+  const native = metadata.tokenUsage
+  if (!isPlainObject(native)) return undefined
+  for (const key of USAGE_COUNTERS) {
+    const value = native[key]
+    if (value != null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)) return undefined
+  }
+  if (!Number.isFinite(Date.parse(thread.createdAt)) || !Number.isFinite(Date.parse(thread.updatedAt))) return undefined
+  /** @type {JsonObject} */
+  const usage = {}
+  const prompt = native.promptTokens
+  const read = native.cachedInputTokens
+  const write = native.cacheCreationInputTokens
+  // Missing cache measurements are unknown, not zero. Never clamp a bad sum.
+  if (typeof prompt === 'number' && typeof read === 'number' && typeof write === 'number') {
+    if (read > prompt || write > prompt - read) return undefined
+    usage.input_tokens = prompt - read - write
+  }
+  for (const [from, to] of [
+    ['completionTokens', 'output_tokens'], ['cachedInputTokens', 'cache_read_tokens'],
+    ['cacheCreationInputTokens', 'cache_write_tokens'], ['reasoningTokens', 'reasoning_tokens'],
+    ['totalTokens', 'total_tokens'],
+  ]) {
+    if (native[from] != null) usage[to] = native[from]
+  }
+  if (!Object.keys(usage).length) return undefined
+  const messageId = `mastracode-usage:${thread.id}`
+  const mastracode = { usage_observed_at: thread.updatedAt }
+  // @ref LLP 0603#queries: each revision needs its own part_id, or central ingest's part_id dedup keeps only the first snapshot.
+  const revision = createHash('sha256').update(JSON.stringify([usage, mastracode])).digest('hex').slice(0, 16)
+  return {
+    role: 'system', provider_subtype: 'session_usage', provider: 'unknown', model: 'unknown',
+    message_id: messageId, message_created_at: thread.createdAt,
+    message_index: 0, previous_message_id: [],
+    content: [{ type: 'status', status: 'session_usage', part_id: `${messageId}#${revision}` }],
+    attributes: { usage, mastracode },
+  }
 }
 
 /**
@@ -335,12 +381,13 @@ export async function projectMastracodeThread(args) {
     })
   })
 
-  // @ref LLP 0586#owner-decisions [implements]: D4, no LLP 0035 usage; the
-  // thread's running counter rides the latest assistant message's last part.
+  // @ref LLP 0603#accounting: retain the legacy raw counters, without per-turn usage
   const usage = processTokenUsage(metadata)
   if (usage && lastAssistantPart) {
     lastAssistantPart.attributes = { mastracode: { process_token_usage: usage } }
   }
+  const snapshot = sessionUsageMessage(thread, metadata)
+  if (snapshot) projectedMessages.push(snapshot)
 
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {

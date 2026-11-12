@@ -28,13 +28,23 @@ directory. A thread's title is generated from your conversation, so it is
 treated as message content. Reasoning parts and other part types HypAware
 does not recognize are skipped.
 
-Mastra Code does not store token counts per turn. It keeps one running
-counter on each thread and adds to it after every step, including when you
-continue a thread. HypAware carries that counter on the last part of the
-thread's latest response, as the `mastracode.process_token_usage` attribute,
-and no row carries per-turn token usage. The counter is not a per-turn value,
-and it is not guaranteed to be a thread total: Mastra Code skips an update it
-fails to save.
+Mastra Code keeps running token counters per thread. HypAware writes one
+replaceable system/status row per thread (`provider_subtype = 'session_usage'`)
+with `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`,
+`reasoning_tokens`, and `total_tokens`, also available in `attributes.usage`.
+Input excludes cache reads and writes; output already includes reasoning.
+Missing measurements stay unknown. Ordinary message rows have no per-turn
+usage. The legacy `mastracode.process_token_usage` attribute remains on the
+latest response for compatibility.
+
+These are recorded session totals, not guaranteed billed totals: cancelled
+requests and failed usage writes can be missing. Accounting uses the thread's
+start date and leaves model/provider unknown because a thread can switch them.
+Date-grouped totals therefore describe sessions starting that day, not spend
+on that day. On a remote, select the latest
+`attributes.mastracode.usage_observed_at` per gateway and message ID before
+summing exported revisions. Assistant-only queries exclude these snapshots;
+server usage dashboards require explicit support for Mastra session snapshots.
 
 HypAware reads only the `mastra_threads` and `mastra_messages` tables. It
 never reads Mastra Code's `settings.json`, `auth.json`, `mastra-vectors.db`,

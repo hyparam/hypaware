@@ -5,6 +5,7 @@
 **Systems:** Sources, Plugins
 **Author:** HypForge
 **Date:** 2026-11-05
+**Extended-by:** [LLP 0603](./0603-mastracode-session-token-snapshots.spec.md#accounting) extends D4 with recorded session-usage snapshots.
 **Related:** LLP 0570, LLP 0571, LLP 0573, LLP 0574, LLP 0118, LLP 0119, LLP 0120, LLP 0121, LLP 0122, LLP 0123, LLP 0124, LLP 0449, LLP 0527, LLP 0359, LLP 0035, LLP 0050, LLP 0070, LLP 0130, LLP 0131, LLP 0394, LLP 0403, LLP 0587
 
 > Buildable design for a `@hypaware/mastracode` client adapter.
