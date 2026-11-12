@@ -136,6 +136,47 @@ function processTokenUsage(metadata) {
 }
 
 /**
+ * @ref LLP 0603#accounting: cumulative counters belong on one replaceable status row
+ * @param {MastraThreadRow} thread
+ * @param {JsonObject} metadata
+ * @returns {AiGatewayProjectedMessage | undefined}
+ */
+function sessionUsageMessage(thread, metadata) {
+  const native = metadata.tokenUsage
+  if (!isPlainObject(native)) return undefined
+  for (const key of USAGE_COUNTERS) {
+    const value = native[key]
+    if (value != null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)) return undefined
+  }
+  if (!Number.isFinite(Date.parse(thread.createdAt)) || !Number.isFinite(Date.parse(thread.updatedAt))) return undefined
+  /** @type {JsonObject} */
+  const usage = {}
+  const prompt = native.promptTokens
+  const read = native.cachedInputTokens
+  const write = native.cacheCreationInputTokens
+  // Missing cache measurements are unknown, not zero. Never clamp a bad sum.
+  if (typeof prompt === 'number' && typeof read === 'number' && typeof write === 'number') {
+    if (read > prompt || write > prompt - read) return undefined
+    usage.input_tokens = prompt - read - write
+  }
+  for (const [from, to] of [
+    ['completionTokens', 'output_tokens'], ['cachedInputTokens', 'cache_read_tokens'],
+    ['cacheCreationInputTokens', 'cache_write_tokens'], ['reasoningTokens', 'reasoning_tokens'],
+    ['totalTokens', 'total_tokens'],
+  ]) {
+    if (native[from] != null) usage[to] = native[from]
+  }
+  if (!Object.keys(usage).length) return undefined
+  return {
+    role: 'system', provider_subtype: 'session_usage', provider: 'unknown', model: 'unknown',
+    message_id: `mastracode-usage:${thread.id}`, message_created_at: thread.createdAt,
+    message_index: 0, previous_message_id: [],
+    content: [{ type: 'status', status: 'session_usage' }],
+    attributes: { usage, mastracode: { usage_observed_at: thread.updatedAt } },
+  }
+}
+
+/**
  * Expand one user message: its text parts joined into one user part, tagged
  * with the first text part's index.
  *
@@ -335,12 +376,13 @@ export async function projectMastracodeThread(args) {
     })
   })
 
-  // @ref LLP 0586#owner-decisions [implements]: D4, no LLP 0035 usage; the
-  // thread's running counter rides the latest assistant message's last part.
+  // @ref LLP 0603#accounting: retain the legacy raw counters, without per-turn usage
   const usage = processTokenUsage(metadata)
   if (usage && lastAssistantPart) {
     lastAssistantPart.attributes = { mastracode: { process_token_usage: usage } }
   }
+  const snapshot = sessionUsageMessage(thread, metadata)
+  if (snapshot) projectedMessages.push(snapshot)
 
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {

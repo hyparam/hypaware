@@ -12,6 +12,7 @@ import {
   providerOfModel,
 } from '../../hypaware-core/plugins-workspace/mastracode/src/projector.js'
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
+import { aiGatewayBackfillMaterializer } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import {
   assistantContent,
   sandboxExitPart,
@@ -29,8 +30,8 @@ import {
 /**
  * @ref LLP 0586#projection [tests]: the Mastra Code -> ai_gateway_messages
  *   mapping, one part per `parts` entry, ids stable as a message is rewritten.
- * @ref LLP 0586#owner-decisions [tests]: D4 the running counter on the latest
- *   assistant part and no LLP 0035 usage, D6 workspace metadata dropped.
+ * @ref LLP 0603#accounting [tests]: one normalized session snapshot, no per-turn usage.
+ * @ref LLP 0586#owner-decisions [tests]: D6 workspace metadata dropped.
  * @ref LLP 0586#privacy [tests]: the usage-policy skip and its path-free log.
  *
  * Rows are synthetic copies of the part shapes the mastracode 0.49.0 probe
@@ -270,11 +271,11 @@ test('a prompt carries the provider of the assistant message that answered it', 
   assert.equal(parts[0].model, undefined, 'a user part names no model')
 })
 
-test('no LLP 0035 usage fields are carried', async () => {
+test('ordinary messages carry no per-turn usage and no provider raw payload', async () => {
   const exchange = (await project()).value
   assert.equal(exchange.usage, undefined)
   for (const part of exchange.messages) assert.equal(part.usage, undefined)
-  const text = JSON.stringify(exchange)
+  const text = JSON.stringify(contentParts({ value: exchange }))
   for (const field of ['input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', '"raw"']) {
     assert.ok(!text.includes(field), field)
   }
@@ -297,11 +298,60 @@ test('a thread with no counter, or no assistant part, carries no usage attribute
 })
 
 test('the title rides the session-title row', async () => {
-  const titles = (await project()).value.messages.filter((/** @type {any} */ m) => m.role === 'system')
+  const titles = (await project()).value.messages.filter((/** @type {any} */ m) => m.attributes?.session)
   assert.equal(titles.length, 1)
   assert.equal(titles[0].attributes.session.title, 'Fixture thread')
-  const untitled = (await project({ thread: thread({ title: '' }) })).value.messages.filter((/** @type {any} */ m) => m.role === 'system')
+  const untitled = (await project({ thread: thread({ title: '' }) })).value.messages.filter((/** @type {any} */ m) => m.attributes?.session)
   assert.equal(untitled.length, 0)
+})
+
+test('session usage materializes normalized columns without inheriting the last model', async () => {
+  const tokenUsage = { promptTokens: 28026, completionTokens: 295, cachedInputTokens: 0,
+    cacheCreationInputTokens: 28022, reasoningTokens: 292, totalTokens: 28321, raw: { secret: 'omit' } }
+  const item = await project({ thread: thread({}, { tokenUsage }) })
+  const rows = await aiGatewayBackfillMaterializer().materialize(item, /** @type {any} */ ({}))
+  const snapshots = rows.filter(row => row.provider_subtype === 'session_usage')
+  assert.equal(snapshots.length, 1)
+  const row = snapshots[0]
+  assert.equal(row.input_tokens, 4)
+  assert.equal(row.output_tokens, 295)
+  assert.equal(row.reasoning_tokens, 292)
+  assert.equal(row.cache_read_tokens, 0)
+  assert.equal(row.cache_write_tokens, 28022)
+  assert.equal(row.total_tokens, 28321)
+  assert.equal(row.role, 'system')
+  assert.equal(row.model, 'unknown')
+  assert.equal(row.provider, 'unknown')
+  assert.equal(row.message_created_at, thread().createdAt)
+  assert.ok(!JSON.stringify(rows).includes('secret'))
+  assert.ok(rows.filter(r => r !== row).every(r => r.input_tokens == null && r.output_tokens == null))
+
+  const revised = await project({ thread: thread({ updatedAt: '2026-11-06T00:00:00.000Z' }, {
+    tokenUsage: { ...tokenUsage, promptTokens: 57091, cachedInputTokens: 29008, cacheCreationInputTokens: 28077 },
+  }) })
+  const next = (await aiGatewayBackfillMaterializer().materialize(revised, /** @type {any} */ ({}))).find(r => r.provider_subtype === 'session_usage')
+  assert.ok(next)
+  assert.equal(next.part_id, row.part_id)
+  assert.equal(next.input_tokens, 6)
+  assert.equal(next.message_created_at, row.message_created_at)
+  assert.equal(/** @type {any} */ (next.attributes).mastracode.usage_observed_at, '2026-11-06T00:00:00.000Z')
+})
+
+test('session usage rejects invalid counters and preserves missing measurements as unknown', async () => {
+  for (const tokenUsage of [undefined, {}, { ...TOKEN_USAGE, promptTokens: -1 },
+    { ...TOKEN_USAGE, completionTokens: 1.5 }, { ...TOKEN_USAGE, cachedInputTokens: 400 },
+    { ...TOKEN_USAGE, totalTokens: Number.MAX_SAFE_INTEGER + 1 }]) {
+    const item = await project({ thread: thread({}, { tokenUsage }) })
+    assert.ok(!item.value.messages.some((/** @type {any} */ m) => m.provider_subtype === 'session_usage'))
+  }
+  const item = await project({ thread: thread({}, { tokenUsage: { promptTokens: 50, completionTokens: 0 } }) })
+  const row = (await aiGatewayBackfillMaterializer().materialize(item, /** @type {any} */ ({}))).find(r => r.provider_subtype === 'session_usage')
+  assert.ok(row)
+  assert.equal(row.output_tokens, 0)
+  assert.equal(row.input_tokens, null)
+  assert.equal(row.cache_read_tokens, null)
+  assert.equal(row.cache_write_tokens, null)
+  assert.equal(row.total_tokens, null)
 })
 
 test('an ignored project drops the thread before any row is built, and the log names no path', async () => {

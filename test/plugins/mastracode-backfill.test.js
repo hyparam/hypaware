@@ -14,8 +14,8 @@ import { runBackfillProvider } from '../../src/core/commands/backfill.js'
 import { withLogRecords } from '../helpers/log_records.js'
 import { createBackfillMaterializerRegistry, createBackfillRegistry } from '../../src/core/registry/backfills.js'
 import { aiGatewayBackfillMaterializer } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
-import { addThread, addTurn, createMastracodeHarness, mastracodePollLogs, texts } from '../helpers/mastracode_source_fixture.js'
-import { openWriter, rewriteMessage } from '../helpers/mastracode_db_fixture.js'
+import { addThread, addTurn, createMastracodeHarness, mastracodePollLogs, nextUpdatedAt, texts } from '../helpers/mastracode_source_fixture.js'
+import { openWriter, rewriteMessage, updateThread } from '../helpers/mastracode_db_fixture.js'
 
 /**
  * @ref LLP 0586#backfill [tests]: the `updatedAt` window, the unset window,
@@ -169,6 +169,48 @@ test('mastracode backfill: an unset window imports every thread, and a re-run re
   assert.equal(second.ok, true)
   assert.equal(h.committed.length, total, 'a re-run replaces each thread scope')
   assert.equal(h.appends, 0, 'every item reconciles its scope')
+})
+
+test('usage-only updates replace one snapshot through poll, backfill and restart', async () => {
+  const h = await stage({ poll: true })
+  try {
+    addThread(h.w, 'usage', h.projectDir)
+    addTurn(h.w, 'usage', 'first')
+    const tokenUsage = { promptTokens: 100, cachedInputTokens: 60, cacheCreationInputTokens: 30,
+      completionTokens: 20, reasoningTokens: 5, totalTokens: 120 }
+    const writeUsage = () => updateThread(h.w, 'usage', { updatedAt: nextUpdatedAt(),
+      metadata: { projectPath: h.projectDir, currentModelId: 'anthropic/fixture', tokenUsage } })
+    writeUsage()
+    await h.poll()
+    const first = h.committed.find(r => r.provider_subtype === 'session_usage')
+    assert.ok(first)
+    assert.equal(first.input_tokens, 10)
+    assert.equal(first.output_tokens, 20)
+    const initialId = first.part_id
+
+    // No message changes: only the thread's persisted counters advance.
+    tokenUsage.promptTokens = 170
+    tokenUsage.cachedInputTokens = 120
+    tokenUsage.completionTokens = 25
+    tokenUsage.totalTokens = 195
+    writeUsage()
+    await h.poll()
+    h.holder.runner = createMastracodePollRunner(h.ctx)
+    await h.poll()
+    assert.equal((await h.run()).ok, true)
+    assert.equal((await h.run()).ok, true)
+    const rows = h.committed.filter(r => r.provider_subtype === 'session_usage')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].part_id, initialId)
+    assert.equal(rows[0].message_created_at, first.message_created_at)
+    assert.equal(rows[0].input_tokens, 20)
+    assert.equal(rows[0].output_tokens, 25)
+    assert.equal(rows[0].cache_read_tokens, 120)
+    assert.equal(rows[0].cache_write_tokens, 30)
+    assert.equal(h.committed.filter(r => r.part_type === 'text').length, 2)
+    assert.ok(h.committed.filter(r => r.part_type === 'text').every(r => r.output_tokens == null))
+    assert.ok(mastracodePollLogs(h.logs).some(l => Number(l.fields?.threads_changed) === 1))
+  } finally { h.w.close() }
 })
 
 test('mastracode backfill: the window filters on the thread updatedAt', async () => {
