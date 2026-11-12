@@ -92,8 +92,7 @@ test('parseConfigShape reports stable pointers for malformed config', () => {
   assert.equal(result.ok, false)
   assert.deepEqual(
     result.errors.map((error) => error.pointer).sort(),
-    ['/plugins/0/name', '/sinks/mixed', '/version'],
-    'the unknown top-level key `extra` is ignored, not an error (LLP 0600)'
+    ['/extra', '/plugins/0/name', '/sinks/mixed', '/version']
   )
 })
 
@@ -819,20 +818,27 @@ test('configRecordsPickAnswer classifies the raw and parsed forms of a document 
   assert.equal(parsedDecorated.ok && configRecordsPickAnswer(parsedDecorated.config), true, 'parsed decorated entry')
 })
 
-// @ref LLP 0600#unknown-keys [tests]: an unknown top-level key is ignored and reported, never an error
-test('parseConfigShape ignores top-level keys it does not know and reports them', () => {
-  const result = parseConfigShape({ version: 2, plugins: [], some_future_key: { a: 1 }, another: true })
+// @ref LLP 0600#unknown-keys [tests]: strict by default (the server and local files), tolerant only for a reader that asks
+test('parseConfigShape rejects an unknown top-level key unless the reader allows it', () => {
+  const doc = { version: 2, plugins: [], some_future_key: { a: 1 }, another: true }
+
+  // The default is what the server's save pipeline and local files get.
+  const strict = parseConfigShape(doc)
+  assert.equal(strict.ok, false)
+  if (!strict.ok) assert.deepEqual(strict.errors.map((e) => e.pointer), ['/some_future_key', '/another'])
+
+  const result = parseConfigShape(doc, { allowUnknownKeys: true })
   assert.equal(result.ok, true)
   if (!result.ok) return
   assert.deepEqual(result.config, { version: 2, plugins: [] })
   assert.deepEqual(result.unknownKeys, ['some_future_key', 'another'])
 
-  const plain = parseConfigShape({ version: 2 })
+  const plain = parseConfigShape({ version: 2 }, { allowUnknownKeys: true })
   assert.equal(plain.ok, true)
   if (plain.ok) assert.equal(plain.unknownKeys, undefined)
 
   // A known key with a bad value is still an error.
-  const bad = parseConfigShape({ version: 2, auto_update: 'yes', some_future_key: 1 })
+  const bad = parseConfigShape({ version: 2, auto_update: 'yes', some_future_key: 1 }, { allowUnknownKeys: true })
   assert.equal(bad.ok, false)
   if (!bad.ok) assert.deepEqual(bad.errors.map((e) => e.pointer), ['/auto_update'])
 })

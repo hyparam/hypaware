@@ -1303,7 +1303,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
   try {
     const centralPath = resolveCentralLayerPath({ stateRoot })
     if (centralPath) {
-      const loaded = await loadConfigFile(centralPath)
+      const loaded = await loadConfigFile(centralPath, { allowUnknownKeys: true })
       if (loaded.ok) {
         centralGateway = (loaded.config.plugins ?? []).find(
           (p) => p.name === GATEWAY_PLUGIN
@@ -1888,7 +1888,7 @@ async function readCentralPluginNames(env) {
     const { stateDir } = readObservabilityEnv(env)
     const centralPath = resolveCentralLayerPath({ stateRoot: stateDir })
     if (!centralPath) return new Set()
-    const loaded = await loadConfigFile(centralPath)
+    const loaded = await loadConfigFile(centralPath, { allowUnknownKeys: true })
     if (!loaded.ok) return new Set()
     return new Set((loaded.config.plugins ?? []).map((entry) => entry.name))
   } catch {

@@ -54,7 +54,8 @@ export function buildConfigApplyDeps(opts) {
 
   /** @param {unknown} document */
   async function validateDocument(document) {
-    const shape = parseConfigShape(document)
+    // @ref LLP 0600#unknown-keys [implements]: the served document is the organization's layer, read tolerantly
+    const shape = parseConfigShape(document, { allowUnknownKeys: true })
     if (!shape.ok) {
       return { ok: false, errors: shape.errors }
     }

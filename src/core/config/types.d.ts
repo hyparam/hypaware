@@ -36,7 +36,8 @@ export interface LoadConfigSuccess {
   configPath: string
   /**
    * Top-level keys in the file that this version does not know and
-   * ignored (LLP 0600). Absent when there are none.
+   * ignored (LLP 0600). Only ever set for a read of the organization's
+   * layer; absent when there are none.
    */
   unknownKeys?: string[]
 }

@@ -12,6 +12,7 @@ import {
   createConfigControl,
   readConfigControlStatus,
 } from '../../src/core/config/apply.js'
+import { loadConfigFile } from '../../src/core/config/schema.js'
 
 /**
  * @import { TestContext } from 'node:test'
@@ -270,4 +271,22 @@ test('a revision with an unknown top-level key applies and keeps the key on disk
   const files = await fsp.readdir(path.join(stateRoot, 'config-control'))
   const stored = await Promise.all(files.filter((f) => f.endsWith('.json')).map((f) => fsp.readFile(path.join(stateRoot, 'config-control', f), 'utf8')))
   assert.ok(stored.some((text) => text.includes('"some_future_key"')))
+})
+
+// @ref LLP 0600#unknown-keys [tests]: the stored organization layer loads with the unknown key ignored; the same file read as a local config is refused
+test('the stored central layer loads tolerantly, and a local read of the same document stays strict', async (t) => {
+  const stateRoot = await makeFixture(t)
+  const file = path.join(stateRoot, 'newer.json')
+  await fsp.writeFile(file, JSON.stringify({ ...REMOTE_CONFIG, some_future_key: true }))
+
+  const central = await loadConfigFile(file, { allowUnknownKeys: true })
+  assert.equal(central.ok, true)
+  if (central.ok) {
+    assert.deepEqual(central.unknownKeys, ['some_future_key'])
+    assert.equal('some_future_key' in central.config, false)
+  }
+
+  const local = await loadConfigFile(file)
+  assert.equal(local.ok, false)
+  if (!local.ok) assert.equal(local.errors?.[0]?.pointer, '/some_future_key')
 })

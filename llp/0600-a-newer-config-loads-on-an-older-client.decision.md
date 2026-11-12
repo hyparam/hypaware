@@ -16,20 +16,30 @@
 
 ## Decision
 
-<a id="unknown-keys"></a>**An unknown top-level key is ignored.**
-`parseConfigShape` no longer treats a top-level key it does not recognize as
-an error. It returns the config it understood and lists the keys it
-skipped. A known key with a bad value is still an error.
+<a id="unknown-keys"></a>**A reader of the organization's layer ignores a
+top-level key it does not know.** `parseConfigShape` takes an
+`allowUnknownKeys` option. With it, an unrecognized top-level key is skipped
+and listed in the result instead of failing the document. A known key with a
+bad value is still an error.
+
+The option is passed wherever the client reads what the organization
+served: the apply engine staging a pulled revision, and every read of the
+stored central layer (boot, `hyp status`, setup). The apply engine logs
+`config.unknown_keys_ignored` once per staged revision. Nothing is shown
+to the person: a newer config on an older client is a normal state that
+an update resolves.
+
+**Authoring stays strict.** Without the option an unknown top-level key is
+an error, as before. That is the default, so `hypaware-server`, which
+validates a saved organization config with this function, still refuses a
+misspelled key with no change on its side, and a person's own local config
+file is checked exactly as it was. The party that writes a config knows
+which keys exist; only the party reading one written for a newer client
+has to be forgiving.
 
 The served document is stored whole, unknown keys included, so a client
 that later updates reads the key from the config it already has, without
 another pull.
-
-Ignored keys are named in two places: the apply engine logs
-`config.unknown_keys_ignored` once per staged revision, and
-`hyp config validate` prints them. Loading a config file does not log them,
-because that runs on every boot and status read and a newer config on an
-older client is a normal state.
 
 <a id="retry"></a>**A revision rejected before it was applied is retried on
 the existing backoff.** A validation, plugin install, artifact hash, or
@@ -50,10 +60,9 @@ settles. Retrying it would mean a restart every backoff.
 
 ## Consequences
 
-- A misspelled top-level key no longer fails a config. It is ignored, and
-  `hyp config validate` names it. `hypaware-server` validates saved
-  organization configs with this function, so it will also accept a
-  misspelled key until it reports `unknownKeys` to the operator.
+- The server must run a release that knows a key before an organization
+  can save it, as today. What changes is that clients older than that
+  release no longer break when they pull it.
 - A revision that stays invalid is re-validated every 6 hours, with one
   `config.apply_failed` log each time. A plugin install failure repeats its
   fetch on the same schedule.

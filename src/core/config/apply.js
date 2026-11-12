@@ -697,7 +697,7 @@ export function createConfigControl(opts) {
         // anything is fetched, and the hash pin bounds what an install
         // can bring in.
         // @ref LLP 0025#install-on-config-hash-pinned [implements]: shape-gate → install pinned plugins → validate against the post-install catalog
-        const shape = parseConfigShape(document)
+        const shape = parseConfigShape(document, { allowUnknownKeys: true })
         if (!shape.ok) {
           const first = shape.errors[0]
           rememberBadEtag(etag, 'validation_failed')

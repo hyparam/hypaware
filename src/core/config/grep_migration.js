@@ -24,7 +24,8 @@ const GREP = '@hypaware/grep'
 export async function loadClientConfigLayers({ configPath, centralConfigPath, migrateGrep = false }) {
   const read = async () => ({
     local: configPath ? await loadConfigFile(configPath) : null,
-    central: centralConfigPath ? await loadConfigFile(centralConfigPath) : null,
+    // @ref LLP 0600#unknown-keys [implements]: boot reads the stored organization layer tolerantly, the local file strictly
+    central: centralConfigPath ? await loadConfigFile(centralConfigPath, { allowUnknownKeys: true }) : null,
   })
   let layers = await read()
   if (!migrateGrep || !configPath || !needsGrep(layers)) return layers

@@ -189,7 +189,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const localConfig = localLoaded.ok ? localLoaded.config : null
 
   const centralConfigPath = resolveCentralLayerPath({ stateRoot })
-  const centralLoaded = centralConfigPath ? await loadConfigFile(centralConfigPath) : null
+  const centralLoaded = centralConfigPath ? await loadConfigFile(centralConfigPath, { allowUnknownKeys: true }) : null
   const centralConfig = centralLoaded?.ok ? centralLoaded.config : null
   const hasCentral = centralConfig !== null
 
