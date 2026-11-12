@@ -25,7 +25,7 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { isEphemeralRecordedBinPath } from '../../cli/global_install.js'
 import { getAtDottedPath, isPlainObject } from '../../util/json_util.js'
-import { resolveClientSettingsPath } from '../client_settings_path.js'
+import { clientHookMarkerPath, resolveClientSettingsPath } from '../client_settings_path.js'
 import {
   processIsAlive,
   readPidFile,
@@ -324,12 +324,36 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       if (!parsed || typeof parsed !== 'object') {
         return { attached: false, settingsPath }
       }
-      const marker = /** @type {Record<string, unknown>} */ (parsed)[probe.marker_key]
+      const legacyMarker = /** @type {Record<string, unknown>} */ (parsed)[probe.marker_key]
+      let marker = legacyMarker
+      const markerPath = clientHookMarkerPath(descriptor.name, settingsPath, env, homeDir)
+      if (markerPath) {
+        try {
+          marker = JSON.parse(await fsp.readFile(markerPath, 'utf8'))
+          if (!isPlainObject(marker) || !isPlainObject(marker.managed) || !Array.isArray(marker.managed.hook_entries)) {
+            throw new Error('Invalid external hook ownership record')
+          }
+          // Attach writes ownership before hooks, so a record alone is not
+          // evidence that its proposed commands reached the client's file.
+          const events = /** @type {Record<string, unknown>} */ (parsed)
+          const installed = marker.managed.hook_entries.some(entry => {
+            if (!isPlainObject(entry) || typeof entry.event !== 'string') return false
+            const groups = events[entry.event]
+            return Array.isArray(groups) && groups.some(group => isPlainObject(group) &&
+              group.matcher === entry.matcher && Array.isArray(group.hooks) &&
+              group.hooks.some(hook => isPlainObject(hook) && hook.command === entry.command))
+          })
+          if (!installed && legacyMarker === undefined) return { attached: false, settingsPath }
+        } catch (err) {
+          if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
+        }
+      }
       if (!marker || typeof marker !== 'object') return { attached: false, settingsPath }
       const markerObj = /** @type {Record<string, unknown>} */ (marker)
       const telemetryPort = markerTelemetryPort(markerObj)
       return {
         attached: true,
+        ...(markerPath && legacyMarker !== undefined ? { markerFormatStale: true } : {}),
         settingsPath,
         version: typeof markerObj.version === 'string' ? markerObj.version : undefined,
         port: typeof markerObj.port === 'number' ? String(markerObj.port) : undefined,

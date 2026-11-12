@@ -1019,12 +1019,14 @@ export function aiGatewayBackfillMaterializer() {
         }
       }
       const rows = aiGatewayRowsFromProjectedExchange(projection, {
-        gatewayAttributes: backfillGatewayAttributes(item),
+        // The mutable Droid usage row must be byte-identical in both lanes.
+        gatewayAttributes: item.reconcile && projection.client_name === 'droid'
+          ? undefined : backfillGatewayAttributes(item),
         state,
       })
       // @ref LLP 0449#reconciliation [implements]: a mutable snapshot must reach
       // storage whole, including old identities whose payload or position changed.
-      return item.reconcile ? rows : dedupe.skipExisting(rows, ctx)
+      return item.reconcile ? withUsageColumns(rows) : dedupe.skipExisting(rows, ctx)
     },
   }
 }

@@ -82,6 +82,7 @@ export async function run({ harness, expect }) {
       if (!client) throw new Error('Droid client missing')
       await client.attach({ config: {}, json: true, stdout: { write() { return true } }, stderr: { write() { return true } } })
       const hooks = JSON.parse(await fs.readFile(path.join(harness.tmpDir, '.factory', 'hooks.json'), 'utf8'))
+      expect.that('hook file contains only supported Droid events', Object.keys(hooks), keys => keys.every(key => ['PreToolUse', 'PostToolUse', 'Notification', 'UserPromptSubmit', 'Stop', 'SubagentStop', 'PreCompact', 'SessionStart', 'SessionEnd'].includes(key)))
       command = hooks.Stop.at(-1).hooks[0].command
     })
     await step('live', async () => {
@@ -102,6 +103,21 @@ export async function run({ harness, expect }) {
       const rows = await query()
       expect.that('recovery repairs missed hook and deduplicates', rows.length, n => n === 6)
       expect.that('no cumulative spend invented', rows, values => values.every(r => !(typeof r.attributes === 'string' ? JSON.parse(r.attributes) : r.attributes)?.usage))
+    })
+    await step('usage', async () => {
+      const settings = file.replace(/\.jsonl$/, '.settings.json')
+      await fs.writeFile(settings, JSON.stringify({ tokenUsage: { inputTokens: 2, outputTokens: 10, cacheReadTokens: 100, cacheCreationTokens: 20 }, inclusiveTokenUsage: { outputTokens: 9999 } }))
+      await notify()
+      await notify()
+      let values = await query()
+      expect.that('usage snapshot has dedicated columns and leaves conversation intact', values,
+        rows => rows.length === 7 && rows.filter(r => r.provider_subtype === 'session_usage').length === 1 && Number(rows.find(r => r.provider_subtype === 'session_usage').output_tokens) === 10)
+      await fs.writeFile(settings, JSON.stringify({ tokenUsage: { inputTokens: 4, outputTokens: 14, cacheReadTokens: 200, cacheCreationTokens: 20 } }))
+      for (let i = 0; i < 2; i++) await cli(['backfill', 'droid', '--since', '2000-01-01T00:00:00Z', '--json'])
+      await notify()
+      values = await query()
+      expect.that('live and backfill converge to one updated session snapshot', values,
+        rows => rows.length === 7 && rows.filter(r => r.provider_subtype === 'session_usage').length === 1 && Number(rows.find(r => r.provider_subtype === 'session_usage').output_tokens) === 14)
     })
     await step('privacy', async () => {
       await fs.writeFile(path.join(records[0].cwd, '.hypignore'), 'ignore\n')
@@ -157,10 +173,11 @@ export async function run({ harness, expect }) {
     })
     await obs.shutdown()
     const logs = await expect.logs()
-    expect.that('capture signal emitted', logs, values => values.filter(e => e.body === 'droid.hook.recorded').reduce((sum, e) => sum + Number(e.attributes?.rows_written ?? 0), 0) === 5)
+    expect.that('capture signal emitted', logs, values => values.filter(e => e.body === 'droid.hook.recorded').reduce((sum, e) => sum + Number(e.attributes?.rows_written ?? 0), 0) >= 6)
+    expect.that('usage reconciliation signal emitted', logs, values => values.some(e => e.body === 'droid.usage.reconciled' && e.attributes?.status === 'ok'))
     expect.that('recovery signal emitted', logs, values => values.some(e => e.body === 'droid.backfill.scan'))
     const traces = await expect.traces()
-    expect.that('run-specific steps traced', traces.filter(t => String(t.name).startsWith('smoke.step.') && t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId).length, n => n === 7)
+    expect.that('run-specific steps traced', traces.filter(t => String(t.name).startsWith('smoke.step.') && t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId).length, n => n === 8)
   } finally {
     await kernel.sources.stop('droid').catch(() => {})
     await obs.shutdown().catch(() => {})

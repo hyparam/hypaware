@@ -40,7 +40,7 @@ Common fields:
 | Role / part kind | `role` / `part_type` |
 | Tool name / arguments | `tool_name` / `tool_args` |
 | Capture source | `conversation_source`, not `source` |
-| Token usage | JSON inside `attributes`, under `usage`; no `usage` column |
+| Token usage | Nullable top-level token columns when present in the schema; older schemas use `attributes.usage` |
 | Human-typed turn | `attributes.claude.origin.kind = 'human'` (Claude) or `attributes.codex.content_item_kinds` containing `user.text` (Codex), not `role = 'user'` alone; rows from before 1.48.0 carry no label, see [sql.md](sql.md) |
 
 Example, replacing the dates and session with the requested scope:
@@ -59,13 +59,23 @@ Schema output is complete; it has no `--max-bytes` flag. For other datasets, use
 
 `SELECT` and `SHOW TABLES` are supported; `DESCRIBE` and `information_schema` are not. Bound message scans by `date` and transcripts by `session_id`. Other datasets may lack `date`: inspect their schema before choosing a time filter. `node` uses `node_type`, `edge` uses `edge_type`, neither uses `type`. Read [sql.md](sql.md) before aggregating usage or using JSON extraction, functions, joins, or other advanced syntax. Read query errors before correcting names; never retry an unchanged memory-budget refusal.
 
-Read token usage from `attributes.usage`, not `raw_frame`. Keep `input_tokens`,
+Read token usage from the dedicated columns when present in the target schema,
+otherwise from `attributes.usage`, NOT `raw_frame`. Keep `input_tokens`,
 `output_tokens`, `cache_read_tokens`, and `cache_write_tokens` separate. Input
 is net of cache; reasoning tokens may already be included in output. Missing
 usage is unknown, not zero consumption; bytes are not tokens. COALESCE every token sum
 and each operand in an addition, without treating missing usage as measured zero.
 
 Before aggregating usage, check for duplicate captures or cumulative updates.
+Factory Droid carries own-session lifetime totals on `role = 'system'`,
+`conversation_source = 'droid'`, `provider_subtype = 'session_usage'` rows.
+The local cache replaces these snapshots; remote exports can retain revisions.
+Keep the latest `attributes.droid.usage_observed_at` per `gateway_id, message_id`
+before summing, taking every counter from the same row. Children have separate
+totals and `parent_thread_id` links. The accounting date is the session's first
+message day, not the spending day, and model/provider are unattributed.
+Use the dedicated token columns when the target schema has them. Missing usage
+is not zero; `total_tokens` is absent for Droid and is not a universal total.
 One carrier row per response does not establish uniqueness across capture sources
 or historical stream updates.
 Deduplicate only with verified response identity, keeping counters from the

@@ -5,7 +5,7 @@ import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/ind
 import { refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import { AI_GATEWAY_MESSAGES_DATASET, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
-import { droidSessionsRoot, droidSessionFiles, fingerprint, fingerprintSettled, MAX_FILE_BYTES, present, readDroidTranscript } from './transcript.js'
+import { droidSessionsRoot, droidSessionFiles, droidSettingsStat, fingerprint, fingerprintSettled, MAX_FILE_BYTES, present, readDroidTranscript } from './transcript.js'
 
 /** @import { BackfillContribution, JsonObject } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -51,29 +51,32 @@ export function createDroidBackfillProvider(opts = {}) {
         nextFile = file
         try {
           const stat = await fs.lstat(file)
+          const settingsStat = await droidSettingsStat(file)
+          const combined = fingerprint(stat) + ':' + (settingsStat ? fingerprint(settingsStat) : 'missing')
           if (!stat.isFile() || stat.size > MAX_FILE_BYTES) throw new Error('file_budget')
           // Do not use mtime for the time window: Droid can preserve file
           // times while rewriting metadata. Filter native message timestamps.
           // And skip only on a settled fingerprint: inside the timestamp
           // tick a same-size rewrite leaves the stat unchanged, and this
           // sweep is the recovery lane that is supposed to catch it.
-          if (ctx.sweep && fingerprints.get(file) === fingerprint(stat) && fingerprintSettled(stat)) {
+          if (ctx.sweep && fingerprints.get(file) === combined && fingerprintSettled(stat) && (!settingsStat || fingerprintSettled(settingsStat))) {
             unchanged++
             continue
           }
-          if (bytes + stat.size > 256 * 1024 * 1024) {
+          if (bytes + stat.size + (settingsStat?.size ?? 0) > 256 * 1024 * 1024) {
             deferred = true
             break
           }
-          bytes += stat.size
+          bytes += stat.size + (settingsStat?.size ?? 0)
           read++
           const failures = ctx.itemsFailed
           for await (const item of readDroidTranscript(file, { root, window, signal: ctx.signal,
+            claimUsage: where => ctx.dryRun ? () => {} : ctx.storage?.claimReconcileScope?.(AI_GATEWAY_MESSAGES_DATASET, where) ?? (() => {}),
             allowed: session => !sessionIgnoreLoadError(opts.ignoredSessions) && !opts.ignoredSessions?.has(String(session.id)) && resolver.resolve(String(session.cwd)).class !== 'ignore',
           })) {
             if (item.dropped) dropped++
-            if (item.projection) yield projectedExchangeItem(item.projection, { client_name: 'droid', source_path: file, native_id: item.projection.session_id })
-            if (item.complete && item.cursor && !ctx.dryRun && ctx.itemsFailed === failures) fingerprints.set(file, item.cursor.fingerprint)
+            if (item.projection) yield { ...projectedExchangeItem(item.projection, { client_name: 'droid', source_path: file, native_id: item.projection.session_id }), ...(item.reconcile ? { reconcile: item.reconcile } : {}) }
+            if (item.complete && item.cursor && !ctx.dryRun && ctx.itemsFailed === failures && item.cursor.fingerprint === fingerprint(stat)) fingerprints.set(file, combined)
           }
         } catch {
           failed++

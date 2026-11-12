@@ -9,6 +9,8 @@ import { isMisdirectedHost, listenAndResolve, requestUrlOf } from '../../../../s
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_writer.js'
+import { AI_GATEWAY_SCHEMA_COLUMNS, withUsageColumns } from '../../ai-gateway/src/dataset.js'
+import { aiGatewayRowsFromProjectedExchange } from '../../ai-gateway/src/message_projector.js'
 import { droidListenPort } from './config.js'
 import { droidSessionsRoot, MAX_LIVE_BYTES, present, readDroidTranscript } from './transcript.js'
 
@@ -94,6 +96,7 @@ export function createStartDroidSource(deps) {
           let skipped = 0
           let dropped = false
           for await (const item of readDroidTranscript(file, { root, sessionId: raw.session_id, cursor: cursors.get(file), maxBytes: MAX_LIVE_BYTES, signal: abort.signal,
+            claimUsage: where => ctx.storage.claimReconcileScope?.('ai_gateway_messages', where) ?? (() => {}),
             allowed: session => !sessionIgnoreLoadError(ignored) && !ignored.has(String(session.id)) && resolver.resolve(String(session.cwd)).class !== 'ignore',
           })) {
             if (item.dropped) {
@@ -101,9 +104,17 @@ export function createStartDroidSource(deps) {
               cursors.delete(file)
             }
             if (item.projection) {
-              const result = await createProjectedExchangeWriter({ storage: ctx.storage }).record(item.projection)
-              rows += result.rowsWritten
-              skipped += result.rowsSkipped
+              if (item.reconcile) {
+                if (!ctx.storage.reconcileRows) throw new Error('Droid usage requires snapshot reconciliation')
+                const usageRows = withUsageColumns(aiGatewayRowsFromProjectedExchange(item.projection))
+                const written = await ctx.storage.reconcileRows('ai_gateway_messages', [...AI_GATEWAY_SCHEMA_COLUMNS], usageRows, item.reconcile)
+                rows += written
+                ctx.log.info('droid.usage.reconciled', { component: 'plugin.droid', operation: 'usage.reconcile', status: 'ok', rows_written: written })
+              } else {
+                const result = await createProjectedExchangeWriter({ storage: ctx.storage }).record(item.projection)
+                rows += result.rowsWritten
+                skipped += result.rowsSkipped
+              }
             }
             // Commit only after every yielded projection was written. A failed
             // batch replays on the next notification; durable IDs deduplicate.

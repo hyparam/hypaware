@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
 import test from 'node:test'
-import { projectDroidEntries, droidSessionHeader } from '../../hypaware-core/plugins-workspace/droid/src/projector.js'
+import { projectDroidEntries, projectDroidUsage, droidUsageScope, droidSessionHeader } from '../../hypaware-core/plugins-workspace/droid/src/projector.js'
 import { droidSessionsRoot, readDroidTranscript, MAX_LINE_BYTES, MAX_FILE_BYTES } from '../../hypaware-core/plugins-workspace/droid/src/transcript.js'
 import { createDroidBackfillProvider } from '../../hypaware-core/plugins-workspace/droid/src/backfill.js'
 import { attachDroidHooks, droidHooksPath, DROID_EVENTS } from '../../hypaware-core/plugins-workspace/droid/src/attach.js'
@@ -14,6 +14,8 @@ import { validateDroidConfig } from '../../hypaware-core/plugins-workspace/droid
 import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { clientHookMarkerPath } from '../../src/core/daemon/client_settings_path.js'
+import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status/clients.js'
 
 const fixture = (await fs.readFile(new URL('../../hypaware-core/smoke/fixtures/droid-session.jsonl', import.meta.url), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
 const silent = { info() {}, warn() {}, debug() {}, error() {} }
@@ -61,6 +63,66 @@ test('Droid native format projects stable IDs, sequence, models and tools withou
   assert.notEqual(projectDroidEntries({ ...fixture[0], id: 'fork' }, entries, entries.map(e => e.seq))?.messages[0].message_id, projection.messages[0].message_id)
   assert.equal(droidSessionHeader({ ...fixture[0], version: 3 }), undefined)
   assert.equal(droidSessionHeader({ ...fixture[0], cwd: 'relative' }), undefined)
+})
+
+test('Droid accounting uses own cumulative counters and native parent identity, never inclusive totals', () => {
+  const session = { ...fixture[0], callingSessionId: 'parent-session' }
+  const at = '2026-11-11T23:00:00Z'
+  const projection = projectDroidUsage(session, { tokenUsage: { inputTokens: 2, outputTokens: 10,
+    cacheCreationTokens: 20, cacheReadTokens: 100, thinkingTokens: 3, factoryCredits: 50 },
+  inclusiveTokenUsage: { outputTokens: 999 }, systemPrompt: 'private' }, at, at)
+  assert.ok(projection)
+  const [row] = aiGatewayRowsFromProjectedExchange(projection)
+  assert.equal(row.parent_thread_id, 'parent-session')
+  assert.equal(row.provider_subtype, 'session_usage')
+  assert.equal(row.role, 'system')
+  assert.equal(row.model, undefined)
+  const attrs = /** @type {any} */ (row.attributes)
+  assert.deepEqual(attrs.usage, { input_tokens: 2, output_tokens: 10, cache_write_tokens: 20, cache_read_tokens: 100, reasoning_tokens: 3 })
+  assert.equal(attrs.droid.factory_credits, 50)
+  assert.ok(!JSON.stringify(row).includes('private'))
+  assert.equal(droidUsageScope(session).message_id, row.message_id)
+  const entries = fixture.filter(e => e.type === 'message')
+  assert.equal(projectDroidEntries(session, entries, entries.map(e => e.seq))?.parent_thread_id, 'parent-session')
+  assert.equal(projectDroidUsage(session, { tokenUsage: {} }, at, at), undefined)
+  assert.throws(() => projectDroidUsage(session, { tokenUsage: { outputTokens: -1 } }, at, at), /invalid_usage/)
+})
+
+test('Droid reads usage after policy checks, revisits sidecar-only updates, and keeps the session date across restart', async t => {
+  const { home, file, root, records } = await setup(t)
+  const settingsFile = file.replace(/\.jsonl$/, '.settings.json')
+  await fs.writeFile(settingsFile, JSON.stringify({ tokenUsage: { outputTokens: 10 } }))
+  const first = await collect(readDroidTranscript(file, { root, allowed: () => true }))
+  const usage = first.find(item => item.reconcile)
+  assert.ok(usage)
+  assert.equal(usage.projection.messages[0].message_created_at, records[1].timestamp)
+  assert.deepEqual(usage.reconcile.where, droidUsageScope(records[0]))
+  assert.equal(first.at(-1).cursor.firstMessageAt, records[1].timestamp)
+  await fs.writeFile(settingsFile, JSON.stringify({ tokenUsage: { outputTokens: 14 } }))
+  const incremental = await collect(readDroidTranscript(file, { root, allowed: () => true, cursor: first.at(-1).cursor }))
+  const restarted = await collect(readDroidTranscript(file, { root, allowed: () => true }))
+  assert.deepEqual(incremental.find(item => item.reconcile).projection, restarted.find(item => item.reconcile).projection)
+  const provider = createDroidBackfillProvider({ env: { HOME: home } })
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 60_000 })
+  const quiet = await collect(readDroidTranscript(file, { root, allowed: () => true, cursor: restarted.at(-1).cursor }))
+  assert.ok(quiet.every(item => !item.reconcile))
+  const ctx = /** @type {any} */ ({ env: {}, log: silent, dryRun: false, sweep: true, itemsFailed: 0 })
+  assert.ok((await collect(provider.run(ctx))).some(item => item.reconcile))
+  assert.equal((await collect(provider.run(ctx))).length, 0)
+  await fs.writeFile(settingsFile, JSON.stringify({ tokenUsage: { outputTokens: 20 } }))
+  assert.ok((await collect(provider.run(ctx))).some(item => item.reconcile))
+  const windowed = await collect(readDroidTranscript(file, { root, allowed: () => true, window: { sinceMs: Date.parse('2026-10-21') } }))
+  assert.ok(windowed.every(item => !item.reconcile))
+  await fs.writeFile(settingsFile, 'invalid JSON')
+  assert.deepEqual(await collect(readDroidTranscript(file, { root, allowed: () => false })), [{ dropped: true }])
+  await assert.rejects(collect(readDroidTranscript(file, { root, allowed: () => true })))
+  if (process.platform !== 'win32') {
+    await fs.unlink(settingsFile)
+    const outside = path.join(home, 'unrelated.json')
+    await fs.writeFile(outside, '{}')
+    await fs.symlink(outside, settingsFile)
+    await assert.rejects(collect(readDroidTranscript(file, { root, allowed: () => true })), /symlink/)
+  }
 })
 
 test('Droid incremental reader handles append, partial UTF-8 lines, header rewrites and same-size edits', async t => {
@@ -201,9 +263,9 @@ test('Droid sweep re-reads a file whose fingerprint has not settled', async t =>
 
 test('Droid attach preserves existing hooks and settings fallbacks, is idempotent and detaches from disk', async t => {
   const { home } = await setup(t)
-  const env = { FACTORY_HOME_OVERRIDE: home, DROID_HOME: '/must-not-use' }
+  const env = { HOME: home, HYP_HOME: path.join(home, '.hyp'), FACTORY_HOME_OVERRIDE: home, DROID_HOME: '/must-not-use' }
   const settingsPath = droidHooksPath({ env })
-  const original = { Stop: [{ matcher: 'user', hooks: [{ type: 'command', command: 'echo existing' }] }], showHookOutput: true }
+  const original = { Stop: [{ matcher: 'user', hooks: [{ type: 'command', command: 'echo existing' }] }] }
   const fallback = { hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo fallback' }] }] } }
   await fs.writeFile(settingsPath, JSON.stringify(original))
   await fs.writeFile(path.join(home, '.factory', 'settings.json'), JSON.stringify(fallback))
@@ -213,6 +275,8 @@ test('Droid attach preserves existing hooks and settings fallbacks, is idempoten
   assert.equal((await attachDroidHooks(opts)).changed, true)
   assert.equal((await attachDroidHooks(opts)).changed, false)
   const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.deepEqual(Object.keys(attached).sort(), [...DROID_EVENTS].sort())
+  assert.equal((await probeClientAttachFromDescriptor({ descriptor, homeDir: home, env })).attached, true)
   assert.equal(attached.Stop[0].hooks[0].command, 'echo existing')
   assert.equal(attached.SessionStart[0].hooks[0].command, 'echo fallback')
   assert.ok(DROID_EVENTS.every(event => attached[event].some(group => group.hooks.some(h => h.command.includes('hook.mjs')))))
@@ -222,6 +286,80 @@ test('Droid attach preserves existing hooks and settings fallbacks, is idempoten
   const detached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
   assert.deepEqual(detached, { ...original, Stop: [...original.Stop, { hooks: [{ type: 'command', command: 'echo later' }] }] })
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(home, '.factory', 'settings.json'), 'utf8')), fallback)
+  assert.equal((await probeClientAttachFromDescriptor({ descriptor, homeDir: home, env })).attached, false)
+})
+
+test('Droid migrates inline ownership to HypAware state and updates its endpoint without duplicate hooks', async t => {
+  const { home } = await setup(t)
+  const env = { HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const opts = { homeDir: home, env, endpoint: 'http://127.0.0.1:4324', version: '1' }
+  const settingsPath = droidHooksPath(opts)
+  const markerPath = /** @type {string} */ (clientHookMarkerPath('droid', settingsPath, env, home))
+  await attachDroidHooks(opts)
+  const hooks = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  hooks._hypaware = JSON.parse(await fs.readFile(markerPath, 'utf8'))
+  await fs.writeFile(settingsPath, JSON.stringify(hooks))
+  await fs.unlink(markerPath)
+  assert.equal((await probeClientAttachFromDescriptor({ descriptor, homeDir: home, env })).markerFormatStale, true)
+  await attachDroidHooks({ ...opts, dryRun: true })
+  await assert.rejects(fs.access(markerPath), { code: 'ENOENT' })
+  assert.ok(JSON.parse(await fs.readFile(settingsPath, 'utf8'))._hypaware)
+  await attachDroidHooks({ ...opts, endpoint: 'http://127.0.0.1:4325' })
+  const migrated = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.deepEqual(Object.keys(migrated).sort(), [...DROID_EVENTS].sort())
+  assert.ok(Object.values(migrated).every(groups => groups.length === 1 && groups[0].hooks[0].command.endsWith("'127.0.0.1:4325'")))
+  assert.equal((await probeClientAttachFromDescriptor({ descriptor, homeDir: home, env })).markerFormatStale, undefined)
+  await detachClientFromDisk({ descriptor, homeDir: home, env })
+  assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, 'utf8')), {})
+  await assert.rejects(fs.access(markerPath), { code: 'ENOENT' })
+})
+
+test('Droid retains old and proposed ownership when updating hooks fails', async t => {
+  const { home } = await setup(t)
+  const env = { HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const opts = { homeDir: home, env, endpoint: 'http://127.0.0.1:4324', version: '1' }
+  await attachDroidHooks(opts)
+  const settingsPath = droidHooksPath(opts)
+  const rename = fs.rename.bind(fs)
+  const mocked = t.mock.method(fs, 'rename', async (from, to) => {
+    if (to === settingsPath) throw new Error('simulated hooks write failure')
+    return rename(from, to)
+  })
+  await assert.rejects(attachDroidHooks({ ...opts, endpoint: 'http://127.0.0.1:4325' }), /simulated/)
+  mocked.mock.restore()
+  await detachClientFromDisk({ descriptor, homeDir: home, env })
+  assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, 'utf8')), {})
+})
+
+test('Droid external ownership is scoped to Factory home and corrupt records fail closed', async t => {
+  const { home } = await setup(t)
+  const env = { HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const opts = { homeDir: home, env, endpoint: 'http://127.0.0.1:4324', version: '1' }
+  const settingsPath = droidHooksPath(opts)
+  const markerPath = /** @type {string} */ (clientHookMarkerPath('droid', settingsPath, env, home))
+  const otherPath = droidHooksPath({ env: { ...env, FACTORY_HOME_OVERRIDE: path.join(home, 'other') } })
+  assert.notEqual(clientHookMarkerPath('droid', otherPath, env, home), markerPath)
+  await attachDroidHooks(opts)
+  const before = await fs.readFile(settingsPath, 'utf8')
+  await fs.writeFile(markerPath, '{}')
+  await assert.rejects(attachDroidHooks(opts), /managed hook record/)
+  await assert.rejects(detachClientFromDisk({ descriptor, homeDir: home, env }), /ownership record/)
+  assert.match((await probeClientAttachFromDescriptor({ descriptor, homeDir: home, env })).error ?? '', /ownership record/)
+  assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+})
+
+test('Droid legacy inline records still detach without loading the adapter', async t => {
+  const { home } = await setup(t)
+  const env = { HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const settingsPath = droidHooksPath({ env })
+  await fs.writeFile(settingsPath, JSON.stringify({
+    Stop: [{ hooks: [{ type: 'command', command: 'old-hyp-hook' }, { type: 'command', command: 'user-hook' }] }],
+    _hypaware: { managed: { hook_entries: [{ event: 'Stop', command: 'old-hyp-hook' }] } },
+  }))
+  await detachClientFromDisk({ descriptor, homeDir: home, env })
+  assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, 'utf8')), {
+    Stop: [{ hooks: [{ type: 'command', command: 'user-hook' }] }],
+  })
 })
 
 test('Droid refuses legacy hook shadowing and corrupt exclusion state', async t => {
