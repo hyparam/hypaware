@@ -149,6 +149,37 @@ test('rollouts without a session header are left alone instead of blocking repai
   } finally { await f.cleanup() }
 })
 
+test('a metadata row whose rollout was deleted is left unchanged and counted instead of blocking repair', async () => {
+  const f = await fixture()
+  try {
+    const goneId = randomUUID()
+    const gone = path.join(f.home, 'sessions', '2025', `rollout-deleted-${goneId}.jsonl`)
+    f.db.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?)').run(goneId, gone, 'hypaware', 'Deleted chat', 1)
+    const before = f.rows()
+    assert.equal((await repairCodexProviders({ ...f.options, dryRun: true })).missing_rollouts, 1)
+    const result = await repairCodexProviders(f.options)
+    assert.equal(result.repaired_threads, 1)
+    assert.equal(result.missing_rollouts, 1)
+    assert.deepEqual(f.rows(), before.map(row => row.id === f.id ? { ...row, model_provider: 'openai' } : row))
+    const manifest = JSON.parse(await fs.readFile(path.join(result.backup_path, 'manifest.json'), 'utf8'))
+    assert.deepEqual(manifest.databases[0].rows.map(row => row.id), [f.id])
+    // Only the deleted chat is left: nothing to repair and no new backup.
+    const again = await repairCodexProviders(f.options)
+    assert.equal(again.repaired_threads, 0)
+    assert.equal(again.missing_rollouts, 1)
+    assert.equal((await fs.readdir(path.dirname(result.backup_path))).length, 1)
+    await restoreCodexProviders({ ...f.options, backupPath: result.backup_path })
+    assert.deepEqual(f.rows(), before)
+    if (process.platform !== 'win32') {
+      await fs.mkdir(path.dirname(gone), { recursive: true })
+      await fs.symlink(path.join(f.home, 'nowhere.jsonl'), gone)
+      // A dangling link is not a deleted chat and stays refused.
+      await assert.rejects(repairCodexProviders(f.options), /Symlinked Codex/)
+      assert.equal(await fs.readFile(f.file, 'utf8'), f.original)
+    }
+  } finally { await f.cleanup() }
+})
+
 test('archived compressed rollouts preserve decompressed history and restore original compressed bytes', async () => {
   if (typeof zlib.zstdCompressSync !== 'function') return
   const f = await fixture()

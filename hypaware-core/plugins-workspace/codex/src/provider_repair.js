@@ -76,8 +76,10 @@ export function createAutomaticCodexProviderRepair(options, deps = {}) {
           span.setAttribute('status', 'ok')
           span.setAttribute('reason', 'complete')
           span.setAttribute('affected_threads', result.repaired_threads)
+          span.setAttribute('missing_rollouts', result.missing_rollouts)
           log.info('codex.provider_repair.automatic', {
             component: 'plugin.codex', operation: 'provider.repair.auto', status: 'ok', reason: 'complete', affected_threads: result.repaired_threads,
+            missing_rollouts: result.missing_rollouts,
           })
         } catch (error) {
           const deferred = error.code === 'CODEX_RUNNING'
@@ -117,11 +119,11 @@ export async function repairCodexProviders(options) {
     await refuseIncompleteRepair(path.join(home, BACKUP_ROOT))
   }
   const files = await discoverRollouts(home, options.signal)
-  const databases = await discoverDatabases(home, sqliteHome, files, options.signal)
+  const { databases, missing } = await discoverDatabases(home, sqliteHome, files, options.signal)
   const threads = new Set(files.map(file => file.id))
   for (const database of databases) for (const row of database.rows) threads.add(row.id)
   if (options.dryRun || threads.size === 0) {
-    return { status: 'ok', dry_run: options.dryRun === true, repaired_threads: threads.size, rollout_files: files.length, databases: databases.length }
+    return { status: 'ok', dry_run: options.dryRun === true, repaired_threads: threads.size, rollout_files: files.length, databases: databases.length, missing_rollouts: missing }
   }
 
   if (options.maxBytes !== undefined) {
@@ -211,7 +213,7 @@ export async function repairCodexProviders(options) {
     }
     manifest.status = 'complete'
     await saveManifest(backupDir, manifest)
-    return { status: 'ok', dry_run: false, repaired_threads: threads.size, rollout_files: files.length, databases: databases.length, backup_path: backupDir }
+    return { status: 'ok', dry_run: false, repaired_threads: threads.size, rollout_files: files.length, databases: databases.length, missing_rollouts: missing, backup_path: backupDir }
   } catch (error) {
     for (const entry of opened) {
       if (entry.db.isTransaction) entry.db.exec('ROLLBACK')
@@ -384,6 +386,7 @@ async function discoverDatabases(home, directory, files, signal) {
   const entries = await fs.opendir(directory)
   let visited = 0
   let rowCount = 0
+  let missing = 0
   for await (const entry of entries) {
     signal?.throwIfAborted()
     if (++visited > MAX_FILES) throw new Error('Codex state exceeds the discovery budget')
@@ -400,21 +403,49 @@ async function discoverDatabases(home, directory, files, signal) {
       if (rowCount > MAX_AFFECTED) throw new Error('Too many affected Codex metadata rows')
       if (!rows.length) continue
       if (databases.length >= MAX_DATABASES) throw new Error('Too many Codex state databases')
+      const kept = []
       for (const row of rows) {
         if (typeof row.id !== 'string' || typeof row.rollout_path !== 'string') throw new Error('Unsupported Codex metadata identity')
         const match = byPath.get(row.rollout_path) === row.id || byPath.get(row.rollout_path + '.zst') === row.id
         // A previously replaced header can coexist with stale DB metadata.
         if (!match) {
-          const target = confinedRolloutPath(home, row.rollout_path)
-          if (await fs.realpath(target) !== target) throw new Error('Symlinked Codex rollout is not supported')
+          const target = await existingRollout(confinedRolloutPath(home, row.rollout_path))
+          // A chat whose file was deleted has nothing to repair or back up, so
+          // its cell is left as it is rather than refusing every other chat.
+          if (!target) {
+            missing++
+            continue
+          }
           const header = await readHeader(target, target.endsWith('.zst'), signal)
           if (header?.id !== row.id || header.provider !== 'openai') throw new Error('A legacy Codex metadata row has no matching repairable rollout')
         }
+        kept.push(row)
       }
-      databases.push({ path: file, rows })
+      if (kept.length) databases.push({ path: file, rows: kept })
     } finally { db.close() }
   }
-  return databases
+  return { databases, missing }
+}
+
+/**
+ * @param {string} target
+ * @returns {Promise<string | undefined>} the rollout, possibly compressed since, or undefined when it no longer exists
+ */
+async function existingRollout(target) {
+  for (const candidate of [target, target + '.zst']) {
+    try {
+      if (await fs.realpath(candidate) !== candidate) throw new Error('Symlinked Codex rollout is not supported')
+      return candidate
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+      // A dangling link also reports ENOENT and stays refused.
+      try { await fs.lstat(candidate) } catch (absent) {
+        if (absent.code === 'ENOENT') continue
+        throw absent
+      }
+      throw new Error('Symlinked Codex rollout is not supported')
+    }
+  }
 }
 
 function decoded(file, compressed, signal) {
@@ -636,11 +667,13 @@ export async function runCodexRepair(argv, ctx, deps = {}) {
         : await repairCodexProviders({ codexHome: home, sqliteHome: config.sqliteHome, dryRun, assertStopped: stopped })
       span.setAttribute('status', 'ok')
       const count = 'repaired_threads' in result ? result.repaired_threads : result.restored_files
+      const missing = 'missing_rollouts' in result ? result.missing_rollouts : 0
       span.setAttribute('affected_threads', count)
-      log.info('codex.provider_repair.complete', { component: 'plugin.codex', operation: backupPath ? 'provider.restore' : 'provider.repair', status: 'ok', dry_run: dryRun, affected_threads: count })
+      log.info('codex.provider_repair.complete', { component: 'plugin.codex', operation: backupPath ? 'provider.restore' : 'provider.repair', status: 'ok', dry_run: dryRun, affected_threads: count, missing_rollouts: missing })
       if (json) ctx.stdout.write(JSON.stringify(result) + '\n')
       else {
         ctx.stdout.write(backupPath ? `Restored ${count} rollout files.\n` : `${dryRun ? 'Would repair' : 'Repaired'} ${count} saved Codex chats.\n`)
+        if (missing) ctx.stdout.write(`Left ${missing} saved Codex chats unchanged because their files were deleted.\n`)
         if ('backup_path' in result && result.backup_path) ctx.stdout.write(`Backup: ${result.backup_path}\n`)
         if (!dryRun && count) ctx.stdout.write('Open Codex normally to continue your chats.\n')
       }

@@ -19,7 +19,9 @@ only `hypaware` provider identities to `openai` in native rollout metadata
 and the corresponding `threads.model_provider` cells. It preserves thread
 IDs, history, titles, timestamps, permissions, and the user's configuration.
 Both active and archived rollouts are eligible, including compressed
-rollouts when the running Node has built-in Zstandard support. The automatic
+rollouts when the running Node has built-in Zstandard support. A metadata
+row whose rollout file no longer exists is left unchanged and counted, since
+there is no chat to repair or back up. The automatic
 upgrade path below reuses this same operation and its backups.
 
 The command asks Codex's own parser to read a private temporary copy of the
