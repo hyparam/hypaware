@@ -201,7 +201,7 @@ test('usage-only updates replace one snapshot through poll, backfill and restart
     assert.equal((await h.run()).ok, true)
     const rows = h.committed.filter(r => r.provider_subtype === 'session_usage')
     assert.equal(rows.length, 1)
-    assert.equal(rows[0].part_id, initialId)
+    assert.notEqual(rows[0].part_id, initialId)
     assert.equal(rows[0].message_created_at, first.message_created_at)
     assert.equal(rows[0].input_tokens, 20)
     assert.equal(rows[0].output_tokens, 25)

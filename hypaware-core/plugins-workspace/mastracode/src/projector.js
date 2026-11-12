@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import { deriveRepoFromCwd } from './git_repo.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { projectedExchangeItem } from '../../../../src/core/backfill/scan_util.js'
@@ -167,12 +168,16 @@ function sessionUsageMessage(thread, metadata) {
     if (native[from] != null) usage[to] = native[from]
   }
   if (!Object.keys(usage).length) return undefined
+  const messageId = `mastracode-usage:${thread.id}`
+  const mastracode = { usage_observed_at: thread.updatedAt }
+  // @ref LLP 0603#queries: each revision needs its own part_id, or central ingest's part_id dedup keeps only the first snapshot.
+  const revision = createHash('sha256').update(JSON.stringify([usage, mastracode])).digest('hex').slice(0, 16)
   return {
     role: 'system', provider_subtype: 'session_usage', provider: 'unknown', model: 'unknown',
-    message_id: `mastracode-usage:${thread.id}`, message_created_at: thread.createdAt,
+    message_id: messageId, message_created_at: thread.createdAt,
     message_index: 0, previous_message_id: [],
-    content: [{ type: 'status', status: 'session_usage' }],
-    attributes: { usage, mastracode: { usage_observed_at: thread.updatedAt } },
+    content: [{ type: 'status', status: 'session_usage', part_id: `${messageId}#${revision}` }],
+    attributes: { usage, mastracode },
   }
 }
 

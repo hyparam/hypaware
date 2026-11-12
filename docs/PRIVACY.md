@@ -25,7 +25,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `hermes` | Hermes Agent conversations read from its local state database |
 | `goose` | Goose CLI and Desktop conversations read from its local session database, including tool calls and results, token usage, and working directory |
 | `crush` | Crush conversations read from each project's local database, including tool calls and results and the project directory; no token usage. The `files` table, which holds copies of file contents, is never read |
-| `mastracode` | Mastra Code conversations read from its local `mastra.db`, including tool calls and results and the project directory; no per-turn token usage or cost. Only the threads and messages tables are read; `settings.json`, `auth.json`, `mastra-vectors.db` and the observability store are never read |
+| `mastracode` | Mastra Code conversations read from its local `mastra.db`, including tool calls and results and the project directory, plus each thread's cumulative token counts from its thread record; no per-turn usage or cost. Only the threads and messages tables are read; `settings.json`, `auth.json`, `mastra-vectors.db` and the observability store are never read |
 | `antigravity`, `antigravity-desktop` | Antigravity CLI and Desktop conversations read from their local summary databases and transcripts, including model thinking, tool calls and results, and working directory |
 | `copilot` | VS Code Copilot completed spans from its local databases, for sessions with a verified local working directory |
 | `nanoclaw` | NanoClaw Claude transcripts read from an explicitly configured local installation |
