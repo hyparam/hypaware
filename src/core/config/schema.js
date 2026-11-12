@@ -247,7 +247,10 @@ export async function loadConfigFile(configPath) {
       span.setAttribute('plugin_count', shape.config.plugins?.length ?? 0)
       span.setAttribute('sink_count', Object.keys(shape.config.sinks ?? {}).length)
       span.setAttribute('status', 'ok')
-      return { ok: true, config: shape.config, configPath }
+      // Not logged here: this runs on every boot and status read, and a
+      // newer config on an older client is a normal state, not an event.
+      if (shape.unknownKeys) span.setAttribute('unknown_key_count', shape.unknownKeys.length)
+      return { ok: true, config: shape.config, configPath, ...(shape.unknownKeys ? { unknownKeys: shape.unknownKeys } : {}) }
     },
     { component: 'config' }
   )
@@ -259,9 +262,14 @@ export async function loadConfigFile(configPath) {
  * on. Failures are returned as a list of `{pointer, message}` records
  * so the caller can re-emit them per validation error.
  *
+ * Top-level keys this version does not know are ignored and reported in
+ * `unknownKeys`, never an error: a config written for a newer client must
+ * still load on an older one.
+ *
  * @param {unknown} value
- * @returns {{ ok: true, config: HypAwareV2Config } | { ok: false, errors: ValidationError[] }}
+ * @returns {{ ok: true, config: HypAwareV2Config, unknownKeys?: string[] } | { ok: false, errors: ValidationError[] }}
  * @ref LLP 0010#no-mode-field [implements]: v2 shape: version must be 2, explicit plugins[], no mode/role label
+ * @ref LLP 0600#unknown-keys [implements]: an unrecognized top-level key is ignored, so a newer config still loads
  */
 export function parseConfigShape(value) {
   /** @type {ValidationError[]} */
@@ -364,11 +372,7 @@ export function parseConfigShape(value) {
 
   const redaction = parseRedactionConfig(root.redaction, errors)
 
-  for (const key of Object.keys(root)) {
-    if (!RECOGNIZED_TOP_KEYS.has(key)) {
-      errors.push({ pointer: `/${key}`, message: `unrecognized top-level key '${key}'` })
-    }
-  }
+  const unknownKeys = Object.keys(root).filter((key) => !RECOGNIZED_TOP_KEYS.has(key))
 
   if (errors.length > 0) return { ok: false, errors }
 
@@ -381,7 +385,7 @@ export function parseConfigShape(value) {
   if (autoUpdate !== undefined) config.auto_update = autoUpdate
   if (firstSyncHold !== undefined) config.first_sync_hold = firstSyncHold
   if (redaction !== undefined) config.redaction = redaction
-  return { ok: true, config }
+  return unknownKeys.length > 0 ? { ok: true, config, unknownKeys } : { ok: true, config }
 }
 
 const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'first_sync_hold', 'redaction'])

@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
-  UNCONFIRMED_RETRY_BACKOFF_MS,
+  RETRY_BACKOFF_MS,
   centralSeedPath,
   createConfigControl,
   readConfigControlStatus,
@@ -20,7 +20,9 @@ import {
 
 // A probation that expires while a sink could not materialize is recorded as
 // "could not confirm", and the same revision is retried without operator
-// action (issue #2547). A genuinely bad revision still waits for a new etag.
+// action (issue #2547). A revision that ran and was rolled back still waits
+// for a new etag; one rejected before it was applied is retried on the same
+// backoff (LLP 0600).
 
 const SEED_CONFIG = {
   version: 2,
@@ -132,11 +134,11 @@ test('a probation that expires while a sink failed is retried after the backoff 
   // Back on the seed: inside the backoff the same etag is held back.
   const back = boot({ stateRoot, clock, clientVersion: version })
   assert.equal((await back.control.evaluateAtBoot()).action, 'none')
-  clock.at = T0 + HOUR + UNCONFIRMED_RETRY_BACKOFF_MS - 1
+  clock.at = T0 + HOUR + RETRY_BACKOFF_MS - 1
   assert.deepEqual(await back.control.stage(REMOTE_CONFIG, 'etag-1'), { ok: true, action: 'skipped_bad_etag' })
 
   // Once the backoff elapses the same etag applies again, unprompted.
-  clock.at = T0 + HOUR + UNCONFIRMED_RETRY_BACKOFF_MS
+  clock.at = T0 + HOUR + RETRY_BACKOFF_MS
   assert.deepEqual(await back.control.stage(REMOTE_CONFIG, 'etag-1'), { ok: true, action: 'applied' })
   const retried = await state(stateRoot)
   assert.equal(retried.badEtag, null)
@@ -213,15 +215,59 @@ test('a genuinely bad revision is still skipped as bad_etag', async (t) => {
   assert.deepEqual((await state(stateRoot)).badEtag, plain.badEtag)
 
   // Neither the backoff nor an upgrade lets the same etag back in.
-  clock.at = T0 + HOUR + 2 * UNCONFIRMED_RETRY_BACKOFF_MS
+  clock.at = T0 + HOUR + 2 * RETRY_BACKOFF_MS
   const later = boot({ stateRoot, clock, clientVersion: '1.41.0' })
   assert.deepEqual(await later.control.stage(REMOTE_CONFIG, 'etag-1'), { ok: true, action: 'skipped_bad_etag' })
 
-  // A revision that fails validation stays skipped the same way.
-  const invalid = boot({ stateRoot, clock, clientVersion: '1.41.0', deps: makeDeps({ validateOk: false }) })
-  assert.equal((await invalid.control.stage(REMOTE_CONFIG, 'etag-2')).ok, false)
-  assert.equal((await state(stateRoot)).badEtag?.reason, 'validation_failed')
-  clock.at += 2 * UNCONFIRMED_RETRY_BACKOFF_MS
-  const upgradedAgain = boot({ stateRoot, clock, clientVersion: '1.42.0' })
-  assert.deepEqual(await upgradedAgain.control.stage(REMOTE_CONFIG, 'etag-2'), { ok: true, action: 'skipped_bad_etag' })
+})
+
+// @ref LLP 0600#retry [tests]: a revision rejected before it was applied is retried once the backoff elapses, with no new state
+test('a revision that failed validation is retried after the backoff, and applies once the client accepts it', async (t) => {
+  const stateRoot = await makeFixture(t)
+  const clock = { at: T0 }
+
+  const old = boot({ stateRoot, clock, clientVersion: '1.41.0', deps: makeDeps({ validateOk: false }) })
+  assert.equal((await old.control.stage(REMOTE_CONFIG, 'etag-2')).ok, false)
+  assert.deepEqual((await state(stateRoot)).badEtag, {
+    etag: 'etag-2',
+    reason: 'validation_failed',
+    recorded_at: new Date(T0).toISOString(),
+  })
+
+  // Inside the backoff the same etag is skipped, even by a newer client:
+  // nothing records which client rejected it.
+  clock.at = T0 + RETRY_BACKOFF_MS - 1
+  const early = boot({ stateRoot, clock, clientVersion: '1.42.0' })
+  assert.deepEqual(await early.control.stage(REMOTE_CONFIG, 'etag-2'), { ok: true, action: 'skipped_bad_etag' })
+
+  // Still bad after the backoff: tried once more, and held back again from
+  // that attempt.
+  clock.at = T0 + RETRY_BACKOFF_MS
+  const stillOld = boot({ stateRoot, clock, clientVersion: '1.41.0', deps: makeDeps({ validateOk: false }) })
+  assert.equal((await stillOld.control.stage(REMOTE_CONFIG, 'etag-2')).ok, false)
+  assert.equal((await state(stateRoot)).badEtag?.recorded_at, new Date(T0 + RETRY_BACKOFF_MS).toISOString())
+  assert.deepEqual(await stillOld.control.stage(REMOTE_CONFIG, 'etag-2'), { ok: true, action: 'skipped_bad_etag' })
+
+  // A client that accepts the document applies it on the next retry.
+  clock.at = T0 + 2 * RETRY_BACKOFF_MS
+  const updated = boot({ stateRoot, clock, clientVersion: '1.42.0' })
+  assert.deepEqual(await updated.control.stage(REMOTE_CONFIG, 'etag-2'), { ok: true, action: 'applied' })
+  assert.equal((await state(stateRoot)).badEtag, null)
+})
+
+// @ref LLP 0600#unknown-keys [tests]: a document carrying a key this client does not know is applied, and stored whole
+test('a revision with an unknown top-level key applies and keeps the key on disk', async (t) => {
+  const stateRoot = await makeFixture(t)
+  const clock = { at: T0 }
+  const { control } = boot({ stateRoot, clock, clientVersion: '1.41.0' })
+  const newer = { ...REMOTE_CONFIG, some_future_key: ['x'] }
+  assert.deepEqual(await control.stage(newer, 'etag-new'), { ok: true, action: 'applied' })
+
+  const status = await state(stateRoot)
+  assert.equal(status.badEtag, null)
+  // The stored document is the served one, so a later client reads the key
+  // it now understands without another pull.
+  const files = await fsp.readdir(path.join(stateRoot, 'config-control'))
+  const stored = await Promise.all(files.filter((f) => f.endsWith('.json')).map((f) => fsp.readFile(path.join(stateRoot, 'config-control', f), 'utf8')))
+  assert.ok(stored.some((text) => text.includes('"some_future_key"')))
 })

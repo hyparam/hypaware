@@ -34,6 +34,11 @@ export interface LoadConfigSuccess {
   ok: true
   config: HypAwareV2Config
   configPath: string
+  /**
+   * Top-level keys in the file that this version does not know and
+   * ignored (LLP 0600). Absent when there are none.
+   */
+  unknownKeys?: string[]
 }
 
 export interface LoadConfigFailure {

@@ -238,7 +238,7 @@ test('a shape-invalid document is rejected before any install runs', async () =>
   assert.equal(status.badEtag?.reason, 'validation_failed')
 })
 
-test('a remembered bad etag backs off re-apply until the etag changes', async () => {
+test('a remembered bad etag backs off re-apply until the etag changes or the backoff elapses', async () => {
   const { stateRoot } = await makeFixture()
   const { control } = makeControl({ stateRoot })
   const deps = makeDeps({ validateOk: false })
