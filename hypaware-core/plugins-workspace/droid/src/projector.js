@@ -44,12 +44,54 @@ export function projectDroidEntries(session, entries, positions) {
       message_index: position, message_created_at: new Date(at).toISOString(),
       model: stringValue(msg.modelId), provider: stringValue(msg.apiProvider),
       // The record's `tokens` is a context estimate, not billed token usage.
-      // Session settings totals include multiple turns and sometimes children.
     })
   }
   if (!messages.length) return undefined
   return { provider: 'unknown', session_id: String(session.id), conversation_id: String(session.id),
-    conversation_source: 'droid', client_name: 'droid', cwd: String(session.cwd), entrypoint: 'unknown', messages }
+    conversation_source: 'droid', client_name: 'droid', cwd: String(session.cwd), entrypoint: 'unknown',
+    parent_thread_id: stringValue(session.callingSessionId), messages }
+}
+
+/** @param {Record<string, any>} session */
+export function droidUsageScope(session) {
+  return { client_name: 'droid', session_id: String(session.id), message_id: `droid-usage:${droidMessageId(session, 'usage')}` }
+}
+
+/**
+ * @ref LLP 0598#accounting: own-session totals, never child-inclusive or per-message estimates
+ * @param {Record<string, any>} session
+ * @param {unknown} settings
+ * @param {string} startedAt
+ * @param {string} observedAt
+ * @returns {AiGatewayProjectedExchange | undefined}
+ */
+export function projectDroidUsage(session, settings, startedAt, observedAt) {
+  if (!isPlainObject(settings) || !isPlainObject(settings.tokenUsage)) return undefined
+  const native = settings.tokenUsage
+  /** @type {JsonObject} */
+  const usage = {}
+  for (const [from, to] of [['inputTokens', 'input_tokens'], ['outputTokens', 'output_tokens'],
+    ['cacheCreationTokens', 'cache_write_tokens'], ['cacheReadTokens', 'cache_read_tokens'], ['thinkingTokens', 'reasoning_tokens']]) {
+    if (native[from] === undefined || native[from] === null) continue
+    if (typeof native[from] !== 'number' || !Number.isSafeInteger(native[from]) || native[from] < 0) throw new Error('invalid_usage_counter')
+    usage[to] = native[from]
+  }
+  if (!Object.keys(usage).length) return undefined
+  /** @type {JsonObject} */
+  const droid = { usage_observed_at: observedAt }
+  if (typeof native.factoryCredits === 'number' && Number.isSafeInteger(native.factoryCredits) && native.factoryCredits >= 0) droid.factory_credits = native.factoryCredits
+  const messageId = droidUsageScope(session).message_id
+  // @ref LLP 0598#remote: each revision needs its own part_id, or central ingest's part_id dedup keeps only the first snapshot.
+  const revision = createHash('sha256').update(JSON.stringify([usage, droid])).digest('hex').slice(0, 16)
+  return {
+    provider: 'unknown', client_name: 'droid', conversation_source: 'droid',
+    session_id: String(session.id), conversation_id: String(session.id), cwd: String(session.cwd),
+    conversation_started_at: startedAt, parent_thread_id: stringValue(session.callingSessionId),
+    messages: [{ role: 'system', provider_subtype: 'session_usage',
+      message_id: messageId, message_created_at: startedAt,
+      message_index: 0, previous_message_id: [], content: [{ type: 'status', status: 'session_usage', part_id: `${messageId}#${revision}` }],
+      attributes: { usage, droid } }],
+  }
 }
 
 /** @param {unknown} value @returns {JsonObject[]} */

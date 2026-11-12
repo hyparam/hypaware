@@ -1,6 +1,23 @@
 // @ts-check
 
 import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { stateRootFromEnv } from '../runtime/paths.js'
+
+/**
+ * Droid accepts only event names in hooks.json. Keep its existing undo
+ * record in core-owned state, scoped to the actual Factory home.
+ * @ref LLP 0551#attachment: ownership survives plugin unload without entering Droid's event map
+ * @param {string} clientName
+ * @param {string} settingsPath
+ * @param {NodeJS.ProcessEnv | undefined} env
+ * @param {string} homeDir
+ */
+export function clientHookMarkerPath(clientName, settingsPath, env, homeDir) {
+  if (clientName !== 'droid') return undefined
+  const key = createHash('sha256').update(path.resolve(settingsPath)).digest('hex')
+  return path.join(stateRootFromEnv(env, homeDir), 'client-hooks', `droid-${key}.json`)
+}
 
 /**
  * A `settings_file` that violates the home-relative contract.

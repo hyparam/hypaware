@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import { constants, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { droidSessionHeader, projectDroidEntries } from './projector.js'
+import { droidSessionHeader, droidUsageScope, projectDroidEntries, projectDroidUsage } from './projector.js'
 
 /** @import { DroidCursor } from '../../../../hypaware-core/plugins-workspace/droid/src/types.js' */
 /** @import { FileHandle } from 'node:fs/promises' */
@@ -13,6 +13,19 @@ import { droidSessionHeader, projectDroidEntries } from './projector.js'
 export const MAX_FILE_BYTES = 64 * 1024 * 1024
 export const MAX_LINE_BYTES = 1024 * 1024
 export const MAX_LIVE_BYTES = 8 * 1024 * 1024
+export const MAX_SETTINGS_BYTES = 1024 * 1024
+
+/** @param {string} file */
+export async function droidSettingsStat(file) {
+  try {
+    const stat = await fs.lstat(file.replace(/\.jsonl$/, '.settings.json'))
+    if (!stat.isFile() || stat.size > MAX_SETTINGS_BYTES) throw new Error('settings_budget_or_symlink')
+    return stat
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return undefined
+    throw error
+  }
+}
 
 /** @param {NodeJS.ProcessEnv} env */
 export function droidSessionsRoot(env) {
@@ -61,7 +74,8 @@ export function fingerprintSettled(stat) {
  * @param {string} file
  * @param {{ root: string, cursor?: DroidCursor, maxBytes?: number, sessionId?: string,
  *   allowed: (session: Record<string, any>) => boolean, signal?: AbortSignal,
- *   window?: { sinceMs?: number, untilMs?: number } }} opts
+ *   window?: { sinceMs?: number, untilMs?: number },
+ *   claimUsage?: (where: Record<string, string>) => (() => void) }} opts
  * @ref LLP 0551#bounds: bounded offset reads; rewrites invalidate the live cursor
  */
 export async function* readDroidTranscript(file, opts) {
@@ -87,8 +101,9 @@ export async function* readDroidTranscript(file, opts) {
     const currentFingerprint = fingerprint(stat)
     let offset = newline + 1
     let sequence = -1
+    let firstMessageAt
     const cursor = opts.cursor
-    if (cursor && cursor.inode === inode && cursor.header === header && cursor.offset <= stat.size &&
+    if (cursor?.firstMessageAt && cursor.inode === inode && cursor.header === header && cursor.offset <= stat.size &&
         // A same-size edit is not an append, and a fingerprint can only rule
         // one out once the stat has aged past the timestamp tick (see
         // `fingerprintSettled`). Replaying is harmless by native ID.
@@ -96,6 +111,7 @@ export async function* readDroidTranscript(file, opts) {
         cursor.boundary === await boundary(fd, cursor.offset)) {
       offset = cursor.offset
       sequence = cursor.sequence
+      firstMessageAt = cursor.firstMessageAt
     }
     const end = Math.min(stat.size, offset + (opts.maxBytes ?? MAX_FILE_BYTES))
     let batch = []
@@ -119,6 +135,7 @@ export async function* readDroidTranscript(file, opts) {
         if (!Number.isInteger(sequence) || sequence < 0 || sequence > 2147483647) throw new Error('invalid_sequence')
         const at = Date.parse(entry.timestamp)
         if (!Number.isFinite(at)) throw new Error('invalid_timestamp')
+        firstMessageAt ??= new Date(at).toISOString()
         const window = opts.window
         if (!(window?.sinceMs !== undefined && at < window.sinceMs) && !(window?.untilMs !== undefined && at > window.untilMs)) {
           if (batch.length && (batch.length >= 64 || batchBytes + line.bytes > MAX_LINE_BYTES)) {
@@ -148,7 +165,47 @@ export async function* readDroidTranscript(file, opts) {
     if (opts.signal?.aborted) return
     // Never acknowledge a file that changed while we were reading it.
     if (fingerprint(await fd.stat()) !== currentFingerprint) return
-    yield { cursor: { offset, sequence, header, inode, fingerprint: currentFingerprint, boundary: await boundary(fd, offset) }, complete: offset === stat.size }
+    let usageFingerprint
+    if (offset === stat.size && firstMessageAt &&
+      !(opts.window?.sinceMs !== undefined && Date.parse(firstMessageAt) < opts.window.sinceMs) &&
+      !(opts.window?.untilMs !== undefined && Date.parse(firstMessageAt) > opts.window.untilMs)) {
+      // A sidecar fault costs only the usage row: the transcript cursor still
+      // advances, and usage retries on the next read.
+      try {
+        const before = await droidSettingsStat(realFile)
+        const unchanged = before && cursor?.header === header && cursor.inode === inode &&
+          cursor.firstMessageAt === firstMessageAt && cursor.usageFingerprint === fingerprint(before) && fingerprintSettled(before)
+        if (unchanged) usageFingerprint = cursor.usageFingerprint
+        else if (before) {
+          const where = droidUsageScope(session)
+          const release = opts.claimUsage?.(where) ?? (() => {})
+          try {
+            // Re-read under the scope guard. Keep no settings payload in cursors.
+            const settingsStat = await droidSettingsStat(realFile)
+            if (settingsStat) {
+              const settingsFd = await fs.open(realFile.replace(/\.jsonl$/, '.settings.json'), constants.O_RDONLY | constants.O_NOFOLLOW)
+              try {
+                const buffer = Buffer.alloc(Math.min(settingsStat.size + 1, MAX_SETTINGS_BYTES + 1))
+                const { bytesRead } = await settingsFd.read(buffer, 0, buffer.length, 0)
+                if (bytesRead > MAX_SETTINGS_BYTES || fingerprint(await settingsFd.stat()) !== fingerprint(settingsStat)) throw new Error('settings_changed_or_over_budget')
+                const settings = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'))
+                const usage = projectDroidUsage(session, settings, firstMessageAt, settingsStat.mtime.toISOString())
+                if (!opts.allowed(session)) {
+                  yield { dropped: true }
+                  return
+                }
+                if (usage) yield { projection: usage, reconcile: { where, key: 'part_id' } }
+                usageFingerprint = fingerprint(settingsStat)
+              } finally { await settingsFd.close() }
+            }
+          } finally { release() }
+        }
+      } catch {
+        usageFingerprint = undefined
+        yield { usageUnavailable: true }
+      }
+    }
+    yield { cursor: { offset, sequence, header, inode, fingerprint: currentFingerprint, firstMessageAt, usageFingerprint, boundary: await boundary(fd, offset) }, complete: offset === stat.size }
   } finally { await fd.close() }
 }
 

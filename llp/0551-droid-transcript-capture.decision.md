@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-10-20
 **Related:** LLP 0045, LLP 0359, LLP 0403, LLP 0416
+**Extended-by:** LLP 0598 (session token snapshots and native parent links)
 
 ## Capture {#capture}
 
@@ -95,16 +96,25 @@ no raw callback spool is introduced.
 ## Attachment {#attachment}
 
 Install command matcher groups into ~/.factory/hooks.json, honoring
-FACTORY_HOME_OVERRIDE. The existing _hypaware managed.hook_entries undo record
-owns exact event/matcher/command entries. Core understands standalone root
-maps as well as nested hooks objects, so detach works after unloading Droid.
+FACTORY_HOME_OVERRIDE. The existing managed.hook_entries undo record owns
+exact event/matcher/command entries, but lives outside Factory's event map:
+`<HYP_HOME>/hypaware/client-hooks/droid-<sha256 of resolved hooks path>.json`.
+Core resolves the same path for status and detach, even after unloading Droid.
+Attach migrates the old inline `_hypaware` record; status marks it stale and
+detach still accepts it. Before replacing hooks, attach persists the union of
+old and proposed ownership, then narrows it after the write succeeds. This
+keeps interrupted updates retryable and detachable. Detach deletes the external
+record only after successfully removing the owned hooks. Separate Factory
+homes get separate records. Existing per-client action locks serialize changes.
 Preserve user groups. Where adding an event shadows settings.json's fallback,
 copy those commands and record ownership of the copies. Detach removes copies
 and the capture hook, exposing settings.json again. Refuse an unmigrated
 legacy hooks/hooks.json when no modern hooks.json exists, since creating an
 empty modern file on detach would shadow the legacy file. Refuse malformed
-or non-JSON configurations rather than rewriting them blindly. Unknown
-_hypaware keys are stripped by the native hook schema, not executed as hooks.
+or non-JSON configurations rather than rewriting them blindly. Factory rejects
+`_hypaware` as an unsupported event; the earlier assumption that its native
+schema stripped unknown keys was incorrect. Only event definitions belong in
+hooks.json.
 
 ## Verification {#verification}
 

@@ -7,7 +7,7 @@ import process from 'node:process'
 
 import { isCaptureSpoolDir, sweepCaptureSpool } from '../capture_spool.js'
 import { captureSpoolRoot } from '../runtime/paths.js'
-import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
+import { clientHookMarkerPath, resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -99,9 +99,11 @@ export class ClientDetachError extends Error {
  * `attachProbe` and the settings-file marker. No-op (`{ changed: false }`) when
  * the descriptor has no probe, the file is absent, or it carries no marker.
  *
- * Every format's undo record lives in the settings file itself: a marker key
+ * Most formats' undo records live in the settings file itself: a marker key
  * (`json`), a managed block (`toml`), or the self-identifying signature on the
- * entries attach wrote (`json_path`, LLP 0210). So this routine needs nothing
+ * entries attach wrote (`json_path`, LLP 0210). Droid's JSON marker lives in
+ * core-owned state because its event map rejects metadata (LLP 0551).
+ * This routine needs nothing
  * from a running daemon, and works identically whether the gateway is alive,
  * stopped, or already uninstalled.
  *
@@ -132,6 +134,7 @@ export async function detachClientFromDisk({
     return await detachJsonMarker({
       settingsPath,
       markerKey: probe.marker_key,
+      markerPath: clientHookMarkerPath(descriptor.name, settingsPath, env, homeDir),
       fs,
       env,
       homeDir,
@@ -201,6 +204,7 @@ async function detachManagedFile({ settingsPath, markerText, fs }) {
  * @param {{
  *   settingsPath: string,
  *   markerKey: string,
+ *   markerPath?: string,
  *   fs: typeof fsp,
  *   env?: NodeJS.ProcessEnv,
  *   homeDir?: string,
@@ -209,12 +213,16 @@ async function detachManagedFile({ settingsPath, markerText, fs }) {
  * }} args
  * @returns {Promise<DetachFromDiskResult>}
  */
-async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, platform, runCommand }) {
+async function detachJsonMarker({ settingsPath, markerKey, markerPath, fs, env, homeDir, platform, runCommand }) {
   const read = await readJson(settingsPath, fs)
   if (!read.existed) return { changed: false, settingsPath }
 
   const value = read.value
-  const marker = value[markerKey]
+  const external = markerPath ? await readJson(markerPath, fs) : undefined
+  const marker = external?.existed ? external.value : value[markerKey]
+  if (external?.existed && (!isPlainObject(marker) || !isPlainObject(marker.managed) || !Array.isArray(marker.managed.hook_entries))) {
+    throw new ClientDetachError('Invalid external hook ownership record; leaving hooks unchanged', { code: 'MALFORMED_MARKER' })
+  }
   if (!isPlainObject(marker)) return { changed: false, settingsPath }
 
   // Pre-upgrade markers have the legacy shape {attached_at,version,port,
@@ -245,6 +253,10 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
   // markers use `hook_entries`. Keep reading the original field so an upgrade
   // can still detach settings written by every earlier HypAware release.
   const hookEntries = collectManagedHookEntries(managed)
+  const legacy = value[markerKey]
+  if (external?.existed && isPlainObject(legacy) && isPlainObject(legacy.managed)) {
+    hookEntries.push(...collectManagedHookEntries(legacy.managed))
+  }
   // Presence, not type: the restore half of the attach-side backup. Attach only
   // ever writes this field when there was a prior value to record, so the field
   // being there IS the "restore me" fact and its JSON type says nothing. A type
@@ -350,6 +362,7 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
   )
 
   await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
+  if (markerPath && external?.existed) await fs.unlink(markerPath)
 
   // A proxy-mode attach set `NODE_USE_SYSTEM_CA=1` in the launchd user
   // environment; release it here, in the same disk-driven undo, because the

@@ -15,11 +15,24 @@ and each session's working directory. Tool results can include file contents
 and command output. Both live capture and history imports write to
 `ai_gateway_messages` with the client name `droid`.
 
-Billed token usage and cost are not available from this integration. Droid's
-context estimates and cumulative session totals are not treated as per-message
-usage. Attachments retain placeholders rather than image bytes or referenced
-file contents; HypAware does not read Factory credentials or session settings
-sidecars.
+Token counts come from each session's adjacent `.settings.json` `tokenUsage`.
+They are lifetime totals for that session, excluding its children. Child sessions
+are counted separately and linked by `parent_thread_id` from Droid's native
+`callingSessionId`. One replaceable system/status row per session carries the
+counts in the token columns (`provider_subtype = 'session_usage'`). Ordinary
+message rows carry no token counts. Factory credits are retained as
+`attributes.droid.factory_credits`, not dollars; `total_tokens` is not fabricated.
+
+Accounting is dated to the first message, so date-grouped figures mean lifetime
+usage of sessions starting that day, not tokens spent on that day. Model/provider
+are unattributed on totals because a session may switch models. On the server,
+exported revisions may coexist: choose the latest
+`attributes.droid.usage_observed_at` per gateway and message ID before summing.
+The usage rollup performs this selection. A missing sidecar means unknown usage.
+
+Attachments retain placeholders rather than image bytes or referenced file
+contents. HypAware reads only allowlisted counters from session sidecars, never
+retaining their other settings, prompts, or credentials.
 
 ## Requirements
 

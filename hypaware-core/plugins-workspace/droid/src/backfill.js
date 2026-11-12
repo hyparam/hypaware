@@ -5,7 +5,7 @@ import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/ind
 import { refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import { AI_GATEWAY_MESSAGES_DATASET, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
-import { droidSessionsRoot, droidSessionFiles, fingerprint, fingerprintSettled, MAX_FILE_BYTES, present, readDroidTranscript } from './transcript.js'
+import { droidSessionsRoot, droidSessionFiles, droidSettingsStat, fingerprint, fingerprintSettled, MAX_FILE_BYTES, present, readDroidTranscript } from './transcript.js'
 
 /** @import { BackfillContribution, JsonObject } from '../../../../hypaware-plugin-kernel-types.js' */
 
@@ -44,6 +44,7 @@ export function createDroidBackfillProvider(opts = {}) {
       let unchanged = 0
       let failed = 0
       let dropped = 0
+      let usageUnavailable = 0
       let deferred = false
       for (let i = 0; i < files.length; i++) {
         if (ctx.signal?.aborted) return
@@ -51,30 +52,37 @@ export function createDroidBackfillProvider(opts = {}) {
         nextFile = file
         try {
           const stat = await fs.lstat(file)
+          // An unreadable sidecar must not cost the transcript; usage retries.
+          const settingsStat = await droidSettingsStat(file).catch(() => undefined)
+          const combined = fingerprint(stat) + ':' + (settingsStat ? fingerprint(settingsStat) : 'missing')
           if (!stat.isFile() || stat.size > MAX_FILE_BYTES) throw new Error('file_budget')
           // Do not use mtime for the time window: Droid can preserve file
           // times while rewriting metadata. Filter native message timestamps.
           // And skip only on a settled fingerprint: inside the timestamp
           // tick a same-size rewrite leaves the stat unchanged, and this
           // sweep is the recovery lane that is supposed to catch it.
-          if (ctx.sweep && fingerprints.get(file) === fingerprint(stat) && fingerprintSettled(stat)) {
+          if (ctx.sweep && fingerprints.get(file) === combined && fingerprintSettled(stat) && (!settingsStat || fingerprintSettled(settingsStat))) {
             unchanged++
             continue
           }
-          if (bytes + stat.size > 256 * 1024 * 1024) {
+          if (bytes + stat.size + (settingsStat?.size ?? 0) > 256 * 1024 * 1024) {
             deferred = true
             break
           }
-          bytes += stat.size
+          bytes += stat.size + (settingsStat?.size ?? 0)
           read++
           const failures = ctx.itemsFailed
+          let usageMissing = false
           for await (const item of readDroidTranscript(file, { root, window, signal: ctx.signal,
+            claimUsage: where => ctx.dryRun ? () => {} : ctx.storage?.claimReconcileScope?.(AI_GATEWAY_MESSAGES_DATASET, where) ?? (() => {}),
             allowed: session => !sessionIgnoreLoadError(opts.ignoredSessions) && !opts.ignoredSessions?.has(String(session.id)) && resolver.resolve(String(session.cwd)).class !== 'ignore',
           })) {
             if (item.dropped) dropped++
-            if (item.projection) yield projectedExchangeItem(item.projection, { client_name: 'droid', source_path: file, native_id: item.projection.session_id })
-            if (item.complete && item.cursor && !ctx.dryRun && ctx.itemsFailed === failures) fingerprints.set(file, item.cursor.fingerprint)
+            if (item.usageUnavailable) usageMissing = true
+            if (item.projection) yield { ...projectedExchangeItem(item.projection, { client_name: 'droid', source_path: file, native_id: item.projection.session_id }), ...(item.reconcile ? { reconcile: item.reconcile } : {}) }
+            if (item.complete && item.cursor && !ctx.dryRun && !usageMissing && ctx.itemsFailed === failures && item.cursor.fingerprint === fingerprint(stat)) fingerprints.set(file, combined)
           }
+          if (usageMissing) usageUnavailable++
         } catch {
           failed++
           ctx.log.warn('droid.backfill.file_failed', { component: 'plugin.droid', operation: 'backfill.read', status: 'failed', error_kind: 'session_unavailable_or_over_budget' })
@@ -82,7 +90,7 @@ export function createDroidBackfillProvider(opts = {}) {
         }
       }
       if (deferred) yield { type: 'event', event: 'scan_deferred', attributes: { client_name: 'droid', reason: 'scan_byte_budget' } }
-      ctx.log.info('droid.backfill.scan', { component: 'plugin.droid', operation: 'backfill.scan', status: failed || deferred ? 'partial' : 'ok', files_read: read, files_unchanged: unchanged, files_failed: failed, policy_drops: dropped, scan_bytes_reserved: bytes, scan_deferred: deferred, fingerprint_count: fingerprints.size })
+      ctx.log.info('droid.backfill.scan', { component: 'plugin.droid', operation: 'backfill.scan', status: failed || deferred ? 'partial' : 'ok', files_read: read, files_unchanged: unchanged, files_failed: failed, policy_drops: dropped, usage_unavailable: usageUnavailable, scan_bytes_reserved: bytes, scan_deferred: deferred, fingerprint_count: fingerprints.size })
     },
   }
 }

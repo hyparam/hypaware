@@ -6,7 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripManagedHooks } from '../../../../src/core/config/client_detach_disk.js'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
-import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_settings_path.js'
+import { clientHookMarkerPath, resolveClientSettingsPath } from '../../../../src/core/daemon/client_settings_path.js'
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 import { isPlainObject } from '../../../../src/core/util/json_util.js'
 
@@ -30,6 +30,8 @@ async function read(file) {
  */
 export async function attachDroidHooks(opts) {
   const settingsPath = droidHooksPath(opts)
+  const markerPath = /** @type {string} */ (clientHookMarkerPath('droid', settingsPath, opts.env, opts.homeDir ?? opts.env?.HOME ?? os.homedir()))
+  const markerRaw = await read(markerPath)
   let mtime
   try { mtime = (await fs.stat(settingsPath)).mtimeMs } catch (error) {
     if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
@@ -40,11 +42,23 @@ export async function attachDroidHooks(opts) {
   }
   const value = raw === undefined ? {} : JSON.parse(raw)
   if (!isPlainObject(value) || value.hooks !== undefined) throw markActionRefused(new Error('Factory hooks.json must map events directly to matcher arrays'))
-  const old = value._hypaware
+  const old = markerRaw === undefined ? value._hypaware : JSON.parse(markerRaw)
+  const priorEntries = []
   if (old !== undefined && (!isPlainObject(old) || !isPlainObject(old.managed) || !Array.isArray(old.managed.hook_entries))) {
     throw markActionRefused(new Error('Factory _hypaware marker is not a readable managed hook record'))
   }
-  if (isPlainObject(old) && isPlainObject(old.managed)) stripManagedHooks(value, /** @type {unknown[]} */ (old.managed.hook_entries))
+  if (isPlainObject(old) && isPlainObject(old.managed)) {
+    priorEntries.push(.../** @type {unknown[]} */ (old.managed.hook_entries))
+    stripManagedHooks(value, priorEntries)
+  }
+  if (value._hypaware !== undefined && value._hypaware !== old) {
+    const legacy = value._hypaware
+    if (!isPlainObject(legacy) || !isPlainObject(legacy.managed) || !Array.isArray(legacy.managed.hook_entries)) {
+      throw markActionRefused(new Error('Factory _hypaware marker is not a readable managed hook record'))
+    }
+    stripManagedHooks(value, legacy.managed.hook_entries)
+    priorEntries.push(...legacy.managed.hook_entries)
+  }
   delete value._hypaware
   const fallbackRaw = await read(path.join(path.dirname(settingsPath), 'settings.json'))
   const fallback = fallbackRaw === undefined ? {} : JSON.parse(fallbackRaw)
@@ -70,12 +84,21 @@ export async function attachDroidHooks(opts) {
     value[event] = [...groups, { matcher: '', hooks: [{ type: 'command', command, timeout: 3 }] }]
     entries.push({ event, matcher: '', command })
   }
-  value._hypaware = { version: opts.version,
+  const marker = { version: opts.version,
     attached_at: isPlainObject(old) && typeof old.attached_at === 'string' ? old.attached_at : new Date().toISOString(),
     managed: { hook_entries: entries } }
   const body = JSON.stringify(value, null, 2) + '\n'
-  const changed = raw !== body
-  if (changed && !opts.dryRun) await atomicWriteFile(settingsPath, body, { mode: 0o600, dirMode: 0o700, fsync: true, expectedMtimeMs: mtime })
+  const markerBody = JSON.stringify(marker, null, 2) + '\n'
+  const changed = raw !== body || markerRaw !== markerBody
+  if (changed && !opts.dryRun) {
+    // Save both old and proposed ownership before changing hooks. A failed
+    // settings write leaves either configuration detachable and retryable.
+    const pendingEntries = [...new Map([...priorEntries, ...entries].map(entry => [JSON.stringify(entry), entry])).values()]
+    const pending = { ...marker, managed: { hook_entries: pendingEntries } }
+    await atomicWriteFile(markerPath, JSON.stringify(pending, null, 2) + '\n', { mode: 0o600, dirMode: 0o700, fsync: true })
+    if (raw !== body) await atomicWriteFile(settingsPath, body, { mode: 0o600, dirMode: 0o700, fsync: true, expectedMtimeMs: mtime })
+    await atomicWriteFile(markerPath, markerBody, { mode: 0o600, dirMode: 0o700, fsync: true })
+  }
   return { settingsPath, changed }
 }
 

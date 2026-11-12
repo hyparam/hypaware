@@ -5,4 +5,6 @@ export interface DroidCursor {
   boundary: string
   fingerprint: string
   inode: string
+  firstMessageAt?: string
+  usageFingerprint?: string
 }
