@@ -558,8 +558,10 @@ test('a top-k hint cannot prune visible rows behind withheld ones that sort firs
     assert.deepEqual(await ids('SELECT id FROM t ORDER BY id LIMIT 2'), [5, 6])
     assert.deepEqual(await ids('SELECT id FROM t ORDER BY id LIMIT 2 OFFSET 3'), [8, 9])
     assert.deepEqual(await ids('SELECT id, msg FROM t ORDER BY id LIMIT 6'), [5, 6, 7, 8, 9, 10])
-    // A caller that sees everything skips the wrapper and keeps the hint.
+    // A local-only caller is still wrapped (ignore outranks it) but withholds nothing here.
     assert.deepEqual((await run({ source, sql: 'SELECT id FROM t ORDER BY id LIMIT 2', callerCwd: '/w/lo' })).rows.map((row) => Number(row.id)), [1, 2])
+    // An include-local-only read skips the wrapper and keeps the hint.
+    assert.deepEqual((await run({ source, sql: 'SELECT id FROM t ORDER BY id LIMIT 2', includeLocalOnly: true })).rows.map((row) => Number(row.id)), [1, 2])
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
