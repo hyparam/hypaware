@@ -22,7 +22,7 @@ import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, CommandGroupRegistration, CommandRegistration, CommandRegistry, ConfigControlFacade, ExportRedactionConfig, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SinkRegistry, SkillContribution, SkillRegistry, SourceContribution, SourceRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
+ * @import { ExtendedQueryStorageService, RepoScopeResolver, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  */
@@ -52,6 +52,7 @@ import { compareStrings } from '../util/compare_strings.js'
  *   cacheRoot?: string,
  *   configControl?: ConfigControlFacade,
  *   sourceWithholdResolver?: SourceWithholdResolver,
+ *   repoScopeResolver?: RepoScopeResolver,
  *   redaction?: ExportRedactionConfig,
  *   recordRedaction?: boolean,
  * }} [opts]
@@ -79,6 +80,7 @@ export function createKernelRuntime(opts = {}) {
     // `undefined` on a machine with no central layer: every current
     // caller of `createKernelRuntime` is untouched until it opts in.
     ...(opts.sourceWithholdResolver ? { sourceWithholdResolver: opts.sourceWithholdResolver } : {}),
+    ...(opts.repoScopeResolver ? { repoScopeResolver: opts.repoScopeResolver } : {}),
   })
   const commands = opts.commandRegistry ?? createCommandRegistry()
   // The verb registry projects each verb into a CLI command on the shared

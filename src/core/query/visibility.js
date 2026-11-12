@@ -5,6 +5,7 @@ import { readBatchColumn, selectBatch, selectedRowCount, valueAt } from 'squirre
 
 import { CLASS_RANK, createUsagePolicyResolver } from '../usage-policy/matcher.js'
 import { localOnlyListPath } from '../usage-policy/local_only.js'
+import { withRepoScope } from '../usage-policy/repo_scope.js'
 
 /**
  * @import { AsyncRow, PrepareScan, RelationSchema } from 'squirreling'
@@ -25,16 +26,22 @@ const MAX_CLASS_RANK = Math.max(...Object.values(CLASS_RANK))
  * handle carries no `cacheRoot` (bare test doubles), the resolver degrades to
  * the dotfile walk alone rather than failing construction.
  *
- * @param {Pick<ExtendedQueryStorageService, 'cacheRoot'>} storage
+ * Under a repository allowlist the storage handle also carries the scope
+ * resolver its export seam enforces with, and it is folded in here, so rows
+ * that seam keeps on the machine are `local-only` to this one as well.
+ *
+ * @ref LLP 0601#query-seam [implements]: the export seam's own allowlist instance governs query visibility
+ * @param {Pick<ExtendedQueryStorageService, 'cacheRoot' | 'repoScopeResolver'>} storage
  * @returns {UsagePolicyResolver}
  */
 export function defaultQueryVisibilityResolver(storage) {
   const cacheRoot = storage?.cacheRoot
-  return createUsagePolicyResolver(
+  const resolver = createUsagePolicyResolver(
     typeof cacheRoot === 'string' && cacheRoot.length > 0
       ? { localOnlyListPath: localOnlyListPath(path.dirname(cacheRoot)) }
       : {}
   )
+  return storage?.repoScopeResolver ? withRepoScope(resolver, storage.repoScopeResolver) : resolver
 }
 
 /**
@@ -86,12 +93,19 @@ export function callerSeesEverything(callerRank) {
  *
  * @ref LLP 0105 [implements]: caller class >= row class on the lattice, the shared predicate form
  * @ref LLP 0302#visibility-predicate [implements]: the lattice is shared as a predicate because the grep walk has no data source to wrap
+ * Under a repository allowlist the resolver also judges the row's recorded
+ * `git_remote` (`rowClass`), and a cwd-less row that carries one is judged
+ * by it, exactly as the export seam does.
+ *
  * @param {UsagePolicyResolver} resolver
  * @param {number} callerRank
  * @param {unknown} cwd
+ * @param {unknown} [gitRemote]
  * @returns {boolean}
  */
-export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
+export function cwdWithheldFromCaller(resolver, callerRank, cwd, gitRemote) {
+  // @ref LLP 0601#query-seam [implements]: the row's class comes from the same evidence, in the same order, as the export seam's verdict
+  if (resolver.rowClass) return CLASS_RANK[resolver.rowClass(cwd, gitRemote)] > callerRank
   if (typeof cwd !== 'string' || cwd === '') return false
   return CLASS_RANK[resolver.resolve(cwd).class] > callerRank
 }
@@ -160,20 +174,33 @@ export function withLocalOnlyVisibility(source, opts) {
   // Rows repeat a few hundred cwds across millions of rows, and resolve()
   // normalizes the path before its own lookup. Memoize the verdict per
   // distinct cwd for this wrapper, which sql.js builds once per query.
-  /** @type {Map<unknown, boolean>} */
+  // Under a repository allowlist the verdict also depends on the row's
+  // recorded remote, so the memo nests one level: a handful of remotes per
+  // cwd, and no per-row key string to allocate.
+  // @ref LLP 0601#query-seam [implements]: the recorded remote is read beside `cwd` whenever the resolver judges by it
+  const hasRemote = hasCwd && typeof resolver.rowClass === 'function' && source.columns.includes('git_remote')
+  /** @type {Map<unknown, Map<unknown, boolean>>} */
   const withheldByCwd = new Map()
   /**
    * @param {unknown} cwd
+   * @param {unknown} [remote]
    * @returns {boolean}
    */
-  function withheld(cwd) {
-    let verdict = withheldByCwd.get(cwd)
+  function withheld(cwd, remote) {
+    let byRemote = withheldByCwd.get(cwd)
+    if (byRemote === undefined) {
+      byRemote = new Map()
+      withheldByCwd.set(cwd, byRemote)
+    }
+    let verdict = byRemote.get(remote)
     if (verdict === undefined) {
-      verdict = cwdWithheldFromCaller(resolver, callerRank, cwd)
-      withheldByCwd.set(cwd, verdict)
+      verdict = cwdWithheldFromCaller(resolver, callerRank, cwd, remote)
+      byRemote.set(remote, verdict)
     }
     return verdict
   }
+  /** @param {unknown} value */
+  const present = (value) => typeof value === 'string' && value !== ''
   const declaredContent = opts.contentColumns.filter((c) => source.columns.includes(c))
 
   /** @type {ScannableDataSource} */
@@ -184,11 +211,19 @@ export function withLocalOnlyVisibility(source, opts) {
       const requested = options?.columns
       const scannedColumns = requested ?? source.columns
       const forceCwd = hasCwd && requested !== undefined && !requested.includes('cwd')
+      const forceRemote = hasRemote && requested !== undefined && !requested.includes('git_remote')
+      /** @param {AsyncRow} row */
+      const unforced = (row) => {
+        const out = forceCwd ? withoutColumn(row, 'cwd') : row
+        return forceRemote ? withoutColumn(out, 'git_remote') : out
+      }
       const toSuppress = declaredContent.filter((c) => scannedColumns.includes(c))
       const suppression = toSuppress.length > 0
       const inner = source.scan({
         ...(options ?? {}),
-        columns: forceCwd ? [...requested, 'cwd'] : requested,
+        columns: forceCwd || forceRemote
+          ? [...requested, ...(forceCwd ? ['cwd'] : []), ...(forceRemote ? ['git_remote'] : [])]
+          : requested,
         limit: undefined,
         offset: undefined,
         ...(suppression ? { where: undefined } : {}),
@@ -199,19 +234,20 @@ export function withLocalOnlyVisibility(source, opts) {
         async *rows() {
           for await (const row of inner.rows()) {
             const cwd = hasCwd ? await readCell(row, 'cwd') : undefined
-            if (typeof cwd === 'string' && cwd !== '') {
+            const remote = hasRemote ? await readCell(row, 'git_remote') : undefined
+            if (present(cwd) || present(remote)) {
               // A corrupt machine-local list makes resolve() throw
               // (LocalOnlyListUnreadableError); let it propagate so the query
               // fails loudly rather than silently resolving to "nothing
               // withheld", matching the export seam's fail-safe polarity.
-              if (withheld(cwd)) {
+              if (withheld(cwd, remote)) {
                 report.withheldRows += 1
                 continue
               }
-              yield forceCwd ? withoutColumn(row, 'cwd') : row
+              yield unforced(row)
               continue
             }
-            const passed = forceCwd ? withoutColumn(row, 'cwd') : row
+            const passed = unforced(row)
             if (suppression) {
               report.suppressedRows += 1
               yield suppressColumns(passed, toSuppress)
@@ -231,7 +267,7 @@ export function withLocalOnlyVisibility(source, opts) {
     schema.fields.every((field, index) => field.name === source.columns[index])) {
     if (hasCwd && declaredContent.length === 0) {
       guarded.schema = schema
-      guarded.prepareScan = prepareVisibleScan(source.prepareScan.bind(source), schema, { withheld, report })
+      guarded.prepareScan = prepareVisibleScan(source.prepareScan.bind(source), schema, { withheld, report, hasRemote })
     } else if (!hasCwd && declaredContent.length > 0) {
       guarded.schema = { fields: schema.fields.map(field => declaredContent.includes(field.name) ? { ...field, nullable: true } : field) }
       guarded.prepareScan = prepareSuppressedScan(source.prepareScan.bind(source), guarded.schema, declaredContent, report)
@@ -290,17 +326,22 @@ function prepareSuppressedScan(prepareScan, schema, contentColumns, report) {
  *
  * @param {PrepareScan} prepareScan
  * @param {RelationSchema} schema
- * @param {{ withheld: (cwd: unknown) => boolean, report: LocalOnlyVisibilityReport }} opts
+ * @param {{ withheld: (cwd: unknown, remote?: unknown) => boolean, report: LocalOnlyVisibilityReport, hasRemote: boolean }} opts
  * @returns {PrepareScan}
  */
-function prepareVisibleScan(prepareScan, schema, { withheld, report }) {
-  const cwdField = /** @type {NonNullable<ReturnType<typeof schema.fields.find>>} */ (schema.fields.find((field) => field.name === 'cwd'))
+function prepareVisibleScan(prepareScan, schema, { withheld, report, hasRemote }) {
+  // `cwd` always, and the recorded remote beside it when the resolver
+  // judges by it (LLP 0601 #query-seam).
+  const filterFields = ['cwd', ...(hasRemote ? ['git_remote'] : [])].map((name) =>
+    /** @type {NonNullable<ReturnType<typeof schema.fields.find>>} */ (schema.fields.find((field) => field.name === name)))
   return (request) => {
-    const columns = request.columns.map((demand) => demand.field === cwdField.id
+    const columns = request.columns.map((demand) => filterFields.some((field) => field.id === demand.field)
       ? { ...demand, mode: /** @type {const} */ ('required'), phase: 0 }
       : demand)
-    if (!columns.some((demand) => demand.field === cwdField.id)) {
-      columns.push({ field: cwdField.id, phase: 0, purpose: 'filter', mode: 'required' })
+    for (const field of filterFields) {
+      if (!columns.some((demand) => demand.field === field.id)) {
+        columns.push({ field: field.id, phase: 0, purpose: 'filter', mode: 'required' })
+      }
     }
     const inner = prepareScan({ ...request, columns, limit: undefined, offset: undefined })
     const requestedFields = request.columns.map((demand) => {
@@ -314,6 +355,7 @@ function prepareVisibleScan(prepareScan, schema, { withheld, report }) {
       return index
     }
     const cwdIndex = indexOf('cwd')
+    const remoteIndex = hasRemote ? indexOf('git_remote') : -1
     const outputIndices = requestedFields.map((field) => indexOf(field.name))
     return {
       schema: { fields: requestedFields },
@@ -323,13 +365,14 @@ function prepareVisibleScan(prepareScan, schema, { withheld, report }) {
         for await (const batch of inner.batches({ signal })) {
           signal?.throwIfAborted()
           const cwd = await readBatchColumn({ batch, columnIndex: cwdIndex, signal })
+          const remote = remoteIndex < 0 ? undefined : await readBatchColumn({ batch, columnIndex: remoteIndex, signal })
           const count = selectedRowCount(batch.selection)
           /** @type {Uint32Array | undefined} */
           let indices
           let kept = 0
           for (let i = 0; i < count; i++) {
             if (i % 4096 === 0) signal?.throwIfAborted()
-            if (withheld(valueAt(cwd, i))) {
+            if (withheld(valueAt(cwd, i), remote === undefined ? undefined : valueAt(remote, i))) {
               report.withheldRows++
               if (!indices) {
                 indices = new Uint32Array(count)

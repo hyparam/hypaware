@@ -96,6 +96,10 @@ export function mergeConfigLayers(central, local) {
   // @ref LLP 0578#org-owned [implements]: only the org turns the review hold off, so a local value never counts here
   if (central.first_sync_hold !== undefined) effective.first_sync_hold = central.first_sync_hold
 
+  // @ref LLP 0601#config [implements]: the organization's allowlist wins; a local one applies only when the organization set none
+  if (central.sync_repos !== undefined) effective.sync_repos = central.sync_repos
+  else if (local?.sync_repos !== undefined) effective.sync_repos = local.sync_repos
+
   // @ref LLP 0503#config [implements]: local custom patterns can strengthen central redaction but cannot remove its rules
   if (central.redaction !== undefined || local?.redaction !== undefined) {
     effective.redaction = { custom_patterns: [
@@ -160,6 +164,7 @@ export function resolveLayeredConfig({ central, local, validate }) {
   if (base.effective.auto_update !== undefined) current.auto_update = base.effective.auto_update
   if (base.effective.first_sync_hold !== undefined) current.first_sync_hold = base.effective.first_sync_hold
   if (base.effective.redaction !== undefined) current.redaction = base.effective.redaction
+  if (base.effective.sync_repos !== undefined) current.sync_repos = base.effective.sync_repos
 
   /** @type {ConfigLayerDrop[]} */
   const drops = [...base.drops]
@@ -231,6 +236,7 @@ function cloneShallow(cfg) {
   if (cfg.auto_update !== undefined) out.auto_update = cfg.auto_update
   if (cfg.first_sync_hold !== undefined) out.first_sync_hold = cfg.first_sync_hold
   if (cfg.redaction !== undefined) out.redaction = cfg.redaction
+  if (cfg.sync_repos !== undefined) out.sync_repos = cfg.sync_repos
   return out
 }
 

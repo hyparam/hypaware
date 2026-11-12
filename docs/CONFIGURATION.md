@@ -19,7 +19,7 @@ and `query.cache` settings. The top-level `auto_update` setting defaults to
 To disable automatic updates, set `"auto_update": false` and restart the daemon.
 Organization policy may control this setting. The top-level `first_sync_hold`
 setting is organization policy only: `false` in the organization's config turns off the
-[first-upload review](TEAM_SETUP.md#review-before-the-first-upload), and a local value has no effect. Each plugin owns its own `config` block. Use
+[first-upload review](TEAM_SETUP.md#review-before-the-first-upload), and a local value has no effect. The top-level `sync_repos` setting limits uploads to sessions recorded in the listed repositories, for example `["github.com/acme"]` for every repository of one owner or `["github.com/acme/tool"]` for a single one. Sessions anywhere else are still recorded and stay on the machine, and `hyp privacy set DIR sync` shares a folder that is not in a listed repository. The organization's list takes precedence over a local one. Each plugin owns its own `config` block. Use
 `hyp plugin info PLUGIN` to inspect an installed plugin's manifest.
 
 On an enrolled host, a separate central layer under `config-control/` is

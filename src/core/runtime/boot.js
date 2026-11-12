@@ -20,6 +20,7 @@ import { createKernelRuntime } from './activation.js'
 import { cacheRootOf, stateRootOf } from './paths.js'
 import { secureStorageRoots } from './owner_only.js'
 import { buildSourceWithholdResolver, ensureClientSyncMigration } from './source_withhold.js'
+import { createRepoScopeResolver } from '../usage-policy/repo_scope.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import {
   V1_BUNDLED_PLUGIN_ALLOWLIST,
@@ -197,6 +198,8 @@ export async function bootKernel(opts = {}) {
         ...(opts.storage ? { storage: opts.storage } : {}),
         ...(opts.configControl ? { configControl: opts.configControl } : {}),
         sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged, stateDir: stateRoot }),
+        // @ref LLP 0601#config [implements]: the effective allowlist arms the export seam; no key means every repository syncs, as before
+        ...(config?.sync_repos ? { repoScopeResolver: createRepoScopeResolver({ allowed: config.sync_repos }) } : {}),
       })
 
       // Full plugin pool + selection (shared with help so `hyp --help`

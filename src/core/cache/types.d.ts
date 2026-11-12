@@ -491,6 +491,28 @@ export interface RetentionResult {
 }
 
 /**
+ * The repository-scope resolver `readRowsSince` consults when the effective
+ * config carries a `sync_repos` allowlist (LLP 0601): only rows recorded in
+ * a repository under an allowed `host/owner[/repo]` prefix are exported.
+ * Built at boot (`createRepoScopeResolver`,
+ * `src/core/usage-policy/repo_scope.js`) and threaded through
+ * `createQueryStorageService` beside the other two resolvers.
+ */
+export interface RepoScopeResolver {
+  /** The normalized allowlist, sorted, for display. */
+  readonly prefixes: ReadonlyArray<string>
+  /**
+   * True when the row must stay on this machine: its recorded `git_remote`
+   * (or, lacking one, the `origin` of the repository its `cwd` is in) is
+   * not under an allowed prefix, or no repository can be determined for its
+   * `cwd`. False for a row carrying neither value.
+   */
+  withholds(gitRemote: unknown, cwd: unknown): boolean
+  /** Stable digest of the allowlist (LLP 0367 #policy-fingerprint). */
+  fingerprint(): string
+}
+
+/**
  * Export-seam source-scoped withholding (LLP 0188): a second, optional
  * `readRowsSince` resolver alongside `UsagePolicyResolver`. Where
  * `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
@@ -579,6 +601,12 @@ export interface SourceWithholdResolver {
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {
+  /**
+   * The repository allowlist this service enforces at the export seam
+   * (LLP 0601), present only when one is configured. Exposed so the query
+   * seam folds the very same instance into its visibility resolver.
+   */
+  repoScopeResolver?: RepoScopeResolver
   dataSourceForTable(tablePath: string): Promise<ScannableDataSource | null>
   flushTable(tablePath: string, opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>

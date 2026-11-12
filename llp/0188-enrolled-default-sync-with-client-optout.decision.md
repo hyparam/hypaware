@@ -18,6 +18,8 @@
 
 **Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
 
+**Extended-by:** [LLP 0601](./0601-repository-scoped-sync.decision.md) (`#rule`: an organization may set `sync_repos`, under which only sessions in its listed repositories sync; without the key the default here is unchanged).
+
 ## Context {#context}
 
 LLP 0132 decided that on a machine with a central layer, locally added

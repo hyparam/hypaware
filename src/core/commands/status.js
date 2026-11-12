@@ -486,6 +486,13 @@ function renderSharingNotices(report, stdout, indent = '  ') {
     )
   }
 
+  // @ref LLP 0601#visible [implements]: an allowlist in force is named, so what leaves the machine is never a guess
+  if (report.usagePolicy?.syncRepos) {
+    stdout.write(
+      `${indent}repositories:    uploading only sessions in ${report.usagePolicy.syncRepos.join(', ')} (everything else stays on this machine)\n`
+    )
+  }
+
   // What happens the next time the user works somewhere new (LLP 0200).
   // Enrolled hosts only: on a machine with no server the question has no
   // stakes and the hook is inert (LLP 0106 #enrolled-only), so a solo
@@ -719,6 +726,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot, inf
       ? {
         local_only_dir_count: report.usagePolicy.localOnlyDirCount,
         folder_ask: report.usagePolicy.folderAsk,
+        ...(report.usagePolicy.syncRepos ? { sync_repos: report.usagePolicy.syncRepos } : {}),
       }
       : null,
     // Pending first-sync export hold (LLP 0101 / LLP 0100 R9): null once the
@@ -1281,7 +1289,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   stdout.write(`    datasets:        ${datasets.length}\n`)
   stdout.write(`    recent errors:   ${report.recentErrorCount} (24h retained history, includes recovered failures)\n`)
 
-  if (report.usagePolicy?.localOnlyDirCount || (report.layered?.hasCentral && report.usagePolicy) || report.firstSyncHoldDeadline !== null) {
+  if (report.usagePolicy?.localOnlyDirCount || report.usagePolicy?.syncRepos || (report.layered?.hasCentral && report.usagePolicy) || report.firstSyncHoldDeadline !== null) {
     section('sharing')
     renderSharingNotices(report, stdout, '    ')
   }

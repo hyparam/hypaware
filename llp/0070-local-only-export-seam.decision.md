@@ -2,7 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
-**Extended-by:** LLP 0503 (content masking follows withholding at the shared export read)
+**Extended-by:** LLP 0503 (content masking follows withholding at the shared export read), LLP 0601 (an organization's repository allowlist is a further per-row verdict at the same seam)
 **Systems:** Sinks, Cache
 **Author:** Phil / Claude
 **Date:** 2026-07-06

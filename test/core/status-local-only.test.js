@@ -159,3 +159,23 @@ test('the new-folder line is enrolled-only, and states either mode', async () =>
   assert.match(askOut.text(), /new folders:\s+asked about once each/)
   assert.match(askOut.text(), /hyp privacy folders sync/)
 })
+
+// @ref LLP 0601#visible [tests]: the allowlist in force is named in text and JSON, and absent otherwise
+test('a sync_repos allowlist is named in text and JSON', async () => {
+  const hypHome = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+    sync_repos: ['github.com/acme', 'github.com/partner/shared'],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.deepEqual(report.usagePolicy?.syncRepos, ['github.com/acme', 'github.com/partner/shared'])
+
+  const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache' })
+  assert.deepEqual(json.usage_policy?.sync_repos, ['github.com/acme', 'github.com/partner/shared'])
+
+  const stdout = makeBuf()
+  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  assert.match(stdout.text(), /repositories:\s+uploading only sessions in github\.com\/acme, github\.com\/partner\/shared/)
+})

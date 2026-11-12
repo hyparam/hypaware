@@ -38,6 +38,14 @@ export interface UsagePolicyResolver {
   resolve(cwd: string): ResolveResult
   isIgnored(cwd: string): boolean
   /**
+   * The class of a recorded row judged by its own evidence: its `cwd` and,
+   * under a repository allowlist (LLP 0601), its recorded `git_remote`,
+   * which outranks whatever that directory holds today. Present only on a
+   * resolver wrapped by `withRepoScope`; a consumer without it falls back
+   * to `resolve(cwd)`.
+   */
+  rowClass?(cwd: unknown, gitRemote: unknown): UsageClass
+  /**
    * Cheap stable digest of the resolver's mutable machine-local input (the
    * LLP 0071/0103 list file), for consumers that must notice a policy change
    * without re-reading history (LLP 0367 #policy-fingerprint). Optional so a

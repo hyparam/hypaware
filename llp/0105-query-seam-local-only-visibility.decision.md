@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-13
 **Related:** LLP 0015, LLP 0034, LLP 0049, LLP 0050, LLP 0066, LLP 0070, LLP 0100, LLP 0106
+**Extended-by:** LLP 0601 (`#query-seam`: rows an organization's repository allowlist keeps local are `local-only` on this lattice too)
 
 > `local-only` rows are filtered out of query, graph, and MCP results when
 > the **querying context** is itself a synced one. The invariant: content may

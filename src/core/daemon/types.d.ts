@@ -710,7 +710,16 @@ export interface HypAwareStatusReport {
    * is the mode with data consequences, so it is exactly the one that must
    * not be silent.
    */
-  usagePolicy: { localOnlyDirCount: number, folderAsk: FolderAskMode } | null
+  usagePolicy: {
+    localOnlyDirCount: number
+    folderAsk: FolderAskMode
+    /**
+     * The repository allowlist in force (LLP 0601), present only when the
+     * effective config sets `sync_repos`: only sessions in these
+     * repositories are uploaded.
+     */
+    syncRepos?: string[]
+  } | null
   /**
    * The pending first-sync export hold's absolute deadline (epoch ms), read
    * from the machine-local marker (LLP 0101). Null whenever no hold is live:

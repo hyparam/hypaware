@@ -34,7 +34,7 @@ import path from 'node:path'
 
 /**
  * @import { ColumnSpec, ExportRedactionConfig, ScannableDataSource, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
- * @import { CachePartitioningDeclaration, ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
+ * @import { CachePartitioningDeclaration, ExtendedQueryStorageService, RepoScopeResolver, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'
  */
@@ -249,13 +249,14 @@ export function resolveIcebergDir(tablePath) {
  *   getSettleHook?: (dataset: string) => ((rows: Record<string, unknown>[], ctx: { storage: ExtendedQueryStorageService }) => Promise<Record<string, unknown>[]>) | undefined,
  *   usagePolicyResolver?: UsagePolicyResolver,
  *   sourceWithholdResolver?: SourceWithholdResolver,
+ *   repoScopeResolver?: RepoScopeResolver,
  *   redaction?: ExportRedactionConfig,
  *   recordRedaction?: boolean,
  * }} args
  * @returns {ExtendedQueryStorageService}
  * @ref LLP 0013#write-path-and-query [implements]: kernel-owned cache write path; every source row lands here
  */
-export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver, redaction, recordRedaction = true }) {
+export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver, repoScopeResolver, redaction, recordRedaction = true }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
   const sessionPurges = createSessionPurgeStore(cacheRoot)
@@ -477,13 +478,21 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
    * @param {string} dataset
    * @param {string | undefined} attributionColumn
    * @param {string | undefined} entrypointColumn
-   * @returns {'cwd' | 'source' | 'unattributed' | undefined}
+   * @returns {'cwd' | 'repo' | 'source' | 'unattributed' | undefined}
    */
   function rowWithholdReason(row, dataset, attributionColumn, entrypointColumn) {
     // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time (no cache-schema marker, retroactive over already-cached rows); `cwd` is forced into the scan by `readRowsSince` so a caller's `columns` projection can't bypass this filter
     // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
     const cwd = row.cwd
-    if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '' && usagePolicyResolver.resolve(cwd).class !== 'full') return 'cwd'
+    let explicitSync = false
+    if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '') {
+      const verdict = usagePolicyResolver.resolve(cwd)
+      if (verdict.class !== 'full') return 'cwd'
+      explicitSync = verdict.governedBy !== null
+    }
+    // @ref LLP 0601#rule [implements]: under an organization's repository allowlist, a row outside every allowed repository is withheld with the same drop-but-advance semantics as the `cwd` filter
+    // @ref LLP 0601#explicit-sync [implements]: a directory the person explicitly marked `sync` is their answer and is not second-guessed by the allowlist
+    if (repoScopeResolver && !explicitSync && repoScopeResolver.withholds(row.git_remote, cwd)) return 'repo'
     // @ref LLP 0188#opt-out [implements]: a row attributed to an
     // opted-out picker source on a machine with a central layer is
     // withheld from the payload, and `readRowsSince` drops it with the same
@@ -636,7 +645,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // but the guarantee never rides on callers remembering to include `cwd`.
       // (`projected === undefined` means "all columns", which already carries
       // `cwd`; no forcing and no stripping needed.)
-      const forceCwd = usagePolicyResolver !== undefined && projected !== undefined && !projected.includes('cwd')
+      const forceCwd = (usagePolicyResolver !== undefined || repoScopeResolver !== undefined) && projected !== undefined && !projected.includes('cwd')
+      // @ref LLP 0601#evidence [implements]: the recorded remote is forced into the scan on the same not-bypassable-by-projection terms as `cwd`
+      const forceRemote = repoScopeResolver !== undefined && projected !== undefined && !projected.includes('git_remote')
       // @ref LLP 0188#opt-out [implements]: same not-bypassable-by-projection
       // guarantee as `cwd` above, but the forced column is dataset-specific
       // (`attributionColumnFor`) rather than a fixed name; `undefined` means
@@ -663,9 +674,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const withholdDataset = sourceWithholdResolver?.shouldWithholdDataset?.(dataset) === true
       /** @type {string[] | undefined} */
       let scanColumns = projected
-      if (forceCwd || forceAttribution || forceEntrypoint) {
+      if (forceCwd || forceRemote || forceAttribution || forceEntrypoint) {
         scanColumns = [...(/** @type {string[]} */ (projected))]
         if (forceCwd) scanColumns.push('cwd')
+        if (forceRemote) scanColumns.push('git_remote')
         if (forceAttribution) scanColumns.push(/** @type {string} */ (attributionColumn))
         if (forceEntrypoint) scanColumns.push(/** @type {string} */ (entrypointColumn))
       }
@@ -684,6 +696,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       /** @type {Set<string>} */
       const droppedCwdHashes = new Set()
       let droppedSourceRowCount = 0
+      let droppedRepoRowCount = 0
       let droppedUnattributedRowCount = 0
       let purgedRowCount = 0
       let scanned = 0
@@ -715,6 +728,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           if (withheld !== undefined) {
             droppedRowCount += 1
             if (withheld === 'cwd') droppedCwdHashes.add(hashCwd(/** @type {string} */ (row.cwd)))
+            else if (withheld === 'repo') droppedRepoRowCount += 1
             else droppedSourceRowCount += 1
             if (withheld === 'unattributed') droppedUnattributedRowCount += 1
             yield { after, dropped: true }
@@ -742,6 +756,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           // separate so neither count is read as the other.
           ...(purgedRowCount > 0 ? { purged_row_count: purgedRowCount } : {}),
           ...(droppedSourceRowCount > 0 ? { dropped_source_row_count: droppedSourceRowCount } : {}),
+          ...(droppedRepoRowCount > 0 ? { dropped_repo_row_count: droppedRepoRowCount } : {}),
           // Separate count so the fail-closed rule's over-withholding is
           // observable in the field, not inferred (LLP 0192 #consequences).
           ...(droppedUnattributedRowCount > 0 ? { dropped_unattributed_row_count: droppedUnattributedRowCount } : {}),
@@ -771,10 +786,17 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // notice a policy change without re-reading history; a machine with no
     // resolver configured reads as a constant policy.
     // @ref LLP 0367#policy-fingerprint [implements]: the storage seam that composes the resolver halves into one comparable digest
+    // @ref LLP 0601#query-seam [implements]: the query seam folds the same allowlist into its resolver, so it is handed the instance this seam enforces with
+    ...(repoScopeResolver ? { repoScopeResolver } : {}),
+
     exportPolicyFingerprint() {
       const usage = usagePolicyResolver?.fingerprint?.() ?? 'none'
       const source = sourceWithholdResolver?.fingerprint?.() ?? 'none'
-      return `v1 usage:${usage} source:${source}`
+      // Appended only when an allowlist is configured, so a machine without
+      // one keeps the digest it already persisted and is not sent through a
+      // revalidation pass by an upgrade.
+      const repo = repoScopeResolver ? ` repo:${repoScopeResolver.fingerprint()}` : ''
+      return `v1 usage:${usage} source:${source}${repo}`
     },
 
     async dataSourceForTable(tablePath) {

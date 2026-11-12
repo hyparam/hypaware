@@ -120,7 +120,7 @@ export async function executeGrepSearch(args) {
     localOnly.callerClass = callerClass
     if (!callerSeesEverything(callerRank)) {
       localOnly.filtered = true
-      withheld = (row) => cwdWithheldFromCaller(resolver, callerRank, row.cwd)
+      withheld = (row) => cwdWithheldFromCaller(resolver, callerRank, row.cwd, row.git_remote)
     }
   }
 

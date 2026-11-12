@@ -833,6 +833,14 @@ export interface HypAwareV2Config {
   first_sync_hold?: boolean
   /** Built-in export redaction is always applied; custom patterns add to it. */
   redaction?: ExportRedactionConfig
+  /**
+   * Repository allowlist for uploads (LLP 0601): `host/owner` or
+   * `host/owner/repo` prefixes. When set, only sessions recorded in a
+   * matching repository leave the machine; everything else is still
+   * recorded locally. Absent means every repository syncs. Central wins
+   * over local when both layers set it.
+   */
+  sync_repos?: string[]
 }
 
 export interface ExportRedactionConfig {

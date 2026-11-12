@@ -17,6 +17,7 @@ import path from 'node:path'
 import { asyncRow, selectVector } from 'squirreling'
 import { executeQuerySql } from '../../src/core/query/sql.js'
 import { withLocalOnlyVisibility } from '../../src/core/query/visibility.js'
+import { withRepoScope } from '../../src/core/usage-policy/repo_scope.js'
 import { appendRowsToTable, dataSourceForTable, deleteMatchingRows } from '../../src/core/cache/iceberg/store.js'
 import { unionSources } from '../../src/core/query/union-source.js'
 
@@ -530,4 +531,36 @@ test('native visibility composes with real Iceberg position deletes and multiple
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
+})
+
+// @ref LLP 0601#query-seam [tests]: the row-stream path reads the recorded remote beside cwd and strips both forced columns
+test('under a repository allowlist the row path judges cwd and recorded remote together', async () => {
+  const outside = (/** @type {unknown} */ v) => v === '/w/me' || (typeof v === 'string' && v.includes(':me/'))
+  const resolver = withRepoScope(fakeResolver(CLASSES), {
+    prefixes: ['github.com/acme'],
+    withholds: (remote, cwd) => (typeof remote === 'string' && remote !== '' ? outside(remote) : outside(cwd)),
+    fingerprint: () => 'github.com/acme',
+  })
+  const rows = [
+    { id: 1, cwd: '/w/org', git_remote: null, msg: 'a' },
+    { id: 2, cwd: '/w/me', git_remote: null, msg: 'b' },
+    { id: 3, cwd: '/w/org', git_remote: 'git@github.com:me/x.git', msg: 'c' },
+    { id: 4, cwd: '/w/me', git_remote: 'git@github.com:acme/x.git', msg: 'd' },
+    { id: 5, cwd: null, git_remote: 'git@github.com:me/x.git', msg: 'e' },
+    { id: 6, cwd: '/w/lo', git_remote: 'git@github.com:acme/x.git', msg: 'f' },
+  ]
+  /** @param {string} callerCwd */
+  const run = (callerCwd) => executeQuerySql({
+    query: 'SELECT id, msg FROM t ORDER BY id',
+    registry: registryFor(memorySource(rows)),
+    storage: /** @type {any} */ ({}),
+    refresh: 'never',
+    usagePolicyResolver: resolver,
+    callerCwd,
+  })
+  const synced = await run('/w/org')
+  assert.deepEqual(synced.rows, [{ id: 1, msg: 'a' }, { id: 4, msg: 'd' }], 'forced columns never reach the result')
+  assert.equal(synced.localOnly.withheldRows, 4)
+  const local = await run('/w/me')
+  assert.deepEqual(local.rows.map((r) => r.id), [1, 2, 3, 4, 5, 6])
 })

@@ -8,6 +8,7 @@ import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
 import { BUILTIN_REMOTE_ALIASES, BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
 import { parseRedactionConfig } from '../sinks/redaction.js'
+import { normalizeRepoPrefix } from '../usage-policy/repo_scope.js'
 
 /**
  * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../hypaware-plugin-kernel-types.js'
@@ -375,6 +376,26 @@ export function parseConfigShape(value, { allowUnknownKeys = false } = {}) {
     }
   }
 
+  /** @type {string[]|undefined} */
+  let syncRepos
+  if (root.sync_repos !== undefined) {
+    // An empty list would withhold every repository; an organization that
+    // wants nothing uploaded removes the sink instead.
+    if (!Array.isArray(root.sync_repos) || root.sync_repos.length === 0) {
+      errors.push({ pointer: '/sync_repos', message: 'sync_repos must be a non-empty array of host/owner or host/owner/repo strings' })
+    } else {
+      syncRepos = []
+      for (let i = 0; i < root.sync_repos.length; i += 1) {
+        const prefix = normalizeRepoPrefix(root.sync_repos[i])
+        if (prefix === null) {
+          errors.push({ pointer: `/sync_repos/${i}`, message: "sync_repos entries must look like 'github.com/acme' or 'github.com/acme/repo'" })
+          continue
+        }
+        syncRepos.push(prefix)
+      }
+    }
+  }
+
   const redaction = parseRedactionConfig(root.redaction, errors)
 
   const unknownKeys = Object.keys(root).filter((key) => !RECOGNIZED_TOP_KEYS.has(key))
@@ -395,10 +416,11 @@ export function parseConfigShape(value, { allowUnknownKeys = false } = {}) {
   if (autoUpdate !== undefined) config.auto_update = autoUpdate
   if (firstSyncHold !== undefined) config.first_sync_hold = firstSyncHold
   if (redaction !== undefined) config.redaction = redaction
+  if (syncRepos !== undefined) config.sync_repos = syncRepos
   return unknownKeys.length > 0 ? { ok: true, config, unknownKeys } : { ok: true, config }
 }
 
-const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'first_sync_hold', 'redaction'])
+const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'first_sync_hold', 'redaction', 'sync_repos'])
 
 /**
  * Build the kernel `ConfigRegistry`. Plugins call `registerSection`

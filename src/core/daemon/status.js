@@ -1927,11 +1927,12 @@ export async function collectHypAwareStatus(opts = {}) {
   // @ref LLP 0200#cli [implements]: hyp status names a suppressed folder ask alongside the withholding counts
   const folderAsk = await readFolderAskModeSafe({ stateDir: stateRoot })
 
-  /** @type {{ localOnlyDirCount: number, folderAsk: FolderAskMode } | null} */
+  /** @type {HypAwareStatusReport['usagePolicy']} */
   let usagePolicy = null
   try {
     const localOnlyDirs = await readLocalOnlyDirs({ stateDir: stateRoot })
-    usagePolicy = { localOnlyDirCount: localOnlyDirs.length, folderAsk }
+    // @ref LLP 0601#visible [implements]: the allowlist in force is reported from the same effective config boot arms the seam with
+    usagePolicy = { localOnlyDirCount: localOnlyDirs.length, folderAsk, ...(config?.sync_repos ? { syncRepos: config.sync_repos } : {}) }
   } catch (err) {
     const filePath = err instanceof LocalOnlyListUnreadableError
       ? err.filePath
