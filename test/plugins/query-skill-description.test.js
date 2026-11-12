@@ -46,19 +46,18 @@ test('hypaware-query frontmatter is identical across every client copy', () => {
 })
 
 test('hypaware-query description names the natural session-search intents', () => {
-  // The intents from issue #396, as substrings a user would plausibly type.
+  // Retain session-search scope without requiring a particular client's name.
   // Matched case-insensitively on intent words, not on any exact sentence, so
   // the description can be reworded without the test dictating its prose.
   /** @type {[string, RegExp][]} */
   const intents = [
-    ['a recent session', /most recent|last (claude|codex)/],
+    ['earlier work', /prior|earlier/],
     ['sessions as the subject', /session/],
     ['searching recorded conversations', /search/],
     ['conversation history', /conversation/],
-    ['tools used in a past session', /tool/],
-    ['errors from a past session', /error/],
-    ['both clients by name', /claude/],
-    ['both clients by name', /codex/],
+    ['recorded usage and workflow questions', /usage.*workflow/],
+    ['prior decisions and rationale', /decisions.*rationale/],
+    ['AI conversations beyond specific clients', /ai conversations/],
   ]
   for (const client of CLIENTS) {
     const description = readFrontmatter(client).description.toLowerCase()
@@ -68,18 +67,17 @@ test('hypaware-query description names the natural session-search intents', () =
   }
 })
 
-test('hypaware-query description reaches a team\'s history on a remote', () => {
+test('hypaware-query description reaches a team\'s recorded activity', () => {
   // LLP 0481 T14: the skill body routes team history questions to the team
   // graph commands; the description has to admit that scope at all.
   for (const client of CLIENTS) {
-    assert.match(readFrontmatter(client).description.toLowerCase(), /team remote/, `${client}: description does not cover a team remote`)
+    assert.match(readFrontmatter(client).description.toLowerCase(), /team activity/, `${client}: description does not cover team activity`)
   }
 })
 
-test('hypaware-query description keeps its original product vocabulary', () => {
-  // Widening the routing surface must not drop the SQL/telemetry triggers the
-  // description already carried.
-  const kept = [/hyp query/, /logs/, /traces/, /metrics/, /ai gateway/, /cache/, /sql/]
+test('hypaware-query discovery covers explicit queries without requiring a history request', () => {
+  // Individual query-language examples are tested in fresh agent sessions.
+  const kept = [/hypaware queries/, /recommendations from recorded activity/]
   for (const client of CLIENTS) {
     const description = readFrontmatter(client).description.toLowerCase()
     for (const pattern of kept) {
@@ -92,7 +90,7 @@ test('hypaware-query discovery covers code-change intent and report operations',
   // Preserve discovery for responsibilities moved out of reference/report,
   // alongside why/intent questions that otherwise start with git alone.
   // These checks guard metadata coverage, not model invocation behavior.
-  const intents = [/recordings first/, /why code changed/, /removed/, /git/, /recommendations/i, /save/, /upload/, /list/, /view/, /hyprec-/, /fix/, /mark/]
+  const intents = [/prior discussions/, /rationale/, /git/, /recommendations/i, /saving/, /upload/, /list/, /view/, /publish/, /hyprec-/, /fix/, /mark/, /pasted id alone/i, /hypaware-report/, /current code or service state/, /not as a precaution/]
   for (const client of CLIENTS) {
     const description = readFrontmatter(client).description
     for (const intent of intents) assert.match(description, intent, `${client}: missing discovery intent ${intent}`)
