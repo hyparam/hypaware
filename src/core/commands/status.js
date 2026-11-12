@@ -379,6 +379,7 @@ export function renderStatusSummary({ report, stdout, info }) {
       : client && client.configured && client.recording === false ? 'Not recording'
       : client?.capture ? describeOllamaCapture(client.capture)
       : capture?.state === 'gap' ? 'Telemetry may be interrupted'
+      : capture?.state === 'unknown' ? 'Capture unconfirmed'
       : client?.attached ? `Recording${client.mode ? ` (${printable(client.mode)})` : ''}`
       : client?.attachable !== false && client?.configured ? 'Settings missing'
       // A probe-less source listed only by its sharing policy has no client
@@ -413,8 +414,11 @@ function statusAttention(report) {
   })
   const actions = report.clientActions?.actions.filter((a) => a.state !== 'done' && a.state !== 'n/a') ?? []
   const gaps = report.captureHealth.filter((c) => c.state === 'gap')
+  const recording = new Set(report.clients.filter(c => c.configured && c.recording !== false).map(c => c.name))
+  const unconfirmed = report.captureHealth.filter((c) => c.state === 'unknown' &&
+    recording.has(c.client))
   const needsAttention = report.overall !== 'healthy' || report.diagnostics.length > 0 ||
-    sourceProblems.length > 0 || gaps.length > 0 || actions.length > 0 ||
+    sourceProblems.length > 0 || gaps.length > 0 || unconfirmed.length > 0 || actions.length > 0 ||
     report.cacheFlushFailuresTotal > 0 || report.clients.some((c) => c.error || c.capture?.state === 'failed') || !report.daemon.running
   // The verdict and the severity that produces it: an error-severity
   // diagnostic is what degrades `overall`, so reading both keeps the heading
@@ -423,7 +427,7 @@ function statusAttention(report) {
   // `status.json`, and the heading prints a literal rather than either value.
   const degraded = report.overall !== 'healthy' || report.diagnostics.some((d) => d.severity === 'error')
 
-  return { sourceProblems, actions, gaps, needsAttention, degraded }
+  return { sourceProblems, actions, gaps, unconfirmed, needsAttention, degraded }
 }
 
 /**
@@ -432,7 +436,7 @@ function statusAttention(report) {
  * @param {{ write(chunk: string): unknown }} stdout
  */
 function renderStatusAttention(report, stdout) {
-  const { sourceProblems, actions, gaps, needsAttention } = statusAttention(report)
+  const { sourceProblems, actions, gaps, unconfirmed, needsAttention } = statusAttention(report)
   if (needsAttention) {
     stdout.write('\nAttention\n')
     if (!report.daemon.running) stdout.write('  ! Daemon is not running.\n')
@@ -441,6 +445,11 @@ function renderStatusAttention(report, stdout) {
       const activity = c.lastTranscriptActivityAt === null ? 'no transcript activity seen' : `transcripts active ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
       stdout.write(`  ! ${printable(c.client)}: ${activity}; ${events}.\n`)
       stdout.write('    Next: hyp daemon restart\n')
+    }
+    for (const c of unconfirmed) {
+      const reason = c.lastEventAt === null ? 'no captured row has been verified' : 'the latest check could not confirm recording'
+      stdout.write(`  ! ${printable(c.client)}: capture is unconfirmed; ${reason}.\n`)
+      if (c.client === 'codex') stdout.write('    Next: hyp backfill codex --dry-run\n')
     }
     for (const d of report.diagnostics) {
       if (d.kind === 'capture_gap' && gaps.length > 0) continue
@@ -468,6 +477,11 @@ function renderStatusAttention(report, stdout) {
     }
   } else {
     stdout.write('\nNo issues detected.\n')
+  }
+  stdout.write('\n  Coverage: only selected sources are recorded (hyp setup).\n')
+  if (report.clients.some(c => c.name === 'codex' && c.configured) &&
+      !report.activePlugins?.includes('@hypaware/codex-cloud')) {
+    stdout.write('\n  Local Codex capture does not cover Codex Cloud or ChatGPT Work. Select those sources with hyp setup to record hosted chats.\n')
   }
 }
 

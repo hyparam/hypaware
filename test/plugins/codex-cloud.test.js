@@ -4,12 +4,15 @@ import test from 'node:test'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { acquireCloudAuth, readCloudAuth, CloudError } from '../../hypaware-core/plugins-workspace/codex-cloud/src/cloud-auth.js'
 import { openCloudClient, readCloudThread, CLOUD_ENDPOINT, listCloudThreads } from '../../hypaware-core/plugins-workspace/codex-cloud/src/cloud-client.js'
 import { createCodexCloudProvider, projectCloudHistory } from '../../hypaware-core/plugins-workspace/codex-cloud/src/cloud.js'
 import { cloudConnectionPath, readCloudConnection, validateCloudThreads, registerCloudCommands, validateCloudOrigins, configureCloudSelection } from '../../hypaware-core/plugins-workspace/codex-cloud/src/cloud-state.js'
 import { aiGatewayBackfillMaterializer } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
 const threadId = '11111111-2222-4333-8444-555555555555'
 const accountHash = 'a'.repeat(64)
@@ -30,6 +33,84 @@ async function temp(t) {
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
   return dir
 }
+
+test('a scheduled cloud sweep finds the ChatGPT bundled CLI with a launchd PATH', { skip: process.platform === 'win32' }, async t => {
+  const home = await temp(t)
+  const nodeBin = path.join(home, 'node-bin')
+  const bundleBin = path.join(home, 'Applications/ChatGPT.app/Contents/Resources/codex-cli/bin')
+  const codexHome = path.join(home, '.codex')
+  await Promise.all([nodeBin, bundleBin, codexHome].map(dir => fs.mkdir(dir, { recursive: true })))
+  // The test runner's Node directory may also contain a globally installed
+  // Codex. A cloned Node gives this service only Node and the bundled fixture.
+  const node = path.join(nodeBin, 'node')
+  await fs.copyFile(process.execPath, node, fs.constants.COPYFILE_FICLONE)
+  await fs.writeFile(path.join(bundleBin, 'codex'), `#!/usr/bin/env node
+import { createInterface } from 'node:readline'
+for await (const line of createInterface({ input: process.stdin })) {
+  const m = JSON.parse(line)
+  if (!m.id) continue
+  const result = m.method === 'config/read' ? { config: { cli_auth_credentials_store: 'file' } }
+    : m.method === 'account/read' ? { account: { type: 'chatgpt' } } : {}
+  process.stdout.write(JSON.stringify({ id: m.id, result }) + '\\n')
+}
+`, { mode: 0o755 })
+  const token = `header.${Buffer.from(JSON.stringify({ sub: 'synthetic-user', exp: Date.now() / 1000 + 3600,
+    'https://api.openai.com/auth': { chatgpt_account_id: 'synthetic-account' } })).toString('base64url')}.signature`
+  await fs.writeFile(path.join(codexHome, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt',
+    tokens: { access_token: token, account_id: 'synthetic-account' } }))
+  const code = `
+    import assert from 'node:assert/strict'
+    import fs from 'node:fs/promises'
+    import path from 'node:path'
+    import { readCloudAuth } from ${JSON.stringify(import.meta.resolve('../../hypaware-core/plugins-workspace/codex-cloud/src/cloud-auth.js'))}
+    import { createCodexCloudProvider } from ${JSON.stringify(import.meta.resolve('../../hypaware-core/plugins-workspace/codex-cloud/src/cloud.js'))}
+    import { cloudConnectionPath } from ${JSON.stringify(import.meta.resolve('../../hypaware-core/plugins-workspace/codex-cloud/src/cloud-state.js'))}
+    import { aiGatewayBackfillMaterializer, aiGatewayDatasetRegistration } from ${JSON.stringify(import.meta.resolve('../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'))}
+    import { createBackfillRegistry, createBackfillMaterializerRegistry } from ${JSON.stringify(import.meta.resolve('../../src/core/registry/backfills.js'))}
+    import { createBackfillSweepDriver } from ${JSON.stringify(import.meta.resolve('../../src/core/daemon/backfill_sweep.js'))}
+    import { withLogRecords } from ${JSON.stringify(import.meta.resolve('../helpers/log_records.js'))}
+    // CI has no macOS runner; the helper reads the platform on each launch.
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
+    const stateDir = process.env.HOME
+    const codexHome = path.join(stateDir, '.codex')
+    const auth = await readCloudAuth(codexHome)
+    await fs.writeFile(cloudConnectionPath(stateDir), JSON.stringify({ version: 2, scope: 'account', accountHash: auth.accountHash }))
+    const threadId = ${JSON.stringify(threadId)}
+    const now = Date.now()
+    const backfills = createBackfillRegistry()
+    backfills.register(createCodexCloudProvider({ stateDir, codexHome, env: process.env, ignoredSessions: new Set() }, {
+      open: async () => ({ call: async () => ({}), close() {} }),
+      listThreads: async () => [{ id: threadId, updatedAt: now / 1000 }],
+      readThread: async () => ({ thread: { id: threadId, originator: 'codex_cloud' }, items: [
+        { turnId: 'turn-1', startedAtMs: now, completedAtMs: now, item: { type: 'agentMessage', id: 'reply', text: 'scheduled-reply-marker' } },
+      ] }),
+    }))
+    const backfillMaterializers = createBackfillMaterializerRegistry()
+    backfillMaterializers.register(aiGatewayBackfillMaterializer())
+    const rows = []
+    const settled = Promise.withResolvers()
+    const driver = createBackfillSweepDriver({ backfills, backfillMaterializers, env: process.env,
+      config: { version: 2, plugins: [{ name: '@hypaware/codex-cloud' }] },
+      storage: { cacheRoot: stateDir, cacheTablePath: () => stateDir,
+        appendRows: async (_table, _columns, batch) => rows.push(...batch), flushTable: async () => {} },
+      query: { getDataset: () => aiGatewayDatasetRegistration() },
+      onResult: (_identity, ok) => settled.resolve(ok),
+    })
+    const { result, records } = await withLogRecords(async () => {
+      assert.deepEqual((await driver.tick({ now: new Date('2026-11-12T10:05:00Z') })).fired, ['codex-cloud'])
+      return settled.promise
+    })
+    assert.equal(result, true, JSON.stringify(records.filter(r => r.body === 'codex.cloud.failed').map(r => r.attributes)))
+    assert.ok(rows.some(r => r.session_id === threadId && r.content_text === 'scheduled-reply-marker'))
+    assert.ok(records.some(r => r.body === 'codex.cloud.completed' && r.attributes.status === 'ok'))
+    assert.ok(records.some(r => r.body === 'backfill.sweep_finished' && r.attributes.status === 'ok'))
+  `
+  await promisify(execFile)(node, ['--input-type=module', '-e', code], {
+    env: { ...isolatedClientEnv(process.env, home), PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+      HYP_HOME: home, HYP_CONFIG: '', HYP_DEV_TELEMETRY: '1', DEV_RUN_ID: 'codex-cloud-launchd-path' },
+    timeout: 15_000,
+  }).catch(error => assert.fail(error.stderr || error.message))
+})
 
 function authHarness({ store = 'file', type = 'chatgpt', snapshots = [auth] } = {}) {
   const calls = []
