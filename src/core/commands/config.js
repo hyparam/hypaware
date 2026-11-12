@@ -47,10 +47,6 @@ export async function runConfigValidate(argv, ctx) {
     return 1
   }
 
-  // @ref LLP 0600#unknown-keys [implements]: an ignored key is named where a person checks a config, so a typo is not silent
-  if (loadResult.unknownKeys) {
-    ctx.stderr.write(`hyp config validate: ignoring unrecognized top-level key(s): ${loadResult.unknownKeys.join(', ')}\n`)
-  }
   ctx.stdout.write(
     `config ok: ${loadResult.configPath} (plugins=${result.pluginCount}, sinks=${result.sinkCount})\n`
   )
