@@ -26,6 +26,11 @@ The presentation heading says `Needs attention` when there are warnings,
 errors, source health problems, unfinished client actions, or a stopped daemon.
 It is an attention cue, not a change to the collector's `overall` verdict
 (LLP 0385). Configured or attached does not mean capture has been verified.
+An existing `unknown` capture-health answer reads `Capture unconfirmed` in the
+client table and needs attention in both text views, without changing the
+collector verdict or inventing a capture outage. Local Codex users without the
+hosted plugin also see that Codex Cloud and ChatGPT Work are separate setup
+choices. This describes source coverage, not evidence that work was missed.
 
 Each configured client or picker source carries `Sync` or `Local only` from
 the existing sharing split (LLP 0188). An enrolled host without a readable
