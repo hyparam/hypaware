@@ -817,3 +817,28 @@ test('configRecordsPickAnswer classifies the raw and parsed forms of a document 
   assert.equal(configRecordsPickAnswer(/** @type {any} */ (decorated)), true, 'raw decorated entry')
   assert.equal(parsedDecorated.ok && configRecordsPickAnswer(parsedDecorated.config), true, 'parsed decorated entry')
 })
+
+// @ref LLP 0600#unknown-keys [tests]: strict by default (the server and local files), tolerant only for a reader that asks
+test('parseConfigShape rejects an unknown top-level key unless the reader allows it', () => {
+  const doc = { version: 2, plugins: [], some_future_key: { a: 1 }, another: true }
+
+  // The default is what the server's save pipeline and local files get.
+  const strict = parseConfigShape(doc)
+  assert.equal(strict.ok, false)
+  if (!strict.ok) assert.deepEqual(strict.errors.map((e) => e.pointer), ['/some_future_key', '/another'])
+
+  const result = parseConfigShape(doc, { allowUnknownKeys: true })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  assert.deepEqual(result.config, { version: 2, plugins: [] })
+  assert.deepEqual(result.unknownKeys, ['some_future_key', 'another'])
+
+  const plain = parseConfigShape({ version: 2 }, { allowUnknownKeys: true })
+  assert.equal(plain.ok, true)
+  if (plain.ok) assert.equal(plain.unknownKeys, undefined)
+
+  // A known key with a bad value is still an error.
+  const bad = parseConfigShape({ version: 2, auto_update: 'yes', some_future_key: 1 }, { allowUnknownKeys: true })
+  assert.equal(bad.ok, false)
+  if (!bad.ok) assert.deepEqual(bad.errors.map((e) => e.pointer), ['/auto_update'])
+})

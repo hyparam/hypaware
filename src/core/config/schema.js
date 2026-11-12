@@ -173,9 +173,10 @@ export async function prepareLocalConfigWrite({ targetPath, force, now, dryRun }
  * either the span or the log.
  *
  * @param {string} configPath
+ * @param {{ allowUnknownKeys?: boolean }} [opts] set when reading the organization's layer (LLP 0600)
  * @returns {Promise<LoadConfigResult>}
  */
-export async function loadConfigFile(configPath) {
+export async function loadConfigFile(configPath, opts = {}) {
   const log = getLogger('config')
   return withSpan(
     'config.load',
@@ -222,7 +223,7 @@ export async function loadConfigFile(configPath) {
         return { ok: false, errorKind, message, configPath }
       }
 
-      const shape = parseConfigShape(parsed)
+      const shape = parseConfigShape(parsed, opts)
       if (!shape.ok) {
         const errorKind = 'config_invalid_shape'
         span.setAttribute('error_kind', errorKind)
@@ -247,7 +248,10 @@ export async function loadConfigFile(configPath) {
       span.setAttribute('plugin_count', shape.config.plugins?.length ?? 0)
       span.setAttribute('sink_count', Object.keys(shape.config.sinks ?? {}).length)
       span.setAttribute('status', 'ok')
-      return { ok: true, config: shape.config, configPath }
+      // Not logged here: this runs on every boot and status read, and a
+      // newer config on an older client is a normal state, not an event.
+      if (shape.unknownKeys) span.setAttribute('unknown_key_count', shape.unknownKeys.length)
+      return { ok: true, config: shape.config, configPath, ...(shape.unknownKeys ? { unknownKeys: shape.unknownKeys } : {}) }
     },
     { component: 'config' }
   )
@@ -259,11 +263,20 @@ export async function loadConfigFile(configPath) {
  * on. Failures are returned as a list of `{pointer, message}` records
  * so the caller can re-emit them per validation error.
  *
+ * A top-level key this version does not know is an error by default, which
+ * is what an author wants: the server saving an organization's config and
+ * a person's own local file both catch a misspelled key. A reader of the
+ * organization's layer passes `allowUnknownKeys`, and the key is ignored
+ * and reported in `unknownKeys` instead: a config written for a newer
+ * client must still load on an older one.
+ *
  * @param {unknown} value
- * @returns {{ ok: true, config: HypAwareV2Config } | { ok: false, errors: ValidationError[] }}
+ * @param {{ allowUnknownKeys?: boolean }} [opts]
+ * @returns {{ ok: true, config: HypAwareV2Config, unknownKeys?: string[] } | { ok: false, errors: ValidationError[] }}
  * @ref LLP 0010#no-mode-field [implements]: v2 shape: version must be 2, explicit plugins[], no mode/role label
+ * @ref LLP 0600#unknown-keys [implements]: strict where a config is authored, tolerant where the organization's layer is read
  */
-export function parseConfigShape(value) {
+export function parseConfigShape(value, { allowUnknownKeys = false } = {}) {
   /** @type {ValidationError[]} */
   const errors = []
 
@@ -364,8 +377,9 @@ export function parseConfigShape(value) {
 
   const redaction = parseRedactionConfig(root.redaction, errors)
 
-  for (const key of Object.keys(root)) {
-    if (!RECOGNIZED_TOP_KEYS.has(key)) {
+  const unknownKeys = Object.keys(root).filter((key) => !RECOGNIZED_TOP_KEYS.has(key))
+  if (!allowUnknownKeys) {
+    for (const key of unknownKeys) {
       errors.push({ pointer: `/${key}`, message: `unrecognized top-level key '${key}'` })
     }
   }
@@ -381,7 +395,7 @@ export function parseConfigShape(value) {
   if (autoUpdate !== undefined) config.auto_update = autoUpdate
   if (firstSyncHold !== undefined) config.first_sync_hold = firstSyncHold
   if (redaction !== undefined) config.redaction = redaction
-  return { ok: true, config }
+  return unknownKeys.length > 0 ? { ok: true, config, unknownKeys } : { ok: true, config }
 }
 
 const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'first_sync_hold', 'redaction'])

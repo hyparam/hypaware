@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-10-16
 **Related:** LLP 0025 (#last-known-good-rollback and #post-apply-probation: the backoff this narrows), hyparam/hypaware#2547, #2662, #2664
+**Extended-by:** LLP 0600 (`#bad-unchanged`: a validation, install, or hash failure is now retried on this backoff; a plain expiry still waits for a new etag)
 
 > Extends [LLP 0025 §last-known-good-rollback](./0025-remote-config-join-flow.spec.md#last-known-good-rollback),
 > which backs off re-apply of a rolled-back etag "until the etag changes".

@@ -50,13 +50,15 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 300
 export const PROBATION_FLOOR_SECONDS = 120
 
 /**
- * How long a revision this host could not confirm is held back before
- * the same etag is applied again. Long enough that a host whose sink
- * keeps failing restarts onto it a few times a day at most; a client
- * version change retries at once instead of waiting.
+ * How long a revision this host could not confirm, or rejected before
+ * applying, is held back before the same etag is tried again. Long enough
+ * that a host whose sink keeps failing restarts onto it a few times a day
+ * at most; for an unconfirmed revision a client version change retries at
+ * once instead of waiting.
  * @ref LLP 0517#retry [implements]: bounded backoff for an unconfirmed revision, settled at 6 hours
+ * @ref LLP 0600#retry [implements]: the same backoff holds a revision rejected before it was applied
  */
-export const UNCONFIRMED_RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000
+export const RETRY_BACKOFF_MS = 6 * 60 * 60 * 1000
 
 /**
  * Path to the join seed (the initial central layer) under a host's
@@ -664,7 +666,7 @@ export function createConfigControl(opts) {
         // apply-crash loop is not. A revision this host only could not
         // confirm is retried once its backoff elapses or the client changes.
         const bad = state.bad_etag && state.bad_etag.etag === etag ? state.bad_etag : null
-        const retry = bad ? unconfirmedRetryReason(bad) : null
+        const retry = bad ? retryReason(bad) : null
         if (bad && !retry) {
           span.setAttribute('apply_action', 'skipped_bad_etag')
           log.warn('config.apply_skipped', {
@@ -675,7 +677,7 @@ export function createConfigControl(opts) {
           return { ok: true, action: 'skipped_bad_etag' }
         }
         if (retry) {
-          log.info('config.apply_retry_unconfirmed', {
+          log.info('config.apply_retry', {
             [Attr.COMPONENT]: 'config-control',
             config_etag: etag,
             hyp_reason: retry,
@@ -695,7 +697,7 @@ export function createConfigControl(opts) {
         // anything is fetched, and the hash pin bounds what an install
         // can bring in.
         // @ref LLP 0025#install-on-config-hash-pinned [implements]: shape-gate → install pinned plugins → validate against the post-install catalog
-        const shape = parseConfigShape(document)
+        const shape = parseConfigShape(document, { allowUnknownKeys: true })
         if (!shape.ok) {
           const first = shape.errors[0]
           rememberBadEtag(etag, 'validation_failed')
@@ -705,6 +707,15 @@ export function createConfigControl(opts) {
           )
         }
         const config = shape.config
+        // @ref LLP 0600#unknown-keys [implements]: once per staged revision, name what this client ignored
+        if (shape.unknownKeys) {
+          log.warn('config.unknown_keys_ignored', {
+            [Attr.COMPONENT]: 'config-control',
+            [Attr.OPERATION]: 'config.apply',
+            config_etag: etag,
+            unknown_keys: shape.unknownKeys.join(','),
+          })
+        }
 
         const install = await applyDeps.installPinnedPlugins(config.plugins ?? [])
         if (!install.ok) {
@@ -752,18 +763,19 @@ export function createConfigControl(opts) {
   }
 
   /**
-   * Why an unconfirmed revision may be applied again now, or null while
-   * it stays held back. A revision recorded for any other reason is
-   * never retried: its etag must change.
+   * Why a remembered revision may be applied again now, or null while it
+   * stays held back. A revision that was applied, ran, and was rolled back
+   * for a plain expiry is never retried: its etag must change.
    * @param {RememberedBadEtag} bad
    * @returns {'client_version_changed' | 'backoff_elapsed' | null}
-   * @ref LLP 0517#retry [implements]: the same etag is retried after a bounded backoff or a client version change; a bad revision still waits for a new etag
+   * @ref LLP 0517#retry [implements]: an unconfirmed etag is retried after a bounded backoff or a client version change
+   * @ref LLP 0600#retry [implements]: a revision rejected before anything was applied is retried on the same backoff; a rolled-back one still waits for a new etag
    */
-  function unconfirmedRetryReason(bad) {
-    if (bad.reason !== 'probation_unconfirmed') return null
-    if (bad.client_version !== clientVersion) return 'client_version_changed'
+  function retryReason(bad) {
+    if (bad.reason === 'probation_expired') return null
+    if (bad.reason === 'probation_unconfirmed' && bad.client_version !== clientVersion) return 'client_version_changed'
     const recordedAt = Date.parse(bad.recorded_at)
-    if (!Number.isFinite(recordedAt) || now() - recordedAt >= UNCONFIRMED_RETRY_BACKOFF_MS) return 'backoff_elapsed'
+    if (!Number.isFinite(recordedAt) || now() - recordedAt >= RETRY_BACKOFF_MS) return 'backoff_elapsed'
     return null
   }
 
