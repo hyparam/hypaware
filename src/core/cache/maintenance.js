@@ -156,6 +156,17 @@ const RESETTLE_SCAN_COOLDOWN_MS = 6 * 60 * 60 * 1000
 const MAX_INPLACE_COMPACT_ROUNDS = 8
 
 /**
+ * The share of a source table's records that position or equality deletes
+ * may hide before maintenance rewrites the whole generation to drop them.
+ * Deletes never change the data-file count, so neither the growth gate nor
+ * the file heuristics ever see them, and the in-place merge only picks
+ * fragmented files. Retention and delete-and-append writers then pile up
+ * deletes that every read decodes: measured on a live github_events table,
+ * 1.83M deletes over 1.84M records made queries 5x slower until a rewrite.
+ */
+const DELETE_BACKLOG_RATIO = 0.25
+
+/**
  * How many rounds THIS config may spend on one partition.
  *
  * Every round commits a snapshot, and snapshot retention is the
@@ -534,6 +545,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     ? liveStats ? liveStats.firstSchemaColumns : await loadFirstSchemaColumns(liveDir)
     : undefined
   const backfillDue = Boolean(columnBackfill && columnBackfillDue(columnBackfill, firstSchemaColumns))
+  const deleteBacklogDue = Boolean(liveStats && deleteBacklogExceeded(liveStats))
 
   if (!opts.compactOnly) {
     const expired = await expireSnapshots(liveDir, cfg, opts)
@@ -569,7 +581,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // A due re-partition outranks the baseline gate and the recorded
     // verdict: both say "a rewrite would reproduce this layout", which is
     // exactly what the migration exists to change.
-    const compactionDue = opts.force || purgeRewrite || repartitionDue || backfillDue ||
+    const compactionDue = opts.force || purgeRewrite || repartitionDue || backfillDue || deleteBacklogDue ||
       ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg, liveStats, layout.kind))
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
@@ -632,7 +644,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       // the sorted layout every night. An explicit --force still rewrites.
       // A due re-partition also outranks the recognition: a foreign sorted
       // replace under the OLD spec is still on the old spec.
-      if (!opts.force && !purgeRewrite && !repartitionDue && !backfillDue && foreignSortedReplace(tableInfo, cursor)) {
+      if (!opts.force && !purgeRewrite && !repartitionDue && !backfillDue && !deleteBacklogDue && foreignSortedReplace(tableInfo, cursor)) {
         // The counter proves a rebaseline happened at all, but it carries
         // only the dataset; tagging the enclosing maintenance.partition span
         // names the partition, so a trace query finds which day re-baselined
@@ -720,7 +732,9 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // A due backfill must not merge in place either: an in-place
             // commit keeps the table, and with it the first schema that makes
             // the partition due (LLP 0590#old-rows).
-            if (!opts.force && !purgeRewrite && !hasResettle && !repartitionDue && !backfillDue && lockedLayout.kind === 'source-table') {
+            // A delete backlog must not either: the merge picks only
+            // fragmented files, so the deleted rows' files would stay.
+            if (!opts.force && !purgeRewrite && !hasResettle && !repartitionDue && !backfillDue && !deleteBacklogDue && lockedLayout.kind === 'source-table') {
               const inPlace = await compactLiveFilesInPlace(r.path, lockedLiveDir, lockedCursor, cfg, settle)
               if (inPlace !== 'settle-required') return inPlace
             }
@@ -1082,6 +1096,19 @@ async function expireSnapshots(tableDir, cfg, opts) {
 }
 
 /**
+ * Do deletes hide at least {@link DELETE_BACKLOG_RATIO} of the table's
+ * records? Read from the snapshot summary already loaded, so it costs no
+ * extra I/O. A summary without the counters is never due.
+ *
+ * @param {{ records: number | null, deletedRows: number | null }} stats
+ * @returns {boolean}
+ */
+function deleteBacklogExceeded({ records, deletedRows }) {
+  if (!records || !deletedRows) return false
+  return deletedRows >= records * DELETE_BACKLOG_RATIO
+}
+
+/**
  * Is this generation due for routine compaction?
  *
  * The metadata-size trigger asks a different question from the two data
@@ -1137,7 +1164,7 @@ function needsCompaction(tableDir, cfg, liveStats, layoutKind) {
  * missing outright.
  *
  * @param {string} tableDir
- * @returns {Promise<{ dataFiles: number | null, dataBytes: number | null, partitionSpec: PartitionSpec | undefined, snapshotId: string, firstSchemaColumns: Set<string> | undefined } | null>}
+ * @returns {Promise<{ dataFiles: number | null, dataBytes: number | null, records: number | null, deletedRows: number | null, partitionSpec: PartitionSpec | undefined, snapshotId: string, firstSchemaColumns: Set<string> | undefined } | null>}
  */
 async function liveTableStats(tableDir) {
   if (!tableExists(tableDir)) return null
@@ -1151,9 +1178,13 @@ async function liveTableStats(tableDir) {
     const dataFiles = Number(summary?.['total-data-files'])
     const dataBytes = Number(summary?.['total-files-size'])
     const totals = Number.isFinite(dataFiles) && Number.isFinite(dataBytes)
+    const records = Number(summary?.['total-records'])
+    const deletedRows = Number(summary?.['total-position-deletes'] ?? 0) + Number(summary?.['total-equality-deletes'] ?? 0)
     return {
       dataFiles: totals ? dataFiles : null,
       dataBytes: totals ? dataBytes : null,
+      records: Number.isFinite(records) ? records : null,
+      deletedRows: Number.isFinite(deletedRows) ? deletedRows : null,
       // The spec rides along because the metadata is already in hand: the
       // re-partition dueness check (LLP 0311) runs every tick and must not
       // cost a second metadata load.
