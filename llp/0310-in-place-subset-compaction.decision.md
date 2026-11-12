@@ -23,6 +23,8 @@ as unreadable when it resolves anywhere else)
 **Extended-by:** LLP 0417#cache-reclamation (explicit session purges force a
 fresh generation so the retired history can be reclaimed after its grace).
 
+**Extended-by:** [LLP 0599](./0599-delete-backlog-rewrites-a-source-table.decision.md) (a delete backlog of a quarter of the records takes the generation-swap rewrite, not the in-place merge, which would keep the files the deletes point into)
+
 > Routine compaction dueness on a source-table generation is served by an
 > in-place subset rewrite: icebird's files-scoped `icebergRewrite` merges only
 > the fragmented partition tuples, committed as a `replace` snapshot into the
