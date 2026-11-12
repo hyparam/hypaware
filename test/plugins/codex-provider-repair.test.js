@@ -68,7 +68,8 @@ test('one-time repair preserves history and metadata, backs up WAL rows, is idem
     const repaired = await fs.readFile(f.file, 'utf8')
     assert.equal(JSON.parse(repaired.split('\n')[0]).payload.model_provider, 'openai')
     assert.equal(repaired.slice(repaired.indexOf('\n') + 1), f.suffix)
-    assert.equal((await fs.stat(f.file)).mode & 0o777, 0o600)
+    // No POSIX mode bits on win32.
+    if (process.platform !== 'win32') assert.equal((await fs.stat(f.file)).mode & 0o777, 0o600)
     assert.deepEqual(f.rows(), f.before.map(row => row.id === f.id ? { ...row, model_provider: 'openai' } : row))
     assert.equal(await fs.readFile(path.join(f.home, 'config.toml'), 'utf8'), '# Synthetic config must stay unchanged\n')
     const manifest = JSON.parse(await fs.readFile(path.join(result.backup_path, 'manifest.json'), 'utf8'))
