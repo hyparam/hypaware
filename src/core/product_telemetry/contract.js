@@ -50,6 +50,7 @@ export const COMMANDS = Object.freeze([
   'client skills',
   'client skills install',
   'client status',
+  'codex repair',
   'codex-cloud connect',
   'codex-cloud disconnect',
   'codex-cloud status',

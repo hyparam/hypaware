@@ -70,10 +70,22 @@ the installed CLI or Desktop-bundled app server in a disposable home. It first
 reproduces the missing-provider error from a synthetic saved rollout, applies
 the real settings repair, then checks `thread/resume` retains the saved provider
 and message while `thread/start` retains the custom default. The child uses an
-allowlisted environment and file-only credential storage, without credentials
-or `turn/start` requests. This proves synthetic app-server resume; authenticated
-inference and the Desktop UI remain separate acceptance checks.
+allowlisted environment and file-only credential storage. A follow-up turn
+uses a synthetic local Responses endpoint and synthetic credentials. This
+proves app-server resume and continuation; real-provider inference and the
+Desktop UI remain separate acceptance checks.
 
 Work is a fixed number of linear passes over one config file and a single
 atomic write when needed. Repair does not scan session history, add a daemon
 cache, or grow with uptime.
+
+## Codex 0.166 provider equality {#provider-equality}
+
+Codex 0.166.0 requires both the saved provider and the requested provider to
+equal the active provider. The alias still repairs a missing-provider error,
+but cannot alone resume a chat while another provider is selected. The
+installed-binary check now verifies this guard and then tests a process-local
+`-c 'model_provider="hypaware"'` override. The saved message resumes and the
+on-disk custom default remains unchanged. LLP 0602 adds an explicit backed-up
+repair for native OpenAI configurations and tests it with both rollout and
+SQLite metadata. Its one-time upgrade migration defers until Codex is closed.

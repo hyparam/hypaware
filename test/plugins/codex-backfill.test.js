@@ -1590,6 +1590,8 @@ test('scheduled repair covers markerless 1.38 configs but skips gateway, manual 
     await fs.mkdir(path.dirname(configPath), { recursive: true })
     const original = 'model_provider = "custom"\n[model_providers.custom]\nname = "Private"\nbase_url = "https://example.invalid/v1"\nenv_key = "PRIVATE_KEY"\n'
     await fs.writeFile(configPath, original)
+    let repairs = 0
+    const repairSavedProviders = async () => { repairs++ }
     for (const scenario of [
       { config: { capture_mode: 'gateway' }, sweep: true, dryRun: false },
       { config: { capture_mode: 'transcript' }, sweep: false, dryRun: false },
@@ -1597,14 +1599,16 @@ test('scheduled repair covers markerless 1.38 configs but skips gateway, manual 
     ]) {
       const { ctx } = runContext()
       Object.assign(ctx, { sweep: scenario.sweep, dryRun: scenario.dryRun })
-      const provider = createCodexBackfillProvider({ homeDir: env.homeDir, config: scenario.config })
+      const provider = createCodexBackfillProvider({ homeDir: env.homeDir, config: scenario.config, repairSavedProviders })
       await collect(provider.run(ctx))
       assert.equal(await fs.readFile(configPath, 'utf8'), original)
+      assert.equal(repairs, 0, 'manual imports, dry runs and gateway capture never repair history')
     }
     const { ctx, entries } = runContext()
     ctx.sweep = true
-    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir, repairSavedProviders })
     await collect(provider.run(ctx))
+    assert.equal(repairs, 1, 'the daemon sweep reaches the one-time repair after route cleanup')
     const repaired = await fs.readFile(configPath, 'utf8')
     assert.ok(repaired.startsWith(original))
     assert.match(repaired, /\[model_providers.hypaware\]\nname = "OpenAI"/)

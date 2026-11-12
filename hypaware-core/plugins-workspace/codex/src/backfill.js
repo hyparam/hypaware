@@ -116,6 +116,7 @@ const MAX_READ_FAILURES = 256
  *   ignoredSessions?: Set<string>,
  *   config?: JsonObject,
  *   configPath?: string,
+ *   repairSavedProviders?: (log: PluginLogger, signal?: AbortSignal) => Promise<void>,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -192,6 +193,8 @@ export function createCodexBackfillProvider(opts) {
           if ('warning' in result && result.warning) ctx.log.warn('codex.capture.route_warning', {
             component: COMPONENT, operation: 'capture.migrate', warning: result.warning,
           })
+          // @ref LLP 0602#automatic: upgrade repair runs only on the daemon's scheduled transcript lane
+          await opts.repairSavedProviders?.(ctx.log, ctx.signal)
         } catch (err) {
           ctx.log.error('codex.capture.route_release_failed', {
             component: COMPONENT, operation: 'capture.migrate', status: 'failed',
