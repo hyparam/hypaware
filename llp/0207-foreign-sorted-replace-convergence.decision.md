@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-10
 **Related:** LLP 0199, LLP 0027
+**Extended-by:** [LLP 0599](./0599-delete-backlog-rewrites-a-source-table.decision.md) (a delete backlog of a quarter of the records outranks the recognition: the generation is rewritten, not re-baselined)
 
 > The compaction due-test recognizes a rewrite it did not make: when a
 > partition's current snapshot is a `replace` committed under the table's

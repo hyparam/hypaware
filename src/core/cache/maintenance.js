@@ -545,6 +545,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     ? liveStats ? liveStats.firstSchemaColumns : await loadFirstSchemaColumns(liveDir)
     : undefined
   const backfillDue = Boolean(columnBackfill && columnBackfillDue(columnBackfill, firstSchemaColumns))
+  // @ref LLP 0599#route [implements]: a delete backlog outranks the baseline gate, the in-place merge and the foreign sorted replace, none of which see deletes.
   const deleteBacklogDue = Boolean(liveStats && deleteBacklogExceeded(liveStats))
 
   if (!opts.compactOnly) {
