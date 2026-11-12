@@ -132,7 +132,9 @@ export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
  *   prunes to the k best rows (or files) does so BEFORE this filter, so
  *   withheld rows that sort first take the slots of visible ones. Where
  *   content is suppressed instead, the hint is kept unless it orders by a
- *   content column: pruning on the TRUE values would reveal their order.
+ *   content column (pruning on the TRUE values would reveal their order) or
+ *   the WHERE is kept from the source (pruning before that WHERE would drop
+ *   the rows it matches).
  * - when suppression can apply, the WHERE hint is also kept from the source
  *   (`appliedWhere: false`): a pushed-down predicate over a content column
  *   would match against the TRUE value and reveal, by a row's presence,
@@ -266,12 +268,13 @@ function prepareSuppressedScan(prepareScan, schema, contentColumns, report) {
       schema.fields.some(field => field.id === demand.field && contentColumns.includes(field.name)))
     const ordersByContent = request.topK?.orderBy.some(term =>
       schema.fields.some(field => field.id === term.field && contentColumns.includes(field.name)))
+    const filterWithheld = demandedContent && request.filter !== undefined
     const inner = prepareScan({
       ...request,
       filter: demandedContent ? undefined : request.filter,
       limit: undefined,
       offset: undefined,
-      topK: ordersByContent ? undefined : request.topK,
+      topK: ordersByContent || filterWithheld ? undefined : request.topK,
     })
     const suppressed = inner.schema.fields.map(field => contentColumns.includes(field.name))
     return {

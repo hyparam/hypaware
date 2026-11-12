@@ -593,3 +593,35 @@ test('a top-k hint over a suppressed content column cannot order rows by their t
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test('a top-k hint cannot prune ahead of a WHERE kept from the source for suppression', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-native-suppression-topk-where-'))
+  try {
+    // Content is demanded, so the WHERE stays residual. The rows it matches
+    // sit in the file whose bounds sort last: pruning to the best k files
+    // before that WHERE keeps only rows it then drops.
+    const all = [{ id: 1, kind: 'a', msg: 'p' }, { id: 2, kind: 'a', msg: 'q' }, { id: 3, kind: 'b', msg: 'r' }, { id: 4, kind: 'b', msg: 's' }]
+    for (const rows of [all.slice(0, 2), all.slice(2)]) {
+      await appendRowsToTable(root, [
+        { name: 'id', type: 'INT64', nullable: false },
+        { name: 'kind', type: 'STRING', nullable: false },
+        { name: 'msg', type: 'STRING', nullable: false },
+      ], rows)
+    }
+    const table = await dataSourceForTable(root)
+    assert.ok(table?.prepareScan)
+    const source = { ...table, scan() { throw new Error('suppression fell back to rows') } }
+    const extras = { localOnlyContentColumns: ['msg'] }
+    for (const sql of [
+      "SELECT id, msg FROM t WHERE kind = 'b' ORDER BY id LIMIT 2",
+      "SELECT id, msg FROM t WHERE msg IS NULL AND kind = 'b' ORDER BY id LIMIT 1 OFFSET 1",
+    ]) {
+      const native = await run({ source, extras, sql })
+      const legacy = await run({ rows: all, extras, sql })
+      assert.deepEqual(native.rows.map((row) => Number(row.id)), legacy.rows.map((row) => Number(row.id)), sql)
+      assert.ok(native.rows.length > 0, sql)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
