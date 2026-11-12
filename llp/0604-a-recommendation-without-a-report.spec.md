@@ -8,7 +8,7 @@
 **Related:** LLP 0414, LLP 0461
 
 > The server can now hold a recommendation that belongs to no report
-> (hypaware-server LLP 0702, provisional: a Draft in
+> (hypaware-server LLP 0705, a Draft in
 > hyparam/hypaware-server#1707). The report
 > commands read one wherever they read a recommendation today, and keep
 > reading the older answers that always named a report.

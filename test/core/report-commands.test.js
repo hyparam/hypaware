@@ -3170,7 +3170,7 @@ test('fix: the default and the picker share ascending client-id order', { timeou
 })
 
 // A recommendation published on its own, which a current server stores with
-// no report (hypaware-server LLP 0702, provisional).
+// no report (hypaware-server LLP 0705).
 const LONE = 'hyprec-qcyx22sjav'
 const LONE_ROW = { id: LONE, page: 'recommendation-no-python3', title: 'No python3 on the runner', standalone: true, publishedAt: '2026-11-12T09:00:00.000Z', url: `/v1/reports/_recommendations/${LONE}/page/` }
 const LONE_PAGE = '# No python3 on the runner\n\n**Every job installs it. Pin it in the image.**\n'

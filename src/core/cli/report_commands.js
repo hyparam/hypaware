@@ -542,7 +542,7 @@ export async function runReportPublish(argv, ctx) {
  * report around it. The server stores the page as a recommendation of its
  * own, mints the `hyprec-` id, and dedupes a same-day retry by content hash,
  * so the receipt is the id and the read that takes it. A server from before
- * hypaware-server LLP 0702 wraps the page in a report of kind
+ * hypaware-server LLP 0705 wraps the page in a report of kind
  * `recommendation` instead and answers with that report; both answers are
  * read. The page follows the same rules as a
  * `recommendation-<slug>.md` page inside a report: the first `# ` heading is
@@ -759,7 +759,7 @@ export async function runReportList(argv, ctx) {
       if (typeof c?.id !== 'string') continue
       const r = c.report
       // A standalone recommendation has no report, or (published before
-      // hypaware-server LLP 0702) one the server made as a wrapper for it, and
+      // hypaware-server LLP 0705) one the server made as a wrapper for it, and
       // naming that would send a reader to a report that is the same page;
       // the slot says what it is instead.
       const where = c.standalone === true || r?.kind === 'recommendation'
@@ -1302,7 +1302,7 @@ function recommendationLabel(page) {
  * @param {{ ctx: CommandRunContext, gate: { params: Record<string, unknown> }, resolved: { target: string, endpoint: string, identityBase: string | undefined }, cmd: string }} run
  * @param {string} id
  * A recommendation published on its own answers with no report (hypaware-server
- * LLP 0702): `report` is then null, and its page is read by the id.
+ * LLP 0705): `report` is then null, and its page is read by the id.
  *
  * @returns {Promise<{ recommendation: FixRecommendation, report: any } | number>}
  */
