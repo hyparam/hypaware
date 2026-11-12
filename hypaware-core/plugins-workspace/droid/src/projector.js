@@ -80,13 +80,16 @@ export function projectDroidUsage(session, settings, startedAt, observedAt) {
   /** @type {JsonObject} */
   const droid = { usage_observed_at: observedAt }
   if (typeof native.factoryCredits === 'number' && Number.isSafeInteger(native.factoryCredits) && native.factoryCredits >= 0) droid.factory_credits = native.factoryCredits
+  const messageId = droidUsageScope(session).message_id
+  // @ref LLP 0598#remote: each revision needs its own part_id, or central ingest's part_id dedup keeps only the first snapshot.
+  const revision = createHash('sha256').update(JSON.stringify([usage, droid])).digest('hex').slice(0, 16)
   return {
     provider: 'unknown', client_name: 'droid', conversation_source: 'droid',
     session_id: String(session.id), conversation_id: String(session.id), cwd: String(session.cwd),
     conversation_started_at: startedAt, parent_thread_id: stringValue(session.callingSessionId),
     messages: [{ role: 'system', provider_subtype: 'session_usage',
-      message_id: droidUsageScope(session).message_id, message_created_at: startedAt,
-      message_index: 0, previous_message_id: [], content: [{ type: 'status', status: 'session_usage' }],
+      message_id: messageId, message_created_at: startedAt,
+      message_index: 0, previous_message_id: [], content: [{ type: 'status', status: 'session_usage', part_id: `${messageId}#${revision}` }],
       attributes: { usage, droid } }],
   }
 }

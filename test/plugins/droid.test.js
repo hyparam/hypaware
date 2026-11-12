@@ -82,6 +82,11 @@ test('Droid accounting uses own cumulative counters and native parent identity, 
   assert.equal(attrs.droid.factory_credits, 50)
   assert.ok(!JSON.stringify(row).includes('private'))
   assert.equal(droidUsageScope(session).message_id, row.message_id)
+  // Central ingest drops a repeated part_id, so a new revision needs a new one; a repeat keeps it.
+  const partId = (/** @type {number} */ output) => aiGatewayRowsFromProjectedExchange(/** @type {any} */ (projectDroidUsage(session, { tokenUsage: { outputTokens: output } }, at, at)))[0].part_id
+  assert.notEqual(partId(10), partId(14))
+  assert.equal(partId(10), partId(10))
+  assert.ok(String(partId(10)).startsWith(row.message_id + '#'))
   const entries = fixture.filter(e => e.type === 'message')
   assert.equal(projectDroidEntries(session, entries, entries.map(e => e.seq))?.parent_thread_id, 'parent-session')
   assert.equal(projectDroidUsage(session, { tokenUsage: {} }, at, at), undefined)
