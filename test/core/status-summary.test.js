@@ -92,6 +92,19 @@ test('warning gaps show both ages and one primary repair without asserting lost 
   assert.doesNotMatch(text, /legacy gap|not being captured|No issues detected/)
 })
 
+test('unconfirmed capture is visible without claiming a capture outage', () => {
+  const text = render(report({
+    clients: [{ name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false }],
+    captureHealth: [{ client: 'codex', plugin: '@hypaware/codex', source: null, state: 'unknown',
+      lastEventAt: null, lastTranscriptActivityAt: null, attachedAt: null, listenerStartedAt: null, gapMs: 0 }],
+  }))
+  assert.match(text, /^HypAware · Needs attention\n/)
+  assert.match(text, /codex\s+Capture unconfirmed/)
+  assert.match(text, /codex: capture is unconfirmed; no captured row has been verified/)
+  assert.match(text, /hyp backfill codex --dry-run/)
+  assert.doesNotMatch(text, /No issues detected|\(degraded\)|not being captured/)
+})
+
 test('sharing holds and privacy exclusions remain visible in compact status', () => {
   const text = render(report({
     layered: managed,
