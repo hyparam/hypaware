@@ -83,6 +83,8 @@ and changes only its first metadata record; the remaining decoded bytes are
 preserved. Metadata updates leave every other native column untouched.
 
 A reported publication failure reverses changed files and provider cells.
+A reported failure before publication removes that attempt's backup
+instead, since nothing it protects was changed.
 After a crash, an incomplete receipt requires explicit restoration before
 another repair. `--restore <backup-path>` restores unchanged repaired files
 and the affected metadata cells. It refuses a rollout with newly appended

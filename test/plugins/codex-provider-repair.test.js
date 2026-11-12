@@ -119,6 +119,35 @@ test('repair refuses running clients and mismatched metadata before writing', as
   } finally { await f.cleanup() }
 })
 
+test('a failure before publication removes its backup copies, so retries do not accumulate them', async () => {
+  const f = await fixture()
+  try {
+    f.db.exec('BEGIN IMMEDIATE')
+    for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(repairCodexProviders(f.options), /locked/)
+    f.db.exec('ROLLBACK')
+    assert.equal(await fs.readFile(f.file, 'utf8'), f.original)
+    assert.deepEqual(f.rows(), f.before)
+    assert.deepEqual(await fs.readdir(path.join(f.home, 'hypaware-provider-repair')), [])
+    assert.equal((await fs.readdir(path.dirname(f.file))).length, 1)
+  } finally { await f.cleanup() }
+})
+
+test('rollouts without a session header are left alone instead of blocking repair', async () => {
+  const f = await fixture()
+  try {
+    const strays = {
+      'rollout-empty.jsonl': '',
+      'rollout-legacy.jsonl': '{"id":"legacy","timestamp":"2025-01-01T00:00:00Z"}\n',
+      'rollout-partial.jsonl': '{"type":"session_meta","payload":{"id":"cut',
+      'rollout-turn.jsonl': '{"type":"turn_context","payload":{}}\n',
+    }
+    for (const [name, content] of Object.entries(strays)) await fs.writeFile(path.join(path.dirname(f.file), name), content)
+    assert.equal((await repairCodexProviders(f.options)).repaired_threads, 1)
+    for (const [name, content] of Object.entries(strays)) assert.equal(await fs.readFile(path.join(path.dirname(f.file), name), 'utf8'), content)
+    assert.equal(f.rows().find(row => row.id === f.id)?.model_provider, 'openai')
+  } finally { await f.cleanup() }
+})
+
 test('archived compressed rollouts preserve decompressed history and restore original compressed bytes', async () => {
   if (typeof zlib.zstdCompressSync !== 'function') return
   const f = await fixture()

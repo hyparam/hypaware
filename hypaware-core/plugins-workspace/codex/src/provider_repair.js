@@ -142,6 +142,7 @@ export async function repairCodexProviders(options) {
   const staged = []
   let manifest
   let backupDir
+  let publishing = false
   try {
     await assertStopped()
     await refuseIncompleteRepair(path.join(home, BACKUP_ROOT))
@@ -186,6 +187,7 @@ export async function repairCodexProviders(options) {
     await fsyncDirectory(home)
     await assertStopped()
     manifest.status = 'applying'
+    publishing = true
     await saveManifest(backupDir, manifest)
     for (const [index, file] of savedFiles.entries()) {
       options.signal?.throwIfAborted()
@@ -215,7 +217,9 @@ export async function repairCodexProviders(options) {
       if (entry.db.isTransaction) entry.db.exec('ROLLBACK')
       if (entry.committed) reverseRows(entry.db, entry.rows)
     }
-    if (manifest && backupDir) {
+    // Nothing was published yet, so the full copies protect nothing.
+    if (!publishing && backupDir) await fs.rm(backupDir, { recursive: true, force: true })
+    else if (manifest && backupDir) {
       await restoreFiles(home, backupDir, manifest.files)
       manifest.status = 'rolled_back'
       await saveManifest(backupDir, manifest)
@@ -362,7 +366,7 @@ async function discoverRollouts(home, signal) {
       if (entry.isDirectory()) await walk(file)
       else if (entry.isFile() && /^rollout-.*\.jsonl(?:\.zst)?$/.test(entry.name)) {
         const meta = await readHeader(file, entry.name.endsWith('.zst'), signal)
-        if (meta.provider !== 'hypaware') continue
+        if (meta?.provider !== 'hypaware') continue
         if (affected.length >= MAX_AFFECTED) throw new Error('Too many affected rollouts for one repair')
         const stat = await fs.lstat(file)
         affected.push({ path: file, id: meta.id, compressed: entry.name.endsWith('.zst'), mode: stat.mode & 0o777, bytes: stat.size })
@@ -404,7 +408,7 @@ async function discoverDatabases(home, directory, files, signal) {
           const target = confinedRolloutPath(home, row.rollout_path)
           if (await fs.realpath(target) !== target) throw new Error('Symlinked Codex rollout is not supported')
           const header = await readHeader(target, target.endsWith('.zst'), signal)
-          if (header.id !== row.id || header.provider !== 'openai') throw new Error('A legacy Codex metadata row has no matching repairable rollout')
+          if (header?.id !== row.id || header.provider !== 'openai') throw new Error('A legacy Codex metadata row has no matching repairable rollout')
         }
       }
       databases.push({ path: file, rows })
@@ -426,6 +430,9 @@ function decoded(file, compressed, signal) {
   return source.pipe(decoder)
 }
 
+/**
+ * @returns {Promise<{ id: string, provider: unknown } | undefined>} undefined when the file has no complete session header
+ */
 async function readHeader(file, compressed, signal) {
   const stream = decoded(file, compressed, signal)
   let prefix = Buffer.alloc(0)
@@ -437,11 +444,9 @@ async function readHeader(file, compressed, signal) {
       if (newline < 0 || newline > HEADER_BYTES) throw new Error('Codex rollout header exceeds the repair budget or is incomplete')
       const line = prefix.subarray(0, newline).toString('utf8')
       const parsed = parseRolloutSessionMeta(line)
-      const row = JSON.parse(line)
-      if (!parsed?.threadId) throw new Error('Unsupported Codex rollout header')
-      return { id: parsed.threadId, provider: row.payload.model_provider }
+      if (!parsed?.threadId) return
+      return { id: parsed.threadId, provider: JSON.parse(line).payload.model_provider }
     }
-    throw new Error('Empty Codex rollout')
   } finally { stream.destroy() }
 }
 
@@ -533,7 +538,8 @@ async function saveManifest(directory, manifest) {
 }
 
 async function syncFile(file) {
-  const handle = await fs.open(file, 'r')
+  // Windows refuses FlushFileBuffers on a read-only handle (EPERM).
+  const handle = await fs.open(file, process.platform === 'win32' ? 'r+' : 'r')
   try { await handle.sync() } finally { await handle.close() }
 }
 
