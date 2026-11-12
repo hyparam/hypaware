@@ -15,6 +15,7 @@ import { createCodexExchangeProjector } from './exchange-projector.js'
 import { createRolloutCwdResolver } from './rollout-cwd.js'
 import { attach, detach, defaultConfigPath } from './settings.js'
 import { runCodexClassifyHook } from './classify_hook.js'
+import { createAutomaticCodexProviderRepair, runCodexRepair } from './provider_repair.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayRouteInput, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -182,6 +183,7 @@ export async function activate(ctx) {
       config: ctx.config,
       configPath: resolveConfigPath(ctx),
       localOnlyListPath: localOnlyList,
+      repairSavedProviders: createAutomaticCodexProviderRepair({ codexHome, stateDir: ctx.paths.stateDir, env: ctx.env, cwd: process.cwd() }),
     })
   )
 
@@ -316,6 +318,17 @@ export async function activate(ctx) {
         { component: 'plugin.codex' }
       )
     },
+  })
+
+  ctx.commands.registerGroup?.({ name: 'codex', summary: 'Maintain saved Codex chats' })
+  ctx.commands.register({
+    name: 'codex repair',
+    summary: 'Repair legacy HypAware provider identities in saved Codex chats, with local backups',
+    usage: 'hyp codex repair [--dry-run] [--json] [--restore <backup-path>] [--codex-bin <path>]',
+    help: 'Preview with --dry-run. Close Codex Desktop and all Codex CLI sessions before applying repair or restore.\n' +
+      'Repair requires the normal OpenAI configuration and the unchanged HypAware compatibility provider.\n' +
+      'Backups stay local under CODEX_HOME/hypaware-provider-repair. Use --restore with the printed backup path to undo.',
+    run: runCodexRepair,
   })
 
   // @ref LLP 0106 [implements]: Codex's degraded classification prompt. Codex
