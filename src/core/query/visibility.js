@@ -128,6 +128,13 @@ export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
  * - limit/offset hints are not forwarded (and `appliedLimitOffset` is
  *   reported false): the source would slice by physical position BEFORE this
  *   filter removes rows, under-returning visible rows.
+ * - the top-k hint is not forwarded where rows are withheld: a source that
+ *   prunes to the k best rows (or files) does so BEFORE this filter, so
+ *   withheld rows that sort first take the slots of visible ones. Where
+ *   content is suppressed instead, the hint is kept unless it orders by a
+ *   content column (pruning on the TRUE values would reveal their order) or
+ *   the WHERE is kept from the source (pruning before that WHERE would drop
+ *   the rows it matches).
  * - when suppression can apply, the WHERE hint is also kept from the source
  *   (`appliedWhere: false`): a pushed-down predicate over a content column
  *   would match against the TRUE value and reveal, by a row's presence,
@@ -259,7 +266,16 @@ function prepareSuppressedScan(prepareScan, schema, contentColumns, report) {
   return request => {
     const demandedContent = request.columns.some(demand =>
       schema.fields.some(field => field.id === demand.field && contentColumns.includes(field.name)))
-    const inner = prepareScan({ ...request, filter: demandedContent ? undefined : request.filter, limit: undefined, offset: undefined })
+    const ordersByContent = request.topK?.orderBy.some(term =>
+      schema.fields.some(field => field.id === term.field && contentColumns.includes(field.name)))
+    const filterWithheld = demandedContent && request.filter !== undefined
+    const inner = prepareScan({
+      ...request,
+      filter: demandedContent ? undefined : request.filter,
+      limit: undefined,
+      offset: undefined,
+      topK: ordersByContent || filterWithheld ? undefined : request.topK,
+    })
     const suppressed = inner.schema.fields.map(field => contentColumns.includes(field.name))
     return {
       schema: { fields: inner.schema.fields.map((field, index) => suppressed[index] ? { ...field, nullable: true } : field) },
@@ -302,7 +318,7 @@ function prepareVisibleScan(prepareScan, schema, { withheld, report }) {
     if (!columns.some((demand) => demand.field === cwdField.id)) {
       columns.push({ field: cwdField.id, phase: 0, purpose: 'filter', mode: 'required' })
     }
-    const inner = prepareScan({ ...request, columns, limit: undefined, offset: undefined })
+    const inner = prepareScan({ ...request, columns, limit: undefined, offset: undefined, topK: undefined })
     const requestedFields = request.columns.map((demand) => {
       const field = schema.fields.find((field) => field.id === demand.field)
       if (!field) throw new Error(`Visibility scan requested unknown field id ${demand.field}`)
