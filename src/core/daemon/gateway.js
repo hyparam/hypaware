@@ -124,9 +124,15 @@ export async function runGatewayDaemon(opts = {}) {
   let processingControls
   /** @type {NodeJS.Timeout | undefined} */
   let processingStopTimer
+  // The child `restartProcessing` asked to stop. Its exit is a requested
+  // restart, not a crash, so it must not reach the crash count or the log
+  // at error level.
+  /** @type {ChildProcess | undefined} */
+  let restartRequested
   let stopping = false
   let refreshing = false
   let restarts = 0
+  let spawns = 0
   /** @type {{ code: number | null, signal: string | null, at: string } | undefined} */
   let lastExit
   let failureStreak = 0
@@ -226,6 +232,7 @@ export async function runGatewayDaemon(opts = {}) {
     if (stopping) return
     sender.reset()
     const spawnedAt = Date.now()
+    const spawn = spawns++
     const next = fork(PROCESSOR_ENTRY, [], {
       env: { ...env, HYP_HOME: hypHome },
       serialization: 'advanced',
@@ -243,15 +250,19 @@ export async function runGatewayDaemon(opts = {}) {
       clearTimeout(processingStopTimer)
       processingStopTimer = undefined
       sender.reset()
-      if (stopping || code === 75) log.warn('processing.exited', { code, signal, gateway_pid: process.pid })
+      const requested = restartRequested === next
+      if (requested) restartRequested = undefined
+      if (stopping || code === 75 || requested) log.warn('processing.exited', { code, signal, gateway_pid: process.pid })
       if (stopping) return
       if (code === 75) { void stop(75); return }
-      // Anything else is a crash (an OOM aborts with SIGABRT). Logged as an
-      // error so `hyp status` counts it, and kept for `hyp daemon status`:
-      // the 1 s restart otherwise hides a crash loop entirely.
-      log.error('processing.exited', { code, signal, gateway_pid: process.pid, restarts: restarts + 1 })
-      lastExit = { code, signal, at: new Date().toISOString() }
-      restarts++
+      if (!requested) {
+        // Anything else is a crash (an OOM aborts with SIGABRT). Logged as an
+        // error so `hyp status` counts it, and kept for `hyp daemon status`:
+        // the 1 s restart otherwise hides a crash loop entirely.
+        log.error('processing.exited', { code, signal, gateway_pid: process.pid, restarts: restarts + 1 })
+        lastExit = { code, signal, at: new Date().toISOString() }
+        restarts++
+      }
       if (Date.now() - spawnedAt >= 60_000) failureStreak = 0
       const delayMs = Math.min(30_000, RESTART_DELAY_MS * 2 ** Math.min(failureStreak++, 5))
       log.info('processing.restart_scheduled', { delay_ms: delayMs, restarts })
@@ -262,7 +273,7 @@ export async function runGatewayDaemon(opts = {}) {
       const details = /** @type {{ host?: string, port?: number, recording_generation?: string } | undefined} */ (snapshot?.details)
       const host = details?.host
       const port = details?.port
-      next.send({ type: 'processing.start', recordingGeneration: details?.recording_generation, hypHome, configPath: opts.configPath, runtimeStateRoot: processingRoot, runId: `${runId}-processing-${restarts}`, tickIntervalMs: opts.tickIntervalMs, endpoint: host && port ? { host, port } : undefined }, error => {
+      next.send({ type: 'processing.start', recordingGeneration: details?.recording_generation, hypHome, configPath: opts.configPath, runtimeStateRoot: processingRoot, runId: `${runId}-processing-${spawn}`, tickIntervalMs: opts.tickIntervalMs, endpoint: host && port ? { host, port } : undefined }, error => {
         if (error) log.warn('processing.start_failed', { message: error.message })
       })
     }).catch(error => { log.warn('processing.start_failed', { message: String(error) }); next.kill() })
@@ -272,6 +283,7 @@ export async function runGatewayDaemon(opts = {}) {
   function restartProcessing() {
     if (stopping || processingStopTimer || !child) return
     const target = child
+    restartRequested = target
     log.info('processing.restart_requested', { processing_pid: target.pid })
     // This watcher lives in the gateway, so a blocked processing event loop
     // cannot prevent its own replacement. Always target this specific child.
