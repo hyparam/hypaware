@@ -52,7 +52,7 @@ export function openAuthHelper(codexHome, env, signal) {
     // launchd cannot see the ChatGPT app's bundled CLI through a login shell.
     // Keep an explicitly installed CLI ahead of the known app locations.
     helperEnv.PATH = [helperEnv.PATH,
-      path.join(env.HOME ?? homedir(), 'Applications/ChatGPT.app/Contents/Resources/codex-cli/bin'),
+      path.join(env.HOME || homedir(), 'Applications/ChatGPT.app/Contents/Resources/codex-cli/bin'),
       '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin',
     ].join(path.delimiter)
   }

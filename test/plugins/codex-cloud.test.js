@@ -34,7 +34,7 @@ async function temp(t) {
   return dir
 }
 
-test('a scheduled cloud sweep finds the ChatGPT bundled CLI with a launchd PATH', { skip: process.platform !== 'darwin' }, async t => {
+test('a scheduled cloud sweep finds the ChatGPT bundled CLI with a launchd PATH', { skip: process.platform === 'win32' }, async t => {
   const home = await temp(t)
   const nodeBin = path.join(home, 'node-bin')
   const bundleBin = path.join(home, 'Applications/ChatGPT.app/Contents/Resources/codex-cli/bin')
@@ -69,6 +69,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     import { createBackfillRegistry, createBackfillMaterializerRegistry } from ${JSON.stringify(import.meta.resolve('../../src/core/registry/backfills.js'))}
     import { createBackfillSweepDriver } from ${JSON.stringify(import.meta.resolve('../../src/core/daemon/backfill_sweep.js'))}
     import { withLogRecords } from ${JSON.stringify(import.meta.resolve('../helpers/log_records.js'))}
+    // CI has no macOS runner; the helper reads the platform on each launch.
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
     const stateDir = process.env.HOME
     const codexHome = path.join(stateDir, '.codex')
     const auth = await readCloudAuth(codexHome)
