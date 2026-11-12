@@ -5,7 +5,7 @@ import { withSpinner } from '../../../../src/core/cli/spinner.js'
 import { requireLinearRuntime, getLinearClient } from './runtime.js'
 import { loginLinear, logoutLinear } from './auth.js'
 import { runLinearCaptureTick } from './capture.js'
-import { NO_TEAMS_MESSAGE } from './config.js'
+import { DEFAULT_CLIENT_ID, NO_TEAMS_MESSAGE } from './config.js'
 
 /** @import { CommandRunContext } from '../../../../hypaware-core/plugins-workspace/linear/src/types.js' */
 
@@ -35,7 +35,7 @@ export async function runLinearLogin(argv, ctx) {
   try {
     if (rt.env[rt.config.token_env]?.trim()) ctx.stdout.write(`Environment override ${rt.config.token_env} remains the effective capture credential.\n`)
     const account = await loginLinear(rt.stateDir, {
-      clientId: rt.config.client_id || rt.env.LINEAR_CLIENT_ID || '', redirectUri: rt.config.redirect_uri, signal: abort.signal,
+      clientId: rt.config.client_id || rt.env.LINEAR_CLIENT_ID || DEFAULT_CLIENT_ID, redirectUri: rt.config.redirect_uri, signal: abort.signal,
       async onUrl(url) {
         ctx.stdout.write(`Authorize read-only Linear access in a browser on this machine:\n${url}\nWaiting for sign-in (Ctrl-C to cancel)...\n`)
         if (!argv.includes('--no-browser')) openBrowser(url)

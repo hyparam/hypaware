@@ -18,8 +18,7 @@ Keep your existing configuration and add this entry to `plugins[]`. Ensure
 {
   "name": "@hypaware/linear",
   "config": {
-    "teams": ["HYP"],
-    "client_id": "YOUR_PUBLIC_LINEAR_OAUTH_CLIENT_ID"
+    "teams": ["HYP"]
   }
 }
 ```
@@ -30,17 +29,14 @@ Restart a running daemon after adding the plugin or changing its config.
 
 ## Browser login
 
-Register a [Linear OAuth application](https://linear.app/developers/oauth-2-0-authentication)
-under Linear's API settings. Its redirect callback must exactly match:
+Run `hyp linear login` to authorize the shared **HypAware Local** OAuth app in
+your Linear workspace. No app registration or client ID configuration is
+required. Login uses S256 PKCE and requests only the `read` scope; no client
+secret is shipped. The app's registered callback is:
 
 ```text
 http://127.0.0.1:19264/callback
 ```
-
-Put the application's public client ID in `client_id`, or set
-`LINEAR_CLIENT_ID` when running login. HypAware currently requires this app
-registration; it does not ship a registered shared Linear client ID. No client
-secret is needed: login uses S256 PKCE and requests only the `read` scope.
 
 ```sh
 hyp linear login
@@ -50,8 +46,14 @@ hyp linear status
 The browser must run on the same machine as the CLI. `--no-browser` prints the
 authorization URL without opening it, and still waits for the local callback.
 The attempt expires after five minutes; Ctrl-C cancels it. If the default port
-is unavailable, configure `redirect_uri` with another explicit loopback port
-and register that exact URL in Linear.
+is unavailable, free that port or use a custom OAuth app with another registered
+loopback callback.
+
+To use your own [Linear OAuth application](https://linear.app/developers/oauth-2-0-authentication),
+put its public client ID in `client_id`, or set `LINEAR_CLIENT_ID` when running
+login. Explicit config takes precedence over the environment variable, followed
+by the shared HypAware app. Set `redirect_uri` only when your custom app uses a
+different callback, and register that exact URL in Linear.
 
 Tokens are saved privately in the plugin's state directory, outside config,
 with automatic refresh. A running daemon picks up login and logout on its next

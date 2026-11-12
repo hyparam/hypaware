@@ -37,10 +37,13 @@ S256 PKCE, random state, `read` scope and a fixed registered loopback callback.
 Bind only loopback, validate path, method, state and duplicate parameters, and
 bound the wait. Close the listener on completion, cancellation and failure.
 The printed URL is usable from a browser on the same machine; this is not a
-cross-machine device-code flow. No client secret is distributed. Until a
-HypAware OAuth application is registered, `client_id` or `LINEAR_CLIENT_ID`
-supplies its public id. The callback is configurable but must remain HTTP on
-127.0.0.1 or localhost with an explicit port and no query or fragment.
+cross-machine device-code flow. No client secret is distributed. Login defaults
+to the public HypAware Local OAuth application, client id
+`68c419c2c54fbbfe5e50a7e51172a6cf`, registered with the default callback.
+An explicit `client_id` takes precedence over `LINEAR_CLIENT_ID`, which takes
+precedence over the bundled public id. The callback is configurable for custom
+applications but must remain HTTP on 127.0.0.1 or localhost with an explicit port
+and no query or fragment.
 
 Follow GitHub's private 0700 directory / 0600 atomic credential file, selected
 pending/active/logged-out state, superseding login generations and mutexed
