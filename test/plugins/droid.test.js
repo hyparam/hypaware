@@ -7,7 +7,7 @@ import path from 'node:path'
 import http from 'node:http'
 import test from 'node:test'
 import { projectDroidEntries, projectDroidUsage, droidUsageScope, droidSessionHeader } from '../../hypaware-core/plugins-workspace/droid/src/projector.js'
-import { droidSessionsRoot, readDroidTranscript, MAX_LINE_BYTES, MAX_FILE_BYTES } from '../../hypaware-core/plugins-workspace/droid/src/transcript.js'
+import { droidSessionsRoot, readDroidTranscript, MAX_LINE_BYTES, MAX_FILE_BYTES, MAX_SETTINGS_BYTES } from '../../hypaware-core/plugins-workspace/droid/src/transcript.js'
 import { createDroidBackfillProvider } from '../../hypaware-core/plugins-workspace/droid/src/backfill.js'
 import { attachDroidHooks, droidHooksPath, DROID_EVENTS } from '../../hypaware-core/plugins-workspace/droid/src/attach.js'
 import { validateDroidConfig } from '../../hypaware-core/plugins-workspace/droid/src/config.js'
@@ -115,13 +115,27 @@ test('Droid reads usage after policy checks, revisits sidecar-only updates, and 
   assert.ok(windowed.every(item => !item.reconcile))
   await fs.writeFile(settingsFile, 'invalid JSON')
   assert.deepEqual(await collect(readDroidTranscript(file, { root, allowed: () => false })), [{ dropped: true }])
-  await assert.rejects(collect(readDroidTranscript(file, { root, allowed: () => true })))
+  // A bad sidecar costs only the usage row: messages and the cursor still land.
+  const assertUsageOnlyLost = (/** @type {any[]} */ items) => {
+    assert.ok(items.some(item => item.projection && !item.reconcile))
+    assert.ok(items.every(item => !item.reconcile))
+    assert.ok(items.some(item => item.usageUnavailable))
+    assert.equal(items.at(-1).cursor.usageFingerprint, undefined)
+  }
+  assertUsageOnlyLost(await collect(readDroidTranscript(file, { root, allowed: () => true })))
+  await fs.writeFile(settingsFile, 'x'.repeat(MAX_SETTINGS_BYTES + 1))
+  assertUsageOnlyLost(await collect(readDroidTranscript(file, { root, allowed: () => true })))
+  const swept = await collect(provider.run(ctx))
+  assert.ok(swept.some(item => item.type !== 'event'))
+  assert.ok(swept.every(item => !item.reconcile && item.event !== 'file_failed'))
+  // Usage retries on the next sweep rather than being marked done.
+  assert.ok((await collect(provider.run(ctx))).length > 0)
   if (process.platform !== 'win32') {
     await fs.unlink(settingsFile)
     const outside = path.join(home, 'unrelated.json')
     await fs.writeFile(outside, '{}')
     await fs.symlink(outside, settingsFile)
-    await assert.rejects(collect(readDroidTranscript(file, { root, allowed: () => true })), /symlink/)
+    assertUsageOnlyLost(await collect(readDroidTranscript(file, { root, allowed: () => true })))
   }
 })
 

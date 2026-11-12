@@ -169,33 +169,40 @@ export async function* readDroidTranscript(file, opts) {
     if (offset === stat.size && firstMessageAt &&
       !(opts.window?.sinceMs !== undefined && Date.parse(firstMessageAt) < opts.window.sinceMs) &&
       !(opts.window?.untilMs !== undefined && Date.parse(firstMessageAt) > opts.window.untilMs)) {
-      const before = await droidSettingsStat(realFile)
-      const unchanged = before && cursor?.header === header && cursor.inode === inode &&
-        cursor.firstMessageAt === firstMessageAt && cursor.usageFingerprint === fingerprint(before) && fingerprintSettled(before)
-      if (unchanged) usageFingerprint = cursor.usageFingerprint
-      else if (before) {
-        const where = droidUsageScope(session)
-        const release = opts.claimUsage?.(where) ?? (() => {})
-        try {
-          // Re-read under the scope guard. Keep no settings payload in cursors.
-          const settingsStat = await droidSettingsStat(realFile)
-          if (settingsStat) {
-            const settingsFd = await fs.open(realFile.replace(/\.jsonl$/, '.settings.json'), constants.O_RDONLY | constants.O_NOFOLLOW)
-            try {
-              const buffer = Buffer.alloc(Math.min(settingsStat.size + 1, MAX_SETTINGS_BYTES + 1))
-              const { bytesRead } = await settingsFd.read(buffer, 0, buffer.length, 0)
-              if (bytesRead > MAX_SETTINGS_BYTES || fingerprint(await settingsFd.stat()) !== fingerprint(settingsStat)) throw new Error('settings_changed_or_over_budget')
-              const settings = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'))
-              const usage = projectDroidUsage(session, settings, firstMessageAt, settingsStat.mtime.toISOString())
-              if (!opts.allowed(session)) {
-                yield { dropped: true }
-                return
-              }
-              if (usage) yield { projection: usage, reconcile: { where, key: 'part_id' } }
-              usageFingerprint = fingerprint(settingsStat)
-            } finally { await settingsFd.close() }
-          }
-        } finally { release() }
+      // A sidecar fault costs only the usage row: the transcript cursor still
+      // advances, and usage retries on the next read.
+      try {
+        const before = await droidSettingsStat(realFile)
+        const unchanged = before && cursor?.header === header && cursor.inode === inode &&
+          cursor.firstMessageAt === firstMessageAt && cursor.usageFingerprint === fingerprint(before) && fingerprintSettled(before)
+        if (unchanged) usageFingerprint = cursor.usageFingerprint
+        else if (before) {
+          const where = droidUsageScope(session)
+          const release = opts.claimUsage?.(where) ?? (() => {})
+          try {
+            // Re-read under the scope guard. Keep no settings payload in cursors.
+            const settingsStat = await droidSettingsStat(realFile)
+            if (settingsStat) {
+              const settingsFd = await fs.open(realFile.replace(/\.jsonl$/, '.settings.json'), constants.O_RDONLY | constants.O_NOFOLLOW)
+              try {
+                const buffer = Buffer.alloc(Math.min(settingsStat.size + 1, MAX_SETTINGS_BYTES + 1))
+                const { bytesRead } = await settingsFd.read(buffer, 0, buffer.length, 0)
+                if (bytesRead > MAX_SETTINGS_BYTES || fingerprint(await settingsFd.stat()) !== fingerprint(settingsStat)) throw new Error('settings_changed_or_over_budget')
+                const settings = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'))
+                const usage = projectDroidUsage(session, settings, firstMessageAt, settingsStat.mtime.toISOString())
+                if (!opts.allowed(session)) {
+                  yield { dropped: true }
+                  return
+                }
+                if (usage) yield { projection: usage, reconcile: { where, key: 'part_id' } }
+                usageFingerprint = fingerprint(settingsStat)
+              } finally { await settingsFd.close() }
+            }
+          } finally { release() }
+        }
+      } catch {
+        usageFingerprint = undefined
+        yield { usageUnavailable: true }
       }
     }
     yield { cursor: { offset, sequence, header, inode, fingerprint: currentFingerprint, firstMessageAt, usageFingerprint, boundary: await boundary(fd, offset) }, complete: offset === stat.size }

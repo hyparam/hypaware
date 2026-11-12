@@ -19,7 +19,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | `cursor` | Cursor editor and CLI conversations, including file contents and command output seen by its tools; explicitly connected Cloud VMs also record API text and supplied tool/edit observations |
 | `opencode` | OpenCode CLI and Desktop conversations from its managed plugin and history exports |
 | `pi` | Pi conversations from its managed extension and local session files |
-| `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory; no billed token usage or cost |
+| `droid` | Factory Droid local CLI transcripts, including prompts, responses, tool arguments and results, and working directory, plus each session's cumulative token counts and Factory credits read from its settings sidecar (no other settings); no per-message usage or dollar cost |
 | `grok` | Grok Build local sessions, including prompts, responses, reasoning summaries, tool arguments and results, and working directory |
 | `openclaw` | OpenClaw conversations from gateway traffic and local transcripts |
 | `hermes` | Hermes Agent conversations read from its local state database |

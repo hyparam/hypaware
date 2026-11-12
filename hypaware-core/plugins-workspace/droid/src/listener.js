@@ -103,6 +103,7 @@ export function createStartDroidSource(deps) {
               dropped = true
               cursors.delete(file)
             }
+            if (item.usageUnavailable) ctx.log.warn('droid.usage.unavailable', { component: 'plugin.droid', operation: 'usage.read', status: 'failed', error_kind: 'settings_unavailable' })
             if (item.projection) {
               if (item.reconcile) {
                 if (!ctx.storage.reconcileRows) throw new Error('Droid usage requires snapshot reconciliation')

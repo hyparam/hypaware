@@ -44,6 +44,7 @@ export function createDroidBackfillProvider(opts = {}) {
       let unchanged = 0
       let failed = 0
       let dropped = 0
+      let usageUnavailable = 0
       let deferred = false
       for (let i = 0; i < files.length; i++) {
         if (ctx.signal?.aborted) return
@@ -51,7 +52,8 @@ export function createDroidBackfillProvider(opts = {}) {
         nextFile = file
         try {
           const stat = await fs.lstat(file)
-          const settingsStat = await droidSettingsStat(file)
+          // An unreadable sidecar must not cost the transcript; usage retries.
+          const settingsStat = await droidSettingsStat(file).catch(() => undefined)
           const combined = fingerprint(stat) + ':' + (settingsStat ? fingerprint(settingsStat) : 'missing')
           if (!stat.isFile() || stat.size > MAX_FILE_BYTES) throw new Error('file_budget')
           // Do not use mtime for the time window: Droid can preserve file
@@ -70,14 +72,17 @@ export function createDroidBackfillProvider(opts = {}) {
           bytes += stat.size + (settingsStat?.size ?? 0)
           read++
           const failures = ctx.itemsFailed
+          let usageMissing = false
           for await (const item of readDroidTranscript(file, { root, window, signal: ctx.signal,
             claimUsage: where => ctx.dryRun ? () => {} : ctx.storage?.claimReconcileScope?.(AI_GATEWAY_MESSAGES_DATASET, where) ?? (() => {}),
             allowed: session => !sessionIgnoreLoadError(opts.ignoredSessions) && !opts.ignoredSessions?.has(String(session.id)) && resolver.resolve(String(session.cwd)).class !== 'ignore',
           })) {
             if (item.dropped) dropped++
+            if (item.usageUnavailable) usageMissing = true
             if (item.projection) yield { ...projectedExchangeItem(item.projection, { client_name: 'droid', source_path: file, native_id: item.projection.session_id }), ...(item.reconcile ? { reconcile: item.reconcile } : {}) }
-            if (item.complete && item.cursor && !ctx.dryRun && ctx.itemsFailed === failures && item.cursor.fingerprint === fingerprint(stat)) fingerprints.set(file, combined)
+            if (item.complete && item.cursor && !ctx.dryRun && !usageMissing && ctx.itemsFailed === failures && item.cursor.fingerprint === fingerprint(stat)) fingerprints.set(file, combined)
           }
+          if (usageMissing) usageUnavailable++
         } catch {
           failed++
           ctx.log.warn('droid.backfill.file_failed', { component: 'plugin.droid', operation: 'backfill.read', status: 'failed', error_kind: 'session_unavailable_or_over_budget' })
@@ -85,7 +90,7 @@ export function createDroidBackfillProvider(opts = {}) {
         }
       }
       if (deferred) yield { type: 'event', event: 'scan_deferred', attributes: { client_name: 'droid', reason: 'scan_byte_budget' } }
-      ctx.log.info('droid.backfill.scan', { component: 'plugin.droid', operation: 'backfill.scan', status: failed || deferred ? 'partial' : 'ok', files_read: read, files_unchanged: unchanged, files_failed: failed, policy_drops: dropped, scan_bytes_reserved: bytes, scan_deferred: deferred, fingerprint_count: fingerprints.size })
+      ctx.log.info('droid.backfill.scan', { component: 'plugin.droid', operation: 'backfill.scan', status: failed || deferred ? 'partial' : 'ok', files_read: read, files_unchanged: unchanged, files_failed: failed, policy_drops: dropped, usage_unavailable: usageUnavailable, scan_bytes_reserved: bytes, scan_deferred: deferred, fingerprint_count: fingerprints.size })
     },
   }
 }
