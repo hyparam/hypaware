@@ -127,6 +127,8 @@ export async function runGatewayDaemon(opts = {}) {
   let stopping = false
   let refreshing = false
   let restarts = 0
+  /** @type {{ code: number | null, signal: string | null, at: string } | undefined} */
+  let lastExit
   let failureStreak = 0
   let lastStatusShape = ''
   let lastStatusWriteMs = 0
@@ -202,7 +204,7 @@ export async function runGatewayDaemon(opts = {}) {
         .map(failed => [failed.name, failed]))
       status.failedPlugins = failedByName.size > 0 ? [...failedByName.values()] : undefined
       status.warnings = [...(matches ? processor?.warnings ?? [] : []), ...(!ready ? ['processing_unavailable: gateway forwarding remains available; recording and background work may be delayed or lost'] : [])]
-      status.processes = { gateway: { pid: process.pid, state: gateway ? 'healthy' : 'disabled' }, processing: { pid: child?.pid, state: ready ? 'healthy' : 'degraded', restarts } }
+      status.processes = { gateway: { pid: process.pid, state: gateway ? 'healthy' : 'disabled' }, processing: { pid: child?.pid, state: ready ? 'healthy' : 'degraded', restarts, ...(lastExit ? { lastExit } : {}) } }
       status.configPath = boot?.configPath ?? undefined
       // The aggregate is recomputed every tick so `snapshot()` and a child
       // transition stay immediately observable, but rewriting an unchanged file
@@ -241,9 +243,14 @@ export async function runGatewayDaemon(opts = {}) {
       clearTimeout(processingStopTimer)
       processingStopTimer = undefined
       sender.reset()
-      log.warn('processing.exited', { code, signal, gateway_pid: process.pid })
+      if (stopping || code === 75) log.warn('processing.exited', { code, signal, gateway_pid: process.pid })
       if (stopping) return
       if (code === 75) { void stop(75); return }
+      // Anything else is a crash (an OOM aborts with SIGABRT). Logged as an
+      // error so `hyp status` counts it, and kept for `hyp daemon status`:
+      // the 1 s restart otherwise hides a crash loop entirely.
+      log.error('processing.exited', { code, signal, gateway_pid: process.pid, restarts: restarts + 1 })
+      lastExit = { code, signal, at: new Date().toISOString() }
       restarts++
       if (Date.now() - spawnedAt >= 60_000) failureStreak = 0
       const delayMs = Math.min(30_000, RESTART_DELAY_MS * 2 ** Math.min(failureStreak++, 5))
