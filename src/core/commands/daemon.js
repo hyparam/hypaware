@@ -242,8 +242,16 @@ export async function runDaemonStatus(argv, ctx) {
   ctx.stdout.write(`  pid:        ${printableNumber(status.pid)}\n`)
   if (status.processes && typeof status.processes === 'object') {
     for (const role of ['gateway', 'processing']) {
-      const part = /** @type {Record<string, { pid?: number, state?: string }>} */ (status.processes)[role]
-      if (part && typeof part === 'object') ctx.stdout.write(`  ${role}: ${printable(part.state)} (pid=${printableNumber(part.pid)})\n`)
+      const part = /** @type {Record<string, { pid?: number, state?: string, restarts?: number, lastExit?: { code?: unknown, signal?: unknown, at?: unknown } }>} */ (status.processes)[role]
+      if (!part || typeof part !== 'object') continue
+      ctx.stdout.write(`  ${role}: ${printable(part.state)} (pid=${printableNumber(part.pid)})\n`)
+      // A crashed child restarts in about a second, so without these lines a
+      // crash loop looks exactly like a healthy daemon.
+      if (typeof part.restarts === 'number' && part.restarts > 0) {
+        const exit = part.lastExit && typeof part.lastExit === 'object' ? part.lastExit : undefined
+        const how = exit ? (exit.signal ? printable(exit.signal) : `code ${printableNumber(exit.code)}`) : undefined
+        ctx.stdout.write(`    crashes:  ${printableNumber(part.restarts)}${how ? `, last ${how} at ${printable(exit?.at)}` : ''}\n`)
+      }
     }
   }
   ctx.stdout.write(`  startedAt:  ${printable(status.startedAt)}\n`)

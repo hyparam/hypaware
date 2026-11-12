@@ -199,7 +199,14 @@ export interface DaemonStatus {
   /** Independent process health; absent on pre-split status files. */
   processes?: {
     gateway: { pid?: number; state: string }
-    processing: { pid?: number; state: string; restarts: number }
+    processing: {
+      pid?: number
+      state: string
+      /** Unexpected child exits since the gateway started. */
+      restarts: number
+      /** The most recent unexpected child exit. */
+      lastExit?: { code: number | null; signal: string | null; at: string }
+    }
   }
   state: DaemonState
   pid: number
