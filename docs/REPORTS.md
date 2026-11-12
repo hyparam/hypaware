@@ -95,11 +95,12 @@ the report for private content first. See the [report command reference](CLI_REF
 for bundles, downloads, and organization-wide deletion.
 
 To download a whole published report, open it in the dashboard and choose
-**Export** on the report toolbar, then **Markdown ZIP**. The ZIP holds the
+**Export** at the top of the report, then **Markdown ZIP**. The ZIP holds the
 report's Markdown pages and an `export.json` file with details such as the
 report's title, period, and recommendation ids. It does not include the
-recorded sessions behind the report, and its evidence links may still ask you
-to sign in.
+recorded sessions behind the report, and links in it to the evidence behind
+the report may ask you to sign in to HypAware Cloud. Some older reports,
+published as HTML rather than Markdown, cannot be exported.
 
 To see the recommendations your organization has not acted on yet:
 
