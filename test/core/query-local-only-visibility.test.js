@@ -531,3 +531,65 @@ test('native visibility composes with real Iceberg position deletes and multiple
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test('a top-k hint cannot prune visible rows behind withheld ones that sort first', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-native-visibility-topk-'))
+  try {
+    // One data file per append: the withheld rows fill the file whose bounds
+    // sort first, so a source pruning to the best k files before the filter
+    // runs keeps only rows the caller cannot see.
+    const files = [
+      [1, 2, 3, 4].map((id) => ({ id, cwd: '/w/lo', msg: `lo-${id}` })),
+      [5, 6, 7, 8].map((id) => ({ id, cwd: '/w/full', msg: `full-${id}` })),
+      [9, 10, 11, 12].map((id) => ({ id, cwd: '/w/full', msg: `full-${id}` })),
+    ]
+    for (const rows of files) {
+      await appendRowsToTable(root, [
+        { name: 'id', type: 'INT64', nullable: false },
+        { name: 'cwd', type: 'STRING', nullable: true },
+        { name: 'msg', type: 'STRING', nullable: true },
+      ], rows)
+    }
+    const table = await dataSourceForTable(root)
+    assert.ok(table?.prepareScan)
+    const source = { ...table, scan() { throw new Error('Iceberg visibility fell back to rows') } }
+    /** @param {string} sql */
+    const ids = async (sql) => (await run({ source, sql, callerCwd: '/w/full' })).rows.map((row) => Number(row.id))
+    assert.deepEqual(await ids('SELECT id FROM t ORDER BY id LIMIT 2'), [5, 6])
+    assert.deepEqual(await ids('SELECT id FROM t ORDER BY id LIMIT 2 OFFSET 3'), [8, 9])
+    assert.deepEqual(await ids('SELECT id, msg FROM t ORDER BY id LIMIT 6'), [5, 6, 7, 8, 9, 10])
+    // A caller that sees everything skips the wrapper and keeps the hint.
+    assert.deepEqual((await run({ source, sql: 'SELECT id FROM t ORDER BY id LIMIT 2', callerCwd: '/w/lo' })).rows.map((row) => Number(row.id)), [1, 2])
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a top-k hint over a suppressed content column cannot order rows by their true values', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-native-suppression-topk-'))
+  try {
+    // The file holding the content that sorts first is written second: a
+    // source pruning on the true values would return its rows, where the
+    // suppressed (all null) column leaves the engine the scan order.
+    for (const rows of [
+      [{ id: 1, msg: 'y' }, { id: 2, msg: 'z' }],
+      [{ id: 3, msg: 'a' }, { id: 4, msg: 'b' }],
+    ]) {
+      await appendRowsToTable(root, [
+        { name: 'id', type: 'INT64', nullable: false },
+        { name: 'msg', type: 'STRING', nullable: false },
+      ], rows)
+    }
+    const table = await dataSourceForTable(root)
+    assert.ok(table?.prepareScan)
+    const source = { ...table, scan() { throw new Error('suppression fell back to rows') } }
+    const extras = { localOnlyContentColumns: ['msg'] }
+    for (const sql of ['SELECT id FROM t ORDER BY msg LIMIT 2', 'SELECT id FROM t ORDER BY msg DESC LIMIT 1 OFFSET 1']) {
+      const native = await run({ source, extras, sql })
+      const legacy = await run({ rows: [{ id: 1, msg: 'y' }, { id: 2, msg: 'z' }, { id: 3, msg: 'a' }, { id: 4, msg: 'b' }], extras, sql })
+      assert.deepEqual(native.rows.map((row) => ({ id: Number(row.id) })), legacy.rows, sql)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
