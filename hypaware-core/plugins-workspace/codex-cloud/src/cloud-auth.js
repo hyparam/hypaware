@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { withNodeBinOnPath } from '../../../../src/core/update/self_update.js'
 
 /** Errors intentionally contain no child-process, server or credential text. */
@@ -46,9 +46,19 @@ export async function readCloudAuth(codexHome) {
  * @param {AbortSignal} signal
  */
 export function openAuthHelper(codexHome, env, signal) {
+  /** @type {NodeJS.ProcessEnv} */
+  const helperEnv = { ...withNodeBinOnPath(env), CODEX_HOME: codexHome }
+  if (process.platform === 'darwin') {
+    // launchd cannot see the ChatGPT app's bundled CLI through a login shell.
+    // Keep an explicitly installed CLI ahead of the known app locations.
+    helperEnv.PATH = [helperEnv.PATH,
+      path.join(env.HOME || homedir(), 'Applications/ChatGPT.app/Contents/Resources/codex-cli/bin'),
+      '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin',
+    ].join(path.delimiter)
+  }
   const child = spawn('codex', ['app-server', '--stdio'], {
     // Service managers omit npm's bin directory and the node needed by its shims.
-    cwd: tmpdir(), env: { ...withNodeBinOnPath(env), CODEX_HOME: codexHome }, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: tmpdir(), env: helperEnv, stdio: ['pipe', 'pipe', 'pipe'],
   })
   let sequence = 0
   let buffered = ''
