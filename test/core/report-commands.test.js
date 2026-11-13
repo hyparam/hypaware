@@ -1687,7 +1687,8 @@ test('fix: an allocated tty nobody answers at the report picker exits 2 with the
   assert.match(stdout.text(), /Which report\?/)
   assert.doesNotMatch(stdout.text(), /Which recommendation|Nothing started|Starting/)
   assert.equal(launches.length, 0)
-  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports'], 'no page is fetched')
+  // The two listings the picker is built from (LLP 0604#picker), and nothing after them.
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports', '/v1/reports/_recommendations'], 'no page is fetched')
 })
 
 test('fix: a report picked by key, then silence at the recommendation picker, exits 2: the first keypress lifts only its own picker', { timeout: 5000 }, async (t) => {
@@ -1703,7 +1704,8 @@ test('fix: a report picked by key, then silence at the recommendation picker, ex
   assertUnanswered(err.join(''))
   assert.match(stdout.text(), /Which recommendation should be fixed\?/)
   assert.equal(launches.length, 0)
-  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports'])
+  // The reports listing, then the ask for report-less recommendations (LLP 0604#picker).
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports', '/v1/reports/_recommendations'])
 })
 
 test('fix: a first keypress on each listing picker lifts its deadline, so a slow reader still picks', { timeout: 5000 }, async (t) => {
@@ -3165,4 +3167,131 @@ test('fix: the default and the picker share ascending client-id order', { timeou
   assert.equal(await runReportFix([REC], ctx, withMixedClients(idle.deps)), 0)
   assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
   assert.equal(idle.launches[0].launcher.client, MIXED_ORDER[0])
+})
+
+// A recommendation published on its own, which a current server stores with
+// no report (hypaware-server LLP 0705).
+const LONE = 'hyprec-qcyx22sjav'
+const LONE_ROW = { id: LONE, page: 'recommendation-no-python3', title: 'No python3 on the runner', standalone: true, publishedAt: '2026-11-12T09:00:00.000Z', url: `/v1/reports/_recommendations/${LONE}/page/` }
+const LONE_PAGE = '# No python3 on the runner\n\n**Every job installs it. Pin it in the image.**\n'
+
+/** @param {TestContext} t */
+function stubLoneServer(t) {
+  return stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === '/v1/reports') return { status: 200, json: { reports: [{ ...REPORT, recommendations: [{ id: REC, page: 'recommendation-batch-the-retries' }] }] } }
+    if (p === '/v1/reports/_recommendations') {
+      // An older server ignores `standalone` and answers every row, so the
+      // row a report carries is here too and must not be offered twice.
+      return { status: 200, json: { recommendations: [LONE_ROW, { id: REC, page: 'recommendation-batch-the-retries', standalone: false, report: REPORT }] } }
+    }
+    if (p === `/v1/reports/_recommendations/${LONE}`) return { status: 200, json: { recommendation: LONE_ROW } }
+    if (p === `/v1/reports/_recommendations/${LONE}/page/recommendation-no-python3.md`) return { status: 200, body: new TextEncoder().encode(LONE_PAGE) }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+}
+
+// @ref LLP 0604#no-report [tests]: the receipt names no report when the server answers none
+test('recommend prints standalone when the server answers no report', async (t) => {
+  const { file } = await tmpRecommendationFile()
+  stubServer(t, () => ({ status: 201, json: { recommendation: LONE_ROW, url: LONE_ROW.url } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportRecommend([file], ctx), 0)
+  assert.equal(out.join(''), `published ${LONE} (standalone)\n  view: hyp report get ${LONE}\n`)
+})
+
+test('recommend says already published, standalone, on a 200 with no report', async (t) => {
+  const { file } = await tmpRecommendationFile()
+  stubServer(t, () => ({ status: 200, json: { recommendation: LONE_ROW, url: LONE_ROW.url } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportRecommend([file], ctx), 0)
+  assert.equal(out.join(''), `already published as ${LONE} (standalone, same content) - nothing new uploaded\n  view: hyp report get ${LONE}\n`)
+})
+
+// @ref LLP 0604#no-report [tests]: the page is read under the id, at an address the CLI builds
+test('get <rec-id> reads a report-less recommendation from its own page address', async (t) => {
+  const { calls } = stubLoneServer(t)
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([LONE, '--org', 'acme'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    `/v1/reports/_recommendations/${LONE}`,
+    `/v1/reports/_recommendations/${LONE}/page/recommendation-no-python3.md`,
+  ])
+  assert.equal(calls[1].url.searchParams.get('org'), 'acme')
+  assert.ok(out.join('').startsWith(LONE_PAGE), 'the page comes first, unchanged')
+})
+
+test('get <rec-id> does not follow the url a report-less row carries', async (t) => {
+  const { calls } = stubServer(t, (method, url) => {
+    if (url.pathname === `/v1/reports/_recommendations/${LONE}`) return { status: 200, json: { recommendation: { ...LONE_ROW, url: 'https://elsewhere.example/steal' } } }
+    if (url.pathname === `/v1/reports/_recommendations/${LONE}/page/recommendation-no-python3.md`) return { status: 200, body: new TextEncoder().encode(LONE_PAGE) }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+  const { ctx } = ctxWith()
+  assert.equal(await runReportGet([LONE], ctx), 0)
+  assert.ok(calls.every((c) => c.url.host === 'hyp.internal'), 'every request went to the configured remote')
+})
+
+test('get <rec-id> still refuses an answer with no report that is not marked standalone', async (t) => {
+  stubServer(t, () => ({ status: 200, json: { recommendation: { id: LONE, page: 'recommendation-no-python3' } } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([LONE], ctx), 1)
+  assert.match(err.join(''), /answered without the recommendation's report/)
+})
+
+test('get <rec-id> on a report-less recommendation whose page is gone says so without a report to point at', async (t) => {
+  stubServer(t, (method, url) => url.pathname === `/v1/reports/_recommendations/${LONE}`
+    ? { status: 200, json: { recommendation: LONE_ROW } }
+    : { status: 404, json: { error: 'unknown_recommendation' } })
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([LONE], ctx), 1)
+  assert.match(err.join(''), new RegExp(`^hyp report get: '${LONE}' has no page to read`))
+})
+
+test('list --recommendations shows a report-less row with its own publish time', async (t) => {
+  stubServer(t, () => ({ status: 200, json: { recommendations: [LONE_ROW] } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--recommendations'], ctx), 0)
+  assert.equal(out.join(''), `  ${LONE}\t2026-11-12T09:00:00.000Z\tstandalone\tNo python3 on the runner\n`)
+})
+
+test('fix <id> on a report-less recommendation starts the client and says it was published on its own', async (t) => {
+  stubLoneServer(t)
+  const { ctx } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([LONE], ctx, deps), 0)
+  assert.equal(launches.length, 1)
+  assert.match(launches[0].prompt, new RegExp(`hyp report get ${LONE}`))
+  assert.match(launches[0].prompt, /one HypAware recommendation \(published on its own, in no report\): "No python3 on the runner"/)
+})
+
+// @ref LLP 0604#picker [tests]: report-less recommendations are one last group, and a row a report carries is not offered twice
+test('fix with no id offers report-less recommendations as a last group', async (t) => {
+  const { calls } = stubLoneServer(t)
+  const { ctx } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  let asked = 0
+  const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => asked++ === 0 ? spec.options.at(-1).value : spec.options[0].value })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.equal(calls[1].url.pathname, '/v1/reports/_recommendations')
+  assert.equal(calls[1].url.searchParams.get('standalone'), 'true')
+  assert.deepEqual(prompts[0].options, [
+    { value: '0', label: 'Weekly', summary: '2026-07-20  usage-review/2026-W29  1 recommendation' },
+    { value: '1', label: 'Standalone recommendations', summary: 'in no report  1 recommendation' },
+  ])
+  assert.deepEqual(prompts[1].options, [{ value: LONE, label: 'No python3 on the runner', summary: LONE }])
+  assert.equal(launches.length, 1)
+  assert.match(launches[0].prompt, new RegExp(`hyp report get ${LONE}`))
+})
+
+test('fix with a --kind filter does not ask for report-less recommendations', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+  assert.equal(await runReportFix(['--kind', 'usage-review'], ctx, deps), 0)
+  assert.ok(!calls.some((c) => c.url.pathname === '/v1/reports/_recommendations'))
+  assert.equal(prompts[0].options.length, 1)
 })

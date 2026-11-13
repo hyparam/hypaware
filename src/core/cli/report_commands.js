@@ -539,10 +539,12 @@ export async function runReportPublish(argv, ctx) {
 
 /**
  * `hyp report recommend <file.md>`: publish one recommendation page with no
- * report around it. The server wraps the page in a report of kind
- * `recommendation` whose period is the publish date, mints the `hyprec-` id,
- * and dedupes by content hash exactly as `publish` does, so the receipt is
- * the id and the read that takes it. The page follows the same rules as a
+ * report around it. The server stores the page as a recommendation of its
+ * own, mints the `hyprec-` id, and dedupes a same-day retry by content hash,
+ * so the receipt is the id and the read that takes it. A server from before
+ * hypaware-server LLP 0705 wraps the page in a report of kind
+ * `recommendation` instead and answers with that report; both answers are
+ * read. The page follows the same rules as a
  * `recommendation-<slug>.md` page inside a report: the first `# ` heading is
  * the title (`--title` overrides it) and the slug derives from that.
  *
@@ -631,7 +633,12 @@ export async function runReportRecommend(argv, ctx) {
   // escaped and the hint keeps the `<id>` placeholder.
   const id = typeof rec.id === 'string' && RECOMMENDATION_ID_RE.test(rec.id) ? rec.id : undefined
   const shown = id ?? (rec.id === undefined || rec.id === null ? '?' : esc(rec.id))
-  const where = `${esc(record.kind ?? 'recommendation')}/${esc(record.period ?? '?')}/${esc(record.id ?? '?')}`
+  // A current server answers no report, because it made none; an older one
+  // names the report it wrapped the page in.
+  // @ref LLP 0604#no-report [implements]: the receipt names a report only when the server answered one
+  const where = parsed?.report === undefined || parsed?.report === null
+    ? 'standalone'
+    : `${esc(record.kind ?? 'recommendation')}/${esc(record.period ?? '?')}/${esc(record.id ?? '?')}`
   if (response.status === 200) {
     ctx.stdout.write(`already published as ${shown} (${where}, same content) - nothing new uploaded\n`)
   } else {
@@ -751,14 +758,17 @@ export async function runReportList(argv, ctx) {
     for (const c of rows) {
       if (typeof c?.id !== 'string') continue
       const r = c.report
-      // A standalone recommendation's report is the wrapper the server made
-      // for it, so naming it would send a reader to a report that is the
-      // same page; the slot says what it is instead.
+      // A standalone recommendation has no report, or (published before
+      // hypaware-server LLP 0705) one the server made as a wrapper for it, and
+      // naming that would send a reader to a report that is the same page;
+      // the slot says what it is instead.
       const where = c.standalone === true || r?.kind === 'recommendation'
         ? 'standalone'
         : `${esc(r?.kind ?? '?')}/${esc(r?.period ?? '?')}/${esc(r?.id ?? '?')}`
       const titleCell = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
-      ctx.stdout.write(`  ${esc(c.id)}${recommendationState(c)}\t${esc(r?.publishedAt ?? '')}\t${where}${titleCell}\n`)
+      // A recommendation with no report carries its own publish time.
+      const when = r?.publishedAt ?? (typeof c.publishedAt === 'string' ? c.publishedAt : '')
+      ctx.stdout.write(`  ${esc(c.id)}${recommendationState(c)}\t${esc(when)}\t${where}${titleCell}\n`)
       if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`      ${esc(c.summary)}\n`)
     }
     return 0
@@ -1043,7 +1053,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   // 1. Which recommendation: the id given, else one picked from the listing.
   /** @type {FixRecommendation} */
   let recommendation
-  /** @type {{ id: string, kind: string, period: string, title?: string }} */
+  /** @type {{ id: string, kind: string, period: string, title?: string } | null} */
   let report
   const id = gate.params.id !== undefined ? String(gate.params.id).trim() : ''
   if (id) {
@@ -1087,7 +1097,27 @@ export async function runReportFix(argv, ctx, deps = {}) {
     // Escape on the second list goes back to the first.
     /** @type {Array<{ report: any, rows: Array<{ value: string, label: string, summary: string }>, byId: Map<string, { recommendation: FixRecommendation, report: any }> }>} */
     const groups = []
-    for (const r of reports) {
+    // Recommendations published on their own are in no report, so the reports
+    // listing above cannot offer them. They are asked for separately and
+    // offered as one last group. A kind or period filter names reports, so it
+    // leaves them out; a server that cannot answer leaves the picker as it was.
+    // @ref LLP 0604#picker [implements]: report-less recommendations are one group after the reports
+    /** @type {any[]} */
+    let alone = []
+    if (gate.params.kind === undefined && gate.params.period === undefined) {
+      const aloneUrl = new URL(`${resolved.endpoint}/_recommendations`)
+      aloneUrl.searchParams.set('standalone', 'true')
+      if (gate.params.limit !== undefined) aloneUrl.searchParams.set('limit', String(gate.params.limit))
+      applyOrgParam(gate.params, aloneUrl)
+      const answered = await request((token) => fetch(aloneUrl, { headers: { authorization: `Bearer ${token}` } }))
+      if (answered.ok && answered.response.status === 200) {
+        const body = /** @type {any} */ (await answered.response.json().catch(() => null))
+        // Only the rows with no report: one a report carries is already
+        // offered under that report, and an older server ignores the filter.
+        alone = (Array.isArray(body?.recommendations) ? body.recommendations : []).filter((/** @type {any} */ c) => c?.standalone === true && (c.report === undefined || c.report === null))
+      }
+    }
+    for (const r of [...reports, ...(alone.length > 0 ? [{ recommendations: alone, alone: true }] : [])]) {
       const list = Array.isArray(r?.recommendations) ? r.recommendations : []
       /** @type {Array<{ value: string, label: string, summary: string }>} */
       const rows = []
@@ -1099,7 +1129,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
         // client is told to run, so a listed id that is not one would put
         // text of the server's choosing on a command line.
         if (typeof c?.id !== 'string' || !RECOMMENDATION_ID_RE.test(c.id) || typeof c?.page !== 'string') continue
-        byId.set(c.id, { recommendation: fixRecommendation(c.id, c), report: r })
+        byId.set(c.id, { recommendation: fixRecommendation(c.id, c), report: r.alone === true ? null : r })
         // Labelled by the page's own title when the server read one, else
         // by the slug read as words; described by the thesis's first
         // sentence, which names the problem, else by the id.
@@ -1117,9 +1147,10 @@ export async function runReportFix(argv, ctx, deps = {}) {
     }
     const reportOptions = groups.map((g, i) => {
       const r = g.report
+      const count = `${g.rows.length} recommendation${g.rows.length === 1 ? '' : 's'}`
+      if (r.alone === true) return { value: String(i), label: 'Standalone recommendations', summary: esc(['in no report', count].join('  ')) }
       const title = typeof r.title === 'string' && r.title ? r.title : `${r.kind}/${r.period}`
       const when = typeof r.publishedAt === 'string' ? r.publishedAt.slice(0, 10) : ''
-      const count = `${g.rows.length} recommendation${g.rows.length === 1 ? '' : 's'}`
       return { value: String(i), label: esc(title), summary: esc([when, `${r.kind}/${r.period}`, count].filter(Boolean).join('  ')) }
     })
     /** @type {{ recommendation: FixRecommendation, report: any } | undefined} */
@@ -1212,7 +1243,9 @@ export async function runReportFix(argv, ctx, deps = {}) {
 
   // 4. The launch, in the directory the command was typed in.
   const title = pageTitle(page.bytes.toString('utf8'), page.ext) ?? recommendation.title ?? recommendationLabel(recommendation.page)
-  const where = `${report.kind}/${report.period}${typeof report.title === 'string' && report.title ? `, "${report.title}"` : ''}`
+  const where = report === null
+    ? 'published on its own, in no report'
+    : `${report.kind}/${report.period}${typeof report.title === 'string' && report.title ? `, "${report.title}"` : ''}`
   // The target flags ride along so the client resolves the same org and
   // remote this run did; the credential reaches it through the inherited
   // environment, as every `hyp` call the client makes already relies on.
@@ -1224,7 +1257,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   const markCommand = ['hyp report mark', recommendation.id].join(' ')
   const markFlags = targetFlags(gate.params).map((f) => ` ${f}`).join('')
   const prompt =
-    `Run \`${readCommand}\` and read its output. It is one recommendation from a HypAware usage report (${where}): "${title}", ` +
+    `Run \`${readCommand}\` and read its output. It is one HypAware recommendation (${where}): "${title}", ` +
     'followed by the evidence it cites and the queries the report ran to reach it. ' +
     'Before implementing, validate the recommendation against current code and its cited evidence. ' +
     'Use remote queries when the evidence comes from the server, keeping the same remote target and organization scope. ' +
@@ -1268,6 +1301,9 @@ function recommendationLabel(page) {
  * @ref LLP 0414#id-is-the-handle [implements]: the server-minted id is the only argument; everything else is resolved from it
  * @param {{ ctx: CommandRunContext, gate: { params: Record<string, unknown> }, resolved: { target: string, endpoint: string, identityBase: string | undefined }, cmd: string }} run
  * @param {string} id
+ * A recommendation published on its own answers with no report (hypaware-server
+ * LLP 0705): `report` is then null, and its page is read by the id.
+ *
  * @returns {Promise<{ recommendation: FixRecommendation, report: any } | number>}
  */
 async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
@@ -1299,6 +1335,12 @@ async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
   // missing `kind` or `period` would fetch `.../undefined/undefined/...` and
   // read as a page the report no longer carries, not as an answer it owes.
   const answered = parsed?.report
+  // No report at all, on a row the server itself calls standalone, is a
+  // recommendation published on its own and not an incomplete answer.
+  // @ref LLP 0604#no-report [implements]: a report-less answer is accepted only with the server's own standalone flag
+  if (typeof parsed?.recommendation?.page === 'string' && (answered === undefined || answered === null) && parsed.recommendation.standalone === true) {
+    return { recommendation: fixRecommendation(id, parsed.recommendation), report: null }
+  }
   if (
     typeof parsed?.recommendation?.page !== 'string' ||
     typeof answered?.id !== 'string' ||
@@ -1321,11 +1363,18 @@ async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
  * on faith. Errors are written under `cmd` and returned as the exit code.
  *
  * @param {{ ctx: CommandRunContext, gate: { params: Record<string, unknown> }, resolved: { target: string, endpoint: string, identityBase: string | undefined }, cmd: string }} run
- * @param {{ recommendation: FixRecommendation, report: { id: string, kind: string, period: string } }} found
+ * A recommendation with no report is read under its own id. The address is
+ * built here from the id, never taken from the `url` the server answers, so
+ * a response cannot point the credential at another path.
+ *
+ * @ref LLP 0604#no-report [implements]: the page of a report-less recommendation is fetched at `_recommendations/<id>/page/`
+ * @param {{ recommendation: FixRecommendation, report: { id: string, kind: string, period: string } | null }} found
  * @returns {Promise<{ bytes: Buffer, ext: string } | number>}
  */
 async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommendation, report }) {
-  const base = `${resolved.endpoint}/${encodeURIComponent(report.kind)}/${encodeURIComponent(report.period)}/${encodeURIComponent(report.id)}/${encodeURIComponent(recommendation.page)}`
+  const base = report === null
+    ? `${resolved.endpoint}/_recommendations/${encodeURIComponent(recommendation.id)}/page/${encodeURIComponent(recommendation.page)}`
+    : `${resolved.endpoint}/${encodeURIComponent(report.kind)}/${encodeURIComponent(report.period)}/${encodeURIComponent(report.id)}/${encodeURIComponent(recommendation.page)}`
   for (const ext of PAGE_EXTS) {
     const url = new URL(`${base}.${ext}`)
     applyOrgParam(gate.params, url)
@@ -1352,6 +1401,10 @@ async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommend
   // `shellWord` because they are pasted as arguments. Escaping first puts the quoting
   // decision on the bytes the reader sees. Both are the identity on every
   // KIND_RE/PERIOD_RE value, so a conforming server's hint is unchanged.
+  if (report === null) {
+    ctx.stderr.write(`hyp ${cmd}: '${esc(recommendation.id)}' has no page to read - it may have been deleted; list what is published with 'hyp report list --recommendations'\n`)
+    return 1
+  }
   const listCommand = [`hyp report list --kind ${shellWord(esc(report.kind))} --period ${shellWord(esc(report.period))}`, ...targetFlags(gate.params)].join(' ')
   ctx.stderr.write(`hyp ${cmd}: the report no longer carries '${esc(recommendation.page)}' - list the pages it does carry with '${listCommand}'\n`)
   return 1
