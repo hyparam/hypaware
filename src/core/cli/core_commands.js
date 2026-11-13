@@ -1007,7 +1007,13 @@ function buildCoreCommands(registry) {
       name: 'report delete',
       summary: "Delete a published report from the org's reports plane (destructive)",
       usage: coreUsage('report delete'),
-      help: 'Org-wide and permanent: the report disappears for every member.\nPrompts on a TTY; pass --yes to delete non-interactively.',
+      help: [
+        'Org-wide and permanent: the report disappears for every member.',
+        'Prompts on a TTY; pass --yes to delete non-interactively.',
+        "A lone recommendation id ('hyprec-...') deletes a recommendation that was",
+        'published on its own. One that is a page of a report is not deleted; the',
+        'report is deleted whole with the <kind> <period> <id> form.',
+      ].join('\n'),
       run: runReportDelete,
     },
     {

@@ -1767,6 +1767,11 @@ export async function runReportMark(argv, ctx) {
  * any of the org's reports), so it follows `hyp purge`'s confirmation
  * posture: prompt on a TTY, require `--yes` otherwise.
  *
+ * `hyp report delete <rec-id>`: delete a recommendation published on its
+ * own, which a current server keeps with no report around it. The id is
+ * resolved first; one inside a report is refused, since a report is deleted
+ * whole.
+ *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -1776,8 +1781,11 @@ export async function runReportDelete(argv, ctx) {
   const gate = parseCoreCommandArgv('report delete', argv, ctx)
   if (!gate.ok) return gate.code
   const [kind, period, id] = positionals(argv, VALUE_FLAGS)
-  if (!kind || !period || !id) {
-    ctx.stderr.write('usage: hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]\n')
+  // As in `report get`, only a lone recommendation id is the record form;
+  // the full <kind> <period> <id> form stays a report delete.
+  const recId = kind !== undefined && period === undefined && RECOMMENDATION_ID_RE.test(kind) ? kind : undefined
+  if (!recId && (!kind || !period || !id)) {
+    ctx.stderr.write('usage: hyp report delete <kind> <period> <id> | <rec-id> [--yes] [--org <org>] [--remote <target>]\n')
     return 2
   }
   const resolved = resolveReportsTarget(gate.params, ctx, 'report delete')
@@ -1787,22 +1795,40 @@ export async function runReportDelete(argv, ctx) {
   }
   // As in `report list`: the gate accepts `--yes=true`, so reading argv
   // directly would refuse a confirmation the validator just accepted.
-  if (gate.params.yes !== true) {
-    const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
-    if (!stdin || !stdin.isTTY) {
-      ctx.stderr.write('error: refusing to delete without confirmation - pass --yes to delete non-interactively\n')
-      return 2
+  const confirm = gate.params.yes !== true
+  const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
+  if (confirm && (!stdin || !stdin.isTTY)) {
+    ctx.stderr.write('error: refusing to delete without confirmation - pass --yes to delete non-interactively\n')
+    return 2
+  }
+  let what = `report ${kind}/${period}/${id}`
+  let path = `${encodeURIComponent(String(kind))}/${encodeURIComponent(String(period))}/${encodeURIComponent(String(id))}`
+  if (recId) {
+    const found = await resolveRecommendation({ ctx, gate, resolved, cmd: 'report delete' }, recId)
+    if (typeof found === 'number') return found
+    // Inside a report, and on a server from before recommendation records
+    // (where a standalone one is a one-page report), the page goes with its
+    // report: the three-argument form names it, and nothing is deleted here.
+    // @ref LLP 0604#delete [implements]: only a recommendation with no report is deleted by its id
+    if (found.report !== null) {
+      const r = found.report
+      const command = [`hyp report delete ${shellWord(esc(r.kind))} ${shellWord(esc(r.period))} ${shellWord(esc(r.id))}`, ...targetFlags(gate.params)].join(' ')
+      ctx.stderr.write(`hyp report delete: '${recId}' is a page of report ${esc(r.kind)}/${esc(r.period)}/${esc(r.id)}, and a report is deleted whole - nothing was deleted; '${command}' deletes the report and every page in it\n`)
+      return 1
     }
-    const ok = await askYesNo(
-      ctx,
-      `Delete report ${kind}/${period}/${id} for the whole org? This cannot be undone. [y/N] `
-    )
+    const title = found.recommendation.title ? ` "${esc(found.recommendation.title)}"` : ''
+    what = `recommendation ${recId}${title}`
+    // Built from the id that was asked about, never from a `url` the answer carries.
+    path = `_recommendations/${encodeURIComponent(recId)}`
+  }
+  if (confirm) {
+    const ok = await askYesNo(ctx, `Delete ${what} for the whole org? This cannot be undone. [y/N] `)
     if (!ok) {
       ctx.stdout.write('delete cancelled\n')
       return 0
     }
   }
-  const url = new URL(`${resolved.endpoint}/${encodeURIComponent(kind)}/${encodeURIComponent(period)}/${encodeURIComponent(id)}`)
+  const url = new URL(`${resolved.endpoint}/${path}`)
   applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report delete' }, (token) =>
@@ -1817,7 +1843,7 @@ export async function runReportDelete(argv, ctx) {
     ctx.stderr.write(`hyp report delete: ${await describeErrorResponse(response)}\n`)
     return 1
   }
-  ctx.stdout.write(`deleted ${kind}/${period}/${id}\n`)
+  ctx.stdout.write(`deleted ${recId ?? `${kind}/${period}/${id}`}\n`)
   return 0
 }
 
