@@ -517,6 +517,9 @@ function renderSharingNotices(report, stdout, indent = '  ') {
   // Never-silent first-sync hold (LLP 0100 R9): only rendered while a hold is
   // actually live, so an ordinary (never-enrolled, or past-deadline) host's
   // text output is unchanged.
+  if (report.recordingPausedSince != null) {
+    stdout.write(`${indent}recording:       paused since ${new Date(report.recordingPausedSince).toISOString()} (hyp privacy resume)\n`)
+  }
   if (report.firstSyncHoldDeadline !== null) {
     stdout.write(
       `${indent}first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
@@ -738,6 +741,9 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot, inf
     // Pending first-sync export hold (LLP 0101 / LLP 0100 R9): null once the
     // hold has expired or was never written, exactly matching the sink
     // driver's own fail-open read of the marker.
+    recording_pause: report.recordingPausedSince != null
+      ? { since_ms: report.recordingPausedSince, since: new Date(report.recordingPausedSince).toISOString() }
+      : null,
     first_sync_hold: report.firstSyncHoldDeadline !== null
       ? {
         deadline: new Date(report.firstSyncHoldDeadline).toISOString(),

@@ -721,6 +721,11 @@ export interface HypAwareStatusReport {
    */
   firstSyncHoldDeadline: number | null
   /**
+   * When `hyp privacy pause` began, or null while recording. Zero when the pause
+   * state is unreadable, which the write path also treats as paused.
+   */
+  recordingPausedSince: number | null
+  /**
    * Client surfaces the running (or last-run) daemon's gateway produced rows
    * for, most recent first, read from `status.json` (LLP 0164). Empty when no
    * daemon has run for this state root, when the gateway recorded nothing, or

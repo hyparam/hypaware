@@ -27,6 +27,7 @@ import { syncDestinationName } from '../remote/builtin_remotes.js'
 import { centralLayerUnreadable, centralSinkOrigins } from '../remote/gateway_seed.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
+import { pauseRecording, resumeRecording } from '../usage-policy/recording_pause.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -246,6 +247,55 @@ export async function runPolicySet(argv, ctx) {
   } catch (err) {
     if (!(err instanceof LocalOnlyListUnreadableError)) throw err
     return reportUnreadableStore(ctx, err)
+  }
+}
+
+/**
+ * `hyp privacy pause`
+ *
+ * @ref LLP 0579#windows [implements]: starts a window; nothing timestamped inside it is recorded, then or later
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runPrivacyPause(argv, ctx) {
+  if (argv.length > 0) {
+    ctx.stderr.write(`error: unknown argument: ${argv[0]}\nusage: hyp privacy pause\n`)
+    return 2
+  }
+  const { stateDir } = readObservabilityEnv(ctx.env)
+  try {
+    const { since, changed } = await pauseRecording({ stateDir })
+    ctx.stdout.write(changed
+      ? 'Recording paused on this machine. Nothing from now until you resume will be recorded, and it can\'t be imported later.\n'
+      : `Recording has been paused since ${new Date(since).toISOString()}.\n`)
+    return 0
+  } catch (err) {
+    ctx.stderr.write(`hyp privacy pause: can't read the pause state: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
+}
+
+/**
+ * `hyp privacy resume`
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runPrivacyResume(argv, ctx) {
+  if (argv.length > 0) {
+    ctx.stderr.write(`error: unknown argument: ${argv[0]}\nusage: hyp privacy resume\n`)
+    return 2
+  }
+  const { stateDir } = readObservabilityEnv(ctx.env)
+  try {
+    const { changed } = await resumeRecording({ stateDir })
+    ctx.stdout.write(changed ? 'Recording resumed. The paused time stays unrecorded.\n' : 'Recording isn\'t paused.\n')
+    return 0
+  } catch (err) {
+    ctx.stderr.write(`hyp privacy resume: can't read the pause state: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
   }
 }
 
