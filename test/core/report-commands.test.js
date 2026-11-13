@@ -3295,3 +3295,85 @@ test('fix with a --kind filter does not ask for report-less recommendations', as
   assert.ok(!calls.some((c) => c.url.pathname === '/v1/reports/_recommendations'))
   assert.equal(prompts[0].options.length, 1)
 })
+
+/* ---------- delete <rec-id> ---------- */
+
+// @ref LLP 0604#delete [tests]: a lone recommendation id deletes a report-less recommendation
+test('delete <rec-id> resolves a standalone recommendation and deletes it at an address built from the id', async (t) => {
+  const { calls } = stubServer(t, (method, url) => {
+    if (method === 'GET' && url.pathname === `/v1/reports/_recommendations/${LONE}`) return { status: 200, json: { recommendation: { ...LONE_ROW, url: 'https://elsewhere.example/steal' } } }
+    if (method === 'DELETE' && url.pathname === `/v1/reports/_recommendations/${LONE}`) return { status: 200, json: { status: 'deleted' } }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportDelete([LONE, '--yes', '--org', 'acme'], ctx), 0)
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.url.pathname}`), [
+    `GET /v1/reports/_recommendations/${LONE}`,
+    `DELETE /v1/reports/_recommendations/${LONE}`,
+  ])
+  assert.ok(calls.every((c) => c.url.host === 'hyp.internal'), 'every request went to the configured remote')
+  assert.equal(calls[1].url.searchParams.get('org'), 'acme')
+  assert.equal(out.join(''), `deleted ${LONE}\n`)
+})
+
+test('delete <rec-id> refuses a recommendation inside a report and names the command that deletes the report', async (t) => {
+  const { calls } = stubServer(t, (method, url) => url.pathname === `/v1/reports/_recommendations/${REC}`
+    ? { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', standalone: false }, report: REPORT } }
+    : { status: 404, json: { error: 'not_found' } })
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportDelete([REC, '--yes', '--org', 'acme'], ctx), 1)
+  assert.ok(calls.every((c) => c.method === 'GET'), 'nothing was deleted')
+  assert.match(err.join(''), /a report is deleted whole - nothing was deleted/)
+  assert.match(err.join(''), /'hyp report delete usage-review 2026-W29 rpt-b --org acme'/)
+})
+
+test('delete <rec-id> against an older server, which answers a one-page report, deletes nothing', async (t) => {
+  const wrapper = { id: 'rpt-lone', kind: 'recommendation', period: '2026-11-12', title: 'No python3 on the runner' }
+  const { calls } = stubServer(t, (method, url) => url.pathname === `/v1/reports/_recommendations/${LONE}`
+    ? { status: 200, json: { recommendation: { id: LONE, page: 'recommendation-no-python3' }, report: wrapper } }
+    : { status: 404, json: { error: 'not_found' } })
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportDelete([LONE, '--yes'], ctx), 1)
+  assert.ok(calls.every((c) => c.method === 'GET'), 'nothing was deleted')
+  assert.match(err.join(''), /'hyp report delete recommendation 2026-11-12 rpt-lone'/)
+})
+
+test('delete <rec-id> deletes nothing when the answer has no report and no standalone mark', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendation: { id: LONE, page: 'recommendation-no-python3' } } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportDelete([LONE, '--yes'], ctx), 1)
+  assert.ok(calls.every((c) => c.method === 'GET'), 'nothing was deleted')
+  assert.match(err.join(''), /answered without the recommendation's report/)
+})
+
+test('delete <rec-id> with an unknown id deletes nothing', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'unknown_recommendation' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportDelete([LONE, '--yes'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.method), ['GET'])
+  assert.match(err.join(''), new RegExp(`no recommendation '${LONE}'`))
+})
+
+test('delete <rec-id> refuses without --yes off a TTY before asking the server anything', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendation: LONE_ROW } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportDelete([LONE], ctx), 2)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /pass --yes/)
+})
+
+test('delete with three arguments is still a report delete, even when the kind looks like a recommendation id', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { status: 'deleted' } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportDelete([LONE, 'p', 'rpt-1', '--yes'], ctx), 0)
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.url.pathname}`), [`DELETE /v1/reports/${LONE}/p/rpt-1`])
+  assert.equal(out.join(''), `deleted ${LONE}/p/rpt-1\n`)
+})
+
+test('delete with one argument that is not a recommendation id prints the usage', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { status: 'deleted' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportDelete(['rpt-1', '--yes'], ctx), 2)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /usage: hyp report delete <kind> <period> <id> \| <rec-id>/)
+})

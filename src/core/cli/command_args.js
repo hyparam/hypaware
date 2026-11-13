@@ -361,7 +361,7 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'report delete': {
-    usage: 'hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]',
+    usage: 'hyp report delete <kind> <period> <id> | <rec-id> [--yes] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {

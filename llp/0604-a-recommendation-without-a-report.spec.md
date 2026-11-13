@@ -52,7 +52,18 @@ harmless. `--kind` and `--period` name reports, so with either the group is
 not asked for. A server that cannot answer the request leaves the picker
 exactly as it was.
 
+## Deleting one {#delete}
+
+`hyp report delete <id>`, with a recommendation id as its only argument,
+deletes a report-less recommendation. It resolves the id as `get` does and
+sends `DELETE _recommendations/<id>`, an address built from the id it asked
+about. A recommendation that is a page of a report is not deleted: the command
+says a report is deleted whole and prints the `<kind> <period> <id>` form that
+deletes it. That covers an older server too, which answers a standalone
+recommendation as a one-page report. A server whose answer is incomplete or
+that does not know the id deletes nothing. The `<kind> <period> <id>` form is
+unchanged.
+
 ## Out of scope {#out-of-scope}
 
-Deleting a report-less recommendation from the CLI, and the MCP tool
-contracts, whose input shapes do not change.
+The MCP tool contracts, whose input shapes do not change.
