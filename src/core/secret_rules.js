@@ -10,25 +10,28 @@ export const CREDENTIAL_KEYS = /^(?:password|passwd|api[_-]?key|access[_-]?token
 
 // Small, maintained patterns with recognizable credential syntax. Avoid a
 // thousands-of-regex pass over every string in a growing transcript.
+// A minimum length is written `[x]{n}[x]*`, never `[x]{n,}`: the two match
+// the same text, but V8 saves a backtrack entry for each character `{n,}`
+// takes, and a run of several million overflows the stack (issue #2991).
 const PATTERNS = [
-  /\bsk-(?:ant-[A-Za-z0-9_-]{16,}|proj-[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]{32,})\b/g,
-  /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
+  /\bsk-(?:ant-[A-Za-z0-9_-]{16}[A-Za-z0-9_-]*|proj-[A-Za-z0-9_-]{16}[A-Za-z0-9_-]*|[A-Za-z0-9_-]{32}[A-Za-z0-9_-]*)\b/g,
+  /\b(?:gh[pousr]_[A-Za-z0-9]{20}[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]{20}[A-Za-z0-9_]*)\b/g,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
-  /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi,
+  /\bxox[baprs]-[A-Za-z0-9-]{10}[A-Za-z0-9-]*\b/g,
+  /\bBearer\s+[A-Za-z0-9._~+/-]{16}[A-Za-z0-9._~+/-]*=*/gi,
   // The user part, which may be empty, holds no `:`, so it has one possible
   // end. Letting it take `:` made the engine try every colon in a run as the
   // user/password split and rescan the rest each time, which is quadratic.
   /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s/@:]*:[^\s/@]+@[^\s"'<>]+/gi,
   /\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/g,
-  /\bsk_live_[A-Za-z0-9]{24,}\b/g,
+  /\bsk_live_[A-Za-z0-9]{24}[A-Za-z0-9]*\b/g,
   // A JWT is three base64url segments whose header encodes `{"`. The
   // signature segment is empty for an unsigned token. The lookbehind starts a
   // match only where a run starts; `\b` would retry at every `-eyJ` in a long
   // run and backtrack to its end each time, which is quadratic.
-  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g,
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8}[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{8}[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g,
 ]
-const ASSIGNMENT = /\b((?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key)\s*[=:]\s*["']?)[^\s"'<>;,}{]{4,}/gi
+const ASSIGNMENT = /\b((?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key)\s*[=:]\s*["']?)[^\s"'<>;,}{]{4}[^\s"'<>;,}{]*/gi
 
 /** @param {string} text */
 function privateKeys(text) {
