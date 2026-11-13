@@ -137,6 +137,19 @@ test('adversarial input stays linear: a database URL scheme before a long colon 
   assert.equal(redactSecretText('[ redis://:pw@h ]'), `[ ${MASK} ]`)
 })
 
+test('a token run of several million characters after a secret prefix neither throws nor changes what is masked', () => {
+  // `[x]{n,}` kept a backtrack entry per character and threw a RangeError
+  // (Maximum call stack size exceeded) from about 5.6 million (issue #2991).
+  const run = ALNUM.repeat(Math.ceil(6_000_000 / ALNUM.length)).slice(0, 6_000_000)
+  for (const prefix of ['sk-' + 'ant-', 'sk-' + 'proj-', 'sk-', 'gh' + 'p_', 'github_' + 'pat_', 'xo' + 'xb-', 'Bearer ', 'sk_' + 'live_']) {
+    assert.equal(redactSecretText(`before ${prefix}${run} after`), `before ${MASK} after`, prefix)
+  }
+  assert.equal(redactSecretText(`password=${run} after`), `password=${MASK} after`)
+  // Runs no rule matches are left alone: dashes give `\b` no word to end on,
+  // base64url JSON with no dots is not a JWT, and both are past the heuristic's length.
+  for (const text of ['x sk-' + 'ant-' + '-'.repeat(6_000_000), 'payload: eyJ' + run]) assert.equal(redactSecretText(text), text)
+})
+
 test('the heuristic false-positive bound: no realistic non-secret token in the corpus is masked', () => {
   const { rand, pick, string, bytes } = generator(1)
   const capitalized = () => { const word = pick(WORDS); return word[0].toUpperCase() + word.slice(1) }

@@ -205,6 +205,16 @@ test('a sensitive-file write past the traversal budget keeps only its path', asy
   assert.equal(row.content_text, MASK)
 })
 
+test('a row holding a token run of several million characters is masked and its batch is written whole', async t => {
+  // The run overflowed a secret rule, so the append rejected and every row in the batch was lost (issue #2991).
+  const storage = createQueryStorageService({ cacheRoot: await tempCache(t) })
+  const long = SECRETS.anthropic + repeat('aB3', 2_000_000)
+  await storage.appendRows(storage.cacheTablePath('messages', ['source=claude']), COLUMNS,
+    [rowWith('plain', 'nothing', 0), rowWith('long', long, 1), rowWith('slack', SECRETS.slack, 2)])
+  const spooled = await Array.fromAsync(storage.readSpooledRows('messages'))
+  assert.deepEqual(spooled.map(row => row.content_text), ['before nothing after', `before ${MASK} after`, `before ${MASK} after`])
+})
+
 test('the record redactor returns the same batch and rows when nothing is masked', () => {
   const redact = createRecordRedactor()
   const rows = [{ session_id: 's', content_text: 'nothing secret here', raw_frame: '{"text":"plain"}' }]
