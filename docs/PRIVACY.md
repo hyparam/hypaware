@@ -102,6 +102,14 @@ still identifies a proxy attach.
   `hyp remote login`, or `hyp join`): recorded rows are synced to
   HypAware Cloud, including conversation content. The controls below
   decide which rows that covers.
+- **Read by HypAware Cloud directly**: if an organization admin connects the
+  Hyperparam GitHub App, HypAware Cloud reads the organization's GitHub
+  activity itself, about once an hour, for every repository the GitHub owner
+  granted the app, private repositories included, or for a subset the admin
+  picks. It keeps the same fields as the `github` row above. No host sends
+  these rows, so the host controls on this page do not apply to them.
+  Disconnecting or removing the app in GitHub stops capture; rows already
+  captured stay until deleted.
 
 > **Note:** Local recording does not mean HypAware makes no network requests. Supervised
 > global installations check npm for [automatic updates](CLI.md#update-hypaware)
