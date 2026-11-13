@@ -180,15 +180,22 @@ test('complete action fetches reviewed evidence once and replaces the header aft
   assert.equal(await readFile(join(temp, 'pr-context-before.md'), 'utf8'), before)
   assert.equal(await readFile(join(temp, 'pr-context-after.md'), 'utf8'), body)
   assert.match(await readFile(env.GITHUB_STEP_SUMMARY, 'utf8'), /Generated section at the top/)
+  await main(fixture, { provenanceRows: rows, sourceUrl: 'https://github.com/hyparam/hypaware/pull/2994' })
+  assert.equal(evidenceCalls, 1)
+  assert.equal(modelCalls, 2)
+  assert.equal(writes, 2)
+  assert.match(body, /\[Action source\]/)
+  assert.equal(body.includes('[Action run]'), false)
+  assert.equal(originalBody(body), authored)
   hidePublicExcerpt = true
   await assert.rejects(() => main(fixture), /evidence_not_already_public/)
-  assert.equal(modelCalls, 1)
-  assert.equal(writes, 1)
+  assert.equal(modelCalls, 2)
+  assert.equal(writes, 2)
   hidePublicExcerpt = false
   for (const fault of ['author', 'pr', 'body']) {
     commentFault = fault
     await assert.rejects(() => main(fixture), /public_comment_identity_mismatch|public_comment_changed/)
   }
-  assert.equal(modelCalls, 1)
-  assert.equal(writes, 1)
+  assert.equal(modelCalls, 2)
+  assert.equal(writes, 2)
 })

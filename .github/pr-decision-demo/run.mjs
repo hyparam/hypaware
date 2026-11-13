@@ -84,7 +84,7 @@ export async function publicEvidence(manifest) {
   return evidence
 }
 
-export function renderSection(result, manifest, runUrl, evidenceUrl) {
+export function renderSection(result, manifest, runUrl, evidenceUrl, local = false) {
   if (!Array.isArray(result.claims) || result.claims.length < 2 || result.claims.length > 3) throw new Error('invalid_claim_count')
   const known = new Set(manifest.sources.map(source => source.id))
   const used = new Set()
@@ -106,7 +106,7 @@ export function renderSection(result, manifest, runUrl, evidenceUrl) {
   if (!result.claims.some(claim => claim.sources.some(id => manifest.sources.find(source => source.id === id)?.format === 'github_comment'))) throw new Error('missing_maintainer_citation')
   if (words(result.why.text) + result.claims.reduce((sum, claim) => sum + words(claim.text), 0) > 130) throw new Error('section_too_long')
   const sources = manifest.sources.filter(source => used.has(source.id)).map(source => `- [${source.id} · ${source.title}](${sourceLink(manifest, source)})`)
-  return [START, '### Decision context from HypAware', '', `**Why this PR exists.** ${why}`, '', ...claims, '', '**Sources**', '', `Public design notes and Kenny's PR comment. [Selected excerpts](${evidenceUrl}) · [Action run](${runUrl})`, '', ...sources, '', '---', '', '### Original PR description', END].join('\n')
+  return [START, '### Decision context from HypAware', '', `**Why this PR exists.** ${why}`, '', ...claims, '', '**Sources**', '', `Public design notes and Kenny's PR comment. [Selected excerpts](${evidenceUrl}) · [${local ? 'Action source' : 'Action run'}](${runUrl})`, '', ...sources, '', '---', '', '### Original PR description', END].join('\n')
 }
 
 let step = 'start'
@@ -123,12 +123,12 @@ async function jsonRequest(url, token, method = 'GET', body) {
   return JSON.parse(read.body)
 }
 
-export async function main(manifest) {
+export async function main(manifest, context = {}) {
   manifest ??= JSON.parse(await readFile(new URL('./evidence.json', import.meta.url), 'utf8'))
   if (process.env.GITHUB_REPOSITORY !== manifest.repository) throw new Error('wrong_repository')
   const api = `https://api.github.com/repos/${manifest.repository}/pulls/${manifest.pr_number}`
   const github = process.env.GITHUB_TOKEN
-  const runUrl = `https://github.com/${manifest.repository}/actions/runs/${process.env.GITHUB_RUN_ID}`
+  const runUrl = context.sourceUrl ?? `https://github.com/${manifest.repository}/actions/runs/${process.env.GITHUB_RUN_ID}`
   step = 'read_pr'
   const before = await jsonRequest(api, github)
   if (before.head.sha !== manifest.head_sha || hash(originalBody(before.body || '')) !== manifest.original_body_sha256) throw new Error('pr_changed')
@@ -136,15 +136,19 @@ export async function main(manifest) {
   if (files.length !== before.changed_files || files.length > 30) throw new Error('diff_not_complete')
   const diff = files.map(file => ({ filename: file.filename, patch: file.patch || '' }))
   if (JSON.stringify(diff).length > 200000) throw new Error('diff_too_large')
-  log('ok', { files: files.length })
+  log('ok', { files: files.length, execution: context.sourceUrl ? 'local' : 'github_actions' })
 
   step = 'fetch_reviewed_evidence'
-  const client = createHttpMcpClient({ url: 'https://api.hypaware.ai/v1/mcp', token: process.env.HYP_PR_DEMO_QUERY_TOKEN, signal, fetchImpl: (url, options) => fetch(url, { ...options, redirect: 'error' }) })
-  await client.initialize()
-  const sql = evidenceQuery(manifest)
-  const answer = await client.callTool('query_sql', { sql }, { maxBytes: 65536 })
-  if (answer.isError) throw new Error('hypaware_query_failed')
-  const data = answer.structuredContent ?? JSON.parse(answer.content.find(item => item.type === 'text').text)
+  let data
+  if (context.provenanceRows) {
+    data = { rows: context.provenanceRows }
+  } else {
+    const client = createHttpMcpClient({ url: 'https://api.hypaware.ai/v1/mcp', token: process.env.HYP_PR_DEMO_QUERY_TOKEN, signal, fetchImpl: (url, options) => fetch(url, { ...options, redirect: 'error' }) })
+    await client.initialize()
+    const answer = await client.callTool('query_sql', { sql: evidenceQuery(manifest) }, { maxBytes: 65536 })
+    if (answer.isError) throw new Error('hypaware_query_failed')
+    data = answer.structuredContent ?? JSON.parse(answer.content.find(item => item.type === 'text').text)
+  }
   if (data.truncated) throw new Error('evidence_truncated')
   const provenance = verifiedEvidence(manifest, data.rows ?? data)
   const evidence = await publicEvidence(manifest)
@@ -162,7 +166,7 @@ export async function main(manifest) {
   if (response.status !== 'completed') throw new Error('model_incomplete')
   const text = response.output.filter(item => item.type === 'message').flatMap(item => item.content).filter(item => item.type === 'output_text').map(item => item.text).join('')
   const evidenceUrl = `https://github.com/${manifest.repository}/blob/${process.env.GITHUB_SHA}/.github/pr-decision-demo/evidence.json`
-  const section = renderSection(JSON.parse(text), manifest, runUrl, evidenceUrl)
+  const section = renderSection(JSON.parse(text), manifest, runUrl, evidenceUrl, Boolean(context.sourceUrl))
   log('ok', { input_tokens: response.usage?.input_tokens, output_tokens: response.usage?.output_tokens, cached_input_tokens: response.usage?.input_tokens_details?.cached_tokens, reasoning_tokens: response.usage?.output_tokens_details?.reasoning_tokens, service_tier: response.service_tier })
 
   step = 'update_pr'
