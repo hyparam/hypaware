@@ -1,0 +1,83 @@
+{
+  "repository": "hyparam/hypaware",
+  "pr_number": 1013,
+  "head_sha": "2a7954f019d28f8e2c24d0221e41f1415f6188ea",
+  "original_body_sha256": "9f12e254ec776812bfafe59c8505821cb1184bac3a70c691c45beea58eb0634e",
+  "comment_id": 5415876485,
+  "comment_author": "platypii",
+  "comment_body_sha256": "fd9b5e1324c207f3c1027af6c0219a5cc01363e0ee2ba4aa1bc5ca6e5cfb898e",
+  "provenance": [
+    {
+      "event_id": "pr:hyparam/hypaware#1013",
+      "event_type": "pull_request",
+      "repo": "hyparam/hypaware",
+      "actor_login": "platypii",
+      "number": 1013,
+      "created_at": "2026-08-25T05:47:06.000Z"
+    },
+    {
+      "event_id": "comment:5415876485",
+      "event_type": "pull_request_comment",
+      "repo": "hyparam/hypaware",
+      "actor_login": "platypii",
+      "number": 1013,
+      "created_at": "2026-08-25T19:50:31.000Z"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S0",
+      "title": "Why automatic updates were needed",
+      "url": "https://github.com/hyparam/hypaware/blob/2a7954f019d28f8e2c24d0221e41f1415f6188ea/llp/0309-kernel-auto-update.decision.md",
+      "fetch_url": "https://raw.githubusercontent.com/hyparam/hypaware/2a7954f019d28f8e2c24d0221e41f1415f6188ea/llp/0309-kernel-auto-update.decision.md",
+      "format": "text",
+      "sha256": "851bfc5de67050e824f050baa5468b7809d86f03999fcc217bff82240c913525",
+      "reviewed_text": "> The HypAware daemon runs unattended on fleet machines; a notify-only update\n> model leaves most installs stale. This settles that the daemon updates the\n> HypAware npm package itself, automatically by default, by shelling out to the\n> same `npm install -g` the durable-bin installer already runs, and that\n> recovery from a bad release is \"publish a newer one\": the check runs before\n> the kernel boots, so even a crash-looping version keeps checking."
+    },
+    {
+      "id": "S1",
+      "title": "Kenny: honor the off switch",
+      "url": "https://github.com/hyparam/hypaware/pull/1013#issuecomment-5415876485",
+      "fetch_url": "https://api.github.com/repos/hyparam/hypaware/issues/comments/5415876485",
+      "format": "github_comment",
+      "sha256": "87653966d73e5e8d1b53a417061e730e5906b70ced45578732a8716b847e5b2c",
+      "reviewed_text": "**Blocker 1 (auto_update off switch):** implemented your third option, pushed as 5ec657f0. The pre-boot lane now falls back to a bare JSON read of the local hypaware-config.json for the one flag when the state cache is absent, so auto_update: false binds from the very first run. No config machinery is imported, so the lane stays as unbreakable as before, and the daemon-cached effective value still wins once a boot has written it, which preserves central-layer fleet control. LLP 0309#config-key is updated in the same commit to record the fallback. Tests and typecheck are green."
+    },
+    {
+      "id": "S2",
+      "title": "Why only global installs update",
+      "url": "https://github.com/hyparam/hypaware/blob/2a7954f019d28f8e2c24d0221e41f1415f6188ea/llp/0309-kernel-auto-update.decision.md#global-install-only",
+      "fetch_url": "https://raw.githubusercontent.com/hyparam/hypaware/2a7954f019d28f8e2c24d0221e41f1415f6188ea/llp/0309-kernel-auto-update.decision.md",
+      "format": "text",
+      "sha256": "f5a798ae57e6a8c7c3de8806136ee1a679f264fb7ee3a3bbddb1b7e517d61925",
+      "reviewed_text": "A daemon running from a dev checkout or an npx cache never auto-updates:\n`npm install -g` would create a second, skewed install beside the one\nactually running. The guard is on the running package root's provenance,\nand a skipped install does not probe the registry either: hermetic smokes\nboot the daemon from the repo checkout, and the guard keeping them off the\nnetwork is what keeps them deterministic. `hyp update` still probes from\nanywhere and explains why it cannot apply. Skipping is logged with its\nreason, and provenance is reported under `hyp status --json`."
+    },
+    {
+      "id": "S3",
+      "title": "Why check before startup",
+      "url": "https://github.com/hyparam/hypaware/blob/2a7954f019d28f8e2c24d0221e41f1415f6188ea/llp/0309-kernel-auto-update.decision.md#unstick-from-the-front",
+      "fetch_url": "https://raw.githubusercontent.com/hyparam/hypaware/2a7954f019d28f8e2c24d0221e41f1415f6188ea/llp/0309-kernel-auto-update.decision.md",
+      "format": "text",
+      "sha256": "9669fa326765a310bb4ef1373fb0febf3aa46079efa44812499bfa19b8728425",
+      "reviewed_text": "Last-known-good rollback (the\n[LLP 0025](./0025-remote-config-join-flow.spec.md#last-known-good-rollback)\npattern) was considered and rejected as too much machinery. The requirement\nis narrower: a machine stuck on a broken version must update to the fix when\none publishes. Placement achieves that:\n\n- The update check runs **first** in daemon startup, before the kernel boots,\n  in a minimal module that imports nothing else. A version that crashes\n  during kernel boot still reaches the check on every service-manager\n  relaunch, and jumps forward the moment a fix is published.\n- The check keeps a small state file: last-check time and last-seen version,\n  so a crash loop does not hammer the registry. The re-check interval is\n  daily normally, and one hour when the previous boot never reached healthy\n  (a boot-started marker that a healthy boot clears).\n- The residual risk is accepted: a release broken so early that the\n  entrypoint itself cannot run defeats this. Keeping the updater import-light\n  is the mitigation, not a rollback engine."
+    },
+    {
+      "id": "S4",
+      "title": "Why notifications were not enough",
+      "url": "https://github.com/hyparam/hypaware/blob/2a7954f019d28f8e2c24d0221e41f1415f6188ea/llp/0309-kernel-auto-update.decision.md#auto-by-default",
+      "fetch_url": "https://raw.githubusercontent.com/hyparam/hypaware/2a7954f019d28f8e2c24d0221e41f1415f6188ea/llp/0309-kernel-auto-update.decision.md",
+      "format": "text",
+      "sha256": "5e3b3863fda3804cac6e15dff03a1bd55029d2951208b3e0dd9b7edc53d9d3a6",
+      "reviewed_text": "The daemon applies updates on its own. A notify-only model was rejected:\nHypAware's steady state is an unattended daemon on a machine nobody is\noperating, so \"tell the user\" mostly tells no one. The off switch is the\n[`auto_update` config key](#config-key); the manual path is\n[`hyp update`](#cli-surface)."
+    },
+    {
+      "id": "S5",
+      "title": "Kenny: accept updates in place",
+      "url": "https://github.com/hyparam/hypaware/pull/1013#issuecomment-5415876485",
+      "fetch_url": "https://api.github.com/repos/hyparam/hypaware/issues/comments/5415876485",
+      "format": "github_comment",
+      "sha256": "c0fb8e832b2ea4aca6033bd7854860defde0a23d0777b18d090b5072889a684e",
+      "reviewed_text": "**Blocker 2 (installing over the live process):** accepted as-is. Node holds already-loaded modules in memory, round 1 fix 1 closed the known lazy-import window, and the apply lock bounds the exposure. Keeping the ordering LLP 0309#cadence settled; no new LLP needed."
+    }
+  ]
+}
