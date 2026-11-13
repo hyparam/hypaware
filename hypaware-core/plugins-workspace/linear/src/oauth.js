@@ -106,7 +106,7 @@ export async function browserLogin(opts) {
   signal.addEventListener('abort', abort, { once: true })
   try {
     await new Promise((resolve, fail) => {
-      server.once('error', () => fail(linearError('callback', 'cannot listen on the registered callback port; close the other login or change redirect_uri')))
+      server.once('error', () => fail(linearError('callback', 'cannot listen on the registered callback port; close the other login or free the port (another redirect_uri needs your own OAuth app)')))
       // localhost is a registered name, but the listener is strictly IPv4 loopback.
       server.listen(Number(redirect.port), '127.0.0.1', () => resolve(undefined))
     })

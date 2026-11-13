@@ -2,6 +2,8 @@
 
 /** @import { LinearConfig } from '../../../../hypaware-core/plugins-workspace/linear/src/types.js' */
 
+// @ref LLP 0592#authentication [implements]: the shared public app uses PKCE, so only its public client ID ships
+export const DEFAULT_CLIENT_ID = '68c419c2c54fbbfe5e50a7e51172a6cf'
 export const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:19264/callback'
 export const NO_TEAMS_MESSAGE = 'No Linear teams selected, so nothing is collected. Add team keys (like ENG) to `teams` in the @hypaware/linear plugin config.'
 const KEYS = new Set(['teams', 'poll_interval', 'token_env', 'client_id', 'redirect_uri'])

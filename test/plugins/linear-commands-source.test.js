@@ -7,10 +7,11 @@ import path from 'node:path'
 import test from 'node:test'
 import { setLinearRuntime } from '../../hypaware-core/plugins-workspace/linear/src/runtime.js'
 import { startLinearSource } from '../../hypaware-core/plugins-workspace/linear/src/source.js'
-import { validateLinearConfig } from '../../hypaware-core/plugins-workspace/linear/src/config.js'
+import { DEFAULT_CLIENT_ID, validateLinearConfig } from '../../hypaware-core/plugins-workspace/linear/src/config.js'
+import { readLinearAuth } from '../../hypaware-core/plugins-workspace/linear/src/auth.js'
 import { runLinearLogin, runLinearLogout, runLinearStatus, runLinearSync, runLinearBackfill } from '../../hypaware-core/plugins-workspace/linear/src/commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
-import { IDENTITY } from '../../hypaware-core/smoke/lib/linear_fixture.js'
+import { callbackUri, fakeLinearApi, IDENTITY } from '../../hypaware-core/smoke/lib/linear_fixture.js'
 
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-linear-source-'))
@@ -30,14 +31,11 @@ function fixture(t) {
     stdout: () => stdout, stderr: () => stderr }
 }
 
-test('auth/capture commands validate arguments and explain missing OAuth registration or team scope', async t => {
+test('auth/capture commands validate arguments and explain missing team scope', async t => {
   const f = fixture(t)
   for (const fn of [runLinearLogin, runLinearLogout, runLinearStatus, runLinearSync, runLinearBackfill]) {
     assert.equal(await fn(['--unknown'], f.ctx), 2)
   }
-  assert.deepEqual(fs.readdirSync(f.dir), [])
-  assert.equal(await runLinearLogin(['--no-browser'], f.ctx), 1)
-  assert.match(f.stderr(), /needs your own Linear OAuth app.*`client_id` in the @hypaware\/linear plugin config/)
   assert.deepEqual(fs.readdirSync(f.dir), [])
   f.rt.config.teams = []
   assert.equal(await runLinearSync([], f.ctx), 2)
@@ -48,6 +46,48 @@ test('auth/capture commands validate arguments and explain missing OAuth registr
   const status = await source.status?.()
   assert.equal(status?.state, 'stopped', 'hyp status prints a stopped source\'s message')
   assert.match(String(status?.message), /No Linear teams selected/)
+})
+
+test('login defaults to the shared HypAware app and preserves config then environment overrides', async t => {
+  const nativeFetch = globalThis.fetch
+  for (const { clientId, envId, expected } of [
+    { clientId: '', envId: '', expected: DEFAULT_CLIENT_ID },
+    { clientId: '', envId: 'env-app', expected: 'env-app' },
+    { clientId: 'config-app', envId: 'env-app', expected: 'config-app' },
+  ]) await t.test(expected, async t => {
+    const f = fixture(t)
+    const api = fakeLinearApi()
+    f.rt.config.client_id = clientId
+    f.rt.config.redirect_uri = await callbackUri()
+    f.rt.env.LINEAR_CLIENT_ID = envId
+    let tokenRequests = 0
+    t.mock.method(globalThis, 'fetch', async (input, init) => {
+      if (String(input).endsWith('/oauth/token')) {
+        tokenRequests++
+        const body = new URLSearchParams(String(init?.body))
+        assert.equal(body.get('client_id'), expected)
+        assert.equal(body.has('client_secret'), false)
+      }
+      return api.fetchImpl(input, init)
+    })
+    let authorizationUrl = ''
+    let callback = Promise.resolve()
+    const ctx = { ...f.ctx, stdout: { write(chunk) {
+      f.ctx.stdout.write(chunk)
+      const url = String(chunk).split('\n').find(line => line.startsWith('https://linear.app/oauth/authorize'))
+      if (url) {
+        authorizationUrl = url
+        callback = api.authorize(url, nativeFetch)
+        callback.catch(() => {})
+      }
+    } } }
+    assert.equal(await runLinearLogin(['--no-browser'], ctx), 0, f.stderr())
+    await callback
+    assert.equal(new URL(authorizationUrl).searchParams.get('client_id'), expected)
+    assert.equal(tokenRequests, 1)
+    assert.equal(readLinearAuth(f.dir)?.client_id, expected)
+    assert.match(f.stdout(), /Signed in to Linear workspace smoke/)
+  })
 })
 
 test('capture failures print the fixed message and next step, not the error kind', async t => {

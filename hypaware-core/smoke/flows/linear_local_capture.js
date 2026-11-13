@@ -13,6 +13,7 @@ import { GITHUB_EVENTS_COLUMNS, githubEventsTablePath } from '../../plugins-work
 import { requireLinearRuntime, setLinearRuntime } from '../../plugins-workspace/linear/src/runtime.js'
 import { createLinearClient } from '../../plugins-workspace/linear/src/client.js'
 import { runLinearLogin } from '../../plugins-workspace/linear/src/commands.js'
+import { DEFAULT_CLIENT_ID } from '../../plugins-workspace/linear/src/config.js'
 import { dispatchText, sqlCount, githubSessionRow, makeStep } from '../lib/github_fixture.js'
 import { callbackUri, fakeLinearApi, WORKSPACE_ID, ISSUE_ID } from '../lib/linear_fixture.js'
 
@@ -35,7 +36,7 @@ export async function run({ harness, expect }) {
     await step('activate', async () => {
       const { loaded } = await loadManifests(['ai-gateway', 'context-graph', 'ai-gateway-graph', 'github', 'linear'].map(name => path.join(workspace, name)))
       const activated = await activatePlugins({ plugins: loaded.map(entry => ({ ...entry,
-        config: entry.manifest.name === '@hypaware/linear' ? { teams: ['HYP'], client_id: 'smoke-app', redirect_uri: redirectUri } : undefined,
+        config: entry.manifest.name === '@hypaware/linear' ? { teams: ['HYP'], redirect_uri: redirectUri } : undefined,
       })), stateRoot: harness.stateDir, runId: harness.devRunId, runtime: kernel, tmpRoot })
       expect.that('all bundled source and graph contracts activate', activated.results, rows => rows.length === 5 && rows.every(row => row.ok))
     })
@@ -57,7 +58,7 @@ export async function run({ harness, expect }) {
     })
 
     const activated = requireLinearRuntime()
-    const rt = { ...activated, env: { ...activated.env, LINEAR_API_KEY: '' } }
+    const rt = { ...activated, env: { ...activated.env, LINEAR_API_KEY: '', LINEAR_CLIENT_ID: '' } }
     setLinearRuntime(rt)
     await step('browser_login', async () => {
       const nativeFetch = globalThis.fetch
@@ -76,6 +77,9 @@ export async function run({ harness, expect }) {
         } }, stderr: { write(chunk) { output += chunk } } })
         expect.that('browser login command succeeds', await runLinearLogin(['--no-browser'], ctx), code => code === 0)
         await callback
+        const authorizationUrl = output.split('\n').find(line => line.startsWith('https://linear.app/oauth/authorize'))
+        expect.that('login uses the shared HypAware app without client configuration', authorizationUrl,
+          url => Boolean(url) && new URL(url).searchParams.get('client_id') === DEFAULT_CLIENT_ID)
         expect.that('verified workspace is reported', output, text => text.includes('workspace smoke'))
       } finally { globalThis.fetch = nativeFetch }
     })
