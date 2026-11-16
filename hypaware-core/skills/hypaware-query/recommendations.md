@@ -35,8 +35,8 @@ Answer briefly with the recommendation, supporting evidence, and material
 uncertainty. Do not create a file unless the user requests a saved or published
 artifact. A standalone artifact needs only `recommendation-<slug>.md`, with a
 scope, absolute dates and descriptive H1. Follow the
-[recommendation page format](../hypaware-report/references/report-contract.md#recommendation-pages)
-without starting the full-report workflow. Use [reports.md](reports.md) to save
+[writing rules](#recommendation-writing) without starting the full-report
+workflow. Use [reports.md](reports.md) to save
 or publish it.
 
 When proposing a fix, name its target, the observed incident it addresses, and

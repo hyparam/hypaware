@@ -88,9 +88,8 @@ test('client skills install places every shared skill file under each client ski
     // The reference files, not only each SKILL.md, are what a client reads on demand.
     for (const rel of [
       'hypaware-query/reports.md',
-      'hypaware-report/references/analyst-task.md',
+      'hypaware-report/SKILL.md',
       'hypaware-query/sql.md',
-      'hypaware-report/references/report-contract.md',
     ]) {
       await fs.access(path.join(base, rel))
     }
