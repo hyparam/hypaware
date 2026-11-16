@@ -27,6 +27,7 @@ import {
   hasTextOrToolUse,
   netInputUsage,
   numberValue,
+  preserveToolResultIds,
   reasoningMessageFromPayload,
   setIfString,
   stampUsageOnLastAssistant,
@@ -1155,9 +1156,10 @@ function projectedExchangeFromSession(args) {
   }
   if (messages.length === 0) return undefined
 
-  // Native message ids preserved verbatim when the rollout carries them;
-  // otherwise the gateway computes deterministic fallback identity.
+  // Native IDs win. Tool outcomes retain the gateway's original fallback hash
+  // so adding outcome evidence cannot duplicate a previously captured result.
   const identitySource = args.identitySource ?? (nativeIdCount > 0 ? 'native' : 'gateway_fallback')
+  preserveToolResultIds(messages, session.threadId ?? session.sessionId)
 
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {

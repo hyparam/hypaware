@@ -1,6 +1,7 @@
 // @ts-check
 
 import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
+import { computeMessageId } from '../../ai-gateway/src/message_projector.js'
 
 /**
  * Projection of OpenAI Responses items into gateway content blocks:
@@ -93,9 +94,52 @@ export function toolResultBlockFromPayload(payload) {
   if (!callId) return undefined
   const text = toolOutputText(payload.output)
   /** @type {JsonObject} */
-  const block = { type: 'tool_result', tool_use_id: callId }
+  const block = { type: 'tool_result', tool_use_id: callId, is_error: toolOutputError(payload.output, text) }
   if (text !== undefined) block.content = text
   return block
+}
+
+/**
+ * Read only a recognized outer outcome. A successful script can contain a
+ * handled inner failure; arbitrary output and still-running tools are unknown.
+ * Bound the extra parse work independently of the captured result's size.
+ * @param {unknown} output
+ * @param {string | undefined} text
+ * @returns {boolean | null}
+ */
+function toolOutputError(output, text) {
+  if (isPlainObject(output) && Number.isInteger(output.exit_code)) return output.exit_code !== 0
+  if (text === undefined) return null
+  if (text.length <= 65536 && text.trimStart().startsWith('{')) {
+    const value = parseMaybeJson(text)
+    if (isPlainObject(value) && Number.isInteger(value.exit_code)) return value.exit_code !== 0
+  }
+  const header = text.slice(0, 8192)
+  const command = /^(?:Chunk ID:[^\r\n]*\r?\n)?(?:Wall time:[^\r\n]*\r?\n)?Process exited with code (-?\d+)\r?\n(?:Final output:|Output:)/.exec(header)
+  if (command) return Number(command[1]) !== 0
+  if (/^Script failed\r?\nScript error:/.test(header)) return true
+  if (/^Script completed\r?\n(?:Wall time:|Output:)/.test(header)) return false
+  return null
+}
+
+/**
+ * Outcome enrichment must not re-key an old tool result on replay. Reuse the
+ * gateway's fallback hash with the pre-enrichment content; native IDs win.
+ * @param {AiGatewayProjectedMessage[]} messages
+ * @param {string} threadScope
+ */
+export function preserveToolResultIds(messages, threadScope) {
+  for (const message of messages) {
+    if (message.message_id || message.role !== 'tool' || !Array.isArray(message.content)) continue
+    const legacy = message.content.map(block => {
+      if (block.type !== 'tool_result') return block
+      const { is_error: _outcome, ...content } = block
+      return content
+    })
+    message.message_id = computeMessageId(threadScope, message.role, legacy, message.agent_id)
+    message.attributes = { ...message.attributes,
+      gateway: { ...(isPlainObject(message.attributes?.gateway) ? message.attributes.gateway : {}), identity_source: 'gateway_fallback' } }
+  }
 }
 
 /**
