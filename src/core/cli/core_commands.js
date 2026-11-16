@@ -707,7 +707,7 @@ function buildCoreCommands(registry) {
       category: 'capture-movement',
       audience: 'everyday',
       summary: 'Send captured data to destinations now',
-      usage: 'hyp sync [instance] [--history <client>] [--yes] [--dry-run]',
+      usage: 'hyp sync [instance] [--history <client|all>] [--yes] [--dry-run]',
       help: [
         'Exports now instead of waiting for the sink schedule. Prints what would',
         'leave this machine and asks before sending; --yes skips the prompt and',
@@ -722,6 +722,8 @@ function buildCoreCommands(registry) {
         '`hyp sync --history <client>` previews and replays locally retained',
         'history for a client that is already syncing. Only replay-safe',
         'destinations participate, and ordinary sink watermarks are unchanged.',
+        '`--history all` covers every syncing client under one confirmation,',
+        'for example after this machine joins a different organization.',
         '',
         '`hyp sync <instance> --check --dataset ai_gateway_messages` compares',
         'retained export-eligible row IDs with a prepared server inventory.',

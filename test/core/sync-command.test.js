@@ -637,6 +637,121 @@ test('--history cannot bypass the first-sync review window', async () => {
   assert.ok(await holdExists(hypHome))
 })
 
+/**
+ * Give a test context retained AI-gateway partitions for the named clients,
+ * which is where `--history all` reads its client list from.
+ *
+ * @param {any} ctx
+ * @param {string[]} sources
+ */
+function withRetainedClients(ctx, sources) {
+  ctx.query.getDataset = (/** @type {string} */ name) => name !== 'ai_gateway_messages' ? undefined : {
+    name,
+    async discoverPartitions() {
+      return sources.map((source) => ({ dataset: name, partition: { source } }))
+    },
+  }
+}
+
+/**
+ * A replay-capable sink whose preview answers per client.
+ *
+ * @param {Record<string, number>} rowsBySource
+ */
+function fakeAllHistorySink(rowsBySource) {
+  const central = fakeHistorySink('central', { url: 'https://hypaware.example.com' })
+  central.sink.previewSourceHistory = async (/** @type {{ source: string }} */ request) => (
+    { rows: rowsBySource[request.source] ?? 0, withheldRows: 0 }
+  )
+  return central
+}
+
+// @ref LLP 0607#command [tests]: one plan and one confirmation cover every
+// syncing client, and a local-only client is skipped rather than refused.
+test('--history all replays every syncing client after one confirmation', async () => {
+  const hypHome = await makeHome('history-all')
+  await writeClientSyncEntries({
+    stateDir: stateDir(hypHome),
+    entries: [{ source: 'droid', class: 'local-only' }],
+  })
+  const central = fakeAllHistorySink({ claude: 12, codex: 30, droid: 5, hermes: 0 })
+  const parquet = fakeSink('local', { dir: '/home/u/exports' })
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central, parquet], tty: true, answer: 'y' })
+  withRetainedClients(ctx, ['hermes', 'droid', 'codex', 'claude'])
+
+  const code = await runSync(['--history', 'all'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /retained history for all clients/)
+  assert.match(stdout.text, /claude\s+12 rows retained and eligible/)
+  assert.match(stdout.text, /codex\s+30 rows retained and eligible/)
+  assert.match(stdout.text, /skipped \(still local-only\): droid/)
+  assert.match(stdout.text, /not replayed \(destination does not support history\): local/)
+  assert.deepEqual(central.replayed.map((request) => request.source), ['claude', 'codex'], 'no local-only or empty client is replayed')
+  assert.match(stdout.text, /central 'claude': exported \(rows=12, bytes=345\)/)
+  assert.deepEqual(parquet.exported, [], 'history mode never runs an ordinary tick')
+})
+
+test('--history all --dry-run shows the plan and sends nothing', async () => {
+  const hypHome = await makeHome('history-all-dry-run')
+  const central = fakeAllHistorySink({ claude: 12, codex: 30 })
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central] })
+  withRetainedClients(ctx, ['claude', 'codex'])
+
+  const code = await runSync(['--history', 'all', '--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /codex\s+30 rows retained and eligible/)
+  assert.match(stdout.text, /\[dry-run\] nothing was sent/)
+  assert.deepEqual(central.replayed, [])
+})
+
+test('--history all with nothing eligible says so instead of prompting', async () => {
+  const hypHome = await makeHome('history-all-empty')
+  const central = fakeAllHistorySink({})
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'y' })
+  withRetainedClients(ctx, ['claude'])
+
+  const code = await runSync(['--history', 'all'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /no retained client history is eligible; nothing to replay/)
+  assert.deepEqual(central.replayed, [])
+})
+
+test('--history all keeps replaying after one client fails, and exits non-zero', async () => {
+  const hypHome = await makeHome('history-all-partial')
+  const central = fakeAllHistorySink({ claude: 12, codex: 30 })
+  const replay = central.sink.replaySourceHistory
+  central.sink.replaySourceHistory = async (/** @type {any} */ request) => {
+    if (request.source === 'claude') throw new Error('network unavailable')
+    return replay(request)
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'y' })
+  withRetainedClients(ctx, ['claude', 'codex'])
+
+  const code = await runSync(['--history', 'all'], ctx)
+
+  assert.equal(code, 1)
+  assert.match(stdout.text, /central 'claude': failed \(network unavailable\)/)
+  assert.match(stdout.text, /central 'codex': exported/)
+})
+
+test('--history all cannot bypass the first-sync review window', async () => {
+  const hypHome = await makeHome('history-all-held')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const central = fakeAllHistorySink({ claude: 12 })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'y' })
+  withRetainedClients(ctx, ['claude'])
+
+  const code = await runSync(['--history', 'all'], ctx)
+
+  assert.equal(code, 2)
+  assert.match(stderr.text, /cannot bypass or clear that hold/)
+  assert.deepEqual(central.replayed, [])
+  assert.ok(await holdExists(hypHome))
+})
+
 test('a sharing plan shows upload targets without counting the accompanying file copy', async () => {
   const hypHome = await makeHome('plan')
   const { ctx, stdout } = makeCtx({

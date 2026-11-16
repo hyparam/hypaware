@@ -29,10 +29,22 @@ import { escapeForDisplay } from '../util/json_util.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
-const USAGE = 'usage: hyp sync [instance] [--history <client>] [--yes] [--dry-run]\n       hyp sync <instance> --check --dataset ai_gateway_messages [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]\n       hyp sync <instance> --missing --dataset ai_gateway_messages [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--dry-run | --yes] [--json]'
+const USAGE = 'usage: hyp sync [instance] [--history <client|all>] [--yes] [--dry-run]\n       hyp sync <instance> --check --dataset ai_gateway_messages [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]\n       hyp sync <instance> --missing --dataset ai_gateway_messages [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--dry-run | --yes] [--json]'
 
 /**
- * `hyp sync [instance] [--history <client>] [--yes] [--dry-run]`
+ * The `--history` value that selects every client instead of naming one. It
+ * is a typed keyword, never the meaning of a missing value: an empty or
+ * dropped argument must not buy the larger action.
+ *
+ * @ref LLP 0607#keyword [implements]: `all` is explicit; a bare or empty --history stays a usage error
+ */
+const HISTORY_ALL = 'all'
+
+/** The dataset whose source partitions carry client-attributed history. */
+const HISTORY_DATASET = 'ai_gateway_messages'
+
+/**
+ * `hyp sync [instance] [--history <client|all>] [--yes] [--dry-run]`
  *
  * Export every configured sink now, rather than on its cron schedule. The
  * user-facing name for the one action the driver performs; it replaced
@@ -108,7 +120,7 @@ export async function runSync(argv, ctx) {
   // sync that also ends the first-sync review window. A mistyped client name
   // must never buy the larger action.
   if (history !== undefined && history === '') {
-    ctx.stderr.write(`hyp sync: --history needs a client name\n${USAGE}\n`)
+    ctx.stderr.write(`hyp sync: --history needs a client name, or 'all'\n${USAGE}\n`)
     return 2
   }
 
@@ -169,6 +181,9 @@ export async function runSync(argv, ctx) {
 
   const destinations = handles.map((handle) => describeDestination(handle))
 
+  if (history === HISTORY_ALL) {
+    return runAllHistorySync({ handles, destinations, stateDir, deadline, yes, dryRun, ctx, log })
+  }
   if (history) {
     return runHistorySync({
       source: history,
@@ -541,34 +556,9 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     return 1
   }
 
-  /** @type {Map<string, SourceHistoryReplayPreview>} */
-  const previews = new Map()
   const previewStartedAt = Date.now()
-  for (const handle of capable) {
-    const instance = sinkInstanceName(handle)
-    try {
-      // A full scan of the client's retained history, once per destination,
-      // and like the ordinary plan's count it runs before anything is on
-      // screen. Quiet off a TTY for the same reason.
-      const preview = await withSpinner(
-        {
-          stdout: ctx.stdout,
-          env: ctx.env,
-          quietWhenPlain: true,
-          label: `Counting retained '${source}' history on ${instance}...`,
-        },
-        async () => handle.sink.previewSourceHistory?.({ source })
-      )
-      if (!preview) throw new Error('history preview became unavailable')
-      previews.set(instance, preview)
-    } catch (err) {
-      ctx.stderr.write(
-        `hyp sync --history: could not preview '${instance}' (${err instanceof Error ? err.message : String(err)})\n` +
-        '  Nothing was sent.\n'
-      )
-      return 1
-    }
-  }
+  const previews = await previewHistory({ source, capable, ctx })
+  if (!previews) return 1
 
   // The preview is a full scan of the client's retained history, once per
   // capable destination, and it sits between the keystroke and the prompt.
@@ -648,6 +638,63 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     return 0
   }
 
+  return (await replayHistory({ source, capable, previews, ctx })) ? 1 : 0
+}
+
+/**
+ * Count one client's retained history on every capable destination. Returns
+ * `null` once a destination's count has failed and been reported, so no
+ * caller can prompt on a partial plan.
+ *
+ * @param {{ source: string, capable: ExtendedSinkHandle[], ctx: CommandRunContext }} args
+ * @returns {Promise<Map<string, SourceHistoryReplayPreview> | null>}
+ */
+async function previewHistory({ source, capable, ctx }) {
+  /** @type {Map<string, SourceHistoryReplayPreview>} */
+  const previews = new Map()
+  for (const handle of capable) {
+    const instance = sinkInstanceName(handle)
+    try {
+      // A full scan of the client's retained history, once per destination,
+      // and like the ordinary plan's count it runs before anything is on
+      // screen. Quiet off a TTY for the same reason.
+      const preview = await withSpinner(
+        {
+          stdout: ctx.stdout,
+          env: ctx.env,
+          quietWhenPlain: true,
+          label: `Counting retained '${source}' history on ${instance}...`,
+        },
+        async () => handle.sink.previewSourceHistory?.({ source })
+      )
+      if (!preview) throw new Error('history preview became unavailable')
+      previews.set(instance, preview)
+    } catch (err) {
+      ctx.stderr.write(
+        `hyp sync --history: could not preview '${instance}' (${err instanceof Error ? err.message : String(err)})\n` +
+        '  Nothing was sent.\n'
+      )
+      return null
+    }
+  }
+  return previews
+}
+
+/**
+ * Replay one client's retained history to every capable destination and
+ * print one result line per destination. `tag` names the client on that line
+ * when a run covers more than one.
+ *
+ * @param {{
+ *   source: string,
+ *   capable: ExtendedSinkHandle[],
+ *   previews: Map<string, SourceHistoryReplayPreview>,
+ *   ctx: CommandRunContext,
+ *   tag?: string,
+ * }} args
+ * @returns {Promise<boolean>} whether any destination failed
+ */
+async function replayHistory({ source, capable, previews, ctx, tag = '' }) {
   const progress = createSyncProgress(new Map([...previews].map(([name, preview]) => [name, { rows: preview.rows, status: 'counted' }])))
   let failed = false
   for (const handle of capable) {
@@ -662,23 +709,222 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     } catch (err) {
       failed = true
       ctx.stdout.write(
-        `${instance}: failed (${err instanceof Error ? err.message : String(err)})\n`
+        `${instance}${tag}: failed (${err instanceof Error ? err.message : String(err)})\n`
       )
       continue
     }
     if (!result) {
       failed = true
-      ctx.stdout.write(`${instance}: failed (history replay became unavailable)\n`)
+      ctx.stdout.write(`${instance}${tag}: failed (history replay became unavailable)\n`)
       continue
     }
     ctx.stdout.write(
-      `${instance}: ${result.status} (rows=${result.rowsReplayed}, bytes=${result.bytesWritten}${
+      `${instance}${tag}: ${result.status} (rows=${result.rowsReplayed}, bytes=${result.bytesWritten}${
         result.error ? `, error=${result.error}` : ''
       })\n`
     )
     if (result.status === 'failed') failed = true
   }
+  return failed
+}
+
+/**
+ * The clients this machine has retained AI-gateway history for: the `source`
+ * of each partition, which is the same attribution a single-client replay
+ * selects by. Listing partitions reads directory names, never rows.
+ *
+ * @ref LLP 0607#clients [implements]: `all` covers the clients the retained partitions name
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<string[]>}
+ */
+async function retainedHistoryClients(ctx) {
+  const dataset = ctx.query.getDataset(HISTORY_DATASET)
+  if (!dataset || typeof dataset.discoverPartitions !== 'function') return []
+  const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+  const partitions = await dataset.discoverPartitions({
+    config: ctx.config,
+    cacheDir: storage.cacheRoot,
+    scope: { limit: 1_000_000 },
+  })
+  /** @type {Set<string>} */
+  const sources = new Set()
+  for (const partition of partitions ?? []) {
+    const source = partition.partition?.source
+    if (typeof source === 'string' && source.length > 0) sources.add(source)
+  }
+  return [...sources].sort()
+}
+
+/**
+ * `hyp sync --history all`: one plan and one confirmation covering every
+ * client with retained history, then the same per-client replay the named
+ * form runs. A client that is still `local-only` is skipped and named rather
+ * than refused, so one opted-out client does not block the rest.
+ *
+ * @ref LLP 0607#command [implements]: an explicit `all` keyword replays every syncing client under one consent
+ * @param {{
+ *   handles: ExtendedSinkHandle[],
+ *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
+ *   stateDir: string,
+ *   deadline: number | null,
+ *   yes: boolean,
+ *   dryRun: boolean,
+ *   ctx: CommandRunContext,
+ *   log: ReturnType<typeof getLogger>,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function runAllHistorySync({ handles, destinations, stateDir, deadline, yes, dryRun, ctx, log }) {
+  let clientEntries
+  try {
+    clientEntries = (await readClientSyncEntries({ stateDir })) ?? []
+  } catch (err) {
+    ctx.stderr.write(`hyp sync --history: cannot verify client policy (${err instanceof Error ? err.message : String(err)})\n`)
+    return 1
+  }
+
+  if (deadline !== null && !dryRun) {
+    ctx.stderr.write(
+      `hyp sync --history: the first-sync review window is open until ${formatFirstSyncDeadline(deadline)}.\n` +
+      '  Historical replay cannot bypass or clear that hold. Run `hyp sync` first,\n' +
+      '  then repeat this command.\n'
+    )
+    return 2
+  }
+
+  const capable = handles.filter((handle) => (
+    typeof handle.sink.previewSourceHistory === 'function' &&
+    typeof handle.sink.replaySourceHistory === 'function'
+  ))
+  if (capable.length === 0) {
+    ctx.stderr.write('hyp sync --history: no configured destination supports client-history replay\n')
+    return 1
+  }
+
+  let sources
+  try {
+    sources = await retainedHistoryClients(ctx)
+  } catch (err) {
+    ctx.stderr.write(
+      `hyp sync --history: could not list the recorded clients (${err instanceof Error ? err.message : String(err)})\n` +
+      '  Nothing was sent.\n'
+    )
+    return 1
+  }
+  const localOnly = new Set(clientEntries.map((entry) => entry.source))
+  const skipped = sources.filter((source) => localOnly.has(source))
+
+  const previewStartedAt = Date.now()
+  /** @type {{ source: string, previews: Map<string, SourceHistoryReplayPreview>, rows: number }[]} */
+  const clients = []
+  let totalRows = 0
+  let totalWithheld = 0
+  for (const source of sources) {
+    if (localOnly.has(source)) continue
+    const previews = await previewHistory({ source, capable, ctx })
+    if (!previews) return 1
+    // `max` across destinations for the same reason as the named form: every
+    // capable destination replays the same retained rows.
+    const counts = [...previews.values()]
+    const rows = counts.reduce((most, preview) => Math.max(most, preview.rows), 0)
+    totalWithheld += counts.reduce((most, preview) => Math.max(most, preview.withheldRows), 0)
+    totalRows += rows
+    if (rows > 0) clients.push({ source, previews, rows })
+  }
+  log.info('sync.history_preview', {
+    [Attr.COMPONENT]: 'cmd-sync',
+    [Attr.OPERATION]: 'sync.history_preview',
+    hyp_elapsed_ms: Date.now() - previewStartedAt,
+    hyp_sink_source: HISTORY_ALL,
+    clients: clients.length,
+    destinations: capable.length,
+    hyp_unsupported_destinations: destinations.length - capable.length,
+    hyp_pending_rows: totalRows,
+    hyp_withheld_rows: totalWithheld,
+  })
+
+  const capableNames = new Set(capable.map(sinkInstanceName))
+  ctx.stdout.write(renderAllHistoryPlan({
+    destinations: destinations.filter((destination) => capableNames.has(destination.instance)),
+    unsupported: destinations.filter((destination) => !capableNames.has(destination.instance)),
+    clients,
+    skipped,
+    totalWithheld,
+  }))
+
+  if (clients.length === 0) {
+    ctx.stdout.write('\nno retained client history is eligible; nothing to replay\n')
+    return 0
+  }
+  if (dryRun) {
+    ctx.stdout.write('\n[dry-run] nothing was sent\n')
+    return 0
+  }
+
+  const outcome = await requireConfirmation({
+    ctx,
+    yes,
+    question: `Replay ${plural(totalRows, 'retained row')} for ${plural(clients.length, 'client')} now? [Y/n] `,
+    defaultYes: true,
+  })
+  if (outcome === 'no-tty') {
+    ctx.stderr.write('error: refusing to replay history without confirmation - pass --yes to send non-interactively\n')
+    return 2
+  }
+  if (outcome === 'declined') {
+    ctx.stdout.write('historical sync cancelled\n')
+    return 0
+  }
+
+  // A failed client does not stop the rest: each replay is independent and
+  // row-idempotent on the server, so rerunning the command repairs it.
+  let failed = false
+  for (const { source, previews } of clients) {
+    if (await replayHistory({ source, capable, previews, ctx, tag: ` '${source}'` })) failed = true
+  }
   return failed ? 1 : 0
+}
+
+/**
+ * @param {{
+ *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
+ *   unsupported: { instance: string, text: string }[],
+ *   clients: { source: string, rows: number }[],
+ *   skipped: string[],
+ *   totalWithheld: number,
+ * }} args
+ */
+function renderAllHistoryPlan({ destinations, unsupported, clients, skipped, totalWithheld }) {
+  const lines = ['hyp sync: retained history for all clients\n', '\n']
+  const width = Math.max(...destinations.map((destination) => destination.instance.length))
+  for (const destination of destinations) {
+    const note = destination.offMachine === true
+      ? '  (leaves this machine)'
+      : destination.offMachine === false
+        ? '  (stays on this machine)'
+        : ''
+    lines.push(`  ${destination.instance.padEnd(width)}  ${destination.text}${note}\n`)
+  }
+  if (clients.length > 0) {
+    lines.push('\n')
+    // Client names come off recorded rows, so they are escaped like any other
+    // plugin-supplied text on this consent surface.
+    const names = clients.map((client) => escapeForDisplay(client.source))
+    const nameWidth = Math.max(...names.map((name) => name.length))
+    clients.forEach((client, i) => {
+      lines.push(`  ${names[i].padEnd(nameWidth)}  ${plural(client.rows, 'row')} retained and eligible\n`)
+    })
+  }
+  if (totalWithheld > 0) {
+    lines.push(`\n  ${plural(totalWithheld, 'row')} withheld by privacy policy (not sent)\n`)
+  }
+  if (skipped.length > 0) {
+    lines.push(`\n  skipped (still local-only): ${skipped.map((source) => escapeForDisplay(source)).join(' · ')}\n`)
+  }
+  if (unsupported.length > 0) {
+    lines.push(`\n  not replayed (destination does not support history): ${unsupported.map((d) => d.instance).join(' · ')}\n`)
+  }
+  return lines.join('')
 }
 
 /**
