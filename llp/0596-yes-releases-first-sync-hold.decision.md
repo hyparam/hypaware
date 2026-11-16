@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-11-11
 **Related:** LLP 0100, LLP 0101, LLP 0203, LLP 0345
+**Extended-by:** LLP 0606 (local release evidence and caller attribution)
 
 > While the first-sync review window is open, `hyp sync --yes` used to refuse:
 > only a `y` typed at a terminal could end the window early. An agent running

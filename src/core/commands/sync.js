@@ -12,7 +12,8 @@ import { previewPendingRows } from '../sinks/pending.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
   SYNC_HELD_NO_DESTINATIONS_NOTICE,
-  clearFirstSyncHold,
+  firstSyncConfirmationActor,
+  releaseFirstSyncHold,
   firstSyncHoldMarkerPath,
   formatFirstSyncDeadline,
   readFirstSyncDeadline,
@@ -296,12 +297,13 @@ export async function runSync(argv, ctx) {
   // leaves the window ended: consent was given, and the retry belongs to the
   // ordinary schedule rather than to a window that has served its purpose.
   //
-  // A failed unlink must not read as success. The marker survives, the driver
+  // A failed receipt commit must not read as success. The marker survives, the driver
   // holds the tick, and without this check the command would print nothing
   // further and exit 0 - the exact "opposite of the truth" output this verb
   // was written to replace.
   if (deadline !== null) {
-    const cleared = await clearFirstSyncHold({ stateDir })
+    const actor = firstSyncConfirmationActor(ctx.env, yes)
+    const cleared = await releaseFirstSyncHold({ stateDir, deadline, actor, method: yes ? 'yes-flag' : 'prompt' })
     const stillHeld = await readFirstSyncDeadline({ stateDir })
     if (!cleared || stillHeld !== null) {
       ctx.stderr.write(
@@ -311,18 +313,15 @@ export async function runSync(argv, ctx) {
       )
       return 1
     }
-    // The one moment a machine's history becomes forwardable ahead of its
-    // deadline, and clearing the marker destroys the only on-disk evidence it
-    // happened. Without this line nothing afterwards distinguishes "the window
-    // expired" from "somebody released it".
+    // The durable receipt survives the marker; telemetry carries the same
+    // attribution. Neither a PTY nor --yes proves a person gave permission.
     log.info('sync.first_sync_hold_released', {
       [Attr.COMPONENT]: 'cmd-sync',
       [Attr.OPERATION]: 'sync.first_sync_hold_released',
       hyp_deadline: new Date(deadline).toISOString(),
       hyp_released_early_ms: deadline - Date.now(),
-      // The on-disk difference between a person who typed `y` and a caller
-      // that passed `--yes`, which the marker cannot record once it is gone.
-      hyp_confirmed_by: yes ? 'yes-flag' : 'prompt',
+      hyp_confirmed_by: actor,
+      hyp_confirmation_method: yes ? 'yes-flag' : 'prompt',
       // Unfiltered, unlike the two preview lines, which count what they
       // previewed. A scoped run was refused above, so this is every
       // destination the machine has, and clearing the marker unblocks all of

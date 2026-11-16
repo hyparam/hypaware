@@ -5,7 +5,8 @@ import path from 'node:path'
 import { noteProductPipeline } from '../product_telemetry/client.js'
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
-import { clearFirstSyncHold, readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { releaseFirstSyncHold, readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { appendDaemonLog } from '../daemon/logs.js'
 import { sinkInstanceName, onSinkHandleClose } from '../registry/sinks.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { sinkOutboxDir } from '../runtime/paths.js'
@@ -24,6 +25,9 @@ const executions = new WeakMap()
 
 /** @type {WeakMap<ExtendedSinkHandle, ReturnType<typeof createDiagnosticHistory>>} */
 const diagnosticHistories = new WeakMap()
+
+/** @type {WeakSet<ExtendedSinkHandle>} */
+const auditedExports = new WeakSet()
 
 /**
  * Build the kernel sink driver. The driver iterates sink handles on
@@ -172,7 +176,7 @@ export function createSinkDriver(opts) {
     // held until the first run under that config, and then every reader agrees.
     // @ref LLP 0578#marker-cleared [implements]: the org's setting clears the marker, not each reader
     if (config?.first_sync_hold === false) {
-      const cleared = await clearFirstSyncHold({ stateDir: stateRoot })
+      const cleared = await releaseFirstSyncHold({ stateDir: stateRoot, deadline, actor: 'organization', method: 'organization' })
       log.info('sink.first_sync_hold_off_by_org', { [Attr.COMPONENT]: 'sinks', [Attr.OPERATION]: 'sink.tick', hyp_cleared: cleared })
       return false
     }
@@ -329,6 +333,14 @@ export function createSinkDriver(opts) {
             partitions_exported: exported,
             bytes_written: bytesWritten,
           })
+          if (!auditedExports.has(handle)) {
+            const logged = await appendDaemonLog({ stateRoot, event: 'sink.export_batch.ok', fields: {
+              [Attr.SINK_INSTANCE]: instance, hyp_batch_id: batchId,
+              partitions_count: partitions.length, partitions_exported: exported, bytes_written: bytesWritten,
+            } })
+            if (logged) auditedExports.add(handle)
+            else log.warn('sink.first_export_audit_failed', { [Attr.SINK_INSTANCE]: instance })
+          }
         } else {
           const retryParts = result.retryPartitions ?? partitions
           const message = result.error ?? 'sink reported non-ok status'
