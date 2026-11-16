@@ -846,6 +846,7 @@ async function runAllHistorySync({ handles, destinations, stateDir, deadline, ye
   ctx.stdout.write(renderAllHistoryPlan({
     destinations: destinations.filter((destination) => capableNames.has(destination.instance)),
     unsupported: destinations.filter((destination) => !capableNames.has(destination.instance)),
+    orgs: replayOrganizations(capable),
     clients,
     skipped,
     totalWithheld,
@@ -885,20 +886,48 @@ async function runAllHistorySync({ handles, destinations, stateDir, deadline, ye
 }
 
 /**
+ * The organization each replay destination names, keyed by instance. A sink
+ * that cannot say, answers something other than a non-empty string, or throws
+ * is `undefined`: the plan then reads `org unknown` and still reaches the
+ * prompt. One in-memory read per destination, before the confirmation.
+ *
+ * @ref LLP 0607#org-in-plan [implements]: an unknown org is stated, never fatal
+ * @param {ExtendedSinkHandle[]} capable
+ * @returns {Map<string, string | undefined>}
+ */
+function replayOrganizations(capable) {
+  /** @type {Map<string, string | undefined>} */
+  const orgs = new Map()
+  for (const handle of capable) {
+    let org
+    try {
+      const answer = handle.sink.replayOrganization?.()
+      if (typeof answer === 'string' && answer.length > 0) org = answer
+    } catch {
+      org = undefined
+    }
+    orgs.set(sinkInstanceName(handle), org)
+  }
+  return orgs
+}
+
+/**
  * @param {{
  *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
  *   unsupported: { instance: string, text: string }[],
+ *   orgs: Map<string, string | undefined>,
  *   clients: { source: string, rows: number }[],
  *   skipped: string[],
  *   totalWithheld: number,
  * }} args
  */
-function renderAllHistoryPlan({ destinations, unsupported, clients, skipped, totalWithheld }) {
+function renderAllHistoryPlan({ destinations, unsupported, orgs, clients, skipped, totalWithheld }) {
   const lines = ['hyp sync: retained history for all clients\n', '\n']
   const width = Math.max(...destinations.map((destination) => destination.instance.length))
   for (const destination of destinations) {
+    // The org comes off a credential, so it is escaped like the client names.
     const note = destination.offMachine === true
-      ? '  (leaves this machine)'
+      ? `  (org ${escapeForDisplay(orgs.get(destination.instance) ?? 'unknown')}, leaves this machine)`
       : destination.offMachine === false
         ? '  (stays on this machine)'
         : ''

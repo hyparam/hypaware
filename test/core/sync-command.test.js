@@ -752,6 +752,126 @@ test('--history all cannot bypass the first-sync review window', async () => {
   assert.ok(await holdExists(hypHome))
 })
 
+/**
+ * Give a history sink an org answer, counting the reads so a test can prove
+ * when the plan asked.
+ *
+ * @param {any} handle
+ * @param {() => unknown} answer
+ */
+function withReplayOrganization(handle, answer) {
+  handle.orgReads = 0
+  handle.sink.replayOrganization = () => {
+    handle.orgReads += 1
+    return answer()
+  }
+  return handle
+}
+
+// @ref LLP 0607#org-in-plan [tests]: the all-clients plan names each destination's
+// organization, says `org unknown` when it cannot, and sends nothing before the answer.
+test('--history all names the organization each destination sends to', async () => {
+  const hypHome = await makeHome('history-all-org')
+  const central = withReplayOrganization(fakeAllHistorySink({ claude: 12 }), () => 'acme')
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'y' })
+  withRetainedClients(ctx, ['claude'])
+
+  const code = await runSync(['--history', 'all'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /^ {2}central {2}hypaware\.example\.com {2}\(org acme, leaves this machine\)$/m)
+  assert.equal(central.orgReads, 1, 'one read per destination per run')
+  assert.equal(central.replayed.length, 1)
+})
+
+test('--history all says org unknown and still prompts when a destination cannot name its org', async () => {
+  for (const [label, answer] of /** @type {[string, (() => unknown) | null][]} */ ([
+    ['no method', null],
+    ['no claim', () => undefined],
+    ['empty claim', () => ''],
+    ['not a string', () => 42],
+    ['throws', () => { throw new Error('identity not acquired') }],
+  ])) {
+    const hypHome = await makeHome('history-all-org-unknown')
+    const central = fakeAllHistorySink({ claude: 12 })
+    if (answer) withReplayOrganization(central, answer)
+    const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'y' })
+    withRetainedClients(ctx, ['claude'])
+
+    const code = await runSync(['--history', 'all'], ctx)
+
+    assert.equal(code, 0, label)
+    assert.match(stdout.text, /hypaware\.example\.com {2}\(org unknown, leaves this machine\)/, label)
+    assert.match(stderr.text, /Replay 12 retained rows for 1 client now\?/, label)
+    assert.doesNotMatch(stderr.text, /error|identity not acquired/i, label)
+    assert.equal(central.replayed.length, 1, label)
+  }
+})
+
+test('--history all names a different org per destination and escapes it', async () => {
+  const hypHome = await makeHome('history-all-org-multi')
+  const first = withReplayOrganization(fakeAllHistorySink({ claude: 12 }), () => 'org-a')
+  const second = withReplayOrganization(fakeAllHistorySink({ claude: 12 }), () => 'org-b\u001b[2J')
+  second.instanceName = 'central-eu'
+  second.config = { url: 'https://eu.hypaware.example.com' }
+  const parquet = fakeSink('local', { dir: '/home/u/exports' })
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [first, second, parquet], tty: true, answer: 'y' })
+  withRetainedClients(ctx, ['claude'])
+
+  const code = await runSync(['--history', 'all'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /^ {2}central {5}hypaware\.example\.com {2}\(org org-a, leaves this machine\)$/m)
+  assert.match(stdout.text, /^ {2}central-eu {2}eu\.hypaware\.example\.com {2}\(org org-b\\u001b\[2J, leaves this machine\)$/m)
+  assert.doesNotMatch(stdout.text, /\u001b/)
+  assert.doesNotMatch(stdout.text, /local.*org /)
+})
+
+test('--history all shows the org on a dry run and sends nothing before the confirmation', async () => {
+  const hypHome = await makeHome('history-all-org-dry')
+  const central = withReplayOrganization(fakeAllHistorySink({ claude: 12 }), () => 'acme')
+  const dry = makeCtx({ hypHome, sinks: [central] })
+  withRetainedClients(dry.ctx, ['claude'])
+  assert.equal(await runSync(['--history', 'all', '--dry-run'], dry.ctx), 0)
+  assert.match(dry.stdout.text, /\(org acme, leaves this machine\)/)
+  assert.match(dry.stdout.text, /\[dry-run\] nothing was sent/)
+
+  const declined = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'n' })
+  withRetainedClients(declined.ctx, ['claude'])
+  assert.equal(await runSync(['--history', 'all'], declined.ctx), 0)
+  assert.match(declined.stdout.text, /\(org acme, leaves this machine\)/)
+  assert.match(declined.stdout.text, /historical sync cancelled/)
+  assert.deepEqual(central.replayed, [], 'nothing is sent before a yes')
+})
+
+test('--history all under the first-sync hold refuses before asking any destination for its org', async () => {
+  const hypHome = await makeHome('history-all-org-held')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const central = withReplayOrganization(fakeAllHistorySink({ claude: 12 }), () => 'acme')
+  const { ctx } = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'y' })
+  withRetainedClients(ctx, ['claude'])
+
+  assert.equal(await runSync(['--history', 'all'], ctx), 2)
+  assert.equal(central.orgReads, 0)
+  assert.ok(await holdExists(hypHome))
+})
+
+test('the named --history form and ordinary sync keep their destination lines without an org', async () => {
+  const hypHome = await makeHome('history-org-scope')
+  const central = withReplayOrganization(fakeHistorySink('central', { url: 'https://hypaware.example.com' }), () => 'acme')
+  const named = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'y' })
+  assert.equal(await runSync(['--history', 'claude'], named.ctx), 0)
+  assert.match(named.stdout.text, /^ {2}central {2}hypaware\.example\.com {2}\(leaves this machine\)$/m)
+  assert.doesNotMatch(named.stdout.text, /org acme|org unknown/)
+
+  const plain = withReplayOrganization(fakeSink('central', { url: 'https://hypaware.example.com' }), () => 'acme')
+  const ordinary = makeCtx({ hypHome, sinks: [plain], tty: true })
+  await runSync(['--dry-run'], ordinary.ctx)
+  assert.match(ordinary.stdout.text, /^Ready to upload to hypaware\.example\.com[ .]/m)
+  assert.doesNotMatch(ordinary.stdout.text, /org acme|org unknown/)
+  assert.equal(central.orgReads + plain.orgReads, 0, 'only the all-clients plan asks')
+})
+
 test('a sharing plan shows upload targets without counting the accompanying file copy', async () => {
   const hypHome = await makeHome('plan')
   const { ctx, stdout } = makeCtx({

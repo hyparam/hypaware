@@ -1664,6 +1664,16 @@ export interface Sink {
    */
   previewSourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayPreview>
   replaySourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayResult>
+  /**
+   * Optional, read-only disclosure for the `hyp sync --history all` plan: the
+   * organization this destination's current credential names, or `undefined`
+   * when it cannot say. It must answer from state already in memory, with no
+   * request, refresh or write, because the plan asks before the confirmation.
+   * It never gates a replay; the server binds rows to the verified credential.
+   *
+   * @ref LLP 0607#org-in-plan [implements]: the plan names the organization each destination sends to
+   */
+  replayOrganization?(): string | undefined
   restoreMissingRows?(request: MissingSyncRequest): Promise<MissingSyncResult>
 }
 

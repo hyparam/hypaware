@@ -47,9 +47,9 @@ No shipped client uses that name.
 
 The command previews every client, prints a single plan with one row count per
 client, and asks once. After confirmation it runs the same per-client replay
-the named form runs, through the same optional sink methods. The sink contract
-does not change, and each client's rows still pass the shared export privacy
-seam.
+the named form runs, through the same optional sink methods. The replay
+methods do not change, and each client's rows still pass the shared export
+privacy seam.
 
 A client that is still `local-only` is skipped and named in the plan rather
 than refused. The named form refuses because the user asked for exactly that
@@ -62,6 +62,13 @@ bypasses nor clears it.
 A failed client does not stop the rest. Each replay is independent and
 row-idempotent on the server, so the command reports the failure, exits
 non-zero, and is safe to rerun.
+
+### The plan names the organization {#org-in-plan}
+
+Each destination that leaves the machine is shown as `(org <org>, leaves this
+machine)`, read through one optional sink method from the credential the sink
+already holds, with no request before the confirmation; when it cannot be
+read the line says `org unknown` and the command still reaches the prompt.
 
 ### The client list is the retained partitions {#clients}
 

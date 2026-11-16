@@ -611,13 +611,25 @@ function identityFromPayload(parsed, fallbackGatewayId) {
  * @param {string} jwt
  */
 function decodeJwtSub(jwt) {
+  return decodeJwtStringClaim(jwt, 'sub')
+}
+
+/**
+ * Decode one non-empty string claim from a JWT without verifying the
+ * signature, for the same reason as {@link decodeJwtSub}. A malformed token or
+ * a missing, empty or non-string claim is `undefined`.
+ *
+ * @param {string} jwt
+ * @param {string} claim
+ * @returns {string | undefined}
+ */
+export function decodeJwtStringClaim(jwt, claim) {
   const parts = jwt.split('.')
   if (parts.length !== 3) return undefined
   try {
     const payload = JSON.parse(base64UrlDecode(parts[1]).toString('utf8'))
-    if (isPlainObject(payload) && typeof payload.sub === 'string' && payload.sub.length > 0) {
-      return payload.sub
-    }
+    const value = isPlainObject(payload) ? payload[claim] : undefined
+    if (typeof value === 'string' && value.length > 0) return value
   } catch {
     return undefined
   }
