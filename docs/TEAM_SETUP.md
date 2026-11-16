@@ -110,7 +110,8 @@ hyp sync
 
 `hyp sync` asks for confirmation. Local-only and ignored data remain excluded.
 An all-destination confirmed sync can release the first-sync review hold early.
-For replaying previously withheld history, see the
+For replaying previously withheld history, or every client's retained history
+after this host joins a different organization, see the
 [sync reference](CLI_REFERENCE.md#hyp-sync).
 
 <!-- @ref LLP 0471#manual-work: manual progress belongs to one awaited destination at a time -->
