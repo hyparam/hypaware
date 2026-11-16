@@ -29,7 +29,9 @@ Quick questions and single recommendations belong to
   covers about a week or month. If wording leaves the intended period unclear
   (for example, "last month" could mean a rolling month or a calendar month),
   ask before choosing dates. Honor clearly specified date ranges. State the
-  resolved absolute dates and timezone (UTC by default).
+  resolved absolute dates and timezone (UTC by default). Use that same zone
+  for calendar-day grouping and pass it, with the exact timestamp boundaries,
+  to every analyst assignment.
 - Include today's available recordings and label today as partial, with the
   query time and cache freshness. Do not require a closed period or impose a
   365-day cutoff. For large ranges, keep queries bounded and agree a narrower
@@ -122,6 +124,8 @@ check figures and locators against the ledger.
 Resolve unsupported claims and contradictions, then recheck affected content.
 Finish with the contract's [reader clarity pass](references/report-contract.md#final-reader-clarity-pass)
 before delivery.
+Run the contract's [timezone check](scripts/check-timezones.mjs) on all pages;
+each page must carry its own visible zone label before saving or delivery.
 
 When review is complete, save the report using
 [query report mechanics](../hypaware-query/reports.md), unless the user requested
