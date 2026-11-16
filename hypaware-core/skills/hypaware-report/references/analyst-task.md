@@ -28,7 +28,7 @@ Use this compact assignment, filled with actual values:
 Investigate one slice of HypAware recordings, read-only.
 Question: <evidence-seeking question>
 Organization context: <absolute path to organization-context.md, or relevant contents with sources>
-Scope: <local or named remote and organization; datasets, inclusive dates, predicates, row counts>
+Scope: <local or named remote and organization; datasets, inclusive dates with the report time zone and exact timestamp boundaries, predicates, row counts>
 Schema and comparison boundaries: <relevant columns and boundaries>
 Data rules: <applicable query, usage-identity, and evidence rules>
 Budget: <query limit, normally 5 and never above 20 or your own tighter limit>

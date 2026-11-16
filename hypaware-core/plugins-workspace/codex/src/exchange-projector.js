@@ -13,6 +13,7 @@ import {
   contentItemKinds,
   netInputUsage,
   numberValue,
+  preserveToolResultIds,
   reasoningMessageFromPayload,
   setIfString,
   stampUsageOnLastAssistant,
@@ -246,6 +247,7 @@ export function createCodexExchangeProjector(opts = {}) {
       // Summary replays retain native ids; ordinary messages keep their
       // established fallback identity.
       codexAttributes.identity_source = messages.some((message) => message.message_id) ? 'native' : 'gateway_fallback'
+      preserveToolResultIds(messages, conversationId ?? sessionId)
       const projectionAttributes = Object.keys(codexAttributes).length > 0
         ? { codex: codexAttributes }
         : undefined

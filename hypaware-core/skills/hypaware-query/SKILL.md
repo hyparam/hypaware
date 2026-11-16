@@ -28,6 +28,8 @@ Connected HypAware MCP tools offer the same reads: `query_sql`, `grep_search`, a
 
 `ai_gateway_messages` contains one row per message content part, not one row
 per message or response. Use `session_id` to scope conversations.
+Read [ai-messages.md](ai-messages.md) before counting tool failures or repeated
+tool results, especially legacy Codex records whose success labels can be wrong.
 
 Common fields:
 

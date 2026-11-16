@@ -15,6 +15,7 @@ import type {
 import type { KernelRuntime } from '../runtime/types.d.ts'
 import type { CommandRunner, DurableBinResult } from '../cli/types.d.ts'
 import type { FolderAskMode } from '../usage-policy/types.d.ts'
+import type { FirstSyncRelease } from '../../../src/core/usage-policy/types.js'
 
 /**
  * Daemon health states the smoke and `hyp daemon status` rely on.
@@ -720,6 +721,7 @@ export interface HypAwareStatusReport {
    * holding ticks. A held machine must never be a silent state (LLP 0100 R9).
    */
   firstSyncHoldDeadline: number | null
+  firstSyncRelease?: FirstSyncRelease | null
   /**
    * Client surfaces the running (or last-run) daemon's gateway produced rows
    * for, most recent first, read from `status.json` (LLP 0164). Empty when no

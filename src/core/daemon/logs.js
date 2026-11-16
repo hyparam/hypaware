@@ -1,8 +1,30 @@
 // @ts-check
 
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
 
 import { daemonLogDir, daemonLogPath } from '../runtime/paths.js'
+
+/**
+ * Persist rare CLI/policy transitions in the same local log as daemon events.
+ * Callers supply only curated scalar fields, never credentials or payloads.
+ * @param {{ stateRoot: string, event: string, fields?: Record<string, unknown> }} args
+ * @returns {Promise<boolean>}
+ */
+export async function appendDaemonLog({ stateRoot, event, fields = {} }) {
+  let file
+  try {
+    await fsp.mkdir(daemonLogDir(stateRoot), { recursive: true, mode: 0o700 })
+    file = await fsp.open(daemonLogPath(stateRoot), 'a', 0o600)
+    await file.writeFile(JSON.stringify({ ...fields, ts: new Date().toISOString(), level: 'info', event, pid: process.pid }) + '\n')
+    await file.sync()
+    return true
+  } catch {
+    return false
+  } finally {
+    await file?.close().catch(() => {})
+  }
+}
 
 /**
  * @import { DaemonLogger } from '../../../src/core/daemon/types.js'
