@@ -497,8 +497,7 @@ async function shippedModules() {
  * The shipped modules allowed to ask the host how to format something, and
  * why.
  *
- * One entry, and its reason is the shape of the whole exemption. A deadline is
- * the one value on these surfaces that *should* move with the machine: it is a
+ * A deadline is a value on these surfaces that *should* move with the machine: it is a
  * wall-clock time the reader has to act on in the zone they are standing in,
  * which is why that helper renders it locally and then names the zone. A count
  * is the opposite. It is the same number everywhere, so a locale cannot change
@@ -512,6 +511,8 @@ async function shippedModules() {
 const HOST_FORMATTING_ALLOWED = {
   'src/core/usage-policy/first_sync_hold.js':
     'formatFirstSyncDeadline renders the hold deadline in the zone the reader is in, and names that zone (LLP 0100)',
+  'hypaware-core/skills/hypaware-report/scripts/check-timezones.mjs':
+    'pageTimeZone validates an explicit IANA time-zone name through ECMA-402; it does not format counts or render a host-local date',
 }
 
 test('the only shipped module that asks the host how to format is the one that means to', async () => {

@@ -20,6 +20,8 @@ Once the user has selected a period, an omitted end date means now. "Last week" 
 boundaries require an explicit request. Ask when the subject or intended period
 is unclear, including whether "last month" means a rolling or calendar month.
 State absolute dates, timezone (UTC by default), and today's partial coverage.
+Saved recommendation pages use the report contract's opening `Time zone:`
+label and timezone check, so an independently opened page retains its scope.
 Specific historical questions and date ranges retain their requested scope.
 
 Establish the latest relevant state, the consequence, and a concrete next action
@@ -64,6 +66,19 @@ immediately after the title. Review each opening for the required labels, a conc
 and a usable change or investigation.
 
 ## Evidence and durable changes
+
+### Completion evidence
+
+Define completion using evidence from the system that owns the requested state.
+Keep the outcome unknown until that evidence is available. For login-session
+revocation, identify the specific old session and verify its revocation with the
+service or support, or a rejected refresh using that session's credential. A new
+login and no later transcript mentions leave the old session's authority unknown.
+Distinguish revoked refresh authority from the remaining lifetime of an already
+issued access token. Give a self-service path only when verified for that service
+and version; otherwise direct the user to its administrator or support. Token
+management and signing out another session are different operations. Keep secrets
+out of evidence and proposed test commands.
 
 When the user asks you to analyze recorded sessions and recommend changes:
 
