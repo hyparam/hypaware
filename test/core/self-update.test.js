@@ -2159,6 +2159,32 @@ test('without a supervisor the automatic lanes install nothing, and hyp update s
   }
 })
 
+test('a cloud restart wrapper enables automatic updates and keeps the TTL and off switch', async () => {
+  // @ref LLP 0365#restart-needs-a-supervisor [tests]: a marked wrapper owns the updater's restart exit
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-cloud-'))
+  try {
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+    const probe = fetchStub('1.1.0')
+    const events = []
+    const pass = () => runSelfUpdatePass({
+      stateRoot: dir, env: { HYP_SUPERVISED: '1' }, packageRoot, runner,
+      fetchImpl: probe.impl, log: event => events.push(event),
+    })
+    assert.equal((await pass()).action, 'updated')
+    assert.ok(events.includes('self_update.applied'))
+    assert.deepEqual(calls.filter(call => call[1] === 'install'), [
+      ['npm', 'install', '-g', 'hypaware@1.1.0'],
+    ])
+    assert.deepEqual(await pass(), { action: 'none' })
+    assert.equal(probe.calledCount(), 1, 'session starts do not bypass the daily check interval')
+    writeSelfUpdateState(dir, { auto_update: false })
+    assert.deepEqual(await pass(), { action: 'skipped', reason: 'auto_update_off' })
+    assert.equal(probe.calledCount(), 1)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('an unsupervised refusal reaches hyp status while that daemon lives, and a supervised pass clears it', async () => {
   // @ref LLP 0539#record [tests]: recorded by the refusing pass, cleared by a supervised one, read only for a live daemon
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-refusal-'))
