@@ -573,3 +573,24 @@ test('withFileLock reports a held lock once and honors a caller stale age', asyn
     await fsp.rm(tmp, { recursive: true, force: true })
   }
 })
+
+test('withFileLock on Windows waits out an EPERM create from a lock still being deleted (#2929)', async (t) => {
+  const { tmp } = await makeFixture()
+  t.after(() => fsp.rm(tmp, { recursive: true, force: true }))
+  fs.mkdirSync(tmp, { recursive: true })
+  const lockPath = path.join(tmp, 'x.lock')
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  t.after(() => { if (platform) Object.defineProperty(process, 'platform', platform) })
+  const open = fsp.open
+  let refusals = 2
+  t.mock.method(fsp, 'open', (/** @type {string} */ file, /** @type {string} */ flags, /** @type {number} */ mode) => {
+    if (refusals-- > 0) return Promise.reject(Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }))
+    return open(file, flags, mode)
+  })
+  assert.equal(await withFileLock(lockPath, async () => 'acquired'), 'acquired')
+
+  // A refusal that outlasts any delete is a real permission error.
+  refusals = Infinity
+  await assert.rejects(withFileLock(lockPath, async () => 'never'), { code: 'EPERM' })
+})
