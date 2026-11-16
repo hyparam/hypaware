@@ -6,7 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-08-31
 **Related:** LLP 0040, LLP 0070, LLP 0101, LLP 0188, LLP 0324, LLP 0327
-**Extended-by:** [LLP 0501](./0501-daily-sync-inventory.rfc.md#missing) (explicit inventory-selected history repair)
+**Extended-by:** [LLP 0501](./0501-daily-sync-inventory.rfc.md#missing) (explicit inventory-selected history repair), [LLP 0607](./0607-history-replay-all-clients.decision.md#command) (`--history all` covers every syncing client)
 
 > Extends [LLP 0188](./0188-enrolled-default-sync-with-client-optout.decision.md)
 > at `#no-retroactive-ship`. Returning a client to `sync` still changes only
