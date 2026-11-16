@@ -595,9 +595,16 @@ function handleRequest(upstreams, opts, pendingFinalizers, lifecycle, req, res) 
   let finalized = false
   /** @type {() => void} */
   let settle = () => {}
-  function finalizeOnce() {
+  /**
+   * The first outcome wins: tearing an exchange down raises further errors
+   * (an aborted upstream response, say), and they must not rewrite it.
+   *
+   * @param {unknown} [error]
+   */
+  function finalizeOnce(error) {
     if (finalized) return
     finalized = true
+    if (error !== undefined) exchange.setError(error)
     // A pass-through exchange produced no row and was never handed to the
     // recorder, so there is nothing to settle.
     if (!recording || ('recording' in exchange && exchange.recording === false)) {
@@ -638,8 +645,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, lifecycle, req, res) 
       // mid-stream upstream drop would leave the client waiting on its own
       // idle timeout. Destroy it so the client sees the drop and can retry.
       res.destroy(err)
-      exchange.setError(err)
-      finalizeOnce()
+      finalizeOnce(err)
     })
     upstreamRes.pipe(res)
   })
@@ -668,14 +674,12 @@ function handleRequest(upstreams, opts, pendingFinalizers, lifecycle, req, res) 
     if (!exchange.response) {
       exchange.setResponseStart({ status: 502, headers: {} })
     }
-    exchange.setError(err)
-    finalizeOnce()
+    finalizeOnce(err)
   })
 
   req.on('error', (err) => {
     upstreamReq.destroy()
-    exchange.setError(err)
-    finalizeOnce()
+    finalizeOnce(err)
   })
   res.on('close', () => {
     if (!failed && !upstreamReq.destroyed) upstreamReq.destroy()
@@ -683,8 +687,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, lifecycle, req, res) 
       // A tunnel socket is destroyed the moment stop() begins; any other
       // connection only when the stop grace ran out.
       const byStop = lifecycle.cut || (proxyMode && lifecycle.stopping)
-      exchange.setError(byStop ? 'gateway_stopped' : 'client_aborted')
-      finalizeOnce()
+      finalizeOnce(byStop ? 'gateway_stopped' : 'client_aborted')
     }
   })
 

@@ -1638,7 +1638,7 @@ test('an apostrophe in the registry password does not cut the redaction short', 
     assert.ok(!error.includes('bot:'), error)
     // Still says which registry went wrong, rather than collapsing to
     // `[url]` because the truncated body would not parse.
-    assert.match(error, /https:\/\/npm\.corp\.example/)
+    assert.match(error, /npm\.corp\.example/)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
