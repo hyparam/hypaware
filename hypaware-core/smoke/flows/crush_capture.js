@@ -56,13 +56,19 @@ export async function run({ harness, expect }) {
   await fs.writeFile(path.join(localOnly, '.hypignore'), 'local-only\n', 'utf8')
   // Every database exists before the source starts, so the baseline tick
   // records each one's cursor and the later writes read as new.
-  const projectDb = await createCrushDb(project)
-  const ignoredDb = await createCrushDb(ignored)
-  const localOnlyDb = await createCrushDb(localOnly)
+  const projects = [project, ignored, localOnly]
+  const dataDirs = projects.map((_, i) => path.join(fakeHome, `external-crush-${i}`))
+  const dbPaths = []
+  for (let i = 0; i < projects.length; i++) {
+    const original = await createCrushDb(projects[i])
+    await fs.rename(path.dirname(original), dataDirs[i])
+    dbPaths.push(path.join(dataDirs[i], 'crush.db'))
+  }
+  const [projectDb, ignoredDb, localOnlyDb] = dbPaths
   const indexPath = path.join(fakeHome, '.local', 'share', 'crush', 'projects.json')
   await fs.mkdir(path.dirname(indexPath), { recursive: true })
   await fs.writeFile(indexPath, JSON.stringify({
-    projects: [project, ignored, localOnly].map((dir) => ({ path: dir, data_dir: path.join(dir, '.crush') })),
+    projects: projects.map((dir, i) => ({ path: dir, data_dir: dataDirs[i] })),
   }), 'utf8')
 
   const needle = `crushsmoke-${harness.devRunId}`

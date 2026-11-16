@@ -36,7 +36,7 @@ export async function createCrushHarness(opts) {
   }
   /** @param {string[]} dataDirs */
   const writeIndex = async (dataDirs) => {
-    await fs.writeFile(indexPath, JSON.stringify({ projects: dataDirs.map(d => ({ data_dir: d })) }))
+    await fs.writeFile(indexPath, JSON.stringify({ projects: dataDirs.map(d => ({ path: path.dirname(d), data_dir: d })) }))
   }
   await writeIndex(projectDirs.map(p => path.join(p, '.crush')))
 
