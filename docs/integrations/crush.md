@@ -10,6 +10,12 @@ every 60 seconds for new messages, and a scheduled import every 15 minutes
 brings in existing sessions. It does not route Crush's model traffic or
 change Crush's settings. Tested with Crush v0.99.0.
 
+Crush can keep a project's database elsewhere (`CRUSH_DATA_DIR`,
+`--data-dir`, or `data_directory` in `crush.json`). HypAware then takes the
+project from the path Crush records in its index, not from where the
+database is stored. A database whose project it cannot tell, including one
+that several projects share, is not recorded, and `hyp status` says so.
+
 ## What is recorded
 
 Sessions and messages, including your prompts, Crush's responses and
@@ -71,8 +77,17 @@ list in your HypAware configuration, preserving the other entries:
 }
 ```
 
-Each entry is a project's `.crush` directory. HypAware reads these as well as
-the projects the index lists, up to 256 entries.
+Each entry is a project's `.crush` directory, inside the project. HypAware
+reads these as well as the projects the index lists, up to 256 entries. For an
+entry the daemon's index does not list, HypAware takes the folder that holds
+the entry as the project, and only when the entry is named `.crush`. Directory
+markings and `.hypignore` then apply to that folder. So with a custom
+`CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, keep each project's database where
+Crush puts it by default, in the project's own `.crush` directory, and list
+that directory here. Do not list a `.crush` directory kept outside its
+project: HypAware records it under the folder that holds it, so marking the
+real project does not stop it. Any other database you list is not recorded,
+and `hyp status` reports it as withheld.
 
 See [configuration](../CONFIGURATION.md#locate-and-validate-configuration)
 for the config location, then apply and check the change:
@@ -141,11 +156,13 @@ setting that turns that check off.
 ## Limits
 
 - Reading a database can leave an empty `crush.db-wal` and a 32 KiB
-  `crush.db-shm` in the project's `.crush/` directory until Crush next closes
-  it cleanly. These are SQLite's own index files and hold no content.
-- A daemon under launchd or systemd reads only the default index. Projects
-  kept under a custom `CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME` need
-  `data_dirs`.
+  `crush.db-shm` beside the database (the project's `.crush/` directory by
+  default) until Crush next closes it cleanly. These are SQLite's own index
+  files and hold no content.
+- A daemon under launchd or systemd reads only the default index. With a
+  custom `CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, only the `.crush` directories
+  listed in `data_dirs` are read, each under the folder that holds it (see
+  [Use a different data location](#use-a-different-data-location)).
 - At most 1,024 project databases are read. `hyp status` counts the ones
   skipped.
 - If Crush changes its database schema, `hyp status` reports the missing
