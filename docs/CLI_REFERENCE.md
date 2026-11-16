@@ -120,13 +120,16 @@ hyp status [--verbose] [--json]
 
 Collects one read-only health snapshot without activating plugins. By default it
 prints a summary: daemon state, storage, each client's attach state and sharing
-policy, first-sync state, and an Attention section whose `Next:` lines are the
+policy, first-sync state (the pending deadline, or when the last early release
+happened and its caller), and an Attention section whose `Next:` lines are the
 commands to run. `--verbose` adds the inventory behind that summary:
 configuration, active plugins, sources, sinks, cache, recent errors, proxy
 trust, maintenance, recent clients, capture health, and the `repair:` lines
 under each diagnostic. Configured and live listener endpoints and endpoint
 drift are reported by `hyp client status`. Use `--json` for the stable machine
-form; `--verbose` does not change it.
+form; `--verbose` does not change it. In `--json`, `first_sync_release` holds
+the last early release of the first-sync review hold (its time, deadline,
+caller and method), or `null` if there was none.
 
 ```sh
 hyp status --json
@@ -772,6 +775,24 @@ sink or every configured sink to export. `--dry-run` sends nothing. On a newly
 enrolled host, a confirmed all-destination sync (a typed `y` or `--yes`)
 releases the first-sync review hold early. A single-instance sync can't
 release that hold.
+
+An early release replaces the hold with a receipt,
+`hypaware/usage-policy/first-sync-release.json`, and adds a
+`sync.first_sync_hold_released` line to `hypaware/logs/daemon.log`. Both record
+the release time, the deadline, the caller, and the method (`prompt`,
+`yes-flag`, or `organization`). The receipt keeps only the latest release. When
+the environment shows a recognized AI agent (Codex, Claude Code, or Cursor's
+agent), the caller is `agent-yes-flag` with `--yes` and `agent-pty` without it.
+It is `organization` when the organization's `"first_sync_hold": false` ended
+the hold, and `unknown` otherwise. The caller is a hint read from environment
+variables, not authentication: a person and an agent HypAware does not
+recognize both read `unknown`. If `hyp sync` cannot write the receipt, the hold
+stays, nothing is sent, and the command returns `1`. `daemon.log` also records
+when a hold is created (`sync.first_sync_hold_created`), when one expires
+(`sync.first_sync_hold_expired`, with no receipt), and each destination's first
+successful export after the daemon starts or reloads its configuration
+(`sink.export_batch.ok`). These lines hold times, labels, and counts, never
+recorded content, paths, or credentials.
 
 `--history <client>` is a separate mode: it previews and, after its own
 confirmation, replays that client's locally retained history to the
