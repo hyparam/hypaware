@@ -26,6 +26,18 @@ function selectionOptions(env) {
   }
 }
 
+// @ref LLP 0511#onboarding: the account-bound grant distinguishes two sources sharing one plugin.
+/** @param {NodeJS.ProcessEnv} env @returns {Promise<Set<string>>} */
+export async function readHostedCodexPicks(env) {
+  const { readCloudConnection, DEFAULT_CLOUD_ORIGINS } = await cloudState()
+  const connection = await readCloudConnection(selectionOptions(env).stateDir)
+  const origins = connection?.origins ?? (connection ? DEFAULT_CLOUD_ORIGINS : [])
+  const picks = new Set()
+  if (origins.includes('codex_cloud')) picks.add('codex-cloud')
+  if (origins.some(origin => origin !== 'codex_cloud')) picks.add('chatgpt-work')
+  return picks
+}
+
 // @ref LLP 0511#onboarding: the local grant, not shared plugin membership, records each hosted choice.
 /**
  * @param {{env: NodeJS.ProcessEnv, descriptors: Map<string, PickerDescriptor>, configured?: Set<string>, detected: Set<string>}} opts
@@ -38,11 +50,7 @@ export async function seedHostedCodexPicks(opts) {
     const active = HOSTED_CODEX_PICKS.some(id => opts.configured?.has(id))
     for (const id of HOSTED_CODEX_PICKS) opts.configured.delete(id)
     if (!active) return
-    const { readCloudConnection, DEFAULT_CLOUD_ORIGINS } = await cloudState()
-    const connection = await readCloudConnection(selectionOptions(opts.env).stateDir)
-    const origins = connection?.origins ?? (connection ? DEFAULT_CLOUD_ORIGINS : [])
-    if (origins.includes('codex_cloud')) opts.configured.add('codex-cloud')
-    if (origins.some(origin => origin !== 'codex_cloud')) opts.configured.add('chatgpt-work')
+    for (const id of await readHostedCodexPicks(opts.env)) opts.configured.add(id)
   }
 }
 
