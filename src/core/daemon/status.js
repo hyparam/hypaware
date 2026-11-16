@@ -36,7 +36,7 @@ import {
   readFolderAskModeSafe,
   readLocalOnlyDirs,
 } from '../usage-policy/index.js'
-import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { readFirstSyncDeadline, readFirstSyncRelease } from '../usage-policy/first_sync_hold.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
 import {
   BOOT_FAILED_WARNING_PREFIX,
@@ -1953,6 +1953,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // hold", the same as the driver's own check sees it.
   // @ref LLP 0100#requirements [implements]: R9 - hyp status shows the pending first-sync deadline while the hold is live
   const firstSyncHoldDeadline = await readFirstSyncDeadline({ stateDir: stateRoot })
+  const firstSyncRelease = await readFirstSyncRelease({ stateDir: stateRoot })
 
   // ----- proxy-mode trust (LLP 0237 / LLP 0239) -----
   const proxyTrust = await collectProxyTrust({
@@ -2072,6 +2073,7 @@ export async function collectHypAwareStatus(opts = {}) {
     clientActions,
     usagePolicy,
     firstSyncHoldDeadline,
+    firstSyncRelease,
     recentEntrypoints,
     maintenance,
     captureHealth,

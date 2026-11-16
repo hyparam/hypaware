@@ -521,6 +521,9 @@ function renderSharingNotices(report, stdout, indent = '  ') {
     stdout.write(
       `${indent}first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
     )
+  } else if (report.firstSyncRelease) {
+    const release = report.firstSyncRelease
+    stdout.write(`${indent}first sync:      released early by ${release.hyp_confirmed_by} at ${formatFirstSyncDeadline(Date.parse(release.ts))} (last release; human approval unverified)\n`)
   }
 }
 
@@ -738,6 +741,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot, inf
     // Pending first-sync export hold (LLP 0101 / LLP 0100 R9): null once the
     // hold has expired or was never written, exactly matching the sink
     // driver's own fail-open read of the marker.
+    first_sync_release: report.firstSyncRelease ?? null,
     first_sync_hold: report.firstSyncHoldDeadline !== null
       ? {
         deadline: new Date(report.firstSyncHoldDeadline).toISOString(),

@@ -7,6 +7,14 @@
 // governs (LLP 0049 #classes).
 export type UsageClass = 'ignore' | 'local-only' | 'full'
 
+export interface FirstSyncRelease {
+  ts: string
+  hyp_deadline: string
+  deadline_ms: number
+  hyp_confirmed_by: 'agent-pty' | 'agent-yes-flag' | 'unknown' | 'organization'
+  hyp_confirmation_method: 'prompt' | 'yes-flag' | 'organization'
+}
+
 // The result of parsing a single `.hypignore` body. `declared` is the raw
 // token read before the fail-safe; `warn` is present only when the declared
 // token was unknown/unimplemented and was clamped to `ignore`.
