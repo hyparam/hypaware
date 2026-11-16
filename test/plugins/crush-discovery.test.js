@@ -173,6 +173,56 @@ test('an unchanged index is not reread', () => {
   }
 })
 
+test('an indexed custom data directory belongs to its recorded project', () => {
+  const root = tmp('crush-disc-')
+  try {
+    const project = path.join(root, 'project')
+    fs.mkdirSync(project)
+    const dataDir = makeProject(root, 'external')
+    const indexPath = path.join(root, 'projects.json')
+    fs.writeFileSync(indexPath, JSON.stringify({ projects: [{ path: project, data_dir: dataDir }] }))
+    const result = discoverDatabases(createDiscoveryState(), { indexPath, dataDirs: [dataDir] })
+    assert.equal(result.databases.length, 1)
+    assert.equal(result.databases[0].projectDir, project)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a database indexed for different projects is withheld rather than assigned to the first', () => {
+  const root = tmp('crush-disc-')
+  try {
+    const dataDir = makeProject(root, 'shared')
+    const projects = ['a', 'b'].map(name => path.join(root, name))
+    for (const project of projects) fs.mkdirSync(project)
+    const indexPath = path.join(root, 'projects.json')
+    fs.writeFileSync(indexPath, JSON.stringify({ projects: projects.map(project => ({ path: project, data_dir: dataDir })) }))
+    const result = discoverDatabases(createDiscoveryState(), { indexPath, dataDirs: [dataDir] })
+    assert.equal(result.databases.length, 0)
+    const status = crushSourceStatus(result, { indexPath, pollIntervalMs: 60_000, rowsWritten: 0 })
+    assert.equal(status.state, 'degraded')
+    assert.equal(status.details?.error_kind, 'project_path_unresolved')
+    assert.ok(!JSON.stringify(status).includes(projects[0]))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an indexed missing or relative project path never falls back to the data directory parent', () => {
+  const root = tmp('crush-disc-')
+  try {
+    const dataDir = makeProject(root, 'a')
+    const indexPath = path.join(root, 'projects.json')
+    for (const project of [undefined, 'relative', path.join(root, 'missing')]) {
+      fs.writeFileSync(indexPath, JSON.stringify({ projects: [{ path: project, data_dir: dataDir }] }))
+      const result = discoverDatabases(createDiscoveryState(), { indexPath, dataDirs: [dataDir] })
+      assert.equal(result.databases.length, 0)
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('a deleted index drops its list; data_dirs still count', () => {
   const root = tmp('crush-disc-')
   try {

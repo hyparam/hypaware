@@ -1229,7 +1229,9 @@ test('runWizardPick: the express path carries a raw-only config and never states
   }))
   const out = stdout.text()
   assert.match(out, /^✓ Recording Claude Code$/m)
-  assert.doesNotMatch(out, /raw|API/i, 'the hidden row is not narrated on the fast path either')
+  // Match the hidden row's own label and id, not bare `raw`/`api` substrings
+  // that the seeded api.anthropic.com upstream or plain words can carry (#1832).
+  assert.doesNotMatch(out, /Anthropic API|raw-anthropic/, 'the hidden row is not narrated on the fast path either')
   // Locked claude is dropped from local-layer composition; the carried raw
   // row is what the local layer still collects.
   assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])

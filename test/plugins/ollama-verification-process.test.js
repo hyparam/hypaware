@@ -281,6 +281,9 @@ test('actual split processing SIGHUP keeps resumed fresh capture and recording g
     await waitFor(() => observed() > 0)
     process.kill(processor, 'SIGHUP')
     await waitFor(() => observed() === 0)
+    // The replacement's first status write can land before its verification
+    // control route serves, so wait for the route itself (#2862).
+    await waitFor(async () => (await requestOllamaVerification({ endpoint: f.root, runId: f.status.runId, deadline: Date.now() + 1000 })).reason === 'ready')
     const result = await verify()
     assert.equal(result.code, 0, result.error + result.output)
     assert.equal(JSON.parse(result.output).status, 'persisted')

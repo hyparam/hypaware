@@ -1,10 +1,22 @@
 // @ts-check
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import v8 from 'node:v8'
+import vm from 'node:vm'
 import { getActiveSpan, runRoot } from '../../src/core/observability/index.js'
 import { TracerProvider, SpanStatusCode } from '../../src/core/observability/runtime.js'
 import { asyncRow } from 'squirreling'
 import { executeQuerySql, streamQuerySql, QueryExecutionBudgetError } from '../../src/core/query/sql.js'
+
+/** Force a full GC, the way the query guard resolves its own handle. */
+function collectGarbage() {
+  v8.setFlagsFromString('--expose-gc')
+  try {
+    vm.runInNewContext('gc')()
+  } finally {
+    v8.setFlagsFromString('--no-expose-gc')
+  }
+}
 
 /**
  * @param {number} count
@@ -106,6 +118,10 @@ test('SHOW TABLES streams the registry without scanning', async () => {
 
 test('the terminal memory guard covers retained consumer output on early break', async () => {
   const { args, state } = fixture(1)
+  // Collect earlier tests' garbage first. The guard measures settled heap
+  // against a raw baseline, so garbage left in that baseline can outweigh
+  // the retained rows once the terminal check collects it (#3001).
+  collectGarbage()
   let retained
   await assert.rejects(async () => {
     for await (const _batch of streamQuerySql({ ...args, maxHeapBytes: 1 })) {

@@ -401,6 +401,34 @@ test('a commit that fails leaves the recorded watermark unchanged', async () => 
 // Privacy
 // ---------------------------------------------------------------------------
 
+test('custom data storage uses the indexed project for cwd and ignore policy', async () => {
+  const h = await createCrushHarness({ projects: ['p1'] })
+  const project = h.projectDirs[0]
+  const dataDir = path.join(h.dir, 'custom-storage')
+  await fs.rename(path.dirname(h.dbPaths[0]), dataDir)
+  const dbPath = path.join(dataDir, 'crush.db')
+  await fs.writeFile(h.indexPath, JSON.stringify({ projects: [{ path: project, data_dir: dataDir }] }))
+  const runner = createCrushPollRunner(h.ctx)
+  await runCrushPollTick(runner, h.ctx)
+  const w = openWriter(dbPath)
+  try {
+    insertSession(w, { id: 'custom' })
+    addTurn(w, 'custom', 'first')
+    await runCrushPollTick(runner, h.ctx)
+    assert.ok(h.committed.length > 0)
+    assert.ok(h.committed.every(row => row.cwd === project))
+    await fs.writeFile(path.join(project, '.hypignore'), 'ignore\n')
+    runner.resolver = createCrushPollRunner(h.ctx).resolver
+    addTurn(w, 'custom', 'private')
+    await runCrushPollTick(runner, h.ctx)
+    assert.equal(h.committed.length, 0)
+    assert.equal(crushPollLogs(h.logs).at(-1)?.fields?.dbs_opened, 0)
+    assert.ok(!JSON.stringify(h.logs).includes(project))
+  } finally {
+    w.close()
+  }
+})
+
 test('a usage-policy ignore removes the project\'s rows, opens nothing and does not churn', async () => {
   const { runner, ctx, committed, logs, w, projectDirs, dbPaths } = await baselined()
   insertSession(w, { id: 's1' })
