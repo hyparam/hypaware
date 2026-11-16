@@ -1,6 +1,7 @@
 # Claude Code Cloud
 
-**Status:** Tested setup recipe for HypAware 1.42.0, October 13-15, 2026.
+**Status:** Setup recipe with automatic updates. Cloud capture originally tested
+with HypAware 1.42.0, October 13-15, 2026.
 **Setup id:** `claude`.
 
 Run HypAware beside Claude Code in an Anthropic-managed cloud session. The
@@ -12,8 +13,9 @@ cloud test. Your computer does not need to remain awake.
 This is the recipe from the
 [original cloud session](https://claude.ai/code/session_01KJKTgd1nks6nusu8diekmV),
 preserved at [commit cdb476d2](https://github.com/hyparam/hypaware/tree/cdb476d2b4faa074f737b86040173d9c9f8ce8ac/scripts/cloud).
-It pins the version that was tested; newer HypAware releases have not been
-retested here. Broader integration work remains tracked in
+The helper now installs the latest release and enables automatic updates;
+newer releases have not been retested in a real cloud session here. Broader
+integration work remains tracked in
 [HYP-115](https://linear.app/hyperparam/issue/HYP-115/add-support-for-cloud-claude-agents).
 
 ## Set up an environment
@@ -48,7 +50,7 @@ retested here. Broader integration work remains tracked in
    environment cache; later sessions reuse the installed files and run the
    session hooks again.
 
-Node 22.12 or newer is required. The pinned version needs Claude Code 2.1.193
+Node 22.12 or newer is required. Capture needs Claude Code 2.1.193
 or newer for telemetry, and 2.1.214 for full tool-decision detail.
 
 ## Setup script
@@ -81,8 +83,16 @@ Enrollment belongs in SessionStart: in the original cloud test, the session
 could read the environment's token but enrollment attempted during setup had
 not taken effect. The hook joins once, when the seed configuration is absent.
 It also removes a stale PID file when its process is no longer a daemon.
-The daemon refuses a second start while one is alive, and the surrounding loop
-relaunches it only on exit code 75.
+The daemon refuses a second start while one is alive. The surrounding loop
+sets `HYP_SUPERVISED=1` before launching the daemon, so its pre-boot updater
+recognizes that something will restart it. On exit code 75 the loop waits one
+second and relaunches the daemon onto the installed code. Other exit codes
+end the loop.
+
+New environments install `hypaware@latest`. Cached sessions use HypAware's
+normal startup and daily update checks rather than reinstalling the package
+on every session. Updates include the kernel and bundled plugins, and honor
+the effective `auto_update` setting, including centrally managed policy.
 
 The Stop hook imports the transcript and runs `hyp sync --yes` 60 seconds
 after the last reply. A newer reply resets that deadline, with one waiting
@@ -122,6 +132,20 @@ the daemon log exists but `session-context.jsonl` is missing, the session
 context hook did not run: telemetry is withheld until the working directory is
 known, so transcript recovery is the remaining capture route.
 
+## Upgrade an existing cloud environment
+
+Environments created with the older helper installed `hypaware@1.42.0` and
+did not enable automatic updates. Publishing a new helper does not replace
+their cached hooks. After the updated helper is published, edit the
+environment's Setup script (adding a comment is enough to change it) to
+rebuild its cache, then start a new session. Keep the loader above so the
+rebuild downloads the current helper. This is a one-time refresh; subsequent
+package releases use the automatic updater.
+
+Editing the setup script does not reconfigure a session already running.
+Check `hyp version` and `hyp status --verbose` inside the new session to
+verify the installed version and updater state.
+
 ## Tested behavior and limits
 
 The original work recorded successful live telemetry and transcript capture in
@@ -129,6 +153,13 @@ a real cloud session. The October 14 script revision also recorded fresh-install
 checks for repeated hook registration, one-time enrollment without a token in
 the log, an existing daemon, stale PID recovery, and exit-75 relaunch. The
 October 15 revision recorded the 60-second upload timing check.
+
+Isolated regression tests cover installing the latest release, preserving
+existing hooks, passing supervision to the first boot and its exit-75
+relaunch, and allowing a session to start after installation fails. Updater
+tests cover the same supervision marker, the daily check interval, and
+`auto_update: false`. These tests do not replace a real cloud-session check
+of the currently published package.
 
 The first seconds of telemetry can be lost while the SessionStart hook gets
 the listener running; transcript recovery captures the conversation afterward.
@@ -142,10 +173,6 @@ concurrent starts and denied `/proc` reads have not been established as safe
 by these historical checks. The current daemon's identity handling is tracked
 in [issue 2583](https://github.com/hyparam/hypaware/issues/2583).
 
-The hosted helper pins `hypaware@1.42.0`. Package upgrades require updating
-and retesting the helper before publishing it. Editing the setup script
-rebuilds the environment cache; it does not immediately reconfigure a running
-session.
 See [Anthropic's environment guide](https://code.claude.com/docs/en/cloud-environments)
 for current environment controls and caching behavior.
 
