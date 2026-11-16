@@ -350,7 +350,7 @@ async function* runCrushBackfill(ctx, opts, resolver) {
   }
 
   // A database left out of a partial discovery is not known to be gone.
-  const setComplete = !discovery.indexUnreadable && discovery.overCap === 0
+  const setComplete = !discovery.indexUnreadable && discovery.overCap === 0 && discovery.unresolved === 0
   if (watermark && !ctx.signal?.aborted) {
     if (setComplete) {
       // Databases no longer in the set: their entries and cursors go. One that
@@ -377,7 +377,7 @@ async function* runCrushBackfill(ctx, opts, resolver) {
     sweep: sweeping,
     dbs: discovery.databases.length,
     dbs_ignored: dbsIgnored,
-    dbs_failed: dbsFailed,
+    dbs_failed: dbsFailed + discovery.unresolved,
     sessions_seen: sessionsSeen,
     sessions_skipped_window: sessionsSkippedWindow,
     sessions_excluded: sessionsExcluded,
@@ -388,7 +388,7 @@ async function* runCrushBackfill(ctx, opts, resolver) {
     sessions_busy: sessionsBusy,
     sessions_projected: sessionsProjected,
     entries_pruned: entriesPruned,
-    status: sessionsBusy || dbsFailed ? 'partial' : 'ok',
+    status: sessionsBusy || dbsFailed || discovery.unresolved ? 'partial' : 'ok',
   })
 
   if (sessionsBusy) {
@@ -400,6 +400,12 @@ async function* runCrushBackfill(ctx, opts, resolver) {
     // The kernel logs a provider's error message, so it names no path.
     throw new CrushDbError(`${dbsFailed} crush database(s) could not be read; see hyp status`,
       { code: /** @type {CrushDbError['code']} */ (firstFailedKind) })
+  }
+  // @ref LLP 0605#ownership: missing project attribution is a visible refusal,
+  // not a successful import of an empty database set.
+  if (discovery.unresolved) {
+    throw Object.assign(new Error(`${discovery.unresolved} crush database(s) have no unambiguous project path`),
+      { error_kind: 'project_path_unresolved' })
   }
 }
 

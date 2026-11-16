@@ -695,6 +695,7 @@ async function pollOnce(runner, ctx) {
  */
 function discoveryErrorKind(result) {
   if (result.indexUnreadable) return 'index_unreadable'
+  if (result.unresolved > 0) return 'project_path_unresolved'
   if (result.overCap > 0) return 'too_many_projects'
   return undefined
 }
@@ -977,6 +978,9 @@ export function crushSourceStatus(result, opts) {
   if (result.indexUnreadable) {
     errorKind = 'index_unreadable'
     message = `cannot read the crush index at ${indexPath}`
+  } else if (result.unresolved > 0) {
+    errorKind = 'project_path_unresolved'
+    message = `${groupThousands(result.unresolved)} crush databases withheld because their project path is missing or ambiguous`
   } else if (result.overCap > 0) {
     errorKind = 'too_many_projects'
     message = `${groupThousands(result.overCap)} crush projects skipped over the ${groupThousands(MAX_DATABASES)} limit`

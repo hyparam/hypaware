@@ -18,11 +18,11 @@ export type CrushDbErrorCode =
 
 /** One project database in the discovered set (LLP 0573#discovery). */
 export interface CrushDatabase {
-  /** Real path of the project's `.crush` data dir. */
+  /** Real path of Crush's data directory, which may be outside the project. */
   dataDir: string
   /** `<dataDir>/crush.db`. */
   dbPath: string
-  /** The data dir's parent: the git root Crush chose. */
+  /** Real project path recorded by Crush, or the parent of an unindexed `.crush` directory. */
   projectDir: string
   /** `size:mtimeNs:ino` of `crush.db` from this pass's existence check. */
   dbSig: string
@@ -32,8 +32,8 @@ export interface CrushDatabase {
 export interface CrushDiscoveryState {
   /** `size:mtimeMs:ino` of `projects.json` at the last read, null when absent. */
   indexSig: string | null
-  /** `data_dir` values from the last good read, in index order, deduplicated as text. */
-  indexDataDirs: string[]
+  /** Indexed storage locations and their recorded project paths from the last good read. */
+  indexProjects: { dataDir: string, projectDirs: (string | undefined)[] }[]
   /** Set while the index at `indexSig` could not be parsed or read. */
   indexUnreadable: boolean
 }
@@ -61,6 +61,8 @@ export interface CrushDiscoveryResult {
   stale: number
   /** Existing databases skipped over the cap. */
   overCap: number
+  /** Databases withheld because their project path is absent, unreadable or ambiguous. */
+  unresolved: number
 }
 
 /** One `sessions` row, the columns the reader names (LLP 0573#sqlite). */
