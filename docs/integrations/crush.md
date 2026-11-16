@@ -78,13 +78,16 @@ list in your HypAware configuration, preserving the other entries:
 ```
 
 Each entry is a project's `.crush` directory, inside the project. HypAware
-reads these as well as the projects the index lists, up to 256 entries. For
-an entry the daemon's index does not list, HypAware takes the entry's parent
-directory as the project, and only when the entry is named `.crush`. So with
-a custom `CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, keep each project's database
-where Crush puts it by default, in the project's own `.crush` directory, and
-list that directory here. A database stored anywhere else is not recorded; if
-you list it here, `hyp status` reports it as withheld.
+reads these as well as the projects the index lists, up to 256 entries. For an
+entry the daemon's index does not list, HypAware takes the folder that holds
+the entry as the project, and only when the entry is named `.crush`. Directory
+markings and `.hypignore` then apply to that folder. So with a custom
+`CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, keep each project's database where
+Crush puts it by default, in the project's own `.crush` directory, and list
+that directory here. Do not list a `.crush` directory kept outside its
+project: HypAware records it under the folder that holds it, so marking the
+real project does not stop it. Any other database you list is not recorded,
+and `hyp status` reports it as withheld.
 
 See [configuration](../CONFIGURATION.md#locate-and-validate-configuration)
 for the config location, then apply and check the change:
@@ -157,8 +160,9 @@ setting that turns that check off.
   default) until Crush next closes it cleanly. These are SQLite's own index
   files and hold no content.
 - A daemon under launchd or systemd reads only the default index. With a
-  custom `CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, only a database in its
-  project's own `.crush` directory, listed in `data_dirs`, is recorded.
+  custom `CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, only the `.crush` directories
+  listed in `data_dirs` are read, each under the folder that holds it (see
+  [Use a different data location](#use-a-different-data-location)).
 - At most 1,024 project databases are read. `hyp status` counts the ones
   skipped.
 - If Crush changes its database schema, `hyp status` reports the missing
