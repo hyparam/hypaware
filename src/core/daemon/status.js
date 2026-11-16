@@ -24,6 +24,7 @@ import { pluginLockPath } from '../plugin_install/paths.js'
 import { sinkInstanceName } from '../registry/sinks.js'
 import { cacheRootOf, daemonLogPath, processingStateRoot } from '../runtime/paths.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
+import { HOSTED_CODEX_PICKS, readHostedCodexPicks } from '../cli/wizard/codex_cloud.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { clientAssetStateRoot, readClientAssetLedger } from '../runtime/client_asset_ledger.js'
 import { sanitizeLabel } from '../util/json_util.js'
@@ -1726,6 +1727,21 @@ export async function collectHypAwareStatus(opts = {}) {
         state: newestRowAt === null || failingBackfills.has(clientName) ? 'unknown' : 'ok',
       })
     }
+  }
+
+  // @ref LLP 0511#onboarding: plugin membership never grants either hosted origin.
+  if (activePlugins.includes('@hypaware/codex-cloud')) {
+    let granted = new Set()
+    let error
+    try { granted = await readHostedCodexPicks(env) } catch {
+      error = 'Hosted chat grant is unreadable. Check hyp codex-cloud status and reconnect with hyp setup.'
+    }
+    const enabled = isEntryRecording(config?.plugins?.find(entry => entry.name === '@hypaware/codex-cloud'))
+    for (const name of HOSTED_CODEX_PICKS) clients.push({
+      name, plugin: '@hypaware/codex-cloud', configured: true,
+      recording: enabled && granted.has(name), attachable: false, attached: false,
+      ...(error ? { error } : {}),
+    })
   }
 
   // ----- client sync split (LLP 0188 #never-silent) -----

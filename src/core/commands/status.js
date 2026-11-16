@@ -9,6 +9,12 @@ import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { productStatus } from '../product_telemetry/commands.js'
 import { versionInfo } from './misc.js'
+import { HOSTED_CODEX_PICKS } from '../cli/wizard/codex_cloud.js'
+
+/** @param {string} name */
+function recordClientCommand(name) {
+  return HOSTED_CODEX_PICKS.includes(name) ? 'hyp setup' : `hyp client attach ${printable(name)}`
+}
 
 /**
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -246,7 +252,7 @@ export function renderClientStatusText(rows, stdout) {
         : 'not attached'
       : 'attach n/a'
     stdout.write(`  ${row.name}: ${row.recording ? 'recording' : 'not recording'}, ${attach}, ${row.provenance}\n`)
-    if (row.configured && !row.recording) stdout.write(`    to record it again: hyp client attach ${row.name}\n`)
+    if (row.configured && !row.recording) stdout.write(`    to record it again: ${recordClientCommand(row.name)}\n`)
     if (row.telemetry_endpoint || row.listener_endpoint) {
       const clientEndpoint = row.telemetry_endpoint ?? 'unknown client endpoint'
       const listenerEndpoint = row.listener_endpoint ?? 'listener not running'
@@ -376,7 +382,7 @@ export function renderStatusSummary({ report, stdout, info }) {
     // @ref LLP 0466#status [implements]: a detached client reads "Not recording", with a hint and no warning
     if (client && client.configured && client.recording === false) notRecording.push(name)
     const state = client?.error ? 'Could not check'
-      : client && client.configured && client.recording === false ? 'Not recording'
+      : client && client.configured && client.recording === false ? (HOSTED_CODEX_PICKS.includes(name) ? 'Not connected' : 'Not recording')
       : client?.capture ? describeOllamaCapture(client.capture)
       : capture?.state === 'gap' ? 'Telemetry may be interrupted'
       : capture?.state === 'unknown' ? 'Capture unconfirmed'
@@ -394,7 +400,7 @@ export function renderStatusSummary({ report, stdout, info }) {
   }
   if (syncing.size > 0) stdout.write('\n  Sync = organization sharing policy, not delivery confirmation.\n')
   for (const name of notRecording) {
-    stdout.write(`\n  To record ${printable(name)} again: hyp client attach ${printable(name)}\n`)
+    stdout.write(`\n  To record ${printable(name)} again: ${recordClientCommand(name)}\n`)
   }
   if (needsCodexRestartNote(clients.get('codex'))) stdout.write(`\n  ${CODEX_RESTART_NOTE}\n`)
 
@@ -1091,7 +1097,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
             : 'not attached'
       )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
-      if (c.configured && c.recording === false) stdout.write(`        to record it again: hyp client attach ${c.name}\n`)
+      if (c.configured && c.recording === false) stdout.write(`        to record it again: ${recordClientCommand(c.name)}\n`)
       if (needsCodexRestartNote(c)) stdout.write(`        ${CODEX_RESTART_NOTE}\n`)
       // The probe's error is not this build's prose: a settings file that is
       // not valid JSON surfaces here as `JSON.parse`'s message, which echoes

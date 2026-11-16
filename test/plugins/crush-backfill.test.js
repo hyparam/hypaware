@@ -383,6 +383,39 @@ test('crush backfill: an unreadable exclusions store fails the run closed', asyn
   assert.equal(h.committed.length, 0, 'nothing is projected')
 })
 
+test('crush backfill: custom storage preserves project attribution and ignore policy', async () => {
+  const h = await stage()
+  seedSession(h.dbPaths[0], 'custom')
+  const project = h.projectDirs[0]
+  const dataDir = path.join(h.dir, 'custom-storage')
+  await fs.rename(path.dirname(h.dbPaths[0]), dataDir)
+  await fs.writeFile(h.indexPath, JSON.stringify({ projects: [{ path: project, data_dir: dataDir }] }))
+  await h.run({ sweep: true })
+  assert.ok(h.committed.length > 0)
+  assert.ok(h.committed.every(row => row.cwd === project))
+  await fs.writeFile(path.join(project, '.hypignore'), 'ignore\n')
+  await h.run({ sweep: true })
+  assert.equal(h.committed.length, 0)
+  await h.direct({ sweep: true })
+  assert.equal(scanComplete(h.logs).dbs_ignored, 1)
+})
+
+test('crush backfill: shared storage fails visibly without opening or capturing it', async () => {
+  const h = await stage()
+  seedSession(h.dbPaths[0], 'shared')
+  const other = path.join(h.dir, 'other-project')
+  await fs.mkdir(other)
+  await fs.writeFile(h.indexPath, JSON.stringify({ projects: [h.projectDirs[0], other]
+    .map(project => ({ path: project, data_dir: path.dirname(h.dbPaths[0]) })) }))
+  await assert.rejects(h.direct({ sweep: true }),
+    /** @param {any} err */ err => err.error_kind === 'project_path_unresolved')
+  assert.equal(h.committed.length, 0)
+  assert.equal(scanComplete(h.logs).dbs_failed, 1)
+  assert.equal(scanComplete(h.logs).status, 'partial')
+  assert.equal(scanComplete(h.logs).sessions_seen, 0)
+  assert.ok(!JSON.stringify(h.logs).includes(other))
+})
+
 test('crush backfill: an ignore-policy project is emptied without opening its database', async () => {
   const h = await stage()
   seedSession(h.dbPaths[0], 's1')

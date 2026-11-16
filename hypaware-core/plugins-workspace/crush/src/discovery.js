@@ -6,8 +6,8 @@
  * `crush.db` per distinct real `data_dir`.
  *
  * Bounded per pass: one `stat` of the index (a read only when its signature
- * moved), then at most one `realpath` and one `stat` per listed data dir
- * until the cap fills.
+ * moved), then resolve each admitted data dir and its indexed project paths
+ * and stat its database. Entries past the database cap spend no filesystem I/O.
  * The index list is cached between passes in a {@link CrushDiscoveryState}.
  *
  * @import { CrushDatabase, CrushDiscoveryInput, CrushDiscoveryResult, CrushDiscoveryState } from './types.js'
@@ -21,7 +21,7 @@ export const MAX_DATABASES = 1024
 
 /** @returns {CrushDiscoveryState} */
 export function createDiscoveryState() {
-  return { indexSig: null, indexDataDirs: [], indexUnreadable: false }
+  return { indexSig: null, indexProjects: [], indexUnreadable: false }
 }
 
 /**
@@ -40,17 +40,17 @@ export function discoverDatabases(state, input) {
   const indexRead = refreshIndex(state, input.indexPath)
   const indexPresent = state.indexSig !== null
 
-  /** @type {CrushDatabase[]} */
-  const databases = []
+  /** @type {Map<string, { database: CrushDatabase, unresolved: boolean }>} */
+  const candidates = new Map()
   /** @type {Set<string>} */
   const seenText = new Set()
-  /** @type {Set<string>} */
-  const seenReal = new Set()
   let listed = 0
   let stale = 0
   let overCap = 0
+  let unresolved = 0
 
-  for (const dir of [...state.indexDataDirs, ...input.dataDirs]) {
+  const entries = [...state.indexProjects, ...input.dataDirs.map(dataDir => ({ dataDir, projectDirs: undefined }))]
+  for (const { dataDir: dir, projectDirs } of entries) {
     if (seenText.has(dir)) continue
     seenText.add(dir)
     // @ref LLP 0573#discovery: past the cap the extras are skipped in index
@@ -59,7 +59,7 @@ export function discoverDatabases(state, input) {
     // over whichever 1,024 databases are in the set. Entries past the cap are
     // counted by text without a realpath or stat, so a huge index costs no
     // more syscalls than a full one.
-    if (databases.length >= MAX_DATABASES) {
+    if (candidates.size >= MAX_DATABASES) {
       listed++
       overCap++
       continue
@@ -77,8 +77,27 @@ export function discoverDatabases(state, input) {
       stale++
       continue
     }
-    if (seenReal.has(real)) continue
-    seenReal.add(real)
+    const previous = candidates.get(real)
+    // @ref LLP 0605#ownership: indexed project paths own attribution, not
+    // the storage location; a shared database cannot identify each session's project.
+    let projectDir
+    if (projectDirs) {
+      for (const project of projectDirs) {
+        let resolved
+        try { if (project && path.isAbsolute(project)) resolved = fs.realpathSync(project) } catch {}
+        if (!resolved || (projectDir && projectDir !== resolved)) {
+          projectDir = undefined
+          break
+        }
+        projectDir = resolved
+      }
+    } else if (path.basename(real) === '.crush') projectDir = path.dirname(real)
+    if (previous) {
+      if (projectDirs) {
+        previous.unresolved ||= !projectDir || previous.database.projectDir !== projectDir
+      }
+      continue
+    }
     listed++
     const dbPath = path.join(real, 'crush.db')
     const dbSig = fileSig(dbPath)
@@ -86,7 +105,17 @@ export function discoverDatabases(state, input) {
       stale++
       continue
     }
-    databases.push({ dataDir: real, dbPath, projectDir: path.dirname(real), dbSig })
+    candidates.set(real, {
+      database: { dataDir: real, dbPath, projectDir: projectDir ?? '', dbSig },
+      unresolved: !projectDir,
+    })
+  }
+
+  /** @type {CrushDatabase[]} */
+  const databases = []
+  for (const candidate of candidates.values()) {
+    if (candidate.unresolved) unresolved++
+    else databases.push(candidate.database)
   }
 
   return {
@@ -97,6 +126,7 @@ export function discoverDatabases(state, input) {
     listed,
     stale,
     overCap,
+    unresolved,
   }
 }
 
@@ -114,7 +144,7 @@ function refreshIndex(state, indexPath) {
   } catch (err) {
     if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
       state.indexSig = null
-      state.indexDataDirs = []
+      state.indexProjects = []
       state.indexUnreadable = false
       return false
     }
@@ -138,16 +168,16 @@ function refreshIndex(state, indexPath) {
     state.indexUnreadable = true
     return true
   }
-  /** @type {string[]} */
-  const dirs = []
-  const seen = new Set()
+  /** @type {Map<string, Set<string | undefined>>} */
+  const projectsByDir = new Map()
   for (const entry of projects) {
     const dir = entry && typeof entry === 'object' ? entry.data_dir : undefined
-    if (typeof dir !== 'string' || !path.isAbsolute(dir) || seen.has(dir)) continue
-    seen.add(dir)
-    dirs.push(dir)
+    if (typeof dir !== 'string' || !path.isAbsolute(dir)) continue
+    let paths = projectsByDir.get(dir)
+    if (!paths) projectsByDir.set(dir, paths = new Set())
+    paths.add(typeof entry.path === 'string' ? entry.path : undefined)
   }
-  state.indexDataDirs = dirs
+  state.indexProjects = [...projectsByDir].map(([dataDir, paths]) => ({ dataDir, projectDirs: [...paths] }))
   state.indexUnreadable = false
   return true
 }

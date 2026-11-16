@@ -573,3 +573,48 @@ test('withFileLock reports a held lock once and honors a caller stale age', asyn
     await fsp.rm(tmp, { recursive: true, force: true })
   }
 })
+
+test('withFileLock on Windows waits out an EPERM create from a lock still being deleted (#2929)', async (t) => {
+  const { tmp } = await makeFixture()
+  t.after(() => fsp.rm(tmp, { recursive: true, force: true }))
+  fs.mkdirSync(tmp, { recursive: true })
+  const lockPath = path.join(tmp, 'x.lock')
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  t.after(() => { if (platform) Object.defineProperty(process, 'platform', platform) })
+  const open = fsp.open
+  let refusals = 2
+  t.mock.method(fsp, 'open', (/** @type {string} */ file, /** @type {string} */ flags, /** @type {number} */ mode) => {
+    if (refusals-- > 0) return Promise.reject(Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }))
+    return open(file, flags, mode)
+  })
+  assert.equal(await withFileLock(lockPath, async () => 'acquired'), 'acquired')
+
+  // A refusal that outlasts any delete is a real permission error.
+  refusals = Infinity
+  await assert.rejects(withFileLock(lockPath, async () => 'never'), { code: 'EPERM' })
+})
+
+test('withFileLock on Windows gives each delete its own EPERM window, however long a holder in between keeps the lock (#2929)', async (t) => {
+  const { tmp } = await makeFixture()
+  t.after(() => fsp.rm(tmp, { recursive: true, force: true }))
+  fs.mkdirSync(tmp, { recursive: true })
+  const lockPath = path.join(tmp, 'x.lock')
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  t.after(() => { if (platform) Object.defineProperty(process, 'platform', platform) })
+  // A delete, then another contender holding the lock past the window, then
+  // that contender's delete. The clock jumps instead of the test waiting.
+  const now = Date.now
+  let skew = 0
+  t.mock.method(Date, 'now', () => now() + skew)
+  const open = fsp.open
+  const codes = ['EPERM', 'EEXIST', 'EPERM']
+  t.mock.method(fsp, 'open', (/** @type {string} */ file, /** @type {string} */ flags, /** @type {number} */ mode) => {
+    const code = codes.shift()
+    if (!code) return open(file, flags, mode)
+    if (code === 'EEXIST') skew += 3000
+    return Promise.reject(Object.assign(new Error(code), { code }))
+  })
+  assert.equal(await withFileLock(lockPath, async () => 'acquired'), 'acquired')
+})
