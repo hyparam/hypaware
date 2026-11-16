@@ -91,6 +91,9 @@ export async function withFileLock(lockPath, fn, opts = {}) {
         if (Date.now() - firstDeletePending > DELETE_PENDING_MS) throw err
       } else if (code !== 'EEXIST') {
         throw err
+      } else {
+        // A live holder in between: its own delete gets a fresh window.
+        firstDeletePending = undefined
       }
       if (!waited) {
         waited = true
