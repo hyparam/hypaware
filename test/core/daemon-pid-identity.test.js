@@ -29,14 +29,36 @@ function makeStateRoot(t) {
 }
 
 /**
+ * A running child that has already exec'd. Right after spawn returns, the
+ * child can still be between fork and exec, when its command line reads as
+ * the parent's or as empty, so wait for it to say it is running (#2922).
+ *
  * @param {import('node:test').TestContext} t
  * @param {string[]} args
+ * @returns {Promise<number>}
  */
-function liveChild(t, args) {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ...args], { stdio: 'ignore' })
+async function liveChild(t, args) {
+  const child = spawn(process.execPath, ['-e', 'process.stdout.write("r"); setInterval(() => {}, 1000)', ...args], { stdio: ['ignore', 'pipe', 'ignore'] })
   if (!child.pid) throw new Error('child did not start')
   t.after(() => child.kill('SIGKILL'))
+  await new Promise((resolve, reject) => {
+    child.stdout.once('data', resolve)
+    child.once('error', reject)
+  })
   return /** @type {number} */ (child.pid)
+}
+
+/**
+ * isDaemonProcess, read again while it answers null. Null is the fail-closed
+ * answer for a command line that could not be read, and on Windows the first
+ * read can overrun its timeout while a cold PowerShell starts (#2922).
+ *
+ * @param {number} pid
+ */
+function identify(pid) {
+  let answer = isDaemonProcess(pid)
+  for (let i = 0; answer === null && i < 2; i++) answer = isDaemonProcess(pid)
+  return answer
 }
 
 function spawnSyncPid() {
@@ -49,15 +71,15 @@ function entry(pid) {
   return { pid, startedAt: new Date().toISOString(), runId: `test-${pid}`, mode: /** @type {const} */ ('foreground') }
 }
 
-test('a live process without `daemon run` arguments is not the daemon (#2583)', (t) => {
-  const pid = liveChild(t, [])
+test('a live process without `daemon run` arguments is not the daemon (#2583)', async (t) => {
+  const pid = await liveChild(t, [])
   assert.equal(processIsAlive(pid), true)
-  assert.equal(isDaemonProcess(pid), false)
+  assert.equal(identify(pid), false)
 })
 
-test('a `daemon run` command line is the daemon, whatever the program is called', (t) => {
-  const pid = liveChild(t, ['daemon', 'run'])
-  assert.equal(isDaemonProcess(pid), true)
+test('a `daemon run` command line is the daemon, whatever the program is called', async (t) => {
+  const pid = await liveChild(t, ['daemon', 'run'])
+  assert.equal(identify(pid), true)
 })
 
 test('an unreadable command line stays fail-closed', () => {
@@ -65,9 +87,9 @@ test('an unreadable command line stays fail-closed', () => {
   assert.equal(isDaemonProcess(4194304), null)
 })
 
-test('a pid file naming a reused pid does not block the start, and the holder is left running', (t) => {
+test('a pid file naming a reused pid does not block the start, and the holder is left running', async (t) => {
   const stateRoot = makeStateRoot(t)
-  const foreign = liveChild(t, [])
+  const foreign = await liveChild(t, [])
   writePidFile(stateRoot, entry(foreign))
   claimDaemonStart(stateRoot, path.join(stateRoot, 'processing'), entry(process.pid))
   assert.equal(readPidFile(stateRoot)?.pid, process.pid)
@@ -81,9 +103,9 @@ test('a pid file naming this process is a previous incarnation\'s', (t) => {
   assert.equal(readPidFile(stateRoot)?.runId, `test-${process.pid}`)
 })
 
-test('a live daemon still refuses the start', (t) => {
+test('a live daemon still refuses the start', async (t) => {
   const stateRoot = makeStateRoot(t)
-  const daemon = liveChild(t, ['daemon', 'run'])
+  const daemon = await liveChild(t, ['daemon', 'run'])
   writePidFile(stateRoot, entry(daemon))
   assert.throws(
     () => claimDaemonStart(stateRoot, path.join(stateRoot, 'processing'), entry(process.pid)),
@@ -92,9 +114,9 @@ test('a live daemon still refuses the start', (t) => {
   assert.equal(readPidFile(stateRoot)?.pid, daemon)
 })
 
-test('a start in progress elsewhere refuses rather than racing it', (t) => {
+test('a start in progress elsewhere refuses rather than racing it', async (t) => {
   const stateRoot = makeStateRoot(t)
-  const holder = liveChild(t, [])
+  const holder = await liveChild(t, [])
   const pidFile = pidFilePath(stateRoot)
   const lock = path.join(path.dirname(pidFile), `.${path.basename(pidFile)}.mutation-lock`)
   fs.mkdirSync(lock, { recursive: true })
@@ -106,11 +128,11 @@ test('a start in progress elsewhere refuses rather than racing it', (t) => {
   assert.equal(readPidFile(stateRoot), null)
 })
 
-test('a stale clear leaves the pid file to a start that holds the guard', (t) => {
+test('a stale clear leaves the pid file to a start that holds the guard', async (t) => {
   const stateRoot = makeStateRoot(t)
   const dead = spawnSyncPid()
   writePidFile(stateRoot, entry(dead))
-  const holder = liveChild(t, [])
+  const holder = await liveChild(t, [])
   const pidFile = pidFilePath(stateRoot)
   const lock = path.join(path.dirname(pidFile), `.${path.basename(pidFile)}.mutation-lock`)
   fs.mkdirSync(lock)
@@ -124,7 +146,7 @@ test('a stale clear leaves the pid file to a start that holds the guard', (t) =>
 
 test('concurrent starts over a stale pid file produce exactly one winner', async (t) => {
   const stateRoot = makeStateRoot(t)
-  writePidFile(stateRoot, entry(liveChild(t, [])))
+  writePidFile(stateRoot, entry(await liveChild(t, [])))
   const go = path.join(stateRoot, 'go')
   // Each starter looks like a daemon to the others and outlives every claim.
   const script = `
