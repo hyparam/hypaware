@@ -767,7 +767,7 @@ work so you can confirm the target.
 ### `hyp sync`
 
 ```text
-hyp sync [instance] [--history <client>] [--yes] [--dry-run]
+hyp sync [instance] [--history <client|all>] [--yes] [--dry-run]
 ```
 
 Prints a destination and exclusion plan, confirms it, then forces the selected
@@ -799,6 +799,21 @@ confirmation, replays that client's locally retained history to the
 destinations that support a replay, leaving the ordinary sink watermarks
 untouched. The client must already be syncing (`hyp privacy client <client>
 sync`), and a replay cannot release the first-sync review hold.
+
+`--history all` replays every client this machine has retained AI-gateway
+history for, under one plan and one confirmation, for example after this
+machine joins a different organization. The plan lists each replay
+destination, one row count per client, the rows privacy policy withholds, and
+any destination that cannot replay. A destination that leaves the machine is
+shown with the organization it sends to, read from this machine's stored login
+(`org unknown` when that cannot be read; the command still asks). A client
+still marked `local-only` is skipped and named in the plan rather than
+refused. Like the single-client form, it replays only `ai_gateway_messages`,
+leaves the watermarks untouched, and refuses with `2` while the first-sync
+review window is open; run `hyp sync` first. A client whose replay fails does
+not stop the others: the command returns `1`, and a rerun is safe because the
+server drops rows it already holds. Without a terminal it refuses with `2`
+unless you pass `--yes`. `--dry-run` prints the plan and sends nothing.
 
 ```sh
 hyp sync --dry-run
@@ -1603,10 +1618,11 @@ hyp privacy client [<name>] [sync|local-only] [--json]
 ```
 
 Lists or changes per-client export policy. `local-only` withholds future rows
-from remote sync. Returning to `sync` affects future rows only: the policy
-flip itself syncs nothing that was withheld. To sync that retained history,
-run the separate, separately confirmed `hyp sync --history <client>`. A client
-required by central configuration can't opt out.
+from remote sync. Returning to `sync` affects future rows only: the policy flip
+itself syncs nothing that was withheld. To sync that retained history, run the
+separate, separately confirmed `hyp sync --history <client>` (or `--history
+all` for every client). A client required by central configuration can't opt
+out.
 
 ```sh
 hyp privacy client codex local-only
