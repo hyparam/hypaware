@@ -21,6 +21,9 @@ about your recordings:
 hyp ask "From my HypAware history, where did my agents go off the rails recently?"
 ```
 
+For what to ask next, see [everyday workflows](WORKFLOWS.md): get a
+recommendation and fix it, pick up where you left off, and more.
+
 Use `hyp --help` to list commands, or `hyp <command> --help` for help with a
 specific command. To query your recordings from an MCP client instead, see
 [Connect an MCP client](MCP.md).
@@ -30,6 +33,7 @@ specific command. To query your recordings from an MCP client instead, see
 | Category | Topics | Commands |
 | --- | --- | --- |
 | [Setup](CLI.md) | Installation, updates, background service, and uninstall | `setup`, `status`, `update`, `version`, `daemon` |
+| [Everyday workflows](WORKFLOWS.md) | Short workflows for using HypAware every day: get a recommendation and fix it, pick up where you left off, explain why a change was built, see where the work goes, and more, with prompts to paste | `ask`, `report` |
 | [Integrations](INTEGRATIONS.md) | Every supported agent and tool, its status, and how to set it up, including CI and headless hosts | `attach`, `codex-cloud`, `cursor-cloud`, `github`, `ollama` |
 | [Clients and history](CLIENTS.md) | Choosing clients, capture, history imports, detaching, and skills | `client`, `attach`, `detach`, `backfill` |
 | [Queries](QUERYING.md) | Explore recordings with your agent, search, SQL, graph and vector tools, and MCP | `ask`, `query`, `graph`, `vector`, `enrichment`, `mcp` |
