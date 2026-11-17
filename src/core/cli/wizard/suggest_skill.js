@@ -31,7 +31,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
 import { buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory } from '../walkthrough.js'
-import { reportSkillLaunchers, resolveLaunchers } from './first_ask.js'
+import { resolveLaunchers } from './first_ask.js'
 
 /**
  * Ask, and on a yes run the real `hyp ask` as a child on this terminal.
@@ -194,16 +194,12 @@ export async function anyClientLaunchable(env, deps = {}) {
 }
 
 /**
- * Whether a client this setup run left recorded can start
- * `hyp report generate`: its attach succeeded (or was already in place),
- * nothing was a dry run, its CLI resolves on `$PATH`, and its
- * `hypaware-report` skill is on disk. The last two are the command's own
- * check (`reportSkillLaunchers`), so setup names the command only where
- * it would start something. A client with a subagent directory must also
- * hold the `hypaware-analyst` worker file the report skill delegates to: there
- * the skill stops to ask about a substitute when it is missing, so setup
- * does not call that client ready. A client with no subagent directory
- * (Codex) has its skill name a generic worker instead.
+ * Whether a client this setup run left recorded can answer a question put
+ * to `hyp ask`: its attach succeeded (or was already in place), nothing was
+ * a dry run, its CLI resolves on `$PATH`, and its `hypaware-query` skill is
+ * on disk. The CLI is the command's own check, and the skill is what the
+ * question is answered with, so setup names the command only where it
+ * would start a client that can look the answer up.
  *
  * Reads the finale's own results rather than probing attach state: this
  * boot cannot see it (see `runAskChild`), and the finale's record is the
@@ -218,7 +214,7 @@ export async function anyClientLaunchable(env, deps = {}) {
  * }} [deps]
  * @returns {Promise<boolean>}
  */
-export async function recordedReportClientLaunchable(summary, env, deps = {}) {
+export async function recordedAskClientLaunchable(summary, env, deps = {}) {
   try {
     if (!summary || summary.daemonInstall.failed === true) return false
     const clients = summary.attach
@@ -232,15 +228,14 @@ export async function recordedReportClientLaunchable(summary, env, deps = {}) {
       env,
       ...(deps.resolve ? { resolve: deps.resolve } : {}),
     })
-    if (launchers.length === 0) return false
     const homeDir = env.HOME || os.homedir()
-    for (const { launcher } of await reportSkillLaunchers({ launchers, descriptors, homeDir })) {
-      const agentDir = descriptors.get(launcher.client)?.agentDir
-      if (!agentDir) return true
+    for (const { client } of launchers) {
+      const skillDir = descriptors.get(client)?.skillDir
+      if (!skillDir) continue
       try {
-        // A file, not just a path: a directory there is a copy that failed.
-        if ((await fsp.stat(path.join(homeDir, agentDir, 'hypaware-analyst.md'))).isFile()) return true
-      } catch { // This client's report workflow is missing its worker.
+        await fsp.access(path.join(homeDir, skillDir, 'hypaware-query', 'SKILL.md'))
+        return true
+      } catch { // This client was not shipped the skill the answer needs.
       }
     }
     return false
