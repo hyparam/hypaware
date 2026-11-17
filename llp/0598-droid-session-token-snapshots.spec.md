@@ -33,8 +33,8 @@ Emit one system/status message with provider_subtype=session_usage and stable
 identity per session. Scope reconciliation to client_name, session_id and that
 message_id so it cannot remove conversation parts. Hold the existing scope
 guard from the sidecar read through commit. Both hook and backfill paths use
-the same projector. Fill token columns explicitly because reconciliation does
-not run the append settlement pass. Changes to just the settings file invalidate
+the same projector. The token columns stay NULL on this row (LLP 0590#additive):
+the counts live in attributes.usage only. Changes to just the settings file invalidate
 the scheduled recovery fingerprint.
 
 The snapshot uses the first native message's timestamp as a stable session
@@ -48,12 +48,12 @@ from callingSessionId, never a guessed relationship from names or nearby times.
 ## Remote revisions {#remote}
 
 Local reconciliation replaces the snapshot. Exported revisions may coexist on
-the server. Queries must choose the greatest usage_observed_at per gateway_id
-and message_id, keeping all fields from that one revision, before summing.
-Server usage rollup includes Droid's explicit system/session_usage rows,
-selects one revision per identity on the anchored session day, and does not
-count these as assistant messages. No independent MAX of token fields.
-Totals grouped by date mean lifetime usage of sessions starting that day.
+the server. A query over attributes.usage must choose the greatest
+usage_observed_at per gateway_id and message_id, keeping all fields from that
+one revision, before summing; no independent MAX of token fields. Totals
+grouped by date mean lifetime usage of sessions starting that day. The token
+columns never carry these totals (LLP 0590#additive), so column sums, the
+server usage rollup included, leave Droid out.
 
 ## Bounds and checks
 

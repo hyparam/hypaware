@@ -139,6 +139,18 @@ function scanComplete(logs) {
   return /** @type {Record<string, unknown>} */ (entry.fields)
 }
 
+
+/**
+ * A session_usage row's counts: they live in `attributes.usage` only, never in
+ * the token columns (LLP 0590#additive).
+ * @param {any} row
+ */
+function snapshotUsage(row) {
+  for (const name of ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens', 'total_tokens']) assert.equal(row[name] ?? null, null)
+  const attributes = typeof row.attributes === 'string' ? JSON.parse(row.attributes) : row.attributes
+  return attributes.usage
+}
+
 test('mastracode backfill: the sweep contribution follows on_join', () => {
   const location = /** @type {const} */ ({ kind: 'local', path: '/nonexistent/mastra.db' })
   const on = createMastracodeBackfillProvider({ location, stateDir: '/nonexistent' })
@@ -184,8 +196,8 @@ test('usage-only updates replace one snapshot through poll, backfill and restart
     await h.poll()
     const first = h.committed.find(r => r.provider_subtype === 'session_usage')
     assert.ok(first)
-    assert.equal(first.input_tokens, 10)
-    assert.equal(first.output_tokens, 20)
+    assert.equal(snapshotUsage(first).input_tokens, 10)
+    assert.equal(snapshotUsage(first).output_tokens, 20)
     const initialId = first.part_id
 
     // No message changes: only the thread's persisted counters advance.
@@ -203,10 +215,11 @@ test('usage-only updates replace one snapshot through poll, backfill and restart
     assert.equal(rows.length, 1)
     assert.notEqual(rows[0].part_id, initialId)
     assert.equal(rows[0].message_created_at, first.message_created_at)
-    assert.equal(rows[0].input_tokens, 20)
-    assert.equal(rows[0].output_tokens, 25)
-    assert.equal(rows[0].cache_read_tokens, 120)
-    assert.equal(rows[0].cache_write_tokens, 30)
+    const usage = snapshotUsage(rows[0])
+    assert.equal(usage.input_tokens, 20)
+    assert.equal(usage.output_tokens, 25)
+    assert.equal(usage.cache_read_tokens, 120)
+    assert.equal(usage.cache_write_tokens, 30)
     assert.equal(h.committed.filter(r => r.part_type === 'text').length, 2)
     assert.ok(h.committed.filter(r => r.part_type === 'text').every(r => r.output_tokens == null))
     assert.ok(mastracodePollLogs(h.logs).some(l => Number(l.fields?.threads_changed) === 1))

@@ -19,8 +19,9 @@ Token counts come from each session's adjacent `.settings.json` `tokenUsage`.
 They are lifetime totals for that session, excluding its children. Child sessions
 are counted separately and linked by `parent_thread_id` from Droid's native
 `callingSessionId`. One replaceable system/status row per session carries the
-counts in the token columns (`provider_subtype = 'session_usage'`). Ordinary
-message rows carry no token counts. Factory credits are retained as
+counts in `attributes.usage` (`provider_subtype = 'session_usage'`). They stay
+out of the token columns, which hold only counts that can be summed, so column
+sums leave Droid out. Ordinary message rows carry no token counts. Factory credits are retained as
 `attributes.droid.factory_credits`, not dollars; `total_tokens` is not fabricated.
 
 Accounting is dated to the first message, so date-grouped figures mean lifetime

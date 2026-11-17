@@ -402,8 +402,17 @@ function usageCount(value) {
   return typeof value === 'number' && Number.isSafeInteger(value) ? value : null
 }
 
-/** @param {Record<string, unknown>} row @returns {Record<string, unknown> | undefined} */
+/**
+ * The usage a row adds to the token columns. A `session_usage` row (Droid,
+ * Mastra Code) carries a running lifetime total that is re-sent as it grows,
+ * so it stays in `attributes.usage` only.
+ *
+ * @ref LLP 0590#additive [implements]: the columns hold only counts a reader can sum
+ * @param {Record<string, unknown>} row
+ * @returns {Record<string, unknown> | undefined}
+ */
 function rowUsage(row) {
+  if (row.provider_subtype === 'session_usage') return undefined
   const attrs = typeof row.attributes === 'string' ? safeParseJson(row.attributes) : row.attributes
   return isPlainObject(attrs) && isPlainObject(attrs.usage) ? attrs.usage : undefined
 }

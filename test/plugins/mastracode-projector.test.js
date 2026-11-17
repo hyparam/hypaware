@@ -135,6 +135,18 @@ function contentParts(item) {
   return item.value.messages.filter((/** @type {any} */ m) => m.role !== 'system')
 }
 
+
+/**
+ * A session_usage row's counts: they live in `attributes.usage` only, never in
+ * the token columns (LLP 0590#additive).
+ * @param {any} row
+ */
+function snapshotUsage(row) {
+  for (const name of ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens', 'total_tokens']) assert.equal(row[name] ?? null, null)
+  const attributes = typeof row.attributes === 'string' ? JSON.parse(row.attributes) : row.attributes
+  return attributes.usage
+}
+
 test('exchange identity: scoped session id, client, entrypoint, repo, provenance and reconcile scope', async () => {
   const item = await project()
   const exchange = item.value
@@ -305,7 +317,7 @@ test('the title rides the session-title row', async () => {
   assert.equal(untitled.length, 0)
 })
 
-test('session usage materializes normalized columns without inheriting the last model', async () => {
+test('session usage normalizes counters into attributes only, without inheriting the last model', async () => {
   const tokenUsage = { promptTokens: 28026, completionTokens: 295, cachedInputTokens: 0,
     cacheCreationInputTokens: 28022, reasoningTokens: 292, totalTokens: 28321, raw: { secret: 'omit' } }
   const item = await project({ thread: thread({}, { tokenUsage }) })
@@ -313,12 +325,13 @@ test('session usage materializes normalized columns without inheriting the last 
   const snapshots = rows.filter(row => row.provider_subtype === 'session_usage')
   assert.equal(snapshots.length, 1)
   const row = snapshots[0]
-  assert.equal(row.input_tokens, 4)
-  assert.equal(row.output_tokens, 295)
-  assert.equal(row.reasoning_tokens, 292)
-  assert.equal(row.cache_read_tokens, 0)
-  assert.equal(row.cache_write_tokens, 28022)
-  assert.equal(row.total_tokens, 28321)
+  const usage = snapshotUsage(row)
+  assert.equal(usage.input_tokens, 4)
+  assert.equal(usage.output_tokens, 295)
+  assert.equal(usage.reasoning_tokens, 292)
+  assert.equal(usage.cache_read_tokens, 0)
+  assert.equal(usage.cache_write_tokens, 28022)
+  assert.equal(usage.total_tokens, 28321)
   assert.equal(row.role, 'system')
   assert.equal(row.model, 'unknown')
   assert.equal(row.provider, 'unknown')
@@ -335,7 +348,7 @@ test('session usage materializes normalized columns without inheriting the last 
   assert.ok(String(next.part_id).startsWith(`${next.message_id}#`))
   const repeat = (await aiGatewayBackfillMaterializer().materialize(await project({ thread: thread({}, { tokenUsage }) }), /** @type {any} */ ({}))).find(r => r.provider_subtype === 'session_usage')
   assert.equal(repeat?.part_id, row.part_id)
-  assert.equal(next.input_tokens, 6)
+  assert.equal(snapshotUsage(next).input_tokens, 6)
   assert.equal(next.message_created_at, row.message_created_at)
   assert.equal(/** @type {any} */ (next.attributes).mastracode.usage_observed_at, '2026-11-06T00:00:00.000Z')
 })
@@ -350,11 +363,7 @@ test('session usage rejects invalid counters and preserves missing measurements 
   const item = await project({ thread: thread({}, { tokenUsage: { promptTokens: 50, completionTokens: 0 } }) })
   const row = (await aiGatewayBackfillMaterializer().materialize(item, /** @type {any} */ ({}))).find(r => r.provider_subtype === 'session_usage')
   assert.ok(row)
-  assert.equal(row.output_tokens, 0)
-  assert.equal(row.input_tokens, null)
-  assert.equal(row.cache_read_tokens, null)
-  assert.equal(row.cache_write_tokens, null)
-  assert.equal(row.total_tokens, null)
+  assert.deepStrictEqual(snapshotUsage(row), { output_tokens: 0 })
 })
 
 test('an ignored project drops the thread before any row is built, and the log names no path', async () => {
