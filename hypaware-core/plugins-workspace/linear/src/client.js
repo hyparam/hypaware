@@ -8,6 +8,10 @@ import { linearIdentity, uuid } from './oauth.js'
 
 const ISSUE_FIELDS = 'id identifier createdAt updatedAt team { id key } state { id type } assignee { id } creator { id }'
 const PAGE_INFO = 'pageInfo { hasNextPage endCursor }'
+const TEAMS_QUERY = `query HypAwareTeams($after: String) {
+  organization { id }
+  teams(first: 50, after: $after) { nodes { id key name } ${PAGE_INFO} }
+}`
 export const ISSUES_QUERY = `query HypAwareIssues($filter: IssueFilter!, $after: String) {
   organization { id }
   issues(first: 50, after: $after, orderBy: createdAt, includeArchived: true, filter: $filter) {
@@ -20,6 +24,41 @@ export const ATTACHMENTS_QUERY = `query HypAwareAttachments($filter: AttachmentF
     nodes { id url createdAt updatedAt issue { ${ISSUE_FIELDS} } } ${PAGE_INFO}
   }
 }`
+
+/**
+ * @param {{ config: LinearConfig, stateDir: string, env: NodeJS.ProcessEnv } & RequestOptions} opts
+ * @param {string} workspace
+ * @returns {Promise<Array<{ id: string, key: string, name: string }>>}
+ */
+// @ref LLP 0608#team-scope [implements]: discovery is bounded and team metadata stays out of capture
+export async function listLinearTeams(opts, workspace) {
+  const teams = new Map()
+  const cursors = new Set()
+  /** @type {string | null} */
+  let after = null
+  for (let page = 0; page < 20; page++) {
+    const data = await linearGraphql(await linearAuthorization(opts.stateDir, opts.config, opts.env, opts), TEAMS_QUERY, { after }, opts)
+    if (data.organization?.id !== workspace) throw linearError('workspace_changed', 'workspace changed during setup; retry')
+    const { nodes, pageInfo } = data.teams ?? {}
+    if (!Array.isArray(nodes) || nodes.length > 50 || typeof pageInfo?.hasNextPage !== 'boolean') {
+      throw linearError('response', 'invalid team list')
+    }
+    for (const team of nodes) {
+      if (!uuid(team?.id) || typeof team.key !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/i.test(team.key) || typeof team.name !== 'string') {
+        throw linearError('response', 'invalid team in API response')
+      }
+      teams.set(team.id.toLowerCase(), { id: team.id.toLowerCase(), key: team.key, name: team.name.slice(0, 120) })
+    }
+    if (!pageInfo.hasNextPage) return [...teams.values()]
+    const next = pageInfo.endCursor
+    if (typeof next !== 'string' || !next || next.length > 4096 || cursors.has(next)) {
+      throw linearError('response', 'invalid team pagination cursor')
+    }
+    cursors.add(next)
+    after = next
+  }
+  throw linearError('team_limit', 'team discovery exceeded 20 pages; re-run with --team <key>')
+}
 
 /** @param {unknown} value @returns {value is string} */
 export function validTime(value) { return typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value)) }

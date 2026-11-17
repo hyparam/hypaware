@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { setLinearRuntime } from '../../hypaware-core/plugins-workspace/linear/src/runtime.js'
 import { startLinearSource } from '../../hypaware-core/plugins-workspace/linear/src/source.js'
@@ -11,7 +12,7 @@ import { DEFAULT_CLIENT_ID, validateLinearConfig } from '../../hypaware-core/plu
 import { readLinearAuth } from '../../hypaware-core/plugins-workspace/linear/src/auth.js'
 import { runLinearLogin, runLinearLogout, runLinearStatus, runLinearSync, runLinearBackfill } from '../../hypaware-core/plugins-workspace/linear/src/commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
-import { callbackUri, fakeLinearApi, IDENTITY } from '../../hypaware-core/smoke/lib/linear_fixture.js'
+import { callbackUri, fakeLinearApi, IDENTITY, TEAM_ID } from '../../hypaware-core/smoke/lib/linear_fixture.js'
 
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-linear-source-'))
@@ -147,5 +148,68 @@ test('inactive Linear command is discoverable without enabling capture', async t
     env: { ...process.env, HYP_HOME: f.dir, HYP_CONFIG: configPath } })
   assert.equal(code, 2)
   assert.match(f.stderr(), /@hypaware\/linear.*not in the active config/)
+  assert.match(f.stderr(), /hyp linear connect/)
   assert.equal(fs.readFileSync(configPath, 'utf8'), config)
+})
+
+test('standalone connect requires a scope for multiple teams and preserves other config', async t => {
+  const f = fixture(t)
+  const configPath = path.join(f.dir, 'config.json')
+  const targetPath = process.platform === 'win32' ? configPath : path.join(f.dir, 'settings.json')
+  const original = JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/grep' }] })
+  const team = { id: '77777777-7777-4777-8777-777777777777', key: 'ENG', name: 'Engineering' }
+  const api = fakeLinearApi({ teams: [{ id: TEAM_ID, key: 'HYP', name: 'HypAware' }, team] })
+  t.mock.method(globalThis, 'fetch', api.fetchImpl)
+  fs.writeFileSync(targetPath, original)
+  if (targetPath !== configPath) fs.symlinkSync(targetPath, configPath)
+  const opts = { stdout: f.ctx.stdout, stderr: f.ctx.stderr,
+    env: { ...process.env, HOME: f.dir, HYP_HOME: f.dir, HYP_CONFIG: configPath, LINEAR_API_KEY: 'hermetic-api-key' } }
+
+  assert.equal(await dispatch(['linear', 'connect'], opts), 2)
+  assert.match(f.stderr(), /Available teams: HYP, ENG/)
+  assert.equal(fs.readFileSync(configPath, 'utf8'), original)
+  assert.equal(await dispatch(['linear', 'connect', '--team', 'ENG', '--team', 'HYP'], opts), 0)
+  const saved = fs.readFileSync(configPath, 'utf8')
+  if (targetPath !== configPath) assert.equal(fs.readlinkSync(configPath), targetPath)
+  assert.deepEqual(JSON.parse(saved).plugins, [
+    { name: '@hypaware/grep' },
+    { name: '@hypaware/context-graph' },
+    { name: '@hypaware/linear', config: { teams: ['eng', 'hyp'] } },
+  ])
+  const backups = () => fs.readdirSync(f.dir).filter(name => name.startsWith(`${path.basename(targetPath)}.bak-`))
+  assert.equal(backups().length, 1)
+  assert.equal(fs.readFileSync(path.join(f.dir, backups()[0]), 'utf8'), original)
+  assert.equal(await dispatch(['linear', 'connect'], opts), 0)
+  assert.equal(backups().length, 1)
+  assert.equal(fs.readFileSync(configPath, 'utf8'), saved)
+  assert.equal(api.calls.filter(call => call.query.includes('HypAwareTeams')).length, 1)
+})
+
+test('standalone connect saves only the team selected in a terminal', async t => {
+  const f = fixture(t)
+  const configPath = path.join(f.dir, 'config.json')
+  const selected = '77777777-7777-4777-8777-777777777777'
+  const api = fakeLinearApi({ teams: [{ id: TEAM_ID, key: 'HYP', name: 'HypAware' }, { id: selected, key: 'ENG', name: 'Engineering' }] })
+  t.mock.method(globalThis, 'fetch', api.fetchImpl)
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {} })
+  const stdout = Object.assign(new PassThrough(), { isTTY: true })
+  let answered = false
+  stdout.on('data', chunk => {
+    if (answered || !String(chunk).includes('Engineering')) return
+    answered = true
+    setImmediate(() => {
+      stdin.write('\x1b[B')
+      stdin.write(' ')
+      stdin.write('\r')
+    })
+  })
+  t.after(() => {
+    stdin.destroy()
+    stdout.destroy()
+  })
+  assert.equal(await dispatch(['linear', 'connect'], {
+    stdin: /** @type {NodeJS.ReadStream} */ (/** @type {unknown} */ (stdin)), stdout, stderr: f.ctx.stderr,
+    env: { ...process.env, HOME: f.dir, HYP_HOME: f.dir, HYP_CONFIG: configPath, LINEAR_API_KEY: 'hermetic-api-key' },
+  }), 0, f.stderr())
+  assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')).plugins.find(plugin => plugin.name === '@hypaware/linear').config.teams, [selected])
 })

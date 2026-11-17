@@ -95,6 +95,7 @@ export const COMMANDS = Object.freeze([
   'leave',
   'linear',
   'linear backfill',
+  'linear connect',
   'linear login',
   'linear logout',
   'linear status',
