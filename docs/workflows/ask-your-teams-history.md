@@ -3,8 +3,8 @@
 Before you fix it, find out whether someone on your team already did.
 
 Once your hosts sync to HypAware Cloud, the questions you ask about your own
-history run across your team's sessions, including agents running unattended
-on build boxes and remote hosts.
+history can run across your team's sessions, including agents running
+unattended on build boxes and remote hosts.
 
 ## Ask your agent
 

@@ -43,7 +43,7 @@ prompts you can paste, what comes back, and how to get a better answer.
 Ask in the agent you already use: Claude Code, Codex, Cursor, or any recorded
 client with HypAware's skills installed. Start with
 `From my HypAware history, ...` for this host's recordings, or
-`From our HypAware team history, ...` for everything your team syncs to
+`From our HypAware team history, ...` for the team sessions you can read on
 HypAware Cloud. The agent often reaches for HypAware without being told;
 naming it makes the prompt work every time. From a terminal, `hyp ask` does
 the same (see [queries](QUERYING.md#use-hyp-ask)).
