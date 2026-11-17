@@ -27,6 +27,9 @@ installed `codex` executable on the collector's PATH, and a file-backed ChatGPT
 login in `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`). The collector
 adds the running Node executable's directory to its helper PATH, so a Codex
 installed beside Node remains discoverable under launchd or systemd.
+On macOS it also looks for the Codex CLI bundled with the ChatGPT app, in
+`~/Applications` and then `/Applications`, after every directory already on its
+PATH.
 The collector checks the effective Codex credential-store setting and rejects `keyring`,
 `auto`, `ephemeral` and API-key authentication. It does not change that setting.
 
