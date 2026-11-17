@@ -43,6 +43,7 @@ This reference identifies each plugin-owned family:
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
+- `codex ...`: `@hypaware/codex`.
 - `codex-cloud ...`: `@hypaware/codex-cloud` (beta).
 - `client claude-account ...`: `@hypaware/claude-account`.
 - `client claude-desktop ...`: `@hypaware/claude-desktop`.
@@ -749,11 +750,12 @@ marked hyprec-0123456789abcdef [applied]	Batch the retries
 
 ```text
 hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]
+hyp report delete <rec-id> [--yes] [--org <org>] [--remote <target>]
 ```
 
-**Warning:** This operation permanently deletes the report and its artifacts
-for every member of the organization. It prompts on a terminal. A
-non-interactive call without `--yes` refuses with exit code `2`.
+**Warning:** This operation permanently deletes the report and its artifacts,
+or the recommendation, for every member of the organization. It prompts on a
+terminal. A non-interactive call without `--yes` refuses with exit code `2`.
 
 ```sh
 hyp report delete usage-review 2026-W34 REPORT_ID
@@ -761,6 +763,18 @@ hyp report delete usage-review 2026-W34 REPORT_ID
 
 Replace `REPORT_ID` with the reviewed report ID. Avoid `--yes` during manual
 work so you can confirm the target.
+
+Given a recommendation id alone (`hyprec-` and its token, as `hyp report list
+--recommendations` prints it), it deletes a recommendation published on its own
+with `hyp report recommend`. A recommendation that is a page of a report is not
+deleted, including a standalone one that a remote from before standalone
+records published as a one-page report. The command says a report is deleted
+whole, prints the `hyp report delete <kind> <period> <id>` command for that
+report, and returns `1`. An unknown id deletes nothing and returns `1`.
+
+```sh
+hyp report delete hyprec-0123456789abcdef
+```
 
 ## Send data now
 
@@ -1243,6 +1257,53 @@ desktop directories.
 ```sh
 hyp client claude-desktop install-helper
 ```
+
+## Repair saved Codex chats
+
+Provided by `@hypaware/codex`. Codex 0.166.0 and later report
+`modelProviderMismatch` for chats saved while HypAware's gateway capture was
+on. The daemon repairs those chats once on its own; this command previews,
+applies or undoes the repair by hand. See
+[reopen chats saved with gateway capture](integrations/codex.md#reopen-chats-saved-with-gateway-capture).
+
+```text
+hyp codex repair [--dry-run] [--json] [--codex-bin <path>]
+hyp codex repair --restore <backup-path> [--json] [--codex-bin <path>]
+```
+
+`--dry-run` counts the chats a repair would change and changes nothing.
+Without it, close Codex Desktop, the ChatGPT app and every Codex CLI session
+first; the command refuses while any of them is running. It copies each
+affected chat file and Codex's state database into a new backup directory,
+changes the saved provider name from `hypaware` to `openai`, and prints the
+backup path. It refuses custom routes and profiles. A saved chat whose file was
+deleted is left unchanged, and the command says how many. When nothing needs
+repair it makes no backup. If an earlier repair was interrupted, it refuses and
+prints the `--restore` command for that backup.
+
+`--restore <backup-path>`, with Codex closed the same way, puts back the chat
+files and provider names saved in that backup. It refuses a backup from another
+Codex home and a chat changed since the repair, so new messages are kept. It
+cannot be combined with `--dry-run`. `--codex-bin` names the Codex executable that reads your
+configuration; on macOS the default is the one bundled with the ChatGPT or
+Codex app in `/Applications`, otherwise `codex` on `PATH`. `--json` prints the
+result as one JSON object.
+
+Each backup is a full copy of the affected chats and of Codex's state database,
+under `$CODEX_HOME/hypaware-provider-repair` (normally
+`~/.codex/hypaware-provider-repair`). A repair that fails before it changes any
+chat removes its own backup. HypAware removes no other backup: not on a later
+repair, a restore, `hyp privacy purge`, detach or daemon uninstall. It stays
+until you delete it.
+
+```sh
+hyp codex repair --dry-run
+hyp codex repair
+hyp codex repair --restore ~/.codex/hypaware-provider-repair/backup-XXXXXX
+```
+
+Returns `0` on success, `1` when the repair or restore fails or is refused, and
+`2` for a usage error.
 
 ## Codex Cloud collection (beta)
 
