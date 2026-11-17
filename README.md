@@ -70,11 +70,21 @@ hyp query sql "select count(*) from ai_gateway_messages"
 
 See [queries](./docs/QUERYING.md) for more.
 
-## Reports
+## Recommendations and reports
 
-Reports review your AI work over a period: token usage, recurring tasks, tool
-failures, and opportunities to improve. Your agent investigates recorded sessions
-and proposes specific fixes with evidence:
+Ask for one recommendation. Your agent looks through your recent sessions, finds
+a problem your agents keep working around, and proposes one change backed by the
+sessions that show it. Then you fix it in the same conversation:
+
+```sh
+hyp ask "From my HypAware history, give me one recommendation that would most improve how my agents work this week."
+```
+
+See [get one recommendation and fix it](./docs/workflows/get-one-recommendation.md).
+
+When you want a whole period reviewed, generate a report. It covers token usage,
+recurring tasks, tool failures, and opportunities to improve, and ranks specific
+fixes with evidence:
 
 ```sh
 hyp report generate "Cover last week and focus on repeated debugging work"

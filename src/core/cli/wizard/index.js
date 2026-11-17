@@ -46,7 +46,7 @@ import { ensureDurableBin } from '../global_install.js'
 import { platformIsSupported, setupUnsupportedNote } from '../../daemon/platform.js'
 import { friendlyClientLabel } from '../../commands/ask.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { anyClientLaunchable, recordedReportClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
+import { anyClientLaunchable, recordedAskClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -59,6 +59,15 @@ import { configureWizardCloud, HOSTED_CODEX_PICKS } from './codex_cloud.js'
 import { guardWizardOutput } from './output_guard.js'
 import { wizardStepProgress } from './steps.js'
 import { offerWizardGithub, connectWizardGithub } from './github.js'
+
+/**
+ * The one-recommendation ask setup closes on, as a command to paste. The
+ * wording is the "let it find the biggest one" prompt from
+ * docs/workflows/get-one-recommendation.md, without the repo it cannot
+ * assume: setup is not run from a project.
+ */
+export const RECOMMEND_ASK_COMMAND =
+  'hyp ask "From my HypAware history, give me one recommendation that would most improve how my agents work this week."'
 
 /**
  * The `hyp init` wizard orchestrator: the fork -> join -> pick ->
@@ -1046,13 +1055,15 @@ async function runGuardedInitWizard(opts, guard) {
   // @ref LLP 0100#requirements [implements]: R1 - a path that skips the offer keeps the narration's release verb and skill hint
   const nothingRecorded = firstLookResult?.shown === false && firstLookResult.reason === 'empty'
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
-  // One pointer to the report workflow, only where a client this run left
-  // recorded can actually start it. It goes ahead of the privacy close and
-  // the closing offers, whose yes can hand the terminal to a child, because
-  // nothing of setup's should follow that.
-  if (offerFollows && (opts.reportGenerateAvailable
-    ?? await recordedReportClientLaunchable(finaleSummary, opts.env))) {
-    opts.stdout.write('\nTo draft a report from your recorded sessions, run `hyp report generate`.\n')
+  // One pointer to a first recommendation, only where a client this run left
+  // recorded can actually answer it. One recommendation rather than a full
+  // report: it is the short way to a first fix, and the report is the step
+  // after it. It goes ahead of the privacy close and the closing offers,
+  // whose yes can hand the terminal to a child, because nothing of setup's
+  // should follow that.
+  if (offerFollows && (opts.recommendAskAvailable
+    ?? await recordedAskClientLaunchable(finaleSummary, opts.env))) {
+    opts.stdout.write(`\nTo get one recommendation from your recorded sessions, run:\n  ${RECOMMEND_ASK_COMMAND}\n`)
   }
   if (offerFollows) {
     opts.stdout.write(privacyReviewStatement({
