@@ -20,12 +20,16 @@ Approve read-only access in your browser, then choose the Linear teams to
 collect. HypAware selects the team automatically if only one is available and
 keeps any team scope you previously configured. The command enables the
 collector and its graph dependency, saves the selection, and restarts a running
-service daemon when the config changes. Linear is offered through this command
-after onboarding.
+service daemon when the config changes. `hyp setup` does not offer Linear. Run
+this command at any time to turn it on.
 
 To set the team scope directly, pass `--team` for each team key or UUID you
 want to collect, for example `hyp linear connect --team ENG --team OPS`.
 This also works when the terminal cannot show a team picker.
+
+If your organization manages the Linear settings, connect uses the teams it
+set. If it turns Linear or the context graph off, sets no teams, or you pass
+`--team`, connect makes no change and asks you to contact your administrator.
 
 ## Sign in again
 
@@ -39,6 +43,11 @@ Tokens are saved privately in the plugin's state directory with automatic
 refresh. A running daemon picks up login and logout on its next request.
 `hyp linear logout` removes local OAuth credentials. Revoke the grant in Linear
 settings to remove provider access as well.
+
+Logout alone leaves the collector on, and `hyp linear status` then reports
+that you are logged out. To stop collecting, run `hyp linear logout` first,
+then set the Linear plugin's `teams` to an empty array or `enabled` to false
+on its `plugins[]` entry, and run `hyp daemon restart`.
 
 ## Advanced authentication
 
