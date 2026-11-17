@@ -3,6 +3,8 @@
 The query interface is read-only. Schema discovery, column names, and usage
 accounting are covered in [SKILL.md](SKILL.md).
 
+- **Time filters.** Compare `message_created_at` against UTC bounds and keep the `Z`: zone-less instants use the host's local time. There is no `DATE()` function; use `date`, `DATE_TRUNC('day', message_created_at)`, or `CAST(message_created_at AS DATE)`.
+- **JSON fields.** Use `JSON_EXTRACT_STRING(col, '$.path')`; dotted names such as `usage.output_tokens` are not columns.
 - **Human-typed turns.** Filter user text rows with `JSON_EXTRACT_STRING(attributes, '$.claude.origin.kind') = 'human'` for Claude Code/Desktop, or `JSON_EXTRACT_STRING(attributes, '$.codex.content_item_kinds') LIKE '%"user.text"%'` for Codex. Role alone includes injected turns.
 - **Label coverage.** Labels arrived in 1.48.0 (2026-11-02); older rows can remain unlabeled. Check coverage by day, installation, and source: some labels do not establish complete coverage, and a missing label does not distinguish human from injected text. Report labeled human counts separately from any estimates based on unlabeled rows. Text heuristics are imperfect for Claude and unreliable for Codex.
 - **Dialect differences.** `LIKE ... ESCAPE`, `datetime`, `strftime`, and `typeof` are unsupported. `regexp_extract(str, pattern, n)` returns capture group `n` (default `0`, the whole match); `REGEXP_SUBSTR` takes a 1-based start position and occurrence and returns the whole match. Set-operation operands may not repeat an output column name; parenthesize an operand to give it its own `ORDER BY` or `LIMIT`. Aggregate windows (`COUNT`, `MAX`, `SUM` with `OVER`) are unsupported; aggregate in a subquery instead. `ROW_NUMBER()` is supported.

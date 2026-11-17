@@ -24,6 +24,7 @@ import { pluginLockPath } from '../plugin_install/paths.js'
 import { sinkInstanceName } from '../registry/sinks.js'
 import { cacheRootOf, daemonLogPath, processingStateRoot } from '../runtime/paths.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
+import { HOSTED_CODEX_PICKS, readHostedCodexPicks } from '../cli/wizard/codex_cloud.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { clientAssetStateRoot, readClientAssetLedger } from '../runtime/client_asset_ledger.js'
 import { sanitizeLabel } from '../util/json_util.js'
@@ -36,7 +37,7 @@ import {
   readFolderAskModeSafe,
   readLocalOnlyDirs,
 } from '../usage-policy/index.js'
-import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { readFirstSyncDeadline, readFirstSyncRelease } from '../usage-policy/first_sync_hold.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
 import {
   BOOT_FAILED_WARNING_PREFIX,
@@ -1728,6 +1729,21 @@ export async function collectHypAwareStatus(opts = {}) {
     }
   }
 
+  // @ref LLP 0511#onboarding: plugin membership never grants either hosted origin.
+  if (activePlugins.includes('@hypaware/codex-cloud')) {
+    let granted = new Set()
+    let error
+    try { granted = await readHostedCodexPicks(env) } catch {
+      error = 'Hosted chat grant is unreadable. Check hyp codex-cloud status and reconnect with hyp setup.'
+    }
+    const enabled = isEntryRecording(config?.plugins?.find(entry => entry.name === '@hypaware/codex-cloud'))
+    for (const name of HOSTED_CODEX_PICKS) clients.push({
+      name, plugin: '@hypaware/codex-cloud', configured: true,
+      recording: enabled && granted.has(name), attachable: false, attached: false,
+      ...(error ? { error } : {}),
+    })
+  }
+
   // ----- client sync split (LLP 0188 #never-silent) -----
   // On an enrolled machine every configured source syncs by default; only
   // the machine-local opt-out store (LLP 0188 #opt-out) keeps one local.
@@ -1953,6 +1969,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // hold", the same as the driver's own check sees it.
   // @ref LLP 0100#requirements [implements]: R9 - hyp status shows the pending first-sync deadline while the hold is live
   const firstSyncHoldDeadline = await readFirstSyncDeadline({ stateDir: stateRoot })
+  const firstSyncRelease = await readFirstSyncRelease({ stateDir: stateRoot })
 
   // ----- proxy-mode trust (LLP 0237 / LLP 0239) -----
   const proxyTrust = await collectProxyTrust({
@@ -2072,6 +2089,7 @@ export async function collectHypAwareStatus(opts = {}) {
     clientActions,
     usagePolicy,
     firstSyncHoldDeadline,
+    firstSyncRelease,
     recentEntrypoints,
     maintenance,
     captureHealth,

@@ -73,6 +73,12 @@ See [privacy review](./PRIVACY.md#review-before-the-first-cloud-sync).
 When you are ready, run `hyp sync` to upload. Otherwise, uploads start when the
 pause expires.
 
+An AI agent working in a terminal on this host can also run `hyp sync` and end
+the pause, so ask your agent not to run it until you have reviewed. After an
+early upload, `hyp status` shows when the pause ended and who ended it, as far
+as HypAware can tell: a recognized AI agent, your organization's setting, or
+`unknown`. It cannot show whether a person approved the upload.
+
 This review period applies to first-time browser sign-in. Signing in again or
 using `hyp join` with a token does not pause uploads. An organization can turn
 this review period off by setting `"first_sync_hold": false` in its config.
@@ -104,7 +110,8 @@ hyp sync
 
 `hyp sync` asks for confirmation. Local-only and ignored data remain excluded.
 An all-destination confirmed sync can release the first-sync review hold early.
-For replaying previously withheld history, see the
+For replaying previously withheld history, or every client's retained history
+after this host joins a different organization, see the
 [sync reference](CLI_REFERENCE.md#hyp-sync).
 
 <!-- @ref LLP 0471#manual-work: manual progress belongs to one awaited destination at a time -->

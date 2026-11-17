@@ -43,6 +43,7 @@ This reference identifies each plugin-owned family:
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
+- `codex ...`: `@hypaware/codex`.
 - `codex-cloud ...`: `@hypaware/codex-cloud` (beta).
 - `client claude-account ...`: `@hypaware/claude-account`.
 - `client claude-desktop ...`: `@hypaware/claude-desktop`.
@@ -120,13 +121,16 @@ hyp status [--verbose] [--json]
 
 Collects one read-only health snapshot without activating plugins. By default it
 prints a summary: daemon state, storage, each client's attach state and sharing
-policy, first-sync state, and an Attention section whose `Next:` lines are the
+policy, first-sync state (the pending deadline, or when the last early release
+happened and its caller), and an Attention section whose `Next:` lines are the
 commands to run. `--verbose` adds the inventory behind that summary:
 configuration, active plugins, sources, sinks, cache, recent errors, proxy
 trust, maintenance, recent clients, capture health, and the `repair:` lines
 under each diagnostic. Configured and live listener endpoints and endpoint
 drift are reported by `hyp client status`. Use `--json` for the stable machine
-form; `--verbose` does not change it.
+form; `--verbose` does not change it. In `--json`, `first_sync_release` holds
+the last early release of the first-sync review hold (its time, deadline,
+caller and method), or `null` if there was none.
 
 ```sh
 hyp status --json
@@ -509,12 +513,14 @@ an analysis that yields a single recommendation. The file must be `.md` or
 `.markdown` and is written like a `recommendation-<slug>.md` page inside a
 report: the first `# ` heading is the title (`--title` overrides it) and the
 bold paragraph under it is the thesis. A page with no heading and no `--title`
-is refused before upload. The remote wraps the page in a report of kind
-`recommendation` whose period is the publish date (UTC `YYYY-MM-DD`), mints
-the `hyprec-` id, and renders it; the report appears in `hyp report list` like
-any other and `hyp report get recommendation <period> <id>` serves the page.
-Repeat uploads of the same content answer with the existing id (`already
-published`). A remote that predates the standalone route returns `1` and says
+is refused before upload. The remote stores the page as a recommendation of
+its own, with no report around it, mints the `hyprec-` id, and renders it.
+`hyp report list --recommendations` lists it as `standalone`, and
+`hyp report get <rec-id>` serves the page. A repeat upload of the same content
+on the same UTC day answers with the existing id (`already published`). A
+recommendation published before the remote stored them this way stays a
+report of kind `recommendation` whose period is its publish date, and
+`hyp report get recommendation <period> <id>` still serves it. A remote that predates the standalone route returns `1` and says
 so. Requires the publisher role, like `publish`.
 
 ```sh
@@ -522,7 +528,7 @@ hyp report recommend ./recommendation-no-python3.md
 ```
 
 ```text
-published hyprec-0123456789abcdef (recommendation/2026-10-03/REPORT_ID)
+published hyprec-0123456789abcdef (standalone)
   view: hyp report get hyprec-0123456789abcdef
 ```
 
@@ -577,10 +583,11 @@ publish, or a report published before it did, lists the id and page alone.
       hyprec-fedcba9876543210	recommendation-tenant-check
 ```
 
-`--recommendations` lists the recommendations themselves, flat across
-reports and newest report first, from the remote's recommendation index: id,
-state in brackets (under the same rule, so a row without a supplied state has
-no label), the parent report's publish time, the parent report as
+`--recommendations` lists the recommendations themselves, flat, newest
+first, from the remote's recommendation index: id, state in brackets (under
+the same rule, so a row without a supplied state has no label), the publish
+time (the parent report's, or the recommendation's own for one published with
+`hyp report recommend`), the parent report as
 `kind/period/id` (or `standalone` for one published with `hyp report
 recommend`), and the title, with the thesis below. It has no coverage
 notice, because the recommendation index does not carry the report's
@@ -588,15 +595,18 @@ coverage; the report listing shows it. `--status <state,...>`
 filters by state and implies `--recommendations`; an unknown state is refused
 before any request, and an empty value (an unset shell variable) still selects
 the flat form rather than falling back to the report listing. A remote that
-predates the recommendation index returns `1` and says so. `--kind`,
-`--period`, `--limit`, and `--before` filter on the parent report in either
-form. With `--json`, the flat form prints the remote's recommendation rows
+predates the recommendation index returns `1` and says so. `--kind` and
+`--period` filter on the parent report in either form, so with either one, a
+recommendation stored on its own is not listed. One published before the
+remote stored them that way is a report of kind `recommendation`, so
+`--kind recommendation` still lists it, as `standalone`. `--limit` and
+`--before` apply to every row. With `--json`, the flat form prints the remote's recommendation rows
 whole.
 
 ```text
+  hyprec-fedcba9876543210	[open]	2026-10-03T09:00:00.000Z	standalone	No python3 on the runner
   hyprec-0123456789abcdef	[in_progress]	2026-08-24T09:00:00.000Z	usage-review/2026-W34/REPORT_ID	Batch the retries
       Every retry is its own call, 506 times a month. One queue fixes it.
-  hyprec-fedcba9876543210	[open]	2026-10-03T09:00:00.000Z	standalone	No python3 on the runner
 ```
 
 ```sh
@@ -625,9 +635,10 @@ hyp report get usage-review 2026-W34 REPORT_ID --output ./usage-review.html
 Replace `REPORT_ID` with the ID from `hyp report list`.
 
 Given a recommendation id instead (`hyprec-` and its token, like `hyprec-qcyx22sjav`, the id
-`hyp report list` prints under each report), it resolves the id to its report
-and page and prints that page (Markdown, or HTML when the report was published
-without it) with a `Citations from the report record` tail: the turns the page
+`hyp report list` prints under each report, or `hyp report list
+--recommendations` for one published with `hyp report recommend`), it resolves
+the id to its page, in its report or on its own, and prints that page
+(Markdown, or HTML when the report was published without it) with a `Citations from the report record` tail: the turns the page
 cites as `evidence:N`, numbered to match, and the queries the report ran to
 reach the recommendation, verbatim in `sql` blocks, and then a `Status`
 section: the current state with its reason, links, who recorded it and when,
@@ -667,8 +678,10 @@ hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <or
 ```
 
 Starts a recorded AI client on one recommendation, in the current directory.
-The id is the one `hyp report list` prints under each report. HypAware
-resolves it to its report, checks the recommendation page still exists, and
+The id is the one `hyp report list` prints under each report, or
+`hyp report list --recommendations` for one published on its own. HypAware
+resolves it to its report (or, for one stored on its own, to its own
+page), checks the recommendation page still exists, and
 starts the client with instructions to read it through
 `hyp report get <rec-id>` and make the change in the current repository.
 Nothing is written to disk. The client takes over the terminal and nothing is
@@ -680,12 +693,15 @@ should not be done, with the run's `--org` and `--remote` carried along.
 
 With no id on a terminal, it asks in two steps: first which report, newest
 first, each with its publish date and how many recommendations it carries
-(a report with none is not offered); then which of that report's
+(a report with none is not offered). Recommendations stored on their own
+are in no report, so they come last as one group, "Standalone
+recommendations". Then it asks which of that report's
 recommendations, labeled by the page's title and described by its thesis
 when the remote lists them, else by the page name. Escape on the second
 list
 returns to the first. `--kind`, `--period` and `--limit` narrow which reports
-are offered. Without a terminal, or with `HYP_NO_TUI=1`, the id is required
+are offered; `--limit` also bounds the standalone group, and with `--kind` or
+`--period` the group is not offered. Without a terminal, or with `HYP_NO_TUI=1`, the id is required
 and omitting it there returns `2`. The client offer set is the recorded one
 `hyp report generate` draws on, without the skill requirement: attached, or
 configured with no attach marker to write, and with its CLI on `PATH`. If
@@ -702,7 +718,8 @@ picks nothing and starts nothing: it prints `hyp report fix: no answer at the
 picker - nothing started.` with the usage line to stderr and returns `2`. A
 declined pick succeeds, as does a listing that carries no
 recommendations. A malformed id returns `2`. An unknown id, a recommendation
-page the report no longer carries, no launchable client, or a process-start
+page the report no longer carries, a standalone recommendation with no page,
+no launchable client, or a process-start
 failure returns `1`.
 
 ```sh
@@ -746,11 +763,12 @@ marked hyprec-0123456789abcdef [applied]	Batch the retries
 
 ```text
 hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]
+hyp report delete <rec-id> [--yes] [--org <org>] [--remote <target>]
 ```
 
-**Warning:** This operation permanently deletes the report and its artifacts
-for every member of the organization. It prompts on a terminal. A
-non-interactive call without `--yes` refuses with exit code `2`.
+**Warning:** This operation permanently deletes the report and its artifacts,
+or the recommendation, for every member of the organization. It prompts on a
+terminal. A non-interactive call without `--yes` refuses with exit code `2`.
 
 ```sh
 hyp report delete usage-review 2026-W34 REPORT_ID
@@ -759,12 +777,24 @@ hyp report delete usage-review 2026-W34 REPORT_ID
 Replace `REPORT_ID` with the reviewed report ID. Avoid `--yes` during manual
 work so you can confirm the target.
 
+Given a recommendation id alone (`hyprec-` and its token, as `hyp report list
+--recommendations` prints it), it deletes a recommendation published on its own
+with `hyp report recommend`. A recommendation that is a page of a report is not
+deleted, including a standalone one that a remote from before standalone
+records published as a one-page report. The command says a report is deleted
+whole, prints the `hyp report delete <kind> <period> <id>` command for that
+report, and returns `1`. An unknown id deletes nothing and returns `1`.
+
+```sh
+hyp report delete hyprec-0123456789abcdef
+```
+
 ## Send data now
 
 ### `hyp sync`
 
 ```text
-hyp sync [instance] [--history <client>] [--yes] [--dry-run]
+hyp sync [instance] [--history <client|all>] [--yes] [--dry-run]
 ```
 
 Prints a destination and exclusion plan, confirms it, then forces the selected
@@ -773,11 +803,44 @@ enrolled host, a confirmed all-destination sync (a typed `y` or `--yes`)
 releases the first-sync review hold early. A single-instance sync can't
 release that hold.
 
+An early release replaces the hold with a receipt,
+`hypaware/usage-policy/first-sync-release.json`, and adds a
+`sync.first_sync_hold_released` line to `hypaware/logs/daemon.log`. Both record
+the release time, the deadline, the caller, and the method (`prompt`,
+`yes-flag`, or `organization`). The receipt keeps only the latest release. When
+the environment shows a recognized AI agent (Codex, Claude Code, or Cursor's
+agent), the caller is `agent-yes-flag` with `--yes` and `agent-pty` without it.
+It is `organization` when the organization's `"first_sync_hold": false` ended
+the hold, and `unknown` otherwise. The caller is a hint read from environment
+variables, not authentication: a person and an agent HypAware does not
+recognize both read `unknown`. If `hyp sync` cannot write the receipt, the hold
+stays, nothing is sent, and the command returns `1`. `daemon.log` also records
+when a hold is created (`sync.first_sync_hold_created`), when one expires
+(`sync.first_sync_hold_expired`, with no receipt), and each destination's first
+successful export after the daemon starts or reloads its configuration
+(`sink.export_batch.ok`). These lines hold times, labels, and counts, never
+recorded content, paths, or credentials.
+
 `--history <client>` is a separate mode: it previews and, after its own
 confirmation, replays that client's locally retained history to the
 destinations that support a replay, leaving the ordinary sink watermarks
 untouched. The client must already be syncing (`hyp privacy client <client>
 sync`), and a replay cannot release the first-sync review hold.
+
+`--history all` replays every client this machine has retained AI-gateway
+history for, under one plan and one confirmation, for example after this
+machine joins a different organization. The plan lists each replay
+destination, one row count per client, the rows privacy policy withholds, and
+any destination that cannot replay. A destination that leaves the machine is
+shown with the organization it sends to, read from this machine's stored login
+(`org unknown` when that cannot be read; the command still asks). A client
+still marked `local-only` is skipped and named in the plan rather than
+refused. Like the single-client form, it replays only `ai_gateway_messages`,
+leaves the watermarks untouched, and refuses with `2` while the first-sync
+review window is open; run `hyp sync` first. A client whose replay fails does
+not stop the others: the command returns `1`, and a rerun is safe because the
+server drops rows it already holds. Without a terminal it refuses with `2`
+unless you pass `--yes`. `--dry-run` prints the plan and sends nothing.
 
 ```sh
 hyp sync --dry-run
@@ -1208,6 +1271,54 @@ desktop directories.
 hyp client claude-desktop install-helper
 ```
 
+## Repair saved Codex chats
+
+Provided by `@hypaware/codex`. Codex 0.166.0 and later report
+`modelProviderMismatch` for chats saved while HypAware's gateway capture was
+on. The daemon repairs those chats once on its own; this command previews,
+applies or undoes the repair by hand. See
+[reopen chats saved with gateway capture](integrations/codex.md#reopen-chats-saved-with-gateway-capture).
+
+```text
+hyp codex repair [--dry-run] [--json] [--codex-bin <path>]
+hyp codex repair --restore <backup-path> [--json] [--codex-bin <path>]
+```
+
+`--dry-run` counts the chats a repair would change and changes nothing.
+Without it, close Codex Desktop, the ChatGPT app and every Codex CLI session
+first; the command refuses while any of them is running. It copies each
+affected chat file and Codex's state database into a new backup directory,
+changes the saved provider name from `hypaware` to `openai`, and prints the
+backup path. It refuses custom routes and profiles. A saved chat whose file was
+deleted is left unchanged, and the command says how many. When nothing needs
+repair it makes no backup. If an earlier repair was interrupted, it refuses and
+prints the `--restore` command for that backup.
+
+`--restore <backup-path>`, with Codex closed the same way, puts back the chat
+files and provider names saved in that backup. It refuses a backup from another
+Codex home and a chat changed since the repair, so new messages are kept. It
+cannot be combined with `--dry-run`. `--codex-bin` names the Codex executable
+that reads your configuration; on macOS the default is the one bundled with the
+ChatGPT or Codex app in `/Applications`, otherwise `codex` on `PATH`. `--json`
+prints the result as one JSON object.
+
+Each backup is a full copy of the affected chats and of Codex's state database,
+under `$CODEX_HOME/hypaware-provider-repair` (normally
+`~/.codex/hypaware-provider-repair`). A repair that stops before it starts
+applying changes removes its backup. From the moment it starts applying them,
+the backup stays, even if the repair then fails or is rolled back. HypAware
+removes no backup after that: not on a later repair, a restore, `hyp privacy
+purge`, detach or daemon uninstall. It stays until you delete it.
+
+```sh
+hyp codex repair --dry-run
+hyp codex repair
+hyp codex repair --restore ~/.codex/hypaware-provider-repair/backup-XXXXXX
+```
+
+Returns `0` on success, `1` when the repair or restore fails or is refused, and
+`2` for a usage error.
+
 ## Codex Cloud collection (beta)
 
 In attended setup, Codex Cloud is a separate row included in Record everything
@@ -1420,11 +1531,12 @@ full historical import. Capture or projection failures return `1`.
 
 ## Collect Linear activity
 
-Plugin: `@hypaware/linear`. Explicit activation and `teams` in the plugin config are required.
-See the [Linear integration](integrations/linear.md) for configuration and for
-using your own OAuth app.
+Plugin: `@hypaware/linear`. Start with `hyp linear connect` to sign in, choose
+teams, and enable collection outside onboarding. See the
+[Linear integration](integrations/linear.md) for advanced configuration.
 
 ```text
+hyp linear connect [--no-browser] [--team <key-or-uuid> ...]
 hyp linear login [--no-browser]
 hyp linear logout
 hyp linear status
@@ -1432,7 +1544,9 @@ hyp linear backfill
 hyp linear sync
 ```
 
-Login uses read-only browser OAuth with a registered loopback callback and
+Connect saves the selected team scope in local config. Repeat `--team` to set
+the scope directly. Login updates credentials for an already enabled plugin.
+Both commands use read-only browser OAuth with a registered loopback callback and
 automatic token refresh. `--no-browser` prints the URL; the callback still
 requires a browser on the CLI's machine. `status` verifies the account and
 workspace. Logout removes local OAuth credentials; an API-key environment
@@ -1582,10 +1696,11 @@ hyp privacy client [<name>] [sync|local-only] [--json]
 ```
 
 Lists or changes per-client export policy. `local-only` withholds future rows
-from remote sync. Returning to `sync` affects future rows only: the policy
-flip itself syncs nothing that was withheld. To sync that retained history,
-run the separate, separately confirmed `hyp sync --history <client>`. A client
-required by central configuration can't opt out.
+from remote sync. Returning to `sync` affects future rows only: the policy flip
+itself syncs nothing that was withheld. To sync that retained history, run the
+separate, separately confirmed `hyp sync --history <client>` (or `--history
+all` for every client). A client required by central configuration can't opt
+out.
 
 ```sh
 hyp privacy client codex local-only

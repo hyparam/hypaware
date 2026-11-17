@@ -28,6 +28,8 @@ Connected HypAware MCP tools offer the same reads: `query_sql`, `grep_search`, a
 
 `ai_gateway_messages` contains one row per message content part, not one row
 per message or response. Use `session_id` to scope conversations.
+Read [ai-messages.md](ai-messages.md) before counting tool failures or repeated
+tool results, especially legacy Codex records whose success labels can be wrong.
 
 Common fields:
 
@@ -74,7 +76,8 @@ Keep the latest `attributes.droid.usage_observed_at` per `gateway_id, message_id
 before summing, taking every counter from the same row. Children have separate
 totals and `parent_thread_id` links. The accounting date is the session's first
 message day, not the spending day, and model/provider are unattributed.
-Use the dedicated token columns when the target schema has them. Missing usage
+Read these totals from `attributes.usage` on that row; its token columns are
+NULL, or hold a running total on rows written by HypAware 1.53.0. Missing usage
 is not zero; `total_tokens` is absent for Droid and is not a universal total.
 One carrier row per response does not establish uniqueness across capture sources
 or historical stream updates.

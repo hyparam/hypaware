@@ -442,6 +442,27 @@ test('client history replay filters by attribution and leaves the watermark unto
   assert.equal(watermarks.writes.length, 0)
 })
 
+// @ref LLP 0607#org-in-plan [tests]: the org comes off the token already in
+// memory, with no request, refresh or write.
+test('replayOrganization names the org of the credential in memory and never asks the server', () => {
+  const { sink, calls, identityClient, watermarks } = buildSink({ count: 0 })
+  const token = (/** @type {Record<string, unknown>} */ claims) => `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`
+
+  assert.equal(sink.replayOrganization?.(), undefined, 'no token in memory')
+  identityClient.identity.jwt = token({ sub: 'gateway-test', org: 'acme' })
+  assert.equal(sink.replayOrganization?.(), 'acme')
+  identityClient.identity.jwt = token({ sub: 'gateway-test' })
+  assert.equal(sink.replayOrganization?.(), undefined, 'no org claim')
+  identityClient.identity.jwt = token({ org: 7 })
+  assert.equal(sink.replayOrganization?.(), undefined, 'non-string claim')
+  identityClient.identity.jwt = 'not-a-jwt'
+  assert.equal(sink.replayOrganization?.(), undefined, 'malformed token')
+
+  assert.equal(calls.length, 0)
+  assert.equal(identityClient.refreshes, 0)
+  assert.equal(watermarks.writes.length, 0)
+})
+
 test('client history replay reports only chunks acknowledged before a failure', async () => {
   const dataset = {
     name: 'ai_gateway_messages',

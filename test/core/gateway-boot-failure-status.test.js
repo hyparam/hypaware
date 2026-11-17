@@ -188,7 +188,7 @@ test('a gateway boot failure records the failed boot rather than a completed sto
     // Bun's bind error names the port without spelling the Node errno.
     assert.ok(
       /EADDRINUSE/.test(run.bootError ?? '') ||
-      run.bootError === `Failed to start server. Is port ${port} in use?`,
+      run.bootError?.startsWith(`Failed to start server. Is port ${port} in use?`),
       `fixture invariant: the boot must fail on the taken port, got ${run.bootError}`
     )
     // The trap is gone from here on, so everything below reads the gateway's

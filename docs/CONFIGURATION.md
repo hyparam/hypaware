@@ -174,6 +174,7 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/logs/daemon.out.log` | Service stdout log |
 | `hypaware/logs/daemon.err.log` | Service stderr log |
 | `hypaware/session-ignores/` | Persistent session exclusions for supported recorders |
+| `hypaware/usage-policy/` | Folder, client, and first-sync policy records, including the receipt of the last early first-sync release |
 | `hypaware/product-telemetry/` | Product telemetry policy and pending batches |
 | `hypaware/tls/` | Local proxy certificate authority and certificates |
 | `hypaware/processing/logs/daemon.log` | Processing daemon log |

@@ -135,6 +135,26 @@ Adapters keep producing a `usage` object; only the stored row changes. That
 keeps the one-carrier and settlement logic in terms of one object, and the
 cutover touches a single function rather than every adapter.
 
+### The columns are additive {#additive}
+
+Every non-NULL token column is a count a reader can add to any other: summing
+the columns over any set of rows never counts a token twice. A reader needs no
+role filter, no per-client dedupe and no knowledge of which adapter wrote a row.
+
+Rows whose usage is a running total re-sent as it grows fail that, so their
+usage stays in `attributes.usage` and the columns stay NULL. Today that is
+every `provider_subtype = 'session_usage'` row: Droid's per-session lifetime
+counters (LLP 0598) and Mastra Code's per-thread counters. Both replace their
+own row locally, but every revision is exported, so a server sum would count
+each session once per revision. Turning them into increments would need
+durable per-session state the adapters do not keep (Droid's live cursors are
+in memory), so their usage is left out of the columns instead.
+
+Two kinds of non-assistant usage already meet the rule and stay: a Cursor stop
+row is one generation's counters, and a re-sent stop keeps its `part_id`, so
+ingest drops it; a Hermes session-end row is written once per session, on a
+client whose message rows carry no usage.
+
 ### Schema evolution {#evolution}
 
 Adding nullable columns is the additive case LLP 0029 already supports: bump

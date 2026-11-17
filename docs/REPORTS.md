@@ -58,19 +58,24 @@ directory's recording and sync policy, excerpts it quotes from `local-only`
 history included ([PRIVACY.md](PRIVACY.md#marking-directories)). Publishing
 remains a separate action, using `hyp report publish <name> ...`.
 
-<!-- @ref LLP 0461 [explains]: the report skill offers a single-recommendation path that hyp report recommend publishes -->
-To get one recommendation instead of a full report, ask for it:
+<!-- @ref LLP 0461 [explains]: a single recommendation saved from chat is the standalone page hyp report recommend publishes -->
+To get one recommendation instead of a full report, ask your agent for it.
+The `hypaware-query` skill answers it directly, without starting the
+full-report workflow:
 
-<!-- agent: Use the hypaware-report skill to give me one recommendation about repeated test failures. -->
+<!-- agent: From my HypAware history, give me one recommendation about repeated test failures this week. -->
 ```sh
-hyp report generate "Give me one recommendation about repeated test failures"
+hyp ask "From my HypAware history, give me one recommendation about repeated test failures this week."
 ```
 
-If you have not named a period, the skill asks for one, suggesting the last 7
-days including today. It answers in the session. Ask it to save the
-recommendation and it writes one `recommendation-<slug>.md` page in the current
-directory; it does not save a report folder. Publish the page only if you want
-to share it, with [`hyp report recommend`](CLI_REFERENCE.md#hyp-report-recommend).
+If you have not named a period or a focus, the agent asks for them first,
+suggesting the last 7 days including today. It answers in the session with a
+**Problem:** and a **Fix:**, followed by the supporting sessions and how to
+measure whether the fix worked. Ask it to save the recommendation and it writes
+one `recommendation-<slug>.md` page in the current directory; it does not save
+a report folder. Publish the page only if you want to share it, with
+[`hyp report recommend`](CLI_REFERENCE.md#hyp-report-recommend). See
+[get one recommendation and fix it](workflows/get-one-recommendation.md).
 
 You can also write a Markdown report yourself with your findings, query scope,
 and tables. The remote renders uploaded Markdown; no local render step is needed.

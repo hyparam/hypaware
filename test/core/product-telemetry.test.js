@@ -1238,7 +1238,9 @@ test('eligible delivery scans once and packs the surviving batches oldest first'
   const open = fs.openSync
   let queueReads = 0
   t.mock.method(fs, 'openSync', (...args) => {
-    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+    // Numeric flags are the outbox's own read opens. Whether a write routes
+    // through `fs.openSync` is the runtime's choice, so writes are not counted.
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep) && typeof args[1] === 'number')
       queueReads++
     return Reflect.apply(open, fs, args)
   })
@@ -1252,9 +1254,9 @@ test('eligible delivery scans once and packs the surviving batches oldest first'
     })
   }).drain()
   assert.deepEqual(sent?.records, [...(oldest?.records ?? []), ...(newer?.records ?? [])])
-  // One enumeration, identity checks before unlinking four copies, one read
-  // of each packed batch and the sealed write.
-  assert.equal(queueReads, QUEUE_SLOTS + 7)
+  // One enumeration, identity checks before unlinking four copies and one
+  // read of each packed batch.
+  assert.equal(queueReads, QUEUE_SLOTS + 6)
   assert.equal(queue.entries().length, 0)
 })
 

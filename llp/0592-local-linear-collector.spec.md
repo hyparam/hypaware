@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-11-06
 **Related:** LLP 0012, LLP 0023, LLP 0032, LLP 0360, LLP 0361, LLP 0392, LLP 0409
+**Extended-by:** LLP 0608 (standalone Linear connection and team selection)
 
 ## Request
 

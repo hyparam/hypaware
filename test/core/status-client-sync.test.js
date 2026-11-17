@@ -7,10 +7,50 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusSummary, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { clientSyncListPath, writeClientSyncEntries } from '../../src/core/usage-policy/client_sync.js'
+
+for (const scenario of [
+  { name: 'Codex Cloud only', origins: ['codex_cloud'], codex: true, work: false },
+  { name: 'Work web only', origins: ['codex_work_web'], codex: false, work: true },
+  { name: 'Work mobile only', origins: ['codex_work_mobile'], codex: false, work: true },
+  { name: 'both hosted sources', origins: ['codex_cloud', 'codex_work_web'], codex: true, work: true },
+  { name: 'a legacy grant', origins: undefined, codex: true, work: false },
+  { name: 'no grant', origins: null, codex: false, work: false },
+]) {
+  test(`hosted source recording follows ${scenario.name}, not shared plugin membership (#2980)`, async t => {
+    const hypHome = await makeHome()
+    t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+    const stateRoot = path.join(hypHome, 'hypaware')
+    const seedPath = centralSeedPath(stateRoot)
+    await fs.mkdir(path.dirname(seedPath), { recursive: true })
+    await fs.writeFile(seedPath, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/central' }] }))
+    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2,
+      plugins: [{ name: '@hypaware/ai-gateway' }, { name: '@hypaware/codex-cloud' }] }))
+    if (scenario.origins !== null) {
+      const grantDir = path.join(stateRoot, 'plugins/@hypaware/codex-cloud')
+      await fs.mkdir(grantDir, { recursive: true })
+      await fs.writeFile(path.join(grantDir, 'cloud-connection.json'), JSON.stringify({
+        version: 2, scope: 'account', accountHash: 'a'.repeat(64), origins: scenario.origins,
+      }))
+    }
+    const report = await collectHypAwareStatus({ env: { ...env(hypHome), HOME: hypHome }, homeDir: hypHome })
+    const stdout = makeBuf()
+    renderStatusSummary({ report, stdout })
+    for (const [name, recording] of [['codex-cloud', scenario.codex], ['chatgpt-work', scenario.work]]) {
+      assert.match(stdout.text(), new RegExp(`${name}\\s+${recording ? 'Recording' : 'Not connected'}`))
+      assert.equal(report.clients.find(c => c.name === name)?.recording, recording)
+    }
+    if (!scenario.codex || !scenario.work) {
+      assert.match(stdout.text(), /hyp setup/)
+      assert.doesNotMatch(stdout.text(), /hyp client attach (codex-cloud|chatgpt-work)/)
+    }
+    const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache' })
+    assert.equal(json.client_attach.find(c => c.name === 'chatgpt-work')?.recording, scenario.work)
+  })
+}
 
 // On an enrolled host every configured source syncs by default (LLP 0188
 // #rule); only the machine-local opt-out store keeps one local, and `hyp

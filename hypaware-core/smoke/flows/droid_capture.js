@@ -109,15 +109,22 @@ export async function run({ harness, expect }) {
       await fs.writeFile(settings, JSON.stringify({ tokenUsage: { inputTokens: 2, outputTokens: 10, cacheReadTokens: 100, cacheCreationTokens: 20 }, inclusiveTokenUsage: { outputTokens: 9999 } }))
       await notify()
       await notify()
+      // The snapshot's running totals live in attributes.usage only; its token columns stay NULL (LLP 0590#additive).
+      const snapshotOutput = (/** @type {any[]} */ rows) => {
+        const snapshots = rows.filter(r => r.provider_subtype === 'session_usage')
+        if (snapshots.length !== 1 || snapshots[0].output_tokens != null) return undefined
+        const attributes = typeof snapshots[0].attributes === 'string' ? JSON.parse(snapshots[0].attributes) : snapshots[0].attributes
+        return Number(attributes?.usage?.output_tokens)
+      }
       let values = await query()
-      expect.that('usage snapshot has dedicated columns and leaves conversation intact', values,
-        rows => rows.length === 7 && rows.filter(r => r.provider_subtype === 'session_usage').length === 1 && Number(rows.find(r => r.provider_subtype === 'session_usage').output_tokens) === 10)
+      expect.that('usage snapshot keeps its totals out of the token columns and leaves conversation intact', values,
+        rows => rows.length === 7 && snapshotOutput(rows) === 10)
       await fs.writeFile(settings, JSON.stringify({ tokenUsage: { inputTokens: 4, outputTokens: 14, cacheReadTokens: 200, cacheCreationTokens: 20 } }))
       for (let i = 0; i < 2; i++) await cli(['backfill', 'droid', '--since', '2000-01-01T00:00:00Z', '--json'])
       await notify()
       values = await query()
       expect.that('live and backfill converge to one updated session snapshot', values,
-        rows => rows.length === 7 && rows.filter(r => r.provider_subtype === 'session_usage').length === 1 && Number(rows.find(r => r.provider_subtype === 'session_usage').output_tokens) === 14)
+        rows => rows.length === 7 && snapshotOutput(rows) === 14)
     })
     await step('privacy', async () => {
       await fs.writeFile(path.join(records[0].cwd, '.hypignore'), 'ignore\n')

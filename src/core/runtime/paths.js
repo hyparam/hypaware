@@ -354,10 +354,10 @@ export function clientActionLocksDir(stateRoot) {
 }
 
 /**
- * One of the four usage-policy records. Each is a `version` and one value,
- * written by the same commands and read together at boot.
+ * A machine-local usage-policy record, written by commands and read at boot
+ * or by status.
  * @param {string} stateRoot
- * @param {'first-sync-hold' | 'folder-ask' | 'local-only' | 'client-sync'} kind
+ * @param {'first-sync-hold' | 'first-sync-release' | 'folder-ask' | 'local-only' | 'client-sync'} kind
  * @returns {string}
  */
 export function usagePolicyPath(stateRoot, kind) {

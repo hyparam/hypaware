@@ -104,7 +104,8 @@ rows below, show in `hyp status --json` as the `crush` entry's
 | Crush status says | What to do |
 | --- | --- |
 | `cannot read the crush index at <path>` | `projects.json` exists but could not be read or parsed. HypAware keeps reading the projects it last found there. Check that Crush itself still starts; Crush rewrites the index when it opens a project. |
-| `<N> crush projects skipped over the 1,024 limit` | HypAware reads at most 1,024 project databases. Remove projects you no longer use from Crush's index, or list the ones you want in `data_dirs`. |
+| `<N> crush databases withheld because their project path is missing or ambiguous` | HypAware cannot tell which project those databases belong to, so it records nothing from them. This happens when Crush's index lists a database with no project path, or with a project folder that no longer exists; when several projects share one database (for example one `CRUSH_DATA_DIR` for every project); or when a `data_dirs` entry is not named `.crush` and the daemon's index does not list it. Give each project its own database in Crush's default place, the project's `.crush` directory. With a custom `CRUSH_GLOBAL_DATA` or `XDG_DATA_HOME`, list that directory in `data_dirs` as shown on the [Crush page](integrations/crush.md#use-a-different-data-location) and run `hyp daemon restart`. Then run `hyp backfill crush`, or wait for the scheduled import. A deleted project's entry clears once it is gone from Crush's index, `projects.json`. HypAware keeps its place in a withheld database and reads it once its project is clear. |
+| `<N> crush projects skipped over the 1,024 limit` | HypAware reads at most 1,024 project databases, the ones in Crush's index first. Remove projects you no longer use from Crush's index; listing a project in `data_dirs` does not bring it under the limit. |
 | `crush.db has no <table> table (<N> crush databases)` or `crush.db has no <table>.<column> column (<N> crush databases)` | Your Crush version uses a database schema this HypAware release does not support. A table named `goose_db_version` is Crush's own migration record, not a Goose problem. Nothing is recorded from those databases until you upgrade HypAware to a release that supports it. |
 | `cannot read <N> crush databases` | The daemon's user cannot open those databases, or the Node.js that runs HypAware has no built-in SQLite. Or a database is damaged; check that Crush still opens that project. Run HypAware as the same user as Crush, and use Node 22.12 or later; `hyp backfill crush` prints `crush capture requires Node >= 22.12` in the second case. Then run `hyp daemon restart`. |
 | `crush poll failed: <kind>` | HypAware retries on the next poll. If it persists, run `hyp daemon restart`. |
@@ -124,8 +125,9 @@ already finished arrives with the scheduled import, up to 15 minutes later.
 Run `hyp backfill crush` to pick it up at once.
 
 Reading a database can leave an empty `crush.db-wal` and a 32 KiB
-`crush.db-shm` in the project's `.crush/` directory until Crush next closes it
-cleanly. These are SQLite's own index files and hold no content.
+`crush.db-shm` beside the database (the project's `.crush/` directory by
+default) until Crush next closes it cleanly. These are SQLite's own index
+files and hold no content.
 
 ## Mastra Code records nothing
 

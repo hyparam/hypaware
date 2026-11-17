@@ -11,13 +11,14 @@ import { DEFAULT_CLIENT_ID, NO_TEAMS_MESSAGE } from './config.js'
 
 /** @param {string[]} _argv @param {CommandRunContext} ctx */
 export async function runLinear(_argv, ctx) {
-  ctx.stdout.write('hyp linear <login|logout|status|backfill|sync>\n' +
+  ctx.stdout.write('hyp linear <connect|login|logout|status|backfill|sync>\n' +
+    '  connect                sign in and choose teams to collect\n' +
     '  login [--no-browser]   sign in to Linear with read-only browser OAuth\n' +
     '  logout                 remove local OAuth tokens\n' +
     '  status                 verify the account and workspace\n' +
     '  backfill               restart a bounded import of configured teams\n' +
     '  sync                   resume capture and automatically project the graph\n' +
-    'Set `teams` in the @hypaware/linear plugin config before collecting. Credentials never belong in config.\n')
+    'Run `hyp linear connect` to choose teams to collect.\n')
   return 0
 }
 
@@ -34,13 +35,7 @@ export async function runLinearLogin(argv, ctx) {
   process.on('SIGTERM', cancel)
   try {
     if (rt.env[rt.config.token_env]?.trim()) ctx.stdout.write(`Environment override ${rt.config.token_env} remains the effective capture credential.\n`)
-    const account = await loginLinear(rt.stateDir, {
-      clientId: rt.config.client_id || rt.env.LINEAR_CLIENT_ID || DEFAULT_CLIENT_ID, redirectUri: rt.config.redirect_uri, signal: abort.signal,
-      async onUrl(url) {
-        ctx.stdout.write(`Authorize read-only Linear access in a browser on this machine:\n${url}\nWaiting for sign-in (Ctrl-C to cancel)...\n`)
-        if (!argv.includes('--no-browser')) openBrowser(url)
-      },
-    })
+    const account = await authorizeLinear(rt, ctx.stdout, argv.includes('--no-browser'), abort.signal)
     rt.log.info('linear.login_completed', { operation: 'linear.login', status: 'ok' })
     ctx.stdout.write(`Signed in to Linear workspace ${account.workspace}.\n`)
     if (!rt.config.teams.length) ctx.stdout.write(`${NO_TEAMS_MESSAGE}\n`)
@@ -54,6 +49,24 @@ export async function runLinearLogin(argv, ctx) {
     process.off('SIGINT', cancel)
     process.off('SIGTERM', cancel)
   }
+}
+
+/**
+ * @param {Pick<ReturnType<typeof requireLinearRuntime>, 'config' | 'stateDir' | 'env'>} rt
+ * @param {CommandRunContext['stdout']} stdout
+ * @param {boolean} noBrowser
+ * @param {AbortSignal} signal
+ */
+export function authorizeLinear(rt, stdout, noBrowser, signal) {
+  return loginLinear(rt.stateDir, {
+    clientId: rt.config.client_id || rt.env.LINEAR_CLIENT_ID || DEFAULT_CLIENT_ID,
+    redirectUri: rt.config.redirect_uri,
+    signal,
+    async onUrl(url) {
+      stdout.write(`Authorize read-only Linear access in a browser on this machine:\n${url}\nWaiting for sign-in (Ctrl-C to cancel)...\n`)
+      if (!noBrowser) openBrowser(url)
+    },
+  })
 }
 
 /** @param {string[]} argv @param {CommandRunContext} ctx */

@@ -5,6 +5,7 @@ import path from 'node:path'
 import { gzip } from 'node:zlib'
 import { promisify } from 'node:util'
 import { openReceipts } from './receipts.js'
+import { decodeJwtStringClaim } from './identity_client.js'
 
 import { CENTRAL_OPERATION_TIMEOUT_MS, RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail, readStopCode } from './backoff.js'
 import { PRODUCT_VERSION } from '../../../../src/core/product_telemetry/collection.js'
@@ -494,6 +495,22 @@ export function createForwardSink(args) {
         hyp_bytes_written: bytesWritten,
       })
       return { status: 'exported', rowsReplayed, bytesWritten }
+    },
+
+    /**
+     * The organization named by the credential this sink holds now, for the
+     * `hyp sync --history all` plan. It reads the token already in memory:
+     * no refresh, no request, no write, so asking before the confirmation
+     * cannot send anything or change any state. The claim is decoded, not
+     * verified; it tells the person where the plan expects rows to go, and
+     * the server still binds every upload to the verified credential.
+     *
+     * @ref LLP 0607#org-in-plan [implements]: name the org of the current credential, from the token in memory
+     * @returns {string | undefined}
+     */
+    replayOrganization() {
+      const jwt = identityClient.identity?.jwt
+      return typeof jwt === 'string' ? decodeJwtStringClaim(jwt, 'org') : undefined
     },
 
     /**

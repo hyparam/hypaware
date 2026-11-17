@@ -2,9 +2,15 @@
 
 import fsp from 'node:fs/promises'
 import process from 'node:process'
+import path from 'node:path'
 
-import { atomicWriteJson } from '../util/fs_atomic.js'
+import { atomicWriteJson, fsyncDirectory } from '../util/fs_atomic.js'
+import { withFileLock } from '../util/file_lock.js'
 import { usagePolicyPath } from '../runtime/paths.js'
+import { appendDaemonLog } from '../daemon/logs.js'
+import { getLogger } from '../observability/index.js'
+
+/** @import { FirstSyncRelease } from '../../../src/core/usage-policy/types.js' */
 
 const FIRST_SYNC_HOLD_VERSION = 1
 
@@ -140,8 +146,72 @@ export async function writeFirstSyncHoldMarker({ stateDir, now = Date.now(), fs 
     deadline_ms: deadlineMs,
     pid: process.pid,
   }
-  await atomicWriteJson(filePath, payload, fs ? { fs } : undefined)
+  await withFileLock(`${filePath}.lock`, () => atomicWriteJson(filePath, payload, fs ? { fs } : undefined))
+  await appendDaemonLog({ stateRoot: stateDir, event: 'sync.first_sync_hold_created', fields: { hyp_deadline: payload.deadline } })
   return deadlineMs
+}
+
+/** @param {string} stateDir */
+function firstSyncReleasePath(stateDir) {
+  return usagePolicyPath(stateDir, 'first-sync-release')
+}
+
+/**
+ * A terminal and --yes establish the confirmation method, not who consented.
+ * Configuration-only CODEX_HOME is deliberately not an agent signal.
+ * @param {NodeJS.ProcessEnv} env
+ * @param {boolean} yes
+ * @returns {FirstSyncRelease['hyp_confirmed_by']}
+ */
+export function firstSyncConfirmationActor(env, yes) {
+  const agent = Object.keys(env).some(key => env[key]
+    && /^(?:CODEX_(?:THREAD_ID|CI|SANDBOX)|CLAUDECODE$|CURSOR_AGENT(?:_|$))/.test(key))
+  return agent ? (yes ? 'agent-yes-flag' : 'agent-pty') : 'unknown'
+}
+
+// @ref LLP 0606#atomic-release [implements]: moving the audited marker commits release and local evidence together.
+/**
+ * @param {{ stateDir: string, deadline: number, actor: FirstSyncRelease['hyp_confirmed_by'], method: FirstSyncRelease['hyp_confirmation_method'] }} args
+ * @returns {Promise<boolean>}
+ */
+export async function releaseFirstSyncHold({ stateDir, deadline, actor, method }) {
+  const marker = firstSyncHoldMarkerPath(stateDir)
+  try {
+    return await withFileLock(`${marker}.lock`, async () => {
+      if (await readFirstSyncDeadline({ stateDir }) !== deadline) return false
+      const receipt = {
+        version: FIRST_SYNC_HOLD_VERSION, deadline_ms: deadline,
+        hyp_deadline: new Date(deadline).toISOString(), ts: new Date().toISOString(),
+        hyp_confirmed_by: actor, hyp_confirmation_method: method,
+      }
+      await atomicWriteJson(marker, receipt, { mode: 0o600, dirMode: 0o700, fsync: true })
+      await fsp.rename(marker, firstSyncReleasePath(stateDir))
+      await fsyncDirectory(path.dirname(marker))
+      const logged = await appendDaemonLog({ stateRoot: stateDir, event: 'sync.first_sync_hold_released', fields: receipt })
+      if (!logged) getLogger('sync').warn('sync.first_sync_audit_log_failed', { hyp_operation: 'sync.first_sync_hold_released' })
+      return true
+    })
+  } catch {
+    return false
+  }
+}
+
+/** @param {{ stateDir: string }} args @returns {Promise<FirstSyncRelease | null>} */
+export async function readFirstSyncRelease({ stateDir }) {
+  let file
+  try {
+    file = await fsp.open(firstSyncReleasePath(stateDir), 'r')
+    if ((await file.stat()).size > 4096) return null
+    const value = JSON.parse(await file.readFile('utf8'))
+    if (value.version !== FIRST_SYNC_HOLD_VERSION || !Number.isFinite(value.deadline_ms)
+      || typeof value.ts !== 'string' || typeof value.hyp_deadline !== 'string'
+      || !Number.isFinite(Date.parse(value.ts)) || !Number.isFinite(Date.parse(value.hyp_deadline))
+      || Date.parse(value.hyp_deadline) !== value.deadline_ms
+      || !['agent-pty', 'agent-yes-flag', 'unknown', 'organization'].includes(value.hyp_confirmed_by)
+      || !['prompt', 'yes-flag', 'organization'].includes(value.hyp_confirmation_method)) return null
+    return { ts: value.ts, hyp_deadline: value.hyp_deadline, deadline_ms: value.deadline_ms,
+      hyp_confirmed_by: value.hyp_confirmed_by, hyp_confirmation_method: value.hyp_confirmation_method }
+  } catch { return null } finally { await file?.close().catch(() => {}) }
 }
 
 /**
@@ -154,10 +224,9 @@ export async function writeFirstSyncHoldMarker({ stateDir, now = Date.now(), fs 
  * [LLP 0069](../../../llp/0069-local-only-dir-selection.spec.md) R6 protects;
  * what R6 forbids is a *silent* first forward, which nothing here can cause.
  *
- * Called behind that prompt, and by the sink driver once it runs under an
- * organization config that turns the hold off (LLP 0578). Otherwise the daemon
- * never clears the marker, so an unattended machine still waits out the full
- * window.
+ * Legacy removal primitive. Confirmed and organization releases use
+ * releaseFirstSyncHold so local evidence survives. Other callers can discard
+ * a marker without creating a claim about consent.
  *
  * @ref LLP 0101#no-release [implements]: the confirmed `hyp sync` is the one user path that ends the window early
  * @param {{ stateDir: string, fs?: typeof fsp }} opts
@@ -210,6 +279,7 @@ export async function readFirstSyncDeadline({ stateDir, now = Date.now(), fs = f
   if (deadlineMs <= now) {
     try {
       await fs.unlink(filePath)
+      await appendDaemonLog({ stateRoot: stateDir, event: 'sync.first_sync_hold_expired', fields: { hyp_deadline: new Date(deadlineMs).toISOString() } })
     } catch {
       // Best-effort hygiene only; the expired marker already reads as absent.
     }

@@ -7,6 +7,8 @@ import path from 'node:path'
 /** @import { Stats } from 'node:fs' */
 
 const LOCK_STALE_MS = 60 * 1000
+// How long a Windows EPERM on the create still reads as contention.
+const DELETE_PENDING_MS = 2000
 
 /** @param {number} ms @returns {Promise<void>} */
 function delay(ms) {
@@ -63,6 +65,8 @@ export async function withFileLock(lockPath, fn, opts = {}) {
   const nonce = crypto.randomUUID()
   const deadline = Date.now() + staleMs * 2
   let waited = false
+  /** @type {number | undefined} */
+  let firstDeletePending
   for (;;) {
     try {
       const handle = await fs.open(lockPath, 'wx', 0o600)
@@ -78,7 +82,19 @@ export async function withFileLock(lockPath, fn, opts = {}) {
       }
       break
     } catch (err) {
-      if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
+      const code = /** @type {NodeJS.ErrnoException} */ (err)?.code
+      // On Windows, creating a name whose previous file is still being
+      // deleted fails with EPERM, not EEXIST: the last holder is mid-release.
+      // Wait that out briefly, but let a real permission error surface (#2929).
+      if (code === 'EPERM' && process.platform === 'win32') {
+        firstDeletePending ??= Date.now()
+        if (Date.now() - firstDeletePending > DELETE_PENDING_MS) throw err
+      } else if (code !== 'EEXIST') {
+        throw err
+      } else {
+        // A live holder in between: its own delete gets a fresh window.
+        firstDeletePending = undefined
+      }
       if (!waited) {
         waited = true
         opts.onWait?.()

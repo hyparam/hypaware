@@ -43,6 +43,7 @@ import { runSinkMaintain } from '../commands/sink.js'
 import { runSync } from '../commands/sync.js'
 import { runInit } from '../commands/init.js'
 import { runJoin, runLeave } from '../commands/central.js'
+import { runLinearConnect } from '../commands/linear.js'
 import { runPurge } from '../commands/purge.js'
 import {
   runAttach,
@@ -116,6 +117,10 @@ const CORE_COMMAND_GROUPS = [
   {
     name: 'dev plugin',
     summary: 'Scaffold and diagnose plugins under development',
+  },
+  {
+    name: 'linear',
+    summary: 'Connect Linear and collect team activity',
   },
 ]
 
@@ -328,6 +333,15 @@ function buildCoreCommands(registry) {
       summary: 'Load and cross-validate the active config file',
       usage: 'hyp config validate [file]',
       run: runConfigValidate,
+    },
+    {
+      name: 'linear connect',
+      category: 'capture-movement',
+      summary: 'Sign in to Linear and choose teams to collect',
+      usage: coreUsage('linear connect'),
+      help: 'Opens read-only OAuth in a local browser, saves the selected teams, and enables Linear collection. Repeat --team to set the scope directly. --no-browser prints the authorization URL.',
+      bootProfile: 'none',
+      run: runLinearConnect,
     },
     {
       name: 'setup',
@@ -707,7 +721,7 @@ function buildCoreCommands(registry) {
       category: 'capture-movement',
       audience: 'everyday',
       summary: 'Send captured data to destinations now',
-      usage: 'hyp sync [instance] [--history <client>] [--yes] [--dry-run]',
+      usage: 'hyp sync [instance] [--history <client|all>] [--yes] [--dry-run]',
       help: [
         'Exports now instead of waiting for the sink schedule. Prints what would',
         'leave this machine and asks before sending; --yes skips the prompt and',
@@ -722,6 +736,8 @@ function buildCoreCommands(registry) {
         '`hyp sync --history <client>` previews and replays locally retained',
         'history for a client that is already syncing. Only replay-safe',
         'destinations participate, and ordinary sink watermarks are unchanged.',
+        '`--history all` covers every syncing client under one confirmation,',
+        'for example after this machine joins a different organization.',
         '',
         '`hyp sync <instance> --check --dataset ai_gateway_messages` compares',
         'retained export-eligible row IDs with a prepared server inventory.',

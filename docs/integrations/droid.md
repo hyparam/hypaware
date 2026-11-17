@@ -19,8 +19,9 @@ Token counts come from each session's adjacent `.settings.json` `tokenUsage`.
 They are lifetime totals for that session, excluding its children. Child sessions
 are counted separately and linked by `parent_thread_id` from Droid's native
 `callingSessionId`. One replaceable system/status row per session carries the
-counts in the token columns (`provider_subtype = 'session_usage'`). Ordinary
-message rows carry no token counts. Factory credits are retained as
+counts in `attributes.usage` (`provider_subtype = 'session_usage'`). They stay
+out of the token columns, which hold only counts that can be summed, so column
+sums leave Droid out. Ordinary message rows carry no token counts. Factory credits are retained as
 `attributes.droid.factory_credits`, not dollars; `total_tokens` is not fabricated.
 
 Accounting is dated to the first message, so date-grouped figures mean lifetime
@@ -28,7 +29,9 @@ usage of sessions starting that day, not tokens spent on that day. Model/provide
 are unattributed on totals because a session may switch models. On the server,
 exported revisions may coexist: choose the latest
 `attributes.droid.usage_observed_at` per gateway and message ID before summing.
-The usage rollup performs this selection. A missing sidecar means unknown usage.
+The server usage rollup sums only the token columns, so it leaves these totals
+out (rows written by HypAware 1.53.0 still fill the columns, and the rollup adds
+each such revision). A missing sidecar means unknown usage.
 
 Attachments retain placeholders rather than image bytes or referenced file
 contents. HypAware reads only allowlisted counters from session sidecars, never

@@ -427,34 +427,22 @@ async function dispatchInternal(argv, opts) {
       // bare command (`query`, `remote`, …) never reaches here: it matched
       // above and renders its own help, so the explicit registration wins.
       const group = resolveGroupHelp(registry, argv)
-      if (group) {
-        noteInvocation({ command: 'help', kind: group.unknownSub === undefined ? 'help' : 'unknown' })
-        if (group.unknownSub !== undefined) {
-          stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
-          stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
-        } else {
-          // A plugin namespace has no bare command, so its header and
-          // paragraph (when it registered one) come from the group registry.
-          // @ref LLP 0214#d2 [implements]: a registered group description reaches synthesized group help
-          renderGroupHelp({
-            stdout,
-            group: group.prefix,
-            groupCommand: registry.getGroup?.(group.prefix),
-            children: group.children,
-          })
-        }
-        return group.unknownSub !== undefined ? 2 : 0
+      if (group && group.unknownSub === undefined) {
+        noteInvocation({ command: 'help', kind: 'help' })
+        // @ref LLP 0214#d2 [implements]: a registered group description reaches synthesized group help
+        renderGroupHelp({
+          stdout,
+          group: group.prefix,
+          groupCommand: registry.getGroup?.(group.prefix),
+          children: group.children,
+        })
+        return 0
       }
-      // Not a group either. Before the generic "unknown command", see whether
-      // the leading token exactly names a command declared by a plugin that is
-      // bundled/installed but whose commands never reached the registry: not
-      // selected by the effective config, or selected and not activated. If so
-      // the command is *unavailable*, not unknown: report which plugin provides
-      // it and what to do, instead of implying the feature does not exist. A
-      // genuine typo matches nothing here and still gets the generic message.
+      // A registered sibling such as `linear connect` can make a group visible
+      // even while an inactive plugin owns the requested subcommand.
       // @ref LLP 0153#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
       const inactive = await findInactivePluginForCommand(helpDiscovery, argv, failedPlugins)
-      if (inactive) {
+      if (inactive && (!group || inactive.token.startsWith(`${group.prefix} `))) {
         // One renderer for both miss paths (here and the group probe below), so
         // the same condition cannot print two different repair lines depending
         // on which path detected it. The repair branches on *why* the plugin is
@@ -464,6 +452,10 @@ async function dispatchInternal(argv, opts) {
         // whose name central already declares (collides_with_central).
         // @ref LLP 0154#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
         renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
+      } else if (group) {
+        noteInvocation({ command: 'help', kind: 'unknown' })
+        stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
+        stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
       } else {
         stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
         stderr.write(`run 'hyp --help' for the list of available commands\n`)
@@ -1595,14 +1587,13 @@ async function findInactivePluginForCommand(discovery, argv, unavailablePlugins 
     // @ref LLP 0219#incomplete-activation-prunes-nothing [constrained-by]: one list holds every way a boot came up short of its plugin set
     // @ref LLP 0267#d5 [implements]: a fourth miss state for a plugin the config selects and the boot did not get
     const unavailable = new Set(unavailablePlugins)
+    const matchManifest = (/** @type {LoadedManifest} */ entry) => longestCommandPrefix(argv,
+      (entry.manifest.contributes?.commands ?? []).flatMap(cmd => cmd && typeof cmd.name === 'string' ? commandManifestNames(cmd) : []))
     for (const entry of selection.selectedManifests) {
       const name = /** @type {PluginName} */ (entry.manifest.name)
       if (!unavailable.has(name)) continue
-      for (const cmd of entry.manifest.contributes?.commands ?? []) {
-        if (!cmd || typeof cmd.name !== 'string') continue
-        const invoked = longestCommandPrefix(argv, commandManifestNames(cmd))
-        if (invoked) return { token: invoked, plugin: name, state: 'selected-unavailable' }
-      }
+      const invoked = matchManifest(entry)
+      if (invoked) return { token: invoked, plugin: name, state: 'selected-unavailable' }
     }
     // Inactive = in the boot pool but not selected for a `config` boot. Walk
     // in pool order (bundled, then excluded, then installed) so the first
@@ -1611,13 +1602,8 @@ async function findInactivePluginForCommand(discovery, argv, unavailablePlugins 
     for (const entry of selection.pool) {
       const name = /** @type {PluginName} */ (entry.manifest.name)
       if (selection.selected.has(name)) continue
-      for (const cmd of entry.manifest.contributes?.commands ?? []) {
-        if (!cmd || typeof cmd.name !== 'string') continue
-        const invoked = longestCommandPrefix(argv, commandManifestNames(cmd))
-        if (invoked) {
-          return { token: invoked, plugin: name, state: classifyInactiveState(selection.layered, name) }
-        }
-      }
+      const invoked = matchManifest(entry)
+      if (invoked) return { token: invoked, plugin: name, state: classifyInactiveState(selection.layered, name) }
     }
     return undefined
   } catch {
@@ -1666,6 +1652,8 @@ function renderInactivePluginError({ stderr, inactive, discovery, env }) {
     stderr.write(
       `  repair: ${inactive.plugin} is disabled by the organization (central) config and cannot be enabled locally; ask your administrator to enable it\n`
     )
+  } else if (inactive.plugin === '@hypaware/linear') {
+    stderr.write('  repair: run `hyp linear connect` to sign in and choose teams to collect\n')
   } else if (inactive.state === 'disabled-local') {
     stderr.write(
       `  repair: set "enabled": true on the {"name": "${inactive.plugin}"} entry in plugins[] in ${displayConfigPath(discovery.configPath, env)}\n`
