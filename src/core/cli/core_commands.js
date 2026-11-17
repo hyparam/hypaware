@@ -43,6 +43,7 @@ import { runSinkMaintain } from '../commands/sink.js'
 import { runSync } from '../commands/sync.js'
 import { runInit } from '../commands/init.js'
 import { runJoin, runLeave } from '../commands/central.js'
+import { runLinearConnect } from '../commands/linear.js'
 import { runPurge } from '../commands/purge.js'
 import {
   runAttach,
@@ -116,6 +117,10 @@ const CORE_COMMAND_GROUPS = [
   {
     name: 'dev plugin',
     summary: 'Scaffold and diagnose plugins under development',
+  },
+  {
+    name: 'linear',
+    summary: 'Connect Linear and collect team activity',
   },
 ]
 
@@ -328,6 +333,15 @@ function buildCoreCommands(registry) {
       summary: 'Load and cross-validate the active config file',
       usage: 'hyp config validate [file]',
       run: runConfigValidate,
+    },
+    {
+      name: 'linear connect',
+      category: 'capture-movement',
+      summary: 'Sign in to Linear and choose teams to collect',
+      usage: coreUsage('linear connect'),
+      help: 'Opens read-only OAuth in a local browser, saves the selected teams, and enables Linear collection. Repeat --team to set the scope directly. --no-browser prints the authorization URL.',
+      bootProfile: 'none',
+      run: runLinearConnect,
     },
     {
       name: 'setup',

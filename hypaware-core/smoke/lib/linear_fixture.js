@@ -30,7 +30,7 @@ export async function callbackUri() {
   return uri
 }
 
-/** @param {{ issues?: any[], attachments?: any[] }} [opts] */
+/** @param {{ issues?: any[], attachments?: any[], teams?: Array<{ id: string, name: string, key: string }> }} [opts] */
 export function fakeLinearApi(opts = {}) {
   const calls = []
   /** @type {string | null} */
@@ -53,6 +53,9 @@ export function fakeLinearApi(opts = {}) {
     const request = JSON.parse(String(init?.body))
     calls.push(request)
     if (request.query.includes('HypAwareIdentity')) return Response.json({ data: { viewer: { id: USER_ID }, organization: { id: WORKSPACE_ID, urlKey: 'smoke' } } })
+    if (request.query.includes('HypAwareTeams')) return Response.json({ data: { organization: { id: WORKSPACE_ID }, teams: {
+      nodes: opts.teams ?? [{ id: TEAM_ID, key: 'HYP', name: 'HypAware' }], pageInfo: { hasNextPage: false, endCursor: null },
+    } } })
     const stream = request.query.includes('HypAwareAttachments') ? 'attachments' : 'issues'
     const nodes = (opts[stream] ?? (stream === 'issues' ? [ISSUE] : [ATTACHMENT])).filter(row => {
       const filter = request.variables.filter.updatedAt

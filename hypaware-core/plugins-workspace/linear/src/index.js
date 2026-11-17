@@ -24,7 +24,7 @@ export async function activate(ctx) {
   graph.registerContract(createLinearGraphContract(graph.kit))
   ctx.sources.register({ name: 'linear', plugin: '@hypaware/linear', configSection: 'linear', summary: 'Poll explicitly configured Linear teams', start: startLinearSource })
   for (const command of [
-    { name: 'linear', run: commands.runLinear, summary: 'Linear capture and authentication', usage: 'hyp linear <login|logout|status|backfill|sync>' },
+    { name: 'linear', run: commands.runLinear, summary: 'Linear capture and authentication', usage: 'hyp linear <connect|login|logout|status|backfill|sync>' },
     { name: 'linear login', run: commands.runLinearLogin, summary: 'Sign in to Linear with read-only browser OAuth', usage: 'hyp linear login [--no-browser]' },
     { name: 'linear logout', run: commands.runLinearLogout, summary: 'Remove local Linear OAuth credentials', usage: 'hyp linear logout' },
     { name: 'linear status', run: commands.runLinearStatus, summary: 'Verify the Linear account and workspace', usage: 'hyp linear status' },

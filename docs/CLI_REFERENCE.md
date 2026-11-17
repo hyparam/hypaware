@@ -1531,11 +1531,12 @@ full historical import. Capture or projection failures return `1`.
 
 ## Collect Linear activity
 
-Plugin: `@hypaware/linear`. Explicit activation and `teams` in the plugin config are required.
-See the [Linear integration](integrations/linear.md) for configuration and for
-using your own OAuth app.
+Plugin: `@hypaware/linear`. Start with `hyp linear connect` to sign in, choose
+teams, and enable collection outside onboarding. See the
+[Linear integration](integrations/linear.md) for advanced configuration.
 
 ```text
+hyp linear connect [--no-browser] [--team <key-or-uuid> ...]
 hyp linear login [--no-browser]
 hyp linear logout
 hyp linear status
@@ -1543,7 +1544,9 @@ hyp linear backfill
 hyp linear sync
 ```
 
-Login uses read-only browser OAuth with a registered loopback callback and
+Connect saves the selected team scope in local config. Repeat `--team` to set
+the scope directly. Login updates credentials for an already enabled plugin.
+Both commands use read-only browser OAuth with a registered loopback callback and
 automatic token refresh. `--no-browser` prints the URL; the callback still
 requires a browser on the CLI's machine. `status` verifies the account and
 workspace. Logout removes local OAuth credentials; an API-key environment
