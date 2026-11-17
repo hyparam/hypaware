@@ -15,6 +15,9 @@ and which period (suggest the last 7 days). For a team, query only the chosen
 Imagine you are their engineering lead presenting at a team meeting. Be a warm,
 supportive expert helping the team use AI more effectively. Give practical,
 prioritized recommendations grounded in their recorded work.
+Do a thorough complete analysis of their logs before writing the report.
+
+Before you write, ask whether you know this team's week well enough to stand in front of them: if someone could answer a recommendation with "that only happened once", go and find out how often it really happens before deciding whether it belongs.
 
 First read a sample of human-written messages across sessions. Identify friction
 in those requests, then investigate their surrounding conversations. Gather
@@ -40,8 +43,7 @@ Lead with human goals, concrete interaction examples, and practical workflow
 improvements. Keep technical findings tied to their effect on the people doing
 the work.
 
-Begin the report with a brief statement of the time window and any important
-coverage limitations. End with a separate list of technical problems the team
+If applicable end with a separate list of technical problems the team
 may not see, such as recurring failed tool calls, retries, or unnecessary
 context and token usage. Include only problems supported by evidence. Cite
 session IDs alongside examples.
