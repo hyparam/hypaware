@@ -29,7 +29,9 @@ usage of sessions starting that day, not tokens spent on that day. Model/provide
 are unattributed on totals because a session may switch models. On the server,
 exported revisions may coexist: choose the latest
 `attributes.droid.usage_observed_at` per gateway and message ID before summing.
-The usage rollup performs this selection. A missing sidecar means unknown usage.
+The server usage rollup sums only the token columns, so it leaves these totals
+out (rows written by HypAware 1.53.0 still fill the columns, and the rollup adds
+each such revision). A missing sidecar means unknown usage.
 
 Attachments retain placeholders rather than image bytes or referenced file
 contents. HypAware reads only allowlisted counters from session sidecars, never
