@@ -12,6 +12,7 @@ import { createDroidBackfillProvider } from '../../hypaware-core/plugins-workspa
 import { attachDroidHooks, droidHooksPath, DROID_EVENTS } from '../../hypaware-core/plugins-workspace/droid/src/attach.js'
 import { validateDroidConfig } from '../../hypaware-core/plugins-workspace/droid/src/config.js'
 import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { withUsageColumns } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { clientHookMarkerPath } from '../../src/core/daemon/client_settings_path.js'
@@ -91,6 +92,16 @@ test('Droid accounting uses own cumulative counters and native parent identity, 
   assert.equal(projectDroidEntries(session, entries, entries.map(e => e.seq))?.parent_thread_id, 'parent-session')
   assert.equal(projectDroidUsage(session, { tokenUsage: {} }, at, at), undefined)
   assert.throws(() => projectDroidUsage(session, { tokenUsage: { outputTokens: -1 } }, at, at), /invalid_usage/)
+})
+
+test('Droid session totals stay out of the token columns (LLP 0590#additive)', () => {
+  const at = '2026-11-11T23:00:00Z'
+  const projection = projectDroidUsage(fixture[0], { tokenUsage: { inputTokens: 2, outputTokens: 10, cacheReadTokens: 100 } }, at, at)
+  assert.ok(projection)
+  const [row] = withUsageColumns(aiGatewayRowsFromProjectedExchange(projection))
+  assert.equal(row.provider_subtype, 'session_usage')
+  for (const name of ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens', 'total_tokens']) assert.equal(row[name] ?? null, null, name)
+  assert.deepEqual(/** @type {any} */ (row.attributes).usage, { input_tokens: 2, output_tokens: 10, cache_read_tokens: 100 })
 })
 
 test('Droid reads usage after policy checks, revisits sidecar-only updates, and keeps the session date across restart', async t => {

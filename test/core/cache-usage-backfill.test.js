@@ -217,6 +217,37 @@ test('backfill of a partition whose columns evolved out of field-id order keeps 
   }
 })
 
+test('the backfill leaves session_usage running totals out of the token columns', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-usage-backfill-session-'))
+  try {
+    /** @type {ColumnSpec[]} */
+    const columns = [...OLD_COLUMNS.slice(0, -1), { name: 'provider_subtype', type: 'STRING', nullable: true }, ...OLD_COLUMNS.slice(-1)]
+    const snapshot = { provider: null, role: 'system', provider_subtype: 'session_usage', request_id: null }
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=claude'], columns, [
+      row({ ...snapshot, client_name: 'droid', conversation_source: 'droid', message_id: 'd-1', part_id: 'd-1#a' }, usage(10)),
+      row({ ...snapshot, client_name: 'mastracode', conversation_source: 'mastracode', message_id: 'm-1', part_id: 'm-1#a' }, usage(20)),
+      row({ message_id: 'c-1', part_id: 'cp1', request_id: 'req_1' }, usage(30)),
+    ], { declaration })
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      getDeclaration: () => declaration,
+      getColumnBackfill: () => backfill,
+    })
+    assert.equal(report.partitions[0].backfilled, true)
+    const rows = await readRowsFromTable(liveTableDir(partitionDir(cacheRoot)))
+    assert.equal(rows.length, 3)
+    for (const r of rows.filter((r) => r.provider_subtype === 'session_usage')) {
+      for (const name of backfill.columns.map((c) => c.name)) assert.equal(r[name] ?? null, null, `${r.client_name} ${name}`)
+      const attrs = typeof r.attributes === 'string' ? JSON.parse(r.attributes) : r.attributes
+      assert.equal(attrs.usage.output_tokens, r.client_name === 'droid' ? 10 : 20, 'the totals stay in the JSON')
+    }
+    assert.equal(Number(rows.find((r) => r.message_id === 'c-1')?.output_tokens), 30)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('a partition created with the token columns is not backfilled', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-usage-backfill-fresh-'))
   try {
