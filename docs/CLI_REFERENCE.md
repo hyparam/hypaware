@@ -1284,17 +1284,18 @@ prints the `--restore` command for that backup.
 `--restore <backup-path>`, with Codex closed the same way, puts back the chat
 files and provider names saved in that backup. It refuses a backup from another
 Codex home and a chat changed since the repair, so new messages are kept. It
-cannot be combined with `--dry-run`. `--codex-bin` names the Codex executable that reads your
-configuration; on macOS the default is the one bundled with the ChatGPT or
-Codex app in `/Applications`, otherwise `codex` on `PATH`. `--json` prints the
-result as one JSON object.
+cannot be combined with `--dry-run`. `--codex-bin` names the Codex executable
+that reads your configuration; on macOS the default is the one bundled with the
+ChatGPT or Codex app in `/Applications`, otherwise `codex` on `PATH`. `--json`
+prints the result as one JSON object.
 
 Each backup is a full copy of the affected chats and of Codex's state database,
 under `$CODEX_HOME/hypaware-provider-repair` (normally
-`~/.codex/hypaware-provider-repair`). A repair that fails before it changes any
-chat removes its own backup. HypAware removes no other backup: not on a later
-repair, a restore, `hyp privacy purge`, detach or daemon uninstall. It stays
-until you delete it.
+`~/.codex/hypaware-provider-repair`). A repair that stops before it starts
+applying changes removes its backup. From the moment it starts applying them,
+the backup stays, even if the repair then fails or is rolled back. HypAware
+removes no backup after that: not on a later repair, a restore, `hyp privacy
+purge`, detach or daemon uninstall. It stays until you delete it.
 
 ```sh
 hyp codex repair --dry-run
