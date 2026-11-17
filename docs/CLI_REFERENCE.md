@@ -597,8 +597,10 @@ before any request, and an empty value (an unset shell variable) still selects
 the flat form rather than falling back to the report listing. A remote that
 predates the recommendation index returns `1` and says so. `--kind` and
 `--period` filter on the parent report in either form, so with either one, a
-recommendation published on its own is not listed. `--limit` and `--before`
-apply to every row. With `--json`, the flat form prints the remote's recommendation rows
+recommendation stored on its own is not listed. One published before the
+remote stored them that way is a report of kind `recommendation`, so
+`--kind recommendation` still lists it, as `standalone`. `--limit` and
+`--before` apply to every row. With `--json`, the flat form prints the remote's recommendation rows
 whole.
 
 ```text
@@ -678,7 +680,7 @@ hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <or
 Starts a recorded AI client on one recommendation, in the current directory.
 The id is the one `hyp report list` prints under each report, or
 `hyp report list --recommendations` for one published on its own. HypAware
-resolves it to its report (or, for one published on its own, to its own
+resolves it to its report (or, for one stored on its own, to its own
 page), checks the recommendation page still exists, and
 starts the client with instructions to read it through
 `hyp report get <rec-id>` and make the change in the current repository.
@@ -691,7 +693,7 @@ should not be done, with the run's `--org` and `--remote` carried along.
 
 With no id on a terminal, it asks in two steps: first which report, newest
 first, each with its publish date and how many recommendations it carries
-(a report with none is not offered). Recommendations published on their own
+(a report with none is not offered). Recommendations stored on their own
 are in no report, so they come last as one group, "Standalone
 recommendations". Then it asks which of that report's
 recommendations, labeled by the page's title and described by its thesis
