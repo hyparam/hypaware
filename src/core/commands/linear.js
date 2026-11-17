@@ -30,10 +30,12 @@ export async function runLinearConnect(argv, ctx) {
   const args = parseCoreCommandArgv('linear connect', argv, ctx)
   if (!args.ok) return args.code
   const requested = /** @type {string[] | undefined} */ (args.params.team)
+  // URL specifiers keep the bundled plugin out of the core declaration build
+  // (rootDir=src), which a literal import would pull in (TS6059).
   const [{ authorizeLinear }, { validateLinearConfig }, { createLinearClient, listLinearTeams }] = await Promise.all([
-    import('../../../hypaware-core/plugins-workspace/linear/src/commands.js'),
-    import('../../../hypaware-core/plugins-workspace/linear/src/config.js'),
-    import('../../../hypaware-core/plugins-workspace/linear/src/client.js'),
+    import(new URL('../../../hypaware-core/plugins-workspace/linear/src/commands.js', import.meta.url).href),
+    import(new URL('../../../hypaware-core/plugins-workspace/linear/src/config.js', import.meta.url).href),
+    import(new URL('../../../hypaware-core/plugins-workspace/linear/src/client.js', import.meta.url).href),
   ])
   const explicit = validateLinearConfig({ teams: requested })
   if (!explicit.config) {
