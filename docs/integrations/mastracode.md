@@ -31,7 +31,9 @@ does not recognize are skipped.
 Mastra Code keeps running token counters per thread. HypAware writes one
 replaceable system/status row per thread (`provider_subtype = 'session_usage'`)
 with `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`,
-`reasoning_tokens`, and `total_tokens`, also available in `attributes.usage`.
+`reasoning_tokens`, and `total_tokens` in `attributes.usage`. These running
+totals stay out of the token columns, which hold only counts that can be
+summed, so column sums leave Mastra Code out.
 Input excludes cache reads and writes; output already includes reasoning.
 Missing measurements stay unknown. Ordinary message rows have no per-turn
 usage. The legacy `mastracode.process_token_usage` attribute remains on the

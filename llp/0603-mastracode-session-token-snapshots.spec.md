@@ -48,7 +48,8 @@ Set model and provider to unknown: the thread can switch models/providers.
 Store thread updatedAt as attributes.mastracode.usage_observed_at, a snapshot
 revision, not proof that every request's usage was saved. Local whole-thread
 reconciliation replaces this row with the conversation. Both poll and backfill
-use the same projector and the existing materializer fills the token columns.
+use the same projector. The counts stay in attributes.usage; the token columns
+stay NULL on this row because it is a running total (LLP 0590#additive).
 Metadata-only updates already invalidate the thread digest. No new scans,
 timers, retained state or runtime dependencies are required; one constant-size
 row and constant CPU work are added per projected thread.
@@ -63,12 +64,12 @@ An assistant-only usage query excludes these rows intentionally.
 On a remote, exported revisions can coexist. Select the greatest
 attributes.mastracode.usage_observed_at per gateway_id and message_id, keeping
 all counters from that revision, before summing. Do not sum snapshots or take
-an independent maximum of each counter. Server rollup support is a separate
-change in the server repository; this change populates local/exported columns.
+an independent maximum of each counter. Column sums, the server usage rollup
+included, leave these totals out.
 
 ## Validation
 
-Test materialized columns, gross/net cache arithmetic, reasoning overlap,
+Test the normalized attributes.usage counts and NULL token columns, gross/net cache arithmetic, reasoning overlap,
 missing and invalid fields, stable identity/date, no inherited last model,
 and no usage on ordinary messages. Exercise metadata-only updates, restart
 and repeated backfill through the existing poll/backfill harness and verify
