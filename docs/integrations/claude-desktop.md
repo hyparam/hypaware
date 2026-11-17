@@ -24,9 +24,5 @@ hyp client status claude-desktop
 
 Desktop sessions arrive on the five-minute import, not live. The schedule and
 its history window belong to the Claude Code plugin's `backfill` settings; see
-the [Claude Desktop reference](../CLI_REFERENCE.md#claude-desktop-commands) to
+the [Claude Desktop reference](../CLI_REFERENCE.md#claude-desktop-capture) to
 change the cadence or turn the import off.
-
-The `hyp client claude-desktop` subcommands operate an older managed
-third-party-inference route. They are optional experiments and are not needed
-for transcript capture.

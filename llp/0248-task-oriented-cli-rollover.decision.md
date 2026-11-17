@@ -11,6 +11,12 @@
 **Extended-by:** LLP 0447 (#aliases: the client history import spelling is removed, not deferred)
 **Extended-by:** LLP 0398 (#one-question: `ask` loses its `--list` flag, since one question leaves nothing to list)
 **Extended-by:** LLP 0480 (#command-tree: `fastask` joins the canonical tree as a top-level journey beside `ask`)
+**Extended-by:** LLP 0609 (#tree: `query graph neighbors` and `query vector search` shorten to `query graph <node>` and `query vector <query>`; the longer spellings become aliases)
+**Extended-by:** LLP 0610 (#tree, #aliases: `fix` and `purge` become top-level journeys; `report fix` and `privacy purge` become their aliases)
+**Extended-by:** LLP 0611 (#tree, #aliases: `skills install` is canonical again and takes the client as a positional; `client skills install` becomes its alias)
+**Extended-by:** LLP 0612 (#tree: `client claude-account ...` and `client claude-desktop ...` are removed with the managed-profile route)
+**Extended-by:** LLP 0613 (#tree, #aliases: `plugin new|doctor` are canonical again; `dev plugin new|doctor` become aliases and the `dev` group leaves help)
+**Extended-by:** LLP 0614 (#tree: recommendations get their own `recommendation` group; `report` keeps the report commands)
 
 ## Context {#context}
 

@@ -194,7 +194,7 @@ function renderSelect(state, opts) {
  * that always contains the cursor and always leaves the frame inside the
  * terminal.
  *
- * Every select caller but one passes a short fixed set. `hyp report fix`
+ * Every select caller but one passes a short fixed set. `hyp fix`
  * passes one option per listed report, so its frame is sized by how many
  * reports a server published, and a frame taller than the terminal is not
  * merely long: the terminal has already scrolled by the time it lands, the

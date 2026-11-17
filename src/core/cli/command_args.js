@@ -276,8 +276,8 @@ export const CORE_COMMAND_ARGS = {
       positional: ['source'],
     },
   },
-  'report recommend': {
-    usage: 'hyp report recommend <file.md> [--title <title>] [--org <org>] [--remote <target>]',
+  'recommendation publish': {
+    usage: 'hyp recommendation publish <file.md> [--title <title>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -311,8 +311,8 @@ export const CORE_COMMAND_ARGS = {
       },
     },
   },
-  'report mark': {
-    usage: 'hyp report mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]',
+  'recommendation mark': {
+    usage: 'hyp recommendation mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -326,6 +326,52 @@ export const CORE_COMMAND_ARGS = {
         remote: { type: 'string' },
       },
       positional: ['id', 'state'],
+    },
+  },
+  'recommendation list': {
+    usage: 'hyp recommendation list [--status <state,...>] [--standalone] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        status: { type: 'array', items: { type: 'string', enum: RECOMMENDATION_STATES } },
+        // Only the ones published on their own, with no report around them.
+        standalone: { type: 'boolean', default: false },
+        // Report properties: with either, only recommendations inside
+        // matching reports are listed.
+        kind: { type: 'string' },
+        period: { type: 'string' },
+        limit: { type: 'string' },
+        before: { type: 'string' },
+        org: { type: 'string' },
+        json: { type: 'boolean', default: false },
+        remote: { type: 'string' },
+      },
+    },
+  },
+  'recommendation get': {
+    usage: 'hyp recommendation get <id> [--output <file>] [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        output: { type: 'string' },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['id'],
+    },
+  },
+  'recommendation delete': {
+    usage: 'hyp recommendation delete <id> [--yes] [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        yes: { type: 'boolean', default: false },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['id'],
     },
   },
   'report get': {
@@ -347,8 +393,8 @@ export const CORE_COMMAND_ARGS = {
       positional: ['kind', 'period', 'id', 'path'],
     },
   },
-  'report fix': {
-    usage: 'hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]',
+  'fix': {
+    usage: 'hyp fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {

@@ -9,7 +9,7 @@
 // that already go through a shell on win32 (`global_install.js`,
 // `self_update.js`) may do so because they pass only fixed bare tokens;
 // the launchers this module serves carry free text - `hyp ask`'s framed
-// question, `hyp report fix`'s server-fetched recommendation title - so
+// question, `hyp fix`'s server-fetched recommendation title - so
 // the line is escaped here instead, the way cross-spawn escapes it, and
 // handed to `ComSpec /d /s /c` with `windowsVerbatimArguments` so Node
 // adds no quoting of its own on top.

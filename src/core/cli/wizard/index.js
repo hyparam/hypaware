@@ -1372,7 +1372,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
  * (issue #417). Each clause is something the installed skill does today:
  * it lists the recorded folders, marks a folder `local-only` (never
  * forwarded) or `ignore` (not recorded) only after a yes on that folder,
- * and offers `hyp privacy purge` as its own confirmed step. The team
+ * and offers `hyp purge` as its own confirmed step. The team
  * clause is said only to a machine that joined, since a local install has
  * nowhere a folder syncs to. A run that installed no copy of the skill is
  * pointed at `hyp privacy` instead of a skill it does not have.

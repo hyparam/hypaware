@@ -322,7 +322,7 @@ walking relationships:
 <!-- agent: Use HypAware's activity graph to show which sessions touched src/app.js, two hops in. Over MCP, use graph_neighbors. -->
 ```sh
 hyp graph project
-hyp query graph neighbors src/app.js --type File --direction in --depth 2 --limit 25
+hyp query graph src/app.js --type File --direction in --depth 2 --limit 25
 ```
 
 Over MCP, use `graph_neighbors`.
@@ -354,7 +354,7 @@ This uses existing remote tools:
 <!-- agent: Use HypAware's team graph to find the file nodes for FEATURE, the sessions that touched them, and what those sessions said about TERM. Over MCP, use query_sql, graph_neighbors and grep_search on our team's server. -->
 ```sh
 hyp query sql "SELECT node_id, natural_key, label FROM node WHERE node_type = 'File' AND LOWER(natural_key) LIKE '%<feature>%' ORDER BY natural_key LIMIT 40" --remote team --format json
-hyp query graph neighbors <file-node-id> --type File --direction in --edge-type touched --depth 1 --limit 50 --remote team --json
+hyp query graph <file-node-id> --type File --direction in --edge-type touched --depth 1 --limit 50 --remote team --json
 hyp query grep "<term>" --session-id <session-id> --remote team --format json
 ```
 
@@ -381,8 +381,8 @@ config block for each client.
 ## Vector search and graph enrichment
 
 With `@hypaware/vector-search` enabled, use `hyp vector status` to inspect
-indexes and `hyp query vector search` for similarity search. See the
-[vector search reference](CLI_REFERENCE.md#hyp-query-vector-search) for query
+indexes and `hyp query vector` for similarity search. See the
+[vector search reference](CLI_REFERENCE.md#hyp-query-vector) for query
 syntax and index selection.
 
 The optional graph-enrichment plugin adds further relationships to the activity

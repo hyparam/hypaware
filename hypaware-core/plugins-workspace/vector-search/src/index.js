@@ -2,7 +2,7 @@
 
 import path from 'node:path'
 
-import { runVector, runVectorSearch, runVectorStatus } from './commands.js'
+import { runVectorSearch, runVectorStatus } from './commands.js'
 import { validateVectorSearchConfig } from './config.js'
 import { setVectorSearchRuntime } from './runtime.js'
 import { searchVectorIndexes } from './search.js'
@@ -21,10 +21,10 @@ const CAPABILITY_VERSION = '1.0.0'
 /**
  * Activate `@hypaware/vector-search`. Registers:
  *  - capability `hypaware.vector-search` (programmatic search/status)
- *  - commands `query vector`, `query vector search` (each keeping its
- *    pre-rollover `vector ...` spelling as an alias), and `vector status`,
- *    which stays a direct operation per LLP 0248 but answers to
- *    `query vector status` so the group's own blurb is navigable
+ *  - command `query vector <query>`, the search itself (LLP 0609), with
+ *    `query vector search`, `vector search` and `vector` kept as aliases,
+ *    and `vector status`, which stays a direct operation per LLP 0248 and
+ *    keeps its `query vector status` alias
  *  - source `vector-search-refresh` (the daemon refresh timer)
  *  - config section `vector-search`
  *
@@ -73,33 +73,24 @@ export async function activate(ctx) {
   }
   ctx.provideCapability('hypaware.vector-search', CAPABILITY_VERSION, capability)
 
+  // @ref LLP 0609#decision [implements]: the query is the positional; `search` survives only as an alias
   ctx.commands.register({
     name: 'query vector',
-    aliases: ['vector'],
-    plugin: PLUGIN_NAME,
-    category: 'explore-share',
-    audience: 'everyday',
-    summary: 'Vector similarity search (see subcommands: search, status)',
-    usage: 'hyp query vector <subcommand> [args...]',
-    run: runVector,
-  })
-  ctx.commands.register({
-    name: 'query vector search',
-    aliases: ['vector search'],
+    aliases: ['vector', 'query vector search', 'vector search'],
     plugin: PLUGIN_NAME,
     category: 'explore-share',
     audience: 'everyday',
     summary: 'Similarity search across configured local vector indexes',
-    usage: 'hyp query vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>]',
+    usage: 'hyp query vector <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>]',
+    help: 'Index coverage and staleness: hyp vector status',
     run: runVectorSearch,
   })
   ctx.commands.register({
     // Canonical spelling stays direct (LLP 0248 lists `vector status` among the
     // direct operations, and `vector` keeps its own top-level help row because
-    // of it). The alias is what makes `hyp query vector`'s printed subcommand
-    // table true: without it that blurb named a `status` subcommand which
-    // longest-prefix matching resolved back to `query vector`, reprinting the
-    // same blurb with exit 0.
+    // of it). The alias keeps `hyp query vector status` reaching this command:
+    // longest-prefix matching prefers it over `query vector`, which would
+    // otherwise search for the word "status".
     // @ref LLP 0248#aliases [implements]: the canonical route is reachable from the group that advertises it
     name: 'vector status',
     aliases: ['query vector status'],

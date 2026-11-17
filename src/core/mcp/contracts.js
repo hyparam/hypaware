@@ -68,7 +68,7 @@ export const REMOTE_TOOL_CONTRACTS = freezeDeep(/** @type {RemoteToolContract[]}
       },
     },
     authClass: 'read',
-    cli: 'hyp report list --recommendations',
+    cli: 'hyp recommendation list',
   },
   {
     tool: 'get_recommendation',
@@ -85,7 +85,7 @@ export const REMOTE_TOOL_CONTRACTS = freezeDeep(/** @type {RemoteToolContract[]}
       required: ['id'],
     },
     authClass: 'read',
-    cli: 'hyp report get <rec-id>',
+    cli: 'hyp recommendation get <id>',
   },
   {
     tool: 'set_recommendation_status',
@@ -109,6 +109,6 @@ export const REMOTE_TOOL_CONTRACTS = freezeDeep(/** @type {RemoteToolContract[]}
     },
     authClass: 'write',
     scope: 'report-publish',
-    cli: 'hyp report mark <id> <state>',
+    cli: 'hyp recommendation mark <id> <state>',
   },
 ]))

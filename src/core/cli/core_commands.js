@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove, runRemoteTokens, runRemoteTokensRevoke } from './remote_commands.js'
-import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportMark, runReportPublish, runReportRecommend, runReportSave } from './report_commands.js'
+import { runRecommendationDelete, runRecommendationGet, runRecommendationList, runRecommendationMark, runRecommendationPublish, runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportPublish, runReportSave } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -47,7 +47,7 @@ import { runLinearConnect } from '../commands/linear.js'
 import { runPurge } from '../commands/purge.js'
 import {
   runAttach,
-  runClientDiscover,
+  runNanoclawDiscover,
   runDetach,
   runIgnore,
   runSkillsInstall,
@@ -115,10 +115,6 @@ const CORE_COMMAND_GROUPS = [
     ].join('\n'),
   },
   {
-    name: 'dev plugin',
-    summary: 'Scaffold and diagnose plugins under development',
-  },
-  {
     name: 'linear',
     summary: 'Connect Linear and collect team activity',
   },
@@ -171,13 +167,6 @@ function buildCoreCommands(registry) {
       audience: 'everyday',
       summary: 'Pause or resume this live session',
       help: 'Session controls are supplied by the active AI gateway plugin. They affect future capture in the live gateway and do not delete existing rows.',
-    }),
-    makeGroupCommand({
-      registry,
-      name: 'dev',
-      category: 'additional',
-      audience: 'developer',
-      summary: 'Build plugins and run development smoke flows',
     }),
     makeGroupCommand({
       registry,
@@ -306,19 +295,20 @@ function buildCoreCommands(registry) {
       run: runPluginRemove,
     },
     {
-      name: 'dev plugin doctor',
-      aliases: ['plugin doctor'],
+      // @ref LLP 0613#decision [implements]: plugin authoring sits with the other plugin commands; `dev plugin` is the alias
+      name: 'plugin doctor',
+      aliases: ['dev plugin doctor'],
       audience: 'developer',
       summary: 'Diagnose a plugin in development (static checks + dry-run activate)',
-      usage: 'hyp dev plugin doctor [dir] [--json]',
+      usage: 'hyp plugin doctor [dir] [--json]',
       run: runPluginDoctor,
     },
     {
-      name: 'dev plugin new',
-      aliases: ['plugin new'],
+      name: 'plugin new',
+      aliases: ['dev plugin new'],
       audience: 'developer',
       summary: 'Scaffold a new plugin',
-      usage: 'hyp dev plugin new <name> [--kind source|sink|dataset] [--dir <path>]',
+      usage: 'hyp plugin new <name> [--kind source|sink|dataset] [--dir <path>]',
       run: runPluginNew,
     },
     makeGroupCommand({
@@ -471,14 +461,26 @@ function buildCoreCommands(registry) {
       ].join('\n'),
       run: runAttach,
     },
+    makeGroupCommand({
+      registry,
+      name: 'nanoclaw',
+      category: 'additional',
+      audience: 'operator',
+      bootProfile: 'none',
+      summary: 'Locate a NanoClaw installation before setting up its capture',
+    }),
     {
-      name: 'client discover',
-      category: 'capture-movement',
-      audience: 'everyday',
+      // Core-owned though it names one adapter: it has to run before setup, when
+      // `@hypaware/nanoclaw` is not yet in the config to contribute a command.
+      // @ref LLP 0554#nanoclaw-discovery [implements]: usable before setup; spelled under the client it serves
+      name: 'nanoclaw discover',
+      aliases: ['client discover nanoclaw'],
+      category: 'additional',
+      audience: 'operator',
       bootProfile: 'none',
       summary: 'Find local NanoClaw installation roots without enabling capture',
-      usage: 'hyp client discover nanoclaw [root] [--json]',
-      run: runClientDiscover,
+      usage: 'hyp nanoclaw discover [root] [--json]',
+      run: runNanoclawDiscover,
     },
     {
       name: 'client status',
@@ -500,7 +502,7 @@ function buildCoreCommands(registry) {
         'client\'s own configuration otherwise intact. hyp unattach is an alias.',
         '',
         'Detaching stops future capture for that client; it does not delete',
-        'anything already recorded (see hyp privacy purge for that).',
+        'anything already recorded (see hyp purge for that).',
         'A detach keeps the local interception CA, and any OS trust store',
         'grant an earlier release was given: no attach re-creates that grant,',
         'so it is a leftover rather than a convenience being held for you.',
@@ -539,6 +541,8 @@ function buildCoreCommands(registry) {
         'machine. client and folders set the two',
         'standing preferences (which clients sync, and whether new folders are',
         'asked about at all).',
+        '',
+        "To delete what was already recorded, see 'hyp purge'.",
       ].join('\n'),
     }),
     {
@@ -609,10 +613,13 @@ function buildCoreCommands(registry) {
       run: runPolicyFolders,
     },
     {
-      name: 'privacy purge',
-      aliases: ['purge'],
+      // @ref LLP 0610#decision [implements]: purge is a top-level journey; the `privacy` spelling is the alias
+      name: 'purge',
+      aliases: ['privacy purge'],
+      category: 'capture-movement',
+      audience: 'everyday',
       summary: 'Delete recorded rows; session purges include configured servers',
-      usage: 'hyp privacy purge <path> | --session <id> [--remote <target> | --local-only] | --ignored | --all [--yes] [--json]',
+      usage: 'hyp purge <path> | --session <id> [--remote <target> | --local-only] | --ignored | --all [--yes] [--json]',
       help: [
         'Position-deletes recorded rows from this machine\'s local cache.',
         'Session purges also exclude future recording and drain pending spool rows.',
@@ -634,8 +641,9 @@ function buildCoreCommands(registry) {
     },
     makeGroupCommand({
       registry,
-      name: 'client skills',
-      aliases: ['skills'],
+      // @ref LLP 0611#decision [implements]: `skills` is top-level again; the `client` spelling is the alias
+      name: 'skills',
+      aliases: ['client skills'],
       category: 'capture-movement',
       audience: 'everyday',
       summary: 'Manage skills and subagents for AI clients',
@@ -646,11 +654,11 @@ function buildCoreCommands(registry) {
       // distinction a user asking for their helpers makes.
       // @ref LLP 0138#one-command [implements]: one install command for both
       //   kinds of client asset; no separate agents verb.
-      name: 'client skills install',
-      aliases: ['skills install'],
+      name: 'skills install',
+      aliases: ['client skills install'],
       summary: 'Install registered skills and subagents into AI client directories',
-      usage: 'hyp client skills install [--client <name>] [--attached]',
-      help: 'Use --attached to install only for clients with a current HypAware attach marker.',
+      usage: 'hyp skills install [client] [--attached]',
+      help: 'Names one client, or installs for all when omitted (--client <name> is the same).\nUse --attached to install only for clients with a current HypAware attach marker.',
       run: runSkillsInstall,
     },
     makeGroupCommand({
@@ -863,12 +871,14 @@ function buildCoreCommands(registry) {
         "'save' moves the finished folder into $HYP_HOME/reports, where 'list'\n" +
         "shows it and 'publish' takes it by name.\n\n" +
         'The rest talk to the remote. Reports are hosted there (there is no\n' +
-        'local reports plane), so publish/recommend/list/get/fix/mark/delete each\n' +
+        'local reports plane), so publish/list/get/delete each\n' +
         'take --remote <target> and default to the default remote target, the same\n' +
         'resolution as bare --remote on queries. Reads use your login session;\n' +
-        'publish, recommend, mark and delete need the publisher role (or an\n' +
+        'publish and delete need the publisher role (or an\n' +
         "operator-minted publish token stored via 'hyp remote login <target>\n" +
-        "--token-file <path>').",
+        "--token-file <path>').\n\n" +
+        "Recommendations, inside a report or published on their own, are under\n" +
+        "'hyp recommendation'; 'hyp fix' starts a client on one.",
     }),
     {
       name: 'report generate',
@@ -936,22 +946,6 @@ function buildCoreCommands(registry) {
       run: runReportPublish,
     },
     {
-      name: 'report recommend',
-      summary: 'Publish one recommendation page on its own, with no report around it',
-      usage: coreUsage('report recommend'),
-      help: [
-        'Upload a single recommendation page (.md/.markdown), written like a',
-        "recommendation-<slug>.md page inside a report: the first '# ' heading is",
-        'the title (--title overrides it) and the bold paragraph under it the',
-        "thesis. The remote wraps it in a report of kind 'recommendation' whose",
-        'period is the publish date, mints its hyprec- id, and renders it; the',
-        "receipt prints the id and the 'hyp report get <id>' that reads it.",
-        'Repeat uploads of the same content answer with the existing id. Needs',
-        'the publisher role, like publish.',
-      ].join('\n'),
-      run: runReportRecommend,
-    },
-    {
       name: 'report list',
       summary: "List the org's published reports (newest first) and this machine's saved ones",
       usage: coreUsage('report list'),
@@ -964,11 +958,9 @@ function buildCoreCommands(registry) {
         'still listed under a warning; --json keeps the failure instead.',
         'Under each report, one line per recommendation: id, [state], page, and',
         'title. The state label appears only when the remote provides a state.',
-        '--recommendations lists the',
-        'recommendations themselves, flat across reports (a standalone one says',
-        "'standalone' where its report would be); --status <state,...> filters",
-        "them and implies --recommendations. --json prints the remote's records whole",
-        'and nothing else; --local --json prints the saved reports.',
+        "'hyp recommendation list' lists the recommendations themselves, flat",
+        "across reports. --json prints the remote's records whole and nothing",
+        'else; --local --json prints the saved reports.',
       ].join('\n'),
       run: runReportList,
     },
@@ -976,24 +968,113 @@ function buildCoreCommands(registry) {
       name: 'report get',
       summary: "Fetch a report's entry document (or one artifact) to stdout or --output",
       usage: coreUsage('report get'),
-      help: [
-        "Given a recommendation id instead (hyprec-qcyx22sjav, as 'hyp report",
-        "list' prints under each report), fetches that recommendation's page",
-        'with the evidence it cites and the queries the report ran to reach it',
-        'appended. This is the read to make when asked to fix a recommendation',
-        'by id from inside an AI client session.',
-      ].join('\n'),
       run: runReportGet,
     },
-    {
-      name: 'report fix',
-      summary: "Start a recorded AI client on one of a report's recommendations, here",
-      usage: coreUsage('report fix'),
+    // @ref LLP 0614#decision [implements]: recommendations are their own noun; the server keeps one with or without a report (hypaware-server LLP 0705)
+    makeGroupCommand({
+      registry,
+      name: 'recommendation',
+      aliases: ['rec'],
+      category: 'explore-share',
+      audience: 'everyday',
+      summary: 'List, read, publish, and track recommendations',
       help: [
-        "The id is a recommendation's, as 'hyp report list' prints under each",
-        'report (hyprec-qcyx22sjav). HypAware checks the recommendation still',
+        'A recommendation is one proposed change with the evidence for it. It is',
+        'either a page of a published report or published on its own; both kinds',
+        "are listed together and share one id form (hyprec-qcyx22sjav). 'hyp rec'",
+        'is the same group.',
+        '',
+        'These talk to the remote, taking --remote <target> and --org <org> as the',
+        "report commands do. publish, mark and delete need the publisher role.",
+        '',
+        "To start a client on one, see 'hyp fix'.",
+      ].join('\n'),
+    }),
+    {
+      name: 'recommendation list',
+      aliases: ['rec list'],
+      summary: 'List recommendations, inside reports and standalone, newest first',
+      usage: coreUsage('recommendation list'),
+      help: [
+        'One line per recommendation: id, [state], publish time, its report',
+        "(or 'standalone'), and title. --status <state,...> filters by what",
+        'became of them; --standalone lists only the ones published on their own.',
+        '--kind and --period name reports, so with either only recommendations',
+        "inside matching reports are listed. --json prints the remote's records",
+        'whole.',
+      ].join('\n'),
+      run: runRecommendationList,
+    },
+    {
+      name: 'recommendation get',
+      aliases: ['rec get'],
+      summary: "Fetch a recommendation's page, with the evidence it cites, to stdout or --output",
+      usage: coreUsage('recommendation get'),
+      help: [
+        "The id is as 'hyp recommendation list' prints it. The page is written",
+        'with the evidence it cites and the queries that reached it appended.',
+        'This is the read to make when asked to fix a recommendation by id from',
+        'inside an AI client session.',
+      ].join('\n'),
+      run: runRecommendationGet,
+    },
+    {
+      name: 'recommendation publish',
+      aliases: ['rec publish', 'report recommend'],
+      summary: 'Publish one recommendation page on its own, with no report around it',
+      usage: coreUsage('recommendation publish'),
+      help: [
+        'Upload a single recommendation page (.md/.markdown), written like a',
+        "recommendation-<slug>.md page inside a report: the first '# ' heading is",
+        'the title (--title overrides it) and the bold paragraph under it the',
+        'thesis. The remote stores it as a recommendation, mints its hyprec- id,',
+        "and renders it; the receipt prints the id and the 'hyp recommendation",
+        "get <id>' that reads it. Repeat uploads of the same content answer with",
+        'the existing id. Needs the publisher role.',
+      ].join('\n'),
+      run: runRecommendationPublish,
+    },
+    {
+      name: 'recommendation mark',
+      aliases: ['rec mark', 'report mark'],
+      summary: 'Record what became of a recommendation: open, in_progress, applied, or dismissed',
+      usage: coreUsage('recommendation mark'),
+      help: [
+        "The id is as 'hyp recommendation list' prints it. The state is the",
+        "remote's vocabulary; any state may follow any other, so marking one",
+        'open again is the same verb. --reason is required for dismissed and',
+        'is what the next reader sees in place of the change; --link (repeatable)',
+        'takes absolute http(s) URLs, the pull request that landed it most of all.',
+        "'hyp recommendation get <id>' shows the current state and the history.",
+        'Needs the publisher role.',
+      ].join('\n'),
+      run: runRecommendationMark,
+    },
+    {
+      name: 'recommendation delete',
+      aliases: ['rec delete'],
+      summary: 'Delete a recommendation that was published on its own (destructive)',
+      usage: coreUsage('recommendation delete'),
+      help: [
+        'Org-wide and permanent. Prompts on a TTY; pass --yes to delete',
+        'non-interactively. A recommendation that is a page of a report is not',
+        "deleted; the report is deleted whole with 'hyp report delete'.",
+      ].join('\n'),
+      run: runRecommendationDelete,
+    },
+    {
+      // @ref LLP 0610#decision [implements]: acting on a recommendation is a top-level journey; `report fix` is the alias
+      name: 'fix',
+      aliases: ['report fix'],
+      category: 'explore-share',
+      audience: 'everyday',
+      summary: 'Start a recorded AI client on a recommendation, here',
+      usage: coreUsage('fix'),
+      help: [
+        "The id is a recommendation's, as 'hyp recommendation list' prints",
+        '(hyprec-qcyx22sjav). HypAware checks the recommendation still',
         'exists and starts a recorded client in the current directory with',
-        "instructions to read it through 'hyp report get <id>' and make the",
+        "instructions to read it through 'hyp recommendation get <id>' and make the",
         'change here; nothing is written to disk. Recorded means attached, or',
         'configured with no attach marker to write, as codex is in its transcript',
         'mode. With no id on a terminal, pick a report (newest first), then one',
@@ -1005,30 +1086,14 @@ function buildCoreCommands(registry) {
       run: runReportFix,
     },
     {
-      name: 'report mark',
-      summary: 'Record what became of a recommendation: open, in_progress, applied, or dismissed',
-      usage: coreUsage('report mark'),
-      help: [
-        "The id is a recommendation's, as 'hyp report list' prints. The state is",
-        "the remote's vocabulary; any state may follow any other, so marking one",
-        'open again is the same verb. --reason is required for dismissed and',
-        'is what the next reader sees in place of the change; --link (repeatable)',
-        'takes absolute http(s) URLs, the pull request that landed it most of all.',
-        "'hyp report get <id>' shows the current state and the history. Needs the",
-        'publisher role, like publish.',
-      ].join('\n'),
-      run: runReportMark,
-    },
-    {
       name: 'report delete',
       summary: "Delete a published report from the org's reports plane (destructive)",
       usage: coreUsage('report delete'),
       help: [
         'Org-wide and permanent: the report disappears for every member.',
         'Prompts on a TTY; pass --yes to delete non-interactively.',
-        "A lone recommendation id ('hyprec-...') deletes a recommendation that was",
-        'published on its own. One that is a page of a report is not deleted; the',
-        'report is deleted whole with the <kind> <period> <id> form.',
+        "A recommendation published on its own is deleted with 'hyp recommendation",
+        "delete <id>'.",
       ].join('\n'),
       run: runReportDelete,
     },
@@ -1052,13 +1117,14 @@ function buildCoreCommands(registry) {
       run: runUpdate,
     },
     {
-      name: 'dev smoke',
-      aliases: ['smoke'],
+      // @ref LLP 0613#decision [implements]: with `dev` gone as a group, the hidden smoke runner is top-level and `dev smoke` its alias
+      name: 'smoke',
+      aliases: ['dev smoke'],
       category: 'dev',
       audience: 'developer',
       bootProfile: 'none',
       summary: 'Run a smoke flow under a fresh tmp HYP_HOME (internal)',
-      usage: 'hyp dev smoke <flow-name>',
+      usage: 'hyp smoke <flow-name>',
       hidden: true,
       run: runSmoke,
     },

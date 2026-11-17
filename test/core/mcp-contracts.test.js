@@ -92,9 +92,9 @@ test('each read has no scope, the mark is a write scoped report-publish, and eac
     assert.equal(c.scope, write ? 'report-publish' : undefined, c.tool)
     assert.ok(c.summary.length > 0, c.tool)
   }
-  assert.equal(contract('list_recommendations').cli, 'hyp report list --recommendations')
-  assert.equal(contract('get_recommendation').cli, 'hyp report get <rec-id>')
-  assert.equal(contract('set_recommendation_status').cli, 'hyp report mark <id> <state>')
+  assert.equal(contract('list_recommendations').cli, 'hyp recommendation list')
+  assert.equal(contract('get_recommendation').cli, 'hyp recommendation get <id>')
+  assert.equal(contract('set_recommendation_status').cli, 'hyp recommendation mark <id> <state>')
 })
 
 test('the mark summary asks for a reason and a link, and says nothing is removed', () => {

@@ -1,11 +1,12 @@
 # LLP 0117: @hypaware/claude-account owns the Anthropic credential; the kind is a fleet-policy switch
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Config, CLI
 **Author:** Phil / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0061, LLP 0063, LLP 0099, LLP 0115, LLP 0116
+**Superseded-by:** LLP 0612 (the managed-profile route and its credential plugin are removed)
 
 > LLP 0116 decides that Desktop presents a credential obtained from a local
 > helper. This decision records where that credential comes from: a

@@ -436,12 +436,12 @@ test('hyp --help renders the exact journey order and compact operations list', a
   assert.equal(code, 0)
   assert.equal(err, '')
   assert.deepEqual(helpSectionNames(out, 'Getting started:'), ['setup', 'status'])
-  assert.deepEqual(helpSectionNames(out, 'Explore and share:'), ['ask', 'query', 'report'])
+  assert.deepEqual(helpSectionNames(out, 'Explore and share:'), ['ask', 'query', 'report', 'recommendation', 'fix'])
   assert.deepEqual(helpSectionNames(out, 'Control capture and movement:'), [
-    'client', 'backfill', 'privacy', 'session', 'join', 'leave', 'sync', 'linear',
+    'client', 'skills', 'backfill', 'privacy', 'purge', 'session', 'join', 'leave', 'sync', 'linear',
   ])
   assert.deepEqual(additionalCommandNames(out), [
-    'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'version', 'update', 'dev', 'telemetry',
+    'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'version', 'update', 'nanoclaw', 'telemetry',
   ])
   assert.doesNotMatch(out, /\b(?:admin|fleet)\b/)
 })
@@ -563,8 +563,8 @@ test('every reachable core group renders a header line, bare command or not', { 
 
 // The same rule, over the groups a plugin contributes. Core registering its
 // own descriptions leaves the next plugin free to repeat the defect from the
-// other side: `client claude-desktop` and `client claude-account` are groups
-// no core registration knows about, and they opened on a naked 'usage:' line
+// other side: `client claude-desktop` and `client claude-account` were groups
+// no core registration knew about, and they opened on a naked 'usage:' line
 // while the core sweep above was green (#1005).
 // @ref LLP 0214#d2 [tests]: the rule is the group registry's, not core's, so bundled plugin groups are held to it too
 test('every reachable bundled-plugin group renders a header line too', { timeout: SWEEP_TIMEOUT_MS }, async () => {

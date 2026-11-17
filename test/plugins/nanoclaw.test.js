@@ -11,7 +11,7 @@ import { readGroups, discoverFiles, discoverNanoclawRoots, readTranscript, proje
 import { validateNanoclawConfig } from '../../hypaware-core/plugins-workspace/nanoclaw/src/config.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
-import { runClientDiscover } from '../../src/core/commands/clients.js'
+import { runNanoclawDiscover } from '../../src/core/commands/clients.js'
 import { readObservabilityEnv } from '../../src/core/observability/env.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
@@ -307,7 +307,7 @@ test('NanoClaw discovery validates catalog and contained Claude layout without r
   assert.deepEqual(await discoverNanoclawRoots([root]), [])
 })
 
-test('client discover escapes a root for the terminal and keeps it exact in JSON', { skip: process.platform === 'win32' && 'NTFS forbids control characters in file names, so the forged-root fixture cannot exist' }, async t => {
+test('nanoclaw discover escapes a root for the terminal and keeps it exact in JSON', { skip: process.platform === 'win32' && 'NTFS forbids control characters in file names, so the forged-root fixture cannot exist' }, async t => {
   const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-nanoclaw-')))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
   const root = path.join(home, 'root\nFORGED\u001b[2J')
@@ -319,25 +319,25 @@ test('client discover escapes a root for the terminal and keeps it exact in JSON
   /** @param {string[]} argv */
   async function run(argv) {
     let out = ''
-    const code = await runClientDiscover(argv, /** @type {any} */ ({ cwd: home, config: { version: 2 }, stdout: { write: (/** @type {string} */ chunk) => { out += chunk } }, stderr: { write() {} } }))
+    const code = await runNanoclawDiscover(argv, /** @type {any} */ ({ cwd: home, config: { version: 2 }, stdout: { write: (/** @type {string} */ chunk) => { out += chunk } }, stderr: { write() {} } }))
     return { code, out }
   }
-  const text = await run(['nanoclaw', root])
+  const text = await run([root])
   assert.equal(text.code, 0)
   assert.ok(!text.out.includes('\u001b'))
   assert.ok(!text.out.includes('\nFORGED'))
-  const json = await run(['nanoclaw', root, '--json'])
+  const json = await run([root, '--json'])
   assert.deepEqual(JSON.parse(json.out).roots, [root])
 })
 
-test('client discover runs before NanoClaw setup and never enables capture', async t => {
+test('nanoclaw discover runs before NanoClaw setup and never enables capture', async t => {
   const { root, group } = await setup(t)
   const home = path.join(root, 'isolated-home')
   await fs.mkdir(home)
   const env = { ...isolatedClientEnv(process.env, home), HYP_HOME: home, HYP_CONFIG: path.join(home, 'config.json') }
   let out = ''
   let err = ''
-  const code = await dispatch(['client', 'discover', 'nanoclaw', '--json'], {
+  const code = await dispatch(['nanoclaw', 'discover', '--json'], {
     env, cwd: group.cwd,
     stdout: { write: chunk => { out += chunk; return true } }, stderr: { write: chunk => { err += chunk; return true } },
   })

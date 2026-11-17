@@ -58,7 +58,7 @@ Or ask from inside any session. Install the HypAware skills and your client
 looks up past sessions itself whenever a question calls for it:
 
 ```sh
-hyp client skills install
+hyp skills install
 ```
 
 Search and query directly, without an AI client:
@@ -149,7 +149,7 @@ destination. You control what is recorded, per folder:
 hyp privacy ignore              # never record sessions in this repo
 hyp privacy set . local-only    # record, but never send to HypAware Cloud
 hyp session ignore              # stop recording the current session
-hyp privacy purge --session ID  # delete what was already recorded
+hyp purge --session ID  # delete what was already recorded
 ```
 
 See [what HypAware records and how to control it](./docs/PRIVACY.md).

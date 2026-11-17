@@ -42,7 +42,7 @@ export function databaseOnlySessionCommand(operation, client) {
       const ignored = store.has(parsed.id)
       const payload = { status: operation === 'status' ? ignored ? 'ignored' : 'not_ignored' : 'ok', session_id: parsed.id, ignored, guarantee: 'persisted_set_membership', earlier_rows: 'retained', recorder: recorders.join(',') }
       if (parsed.json) ctx.stdout.write(JSON.stringify(payload) + '\n')
-      else ctx.stdout.write(`${parsed.id}: ${ignored ? 'excluded' : 'eligible'} for ${label} recording. This saved choice survives daemon restarts. Earlier recordings are retained; use hyp privacy purge to remove them.\n`)
+      else ctx.stdout.write(`${parsed.id}: ${ignored ? 'excluded' : 'eligible'} for ${label} recording. This saved choice survives daemon restarts. Earlier recordings are retained; use hyp purge to remove them.\n`)
       return operation === 'status' && !ignored ? 1 : 0
     } catch {
       ctx.stderr.write(`${label} session exclusions could not be read or saved; status is unknown.\n`)

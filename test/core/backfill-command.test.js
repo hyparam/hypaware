@@ -491,7 +491,7 @@ function envWithConfig(pluginNames) {
 // @ref LLP 0140#manifest-declares-ownership [tests]: "configured" is membership of the effective config, not of the boot profile's activation set
 test('the entrypoint gate counts a config-listed plugin as configured even when this process never activated it', async () => {
   const { ctx, runContexts } = makeCtx({
-    env: envWithConfig(['@hypaware/claude', '@hypaware/claude-account', '@hypaware/claude-desktop']),
+    env: envWithConfig(['@hypaware/claude', '@hypaware/claude-desktop']),
     plugins: [{ name: '@hypaware/claude' }],
   })
   const result = await runBackfillProvider({ ctx, provider: 'tester', dryRun: true })

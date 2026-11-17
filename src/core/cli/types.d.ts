@@ -535,7 +535,7 @@ export interface RecommendationStatus {
 }
 
 /**
- * A recommendation as `hyp report fix` carries it from the record to the
+ * A recommendation as `hyp fix` carries it from the record to the
  * saved brief: the page stem and title, the citations the server attached at
  * publish (empty when the record carries none), and the status the server
  * joins onto the record (`status` absent when never marked, `history` oldest

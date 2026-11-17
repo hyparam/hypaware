@@ -566,5 +566,5 @@ test('no bundled plugin trips the guard', async () => {
   // did not quietly empty the report.
   assert.ok(dirs.length >= 20, `only ${dirs.length} bundled plugins`)
   assert.ok(commands >= 30, `only ${commands} bundled commands survived the snapshot`)
-  assert.ok(aliases >= 15, `only ${aliases} bundled aliases survived the snapshot`)
+  assert.ok(aliases >= 10, `only ${aliases} bundled aliases survived the snapshot`)
 })

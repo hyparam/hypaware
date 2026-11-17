@@ -222,32 +222,7 @@ test('plugin compatibility aliases are dispatchable only while their owner is co
   })
   assert.equal(activeCode, 0)
   assert.equal(activeErr.text(), '')
-  assert.match(activeOut.text(), /^hyp query graph neighbors - /)
-})
-
-test('the Claude credential machine contract is callable but absent from help', async () => {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hidden-credential-'))
-  const configPath = path.join(hypHome, 'hypaware-config.json')
-  await fs.writeFile(configPath, JSON.stringify({
-    version: 2,
-    plugins: [{ name: '@hypaware/claude-account' }],
-  }))
-  const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath }
-
-  const topOut = makeBuf()
-  assert.equal(await dispatch(['--help'], { stdout: topOut, stderr: makeBuf(), env }), 0)
-  assert.equal(topOut.text().includes('claude-account credential'), false)
-
-  const commandOut = makeBuf()
-  const commandErr = makeBuf()
-  assert.equal(await dispatch(['claude-account', 'credential', '--help'], {
-    stdout: commandOut,
-    stderr: commandErr,
-    env,
-  }), 0)
-  assert.equal(commandErr.text(), '')
-  assert.match(commandOut.text(), /^hyp claude-account credential - /)
-  assert.match(commandOut.text(), /usage: hyp claude-account credential/)
+  assert.match(activeOut.text(), /^hyp query graph - /)
 })
 
 test('top-level help lists a local plugin addition on a fleet-joined host', async () => {
@@ -546,12 +521,12 @@ test('top-level help renders journey sections and a compact operations list', as
   const additional = out.indexOf('Additional commands:')
   assert.ok(gettingStarted < explore && explore < control && control < additional)
   assert.match(out, /Getting started:\n  setup\s+.*\n  status\s+/)
-  assert.match(out, /Explore and share:\n  ask\s+.*\n  query\s+.*\n  report\s+/)
-  assert.match(out, /Control capture and movement:\n  client\s+.*\n  backfill\s+.*\n  privacy\s+.*\n  session\s+.*\n  join\s+.*\n  leave\s+.*\n  sync\s+/)
+  assert.match(out, /Explore and share:\n  ask\s+.*\n  query\s+.*\n  report\s+.*\n  recommendation\s+.*\n  fix\s+/)
+  assert.match(out, /Control capture and movement:\n  client\s+.*\n  skills\s+.*\n  backfill\s+.*\n  privacy\s+.*\n  purge\s+.*\n  session\s+.*\n  join\s+.*\n  leave\s+.*\n  sync\s+/)
   // `graph` is plugin-contributed (`@hypaware/context-graph`) and only
   // appears once the plugin is config-active; this dispatch has no config,
   // so only core commands show up here.
-  assert.match(out, /Additional commands:\n  daemon, config, cache, sink, plugin, remote, mcp, version, update, dev/)
+  assert.match(out, /Additional commands:\n  daemon, config, cache, sink, plugin, remote, mcp, version, update/)
   assert.equal(out.includes('admin'), false)
   assert.equal(out.includes('fleet'), false)
   // Subcommands live in group help, not at the top level.
@@ -1038,7 +1013,7 @@ function fakeClientKernel() {
 
 test('dispatch forwards a real stdin to command run when the caller omits opts.stdin', async () => {
   // Regression for #352: the bin entry calls `dispatch(argv)` with no opts,
-  // so a command that reads stdin (e.g. `hyp claude-account login`) received
+  // so a command that reads stdin (a plugin's sign-in prompt, say) received
   // `ctx.stdin === undefined` and wrongly reported "needs an interactive
   // terminal". stdin must default to `process.stdin`, just as stdout/stderr do.
   const registry = createCommandRegistry()
@@ -1134,22 +1109,13 @@ test('ctx.commands.run dispatches a registered command with the same exit code a
   assert.equal(seamErr.text(), 'seamtarget err\n')
 })
 
-test('ctx.commands.run activates the config-enabled Desktop plugin without making its optional credential implicit', async () => {
-  // LLP 0358 removed the credential capability from Desktop's activation
-  // requirements. The seam still activates the command owner from a fresh
-  // config read, but it does not widen that request to an unrelated optional
-  // plugin merely because both are listed in config.
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-activate-'))
+test('ctx.commands.run activates a config-enabled plugin that default activation excludes', async () => {
+  // The seam activates the command owner from a fresh config read, so a
+  // plugin outside the default set is reachable once the config names it.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-'))
   await fs.writeFile(
     path.join(hypHome, 'hypaware-config.json'),
-    JSON.stringify({
-      version: 2,
-      plugins: [
-        { name: '@hypaware/ai-gateway' },
-        { name: '@hypaware/claude-account', config: { mode: 'subscription' } },
-        { name: '@hypaware/claude-desktop' },
-      ],
-    })
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/embedder-openai' }, { name: '@hypaware/vector-search' }] })
   )
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
@@ -1158,7 +1124,7 @@ test('ctx.commands.run activates the config-enabled Desktop plugin without makin
     summary: 'Run a configure command through the seam, like the wizard does',
     usage: 'hyp seamconfigure',
     async run(argv, ctx) {
-      return ctx.commands.run('claude-desktop install', ['--print-commands'])
+      return ctx.commands.run('vector status', [])
     },
   })
   const kernel = createKernelRuntime({ commandRegistry: registry })
@@ -1173,20 +1139,16 @@ test('ctx.commands.run activates the config-enabled Desktop plugin without makin
     kernel,
   })
 
-  // Exit 1 is the command's own optional-dependency result, not a registry
-  // miss. That proves the excluded plugin was activated and dispatched while
-  // transcript capture remained credential-free.
-  assert.equal(code, 1)
-  assert.equal(stdout.text(), '')
-  assert.match(stderr.text(), /managed-profile commands require @hypaware\/claude-account/)
-  assert.match(stderr.text(), /scheduled transcript capture does not/)
+  // The command's own answer, not a registry miss.
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /no vector indexes configured/)
   assert.equal(stderr.text().includes('not in the active config'), false)
 })
 
 test('ctx.commands.run does not activate a plugin the effective config leaves out', async () => {
   // The seam's fresh read is the opt-in boundary: a plugin absent from the
   // effective config stays inactive and the miss path reports as before.
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-inactive-'))
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-'))
   await fs.writeFile(
     path.join(hypHome, 'hypaware-config.json'),
     JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/local-fs' }] })
@@ -1198,7 +1160,7 @@ test('ctx.commands.run does not activate a plugin the effective config leaves ou
     summary: 'Run a configure command through the seam, like the wizard does',
     usage: 'hyp seamconfigure',
     async run(argv, ctx) {
-      return ctx.commands.run('claude-desktop install', ['--print-commands'])
+      return ctx.commands.run('vector status', [])
     },
   })
   const kernel = createKernelRuntime({ commandRegistry: registry })
@@ -1214,7 +1176,7 @@ test('ctx.commands.run does not activate a plugin the effective config leaves ou
   })
 
   assert.equal(code, 2)
-  assert.match(stderr.text(), /unknown command 'claude-desktop install/)
+  assert.match(stderr.text(), /'vector status' is provided by @hypaware\/vector-search, which is not in the active config/)
 })
 
 function makeBuf() {

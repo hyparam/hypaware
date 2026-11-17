@@ -176,7 +176,7 @@ test('Claude Code: a session after detach does not reach the cache; attach resum
     const cli = cliCtx(s)
     assert.equal(await runDetach(['claude'], cli.ctx), 0, cli.err())
     assert.match(cli.out(), /HypAware stopped recording claude/)
-    assert.match(cli.out(), /hyp privacy purge/)
+    assert.match(cli.out(), /hyp purge/)
     assert.equal((await s.readLocal()).plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude').recording, false)
 
     // A new Code session, and one with no entrypoint (unclaimed sessions

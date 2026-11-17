@@ -45,9 +45,7 @@ This reference identifies each plugin-owned family:
 - `ollama ...`: `@hypaware/ollama`.
 - `codex ...`: `@hypaware/codex`.
 - `codex-cloud ...`: `@hypaware/codex-cloud` (beta).
-- `client claude-account ...`: `@hypaware/claude-account`.
-- `client claude-desktop ...`: `@hypaware/claude-desktop`.
-- `graph ...` and `query graph neighbors`: `@hypaware/context-graph`.
+- `graph ...` and `query graph`: `@hypaware/context-graph`.
 - `query vector ...` and `vector status`: `@hypaware/vector-search`.
 - `enrichment ...`: `@hypaware/context-graph-enrich`.
 
@@ -337,12 +335,12 @@ hyp query schema ai_gateway_messages
 hyp query schema ai_gateway_messages --remote team --format json
 ```
 
-### `hyp query graph neighbors`
+### `hyp query graph`
 
 Plugin: `@hypaware/context-graph`.
 
 ```text
-hyp query graph neighbors <node> [--depth <depth>] [--type <type>] [--edge-type <edge_type...>] [--direction out|in|both] [--limit <limit>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
+hyp query graph <node> [--depth <depth>] [--type <type>] [--edge-type <edge_type...>] [--direction out|in|both] [--limit <limit>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
 Resolves a node ID, natural key, or label, then walks the activity graph in
@@ -352,33 +350,22 @@ direction. The default depth is `1`, direction is `both`, and limit is `100`.
 The parser also accepts `--json` for the command's structured result.
 
 ```sh
-hyp query graph neighbors src/app.js --type File --depth 2 --direction in
+hyp query graph src/app.js --type File --depth 2 --direction in
 ```
 
 This command is read-only and supports remote execution. An unresolved or
 ambiguous seed returns `1`; invalid arguments return `2`. If the graph is
 empty, build it with `hyp graph project`.
 
-### `hyp query vector search`
+### `hyp query vector`
 
-Plugin: `@hypaware/vector-search`. The visible `hyp query vector` group lists
-its search subcommand:
-
-```text
-hyp query vector <subcommand> [args...]
-```
-
-```sh
-hyp query vector --help
-```
+Plugin: `@hypaware/vector-search`.
 
 Requires active `@hypaware/vector-search` and a configured embedder provider,
 such as `@hypaware/embedder-openai`, plus at least one configured vector index.
 
-Search syntax is:
-
 ```text
-hyp query vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>] [--max-cell <n>] [--max-bytes <n>]
+hyp query vector <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>] [--max-cell <n>] [--max-bytes <n>]
 ```
 
 Embeds the query and searches configured local vector shards. Automatic
@@ -387,7 +374,7 @@ uses the shards as they are. This command is local-only; it doesn't accept
 remote execution.
 
 ```sh
-hyp query vector search "daemon restart failure" --top-k 5 --format json
+hyp query vector "daemon restart failure" --top-k 5 --format json
 ```
 
 ## Generate and manage reports
@@ -502,40 +489,10 @@ applies only to an operator credential that can name an organization.
 hyp report publish hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
 ```
 
-### `hyp report recommend`
-
-```text
-hyp report recommend <file.md> [--title <title>] [--org <org>] [--remote <target>]
-```
-
-Publishes one recommendation page on its own, with no report around it, for
-an analysis that yields a single recommendation. The file must be `.md` or
-`.markdown` and is written like a `recommendation-<slug>.md` page inside a
-report: the first `# ` heading is the title (`--title` overrides it) and the
-bold paragraph under it is the thesis. A page with no heading and no `--title`
-is refused before upload. The remote stores the page as a recommendation of
-its own, with no report around it, mints the `hyprec-` id, and renders it.
-`hyp report list --recommendations` lists it as `standalone`, and
-`hyp report get <rec-id>` serves the page. A repeat upload of the same content
-on the same UTC day answers with the existing id (`already published`). A
-recommendation published before the remote stored them this way stays a
-report of kind `recommendation` whose period is its publish date, and
-`hyp report get recommendation <period> <id>` still serves it. A remote that predates the standalone route returns `1` and says
-so. Requires the publisher role, like `publish`.
-
-```sh
-hyp report recommend ./recommendation-no-python3.md
-```
-
-```text
-published hyprec-0123456789abcdef (standalone)
-  view: hyp report get hyprec-0123456789abcdef
-```
-
 ### `hyp report list`
 
 ```text
-hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]
+hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]
 ```
 
 Lists the newest reports visible to the selected organization, then this
@@ -567,7 +524,7 @@ has no notice. Each report's recommendations follow its line, one per line, as t
 minted id, its state in brackets, the `recommendation-<slug>` page the id
 names, and the page's title, with its thesis on the line below. The state is
 the one the remote supplies, such as `open`, `in_progress`, `applied`, or
-`dismissed` as last recorded with `hyp report mark`. The label appears only
+`dismissed` as last recorded with `hyp recommendation mark`. The label appears only
 when the remote supplies a nonempty state, and an explicit `open` shows
 `[open]`. A missing, empty, or malformed status, as from a remote that records
 none, shows no label: a missing status does not say the recommendation is
@@ -583,43 +540,19 @@ publish, or a report published before it did, lists the id and page alone.
       hyprec-fedcba9876543210	recommendation-tenant-check
 ```
 
-`--recommendations` lists the recommendations themselves, flat, newest
-first, from the remote's recommendation index: id, state in brackets (under
-the same rule, so a row without a supplied state has no label), the publish
-time (the parent report's, or the recommendation's own for one published with
-`hyp report recommend`), the parent report as
-`kind/period/id` (or `standalone` for one published with `hyp report
-recommend`), and the title, with the thesis below. It has no coverage
-notice, because the recommendation index does not carry the report's
-coverage; the report listing shows it. `--status <state,...>`
-filters by state and implies `--recommendations`; an unknown state is refused
-before any request, and an empty value (an unset shell variable) still selects
-the flat form rather than falling back to the report listing. A remote that
-predates the recommendation index returns `1` and says so. `--kind` and
-`--period` filter on the parent report in either form, so with either one, a
-recommendation stored on its own is not listed. One published before the
-remote stored them that way is a report of kind `recommendation`, so
-`--kind recommendation` still lists it, as `standalone`. `--limit` and
-`--before` apply to every row. With `--json`, the flat form prints the remote's recommendation rows
-whole.
-
-```text
-  hyprec-fedcba9876543210	[open]	2026-10-03T09:00:00.000Z	standalone	No python3 on the runner
-  hyprec-0123456789abcdef	[in_progress]	2026-08-24T09:00:00.000Z	usage-review/2026-W34/REPORT_ID	Batch the retries
-      Every retry is its own call, 506 times a month. One queue fixes it.
-```
+The recommendations themselves, flat across reports and including ones
+published on their own, are listed by
+[`hyp recommendation list`](#hyp-recommendation-list).
 
 ```sh
 hyp report list --kind usage-review --limit 10 --json
 hyp report list --local --json
-hyp report list --status open,in_progress
 ```
 
 ### `hyp report get`
 
 ```text
 hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]
-hyp report get <rec-id> [--output <file>] [--org <org>] [--remote <target>]
 ```
 
 Fetches a report's entry document or one artifact. Without `--output`, it
@@ -634,9 +567,81 @@ hyp report get usage-review 2026-W34 REPORT_ID --output ./usage-review.html
 
 Replace `REPORT_ID` with the ID from `hyp report list`.
 
-Given a recommendation id instead (`hyprec-` and its token, like `hyprec-qcyx22sjav`, the id
-`hyp report list` prints under each report, or `hyp report list
---recommendations` for one published with `hyp report recommend`), it resolves
+A recommendation's page is read by id with
+[`hyp recommendation get`](#hyp-recommendation-get).
+
+### `hyp report delete`
+
+```text
+hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]
+```
+
+**Warning:** This operation permanently deletes the report and its artifacts
+for every member of the organization. It prompts on a
+terminal. A non-interactive call without `--yes` refuses with exit code `2`.
+
+```sh
+hyp report delete usage-review 2026-W34 REPORT_ID
+```
+
+Replace `REPORT_ID` with the reviewed report ID. Avoid `--yes` during manual
+work so you can confirm the target.
+
+A recommendation published on its own is deleted with
+[`hyp recommendation delete`](#hyp-recommendation-delete).
+
+## Work with recommendations
+
+A recommendation is one proposed change with the evidence for it. It is
+either a page of a published report or published on its own; both kinds are
+listed together and share one id form. `hyp rec` is a short alias for
+`hyp recommendation`. The forms these commands replace still run:
+`hyp report recommend`, `hyp report mark`, `hyp report list --recommendations`
+and a lone recommendation id given to `hyp report get` or `hyp report delete`.
+
+### `hyp recommendation list`
+
+```text
+hyp recommendation list [--status <state,...>] [--standalone] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]
+```
+
+Lists the recommendations themselves, flat, newest
+first, from the remote's recommendation index: id, state in brackets (shown only
+when the remote supplies one), the publish
+time (the parent report's, or the recommendation's own for one published with
+`hyp recommendation publish`), the parent report as
+`kind/period/id` (or `standalone` for one published with `hyp recommendation
+publish`), and the title, with the thesis below. It has no coverage
+notice, because the recommendation index does not carry the report's
+coverage; `hyp report list` shows it. `--status <state,...>`
+filters by state; an unknown state is refused before any request.
+`--standalone` lists only the ones published on their own. A remote that
+predates the recommendation index returns `1` and says so. `--kind` and
+`--period` filter on the parent report, so with either one, a
+recommendation stored on its own is not listed. One published before the
+remote stored them that way is a report of kind `recommendation`, so
+`--kind recommendation` still lists it, as `standalone`. `--limit` and
+`--before` apply to every row. `--json` prints the remote's recommendation rows whole.
+
+```text
+  hyprec-fedcba9876543210	[open]	2026-10-03T09:00:00.000Z	standalone	No python3 on the runner
+  hyprec-0123456789abcdef	[in_progress]	2026-08-24T09:00:00.000Z	usage-review/2026-W34/REPORT_ID	Batch the retries
+      Every retry is its own call, 506 times a month. One queue fixes it.
+```
+
+```sh
+hyp recommendation list --status open,in_progress
+hyp recommendation list --standalone
+```
+
+### `hyp recommendation get`
+
+```text
+hyp recommendation get <id> [--output <file>] [--org <org>] [--remote <target>]
+```
+
+Takes a recommendation id (`hyprec-` and its token, like `hyprec-qcyx22sjav`,
+as `hyp recommendation list` prints it). It resolves
 the id to its page, in its report or on its own, and prints that page
 (Markdown, or HTML when the report was published without it) with a `Citations from the report record` tail: the turns the page
 cites as `evidence:N`, numbered to match, and the queries the report ran to
@@ -647,13 +652,13 @@ nobody has marked reads `State: open (never marked)`. This is the read to make
 from inside an AI client session when asked to fix a recommendation by id.
 
 Ten-character ids like `hyprec-qcyx22sjav` need HypAware 1.51.0 or newer. An
-older `hyp` refuses one: `report fix` and `report mark` say it is "not a
-recommendation id", and `report get` prints its usage line. The id is fine;
+older `hyp` refuses one: `fix` and `recommendation mark` say it is "not a
+recommendation id", and `report get <id>` prints its usage line. The id is fine;
 run `hyp update` (see [updating and recovery](CLI.md#update-hypaware)) and try
 again.
 
 ```sh
-hyp report get hyprec-0123456789abcdef
+hyp recommendation get hyprec-0123456789abcdef
 ```
 
 ```text
@@ -671,24 +676,105 @@ History, oldest first:
 - 2026-10-03T18:21:07.000Z  applied  by email:dev@example.com  via cli: Landed in hyparam/hypaware#912 https://github.com/hyparam/hypaware/pull/912
 ```
 
-### `hyp report fix`
+### `hyp recommendation publish`
 
 ```text
-hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]
+hyp recommendation publish <file.md> [--title <title>] [--org <org>] [--remote <target>]
+```
+
+Publishes one recommendation page on its own, with no report around it, for
+an analysis that yields a single recommendation. The file must be `.md` or
+`.markdown` and is written like a `recommendation-<slug>.md` page inside a
+report: the first `# ` heading is the title (`--title` overrides it) and the
+bold paragraph under it is the thesis. A page with no heading and no `--title`
+is refused before upload. The remote stores the page as a recommendation of
+its own, with no report around it, mints the `hyprec-` id, and renders it.
+`hyp recommendation list` lists it as `standalone`, and
+`hyp recommendation get <id>` serves the page. A repeat upload of the same content
+on the same UTC day answers with the existing id (`already published`). A
+recommendation published before the remote stored them this way stays a
+report of kind `recommendation` whose period is its publish date, and
+`hyp report get recommendation <period> <id>` still serves it. A remote that predates the standalone route returns `1` and says
+so. Requires the publisher role, like `publish`.
+
+```sh
+hyp recommendation publish ./recommendation-no-python3.md
+```
+
+```text
+published hyprec-0123456789abcdef (standalone)
+  view: hyp recommendation get hyprec-0123456789abcdef
+```
+
+### `hyp recommendation mark`
+
+```text
+hyp recommendation mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]
+```
+
+Records what became of a recommendation. The id is the one `hyp recommendation list`
+prints (the legacy `rec-` spelling is accepted). The state is the remote's
+vocabulary: `open`, `in_progress`, `applied`, or `dismissed`; any state may
+follow any other, so reopening is the same verb. `--reason` (one line, up to
+2000 characters) is required for `dismissed` and optional otherwise; a
+dismissal without one is refused with exit `2` before any request. `--link`
+is repeatable and takes absolute `http(s)` URLs, the pull request that landed
+the change most of all (up to 8; a value with a literal comma is split on it,
+so percent-encode one). An empty `--link` is refused with exit `2` rather than
+recorded as no link. The event is appended on the remote with `via: cli`;
+nothing is kept locally. The receipt is the new state line with the reason
+and links as recorded. An unknown id, or a remote that predates the status
+route, returns `1` and names both readings. Requires the publisher role, like
+`publish`.
+
+```sh
+hyp recommendation mark hyprec-0123456789abcdef applied --reason "Landed in hyparam/hypaware#912" --link https://github.com/hyparam/hypaware/pull/912
+hyp recommendation mark hyprec-0123456789abcdef dismissed --reason "The retry loop was removed in 1.39"
+```
+
+```text
+marked hyprec-0123456789abcdef [applied]	Batch the retries
+  reason: Landed in hyparam/hypaware#912
+  link: https://github.com/hyparam/hypaware/pull/912
+```
+
+### `hyp recommendation delete`
+
+```text
+hyp recommendation delete <id> [--yes] [--org <org>] [--remote <target>]
+```
+
+**Warning:** This permanently deletes a recommendation published on its own,
+for every member of the organization. It prompts on a terminal; a
+non-interactive call without `--yes` refuses with exit code `2`.
+
+The id is as `hyp recommendation list` prints it. A recommendation that is a page of a report is not
+deleted, including a standalone one that a remote from before standalone
+records published as a one-page report. The command says a report is deleted
+whole, prints the `hyp report delete <kind> <period> <id>` command for that
+report, and returns `1`. An unknown id deletes nothing and returns `1`.
+
+```sh
+hyp recommendation delete hyprec-0123456789abcdef
+```
+
+### `hyp fix`
+
+```text
+hyp fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]
 ```
 
 Starts a recorded AI client on one recommendation, in the current directory.
-The id is the one `hyp report list` prints under each report, or
-`hyp report list --recommendations` for one published on its own. HypAware
+The id is the one `hyp recommendation list` prints. HypAware
 resolves it to its report (or, for one stored on its own, to its own
 page), checks the recommendation page still exists, and
 starts the client with instructions to read it through
-`hyp report get <rec-id>` and make the change in the current repository.
+`hyp recommendation get <id>` and make the change in the current repository.
 Nothing is written to disk. The client takes over the terminal and nothing is
 pre-authorized: the client asks before running the read. The instructions end
-by telling the client to record the outcome: `hyp report mark <rec-id> applied
+by telling the client to record the outcome: `hyp recommendation mark <rec-id> applied
 --reason "<one line>" --link <PR url>` once the change is landed, or
-`hyp report mark <rec-id> dismissed --reason "<why>"` if the recommendation
+`hyp recommendation mark <rec-id> dismissed --reason "<why>"` if the recommendation
 should not be done, with the run's `--org` and `--remote` carried along.
 
 With no id on a terminal, it asks in two steps: first which report, newest
@@ -714,7 +800,7 @@ one.`), and the first keypress lifts the deadline. The report and
 recommendation listings above each have their own 10-second deadline, which
 starts when that list is shown and is lifted by the first keypress on it;
 going back to the first list starts a fresh one. A listing left unanswered
-picks nothing and starts nothing: it prints `hyp report fix: no answer at the
+picks nothing and starts nothing: it prints `hyp fix: no answer at the
 picker - nothing started.` with the usage line to stderr and returns `2`. A
 declined pick succeeds, as does a listing that carries no
 recommendations. A malformed id returns `2`. An unknown id, a recommendation
@@ -723,70 +809,8 @@ no launchable client, or a process-start
 failure returns `1`.
 
 ```sh
-hyp report fix hyprec-0123456789abcdef
-hyp report fix --kind usage-review
-```
-
-### `hyp report mark`
-
-```text
-hyp report mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]
-```
-
-Records what became of a recommendation. The id is the one `hyp report list`
-prints (the legacy `rec-` spelling is accepted). The state is the remote's
-vocabulary: `open`, `in_progress`, `applied`, or `dismissed`; any state may
-follow any other, so reopening is the same verb. `--reason` (one line, up to
-2000 characters) is required for `dismissed` and optional otherwise; a
-dismissal without one is refused with exit `2` before any request. `--link`
-is repeatable and takes absolute `http(s)` URLs, the pull request that landed
-the change most of all (up to 8; a value with a literal comma is split on it,
-so percent-encode one). An empty `--link` is refused with exit `2` rather than
-recorded as no link. The event is appended on the remote with `via: cli`;
-nothing is kept locally. The receipt is the new state line with the reason
-and links as recorded. An unknown id, or a remote that predates the status
-route, returns `1` and names both readings. Requires the publisher role, like
-`publish`.
-
-```sh
-hyp report mark hyprec-0123456789abcdef applied --reason "Landed in hyparam/hypaware#912" --link https://github.com/hyparam/hypaware/pull/912
-hyp report mark hyprec-0123456789abcdef dismissed --reason "The retry loop was removed in 1.39"
-```
-
-```text
-marked hyprec-0123456789abcdef [applied]	Batch the retries
-  reason: Landed in hyparam/hypaware#912
-  link: https://github.com/hyparam/hypaware/pull/912
-```
-
-### `hyp report delete`
-
-```text
-hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]
-hyp report delete <rec-id> [--yes] [--org <org>] [--remote <target>]
-```
-
-**Warning:** This operation permanently deletes the report and its artifacts,
-or the recommendation, for every member of the organization. It prompts on a
-terminal. A non-interactive call without `--yes` refuses with exit code `2`.
-
-```sh
-hyp report delete usage-review 2026-W34 REPORT_ID
-```
-
-Replace `REPORT_ID` with the reviewed report ID. Avoid `--yes` during manual
-work so you can confirm the target.
-
-Given a recommendation id alone (`hyprec-` and its token, as `hyp report list
---recommendations` prints it), it deletes a recommendation published on its own
-with `hyp report recommend`. A recommendation that is a page of a report is not
-deleted, including a standalone one that a remote from before standalone
-records published as a one-page report. The command says a report is deleted
-whole, prints the `hyp report delete <kind> <period> <id>` command for that
-report, and returns `1`. An unknown id deletes nothing and returns `1`.
-
-```sh
-hyp report delete hyprec-0123456789abcdef
+hyp fix hyprec-0123456789abcdef
+hyp fix --kind usage-review
 ```
 
 ## Send data now
@@ -917,7 +941,7 @@ recorder's drop set. This stops future capture only. It doesn't delete existing 
 telemetry listener deletes ignored-session bodies from its transient spool.
 
 A confirmed ignore prints the exact command to delete what the session already
-recorded, `hyp privacy purge --session <id>`, plus its `--local-only` form.
+recorded, `hyp purge --session <id>`, plus its `--local-only` form.
 The default form also deletes the session's rows from configured remotes. With `--json`, the same hint is a `purge` object:
 `earlier_rows` (`retained`), `command`, `command_deletes_remote` (`true`), and
 `local_only_command`.
@@ -1009,7 +1033,7 @@ config (`"recording": false` on its plugin entry), so the daemon's scheduled
 transcript import and every other capture lane stop picking up its new
 sessions, with no daemon restart. It then replays the on-disk undo marker and
 removes only managed settings. Recorded history is kept; use
-[`hyp privacy purge`](#hyp-privacy-purge) to delete it. `hyp status` shows a
+[`hyp purge`](#hyp-purge) to delete it. `hyp status` shows a
 detached client as "Not recording", with no warning. Run
 `hyp client attach <client>` to record it again. If your organization's
 central config requires the client, detach refuses and changes nothing.
@@ -1026,10 +1050,10 @@ reattach through a proxy.
 hyp client detach codex --dry-run
 ```
 
-### `hyp client discover`
+### `hyp nanoclaw discover`
 
 ```text
-hyp client discover nanoclaw [root] [--json]
+hyp nanoclaw discover [root] [--json]
 ```
 
 Finds a supported NanoClaw v2 installation to record. With `root`, it checks
@@ -1049,93 +1073,30 @@ where `roots` holds each qualifying absolute root and `changed` is always
 `false`.
 
 ```sh
-hyp client discover nanoclaw /absolute/path/to/nanoclaw --json
+hyp nanoclaw discover /absolute/path/to/nanoclaw --json
 ```
 
 ### Client skill commands
 
-The visible `hyp client skills` group contains the install command:
+#### `hyp skills install`
 
 ```text
-hyp client skills <subcommand> [args...]
-```
-
-```sh
-hyp client skills --help
-```
-
-#### `hyp client skills install`
-
-```text
-hyp client skills install [--client <name>] [--attached]
+hyp skills install [client] [--attached]
 ```
 
 Replaces registered skill and subagent copies for one client, or for all
-eligible clients when you omit `--client`. It requires a home directory and is
+eligible clients when you name none. `--client <name>` is accepted as the
+same thing. It requires a home directory and is
 safe to repeat. `--attached` restricts installation to clients whose settings
 currently contain a HypAware attach marker. With no attached clients it installs
 nothing. Package updates use this mode so detached and never-attached clients
 do not get skills installed.
 
 ```sh
-hyp client skills install --client codex
+hyp skills install codex
 ```
 
-### Claude account commands
-
-Plugin: `@hypaware/claude-account`. These commands are available only when the
-plugin is active and configured for the intended credential mode.
-
-```text
-hyp client claude-account <subcommand>
-```
-
-#### `hyp client claude-account login`
-
-```text
-hyp client claude-account login
-```
-
-Starts an interactive Claude subscription OAuth flow. It opens a browser with
-a loopback callback and offers pasted-code fallback. It stores a refreshable
-credential in permission-restricted plugin state. Organization-key mode
-refuses because it doesn't need subscription sign-in.
-
-```sh
-hyp client claude-account login
-```
-
-#### `hyp client claude-account logout`
-
-```text
-hyp client claude-account logout
-```
-
-Removes the locally stored subscription credential. It doesn't revoke the
-credential at Anthropic or remove organization-key configuration.
-
-```sh
-hyp client claude-account logout
-```
-
-#### `hyp client claude-account status`
-
-```text
-hyp client claude-account status
-```
-
-Reports the credential mode and whether a usable credential is present. A
-missing, unreadable, or unresolved credential returns `1`. A stored
-subscription credential that is past its expiry still returns `0`: the command
-prints the expiry timestamp without comparing it, and the next resolve attempts
-a renewal from the stored refresh token, which fails if that refresh token has
-also been revoked or expired.
-
-```sh
-hyp client claude-account status
-```
-
-### Claude Desktop commands
+### Claude Desktop capture
 
 Plugin: `@hypaware/claude-desktop`.
 
@@ -1185,90 +1146,6 @@ and has no "never" value.
 { "name": "@hypaware/claude", "config": {
   "backfill": { "on_join": false }
 } }
-```
-
-The subcommands below operate the older managed third-party-inference route.
-They are optional experiments, not prerequisites for transcript capture. They
-require `@hypaware/claude-account`; without that capability they return a
-repair message while the scheduled transcript imports continue normally.
-
-```text
-hyp client claude-desktop <subcommand> [args...]
-```
-
-#### `hyp client claude-desktop install`
-
-```text
-hyp client claude-desktop install [--yes] [--print-commands]
-```
-
-Optionally runs the attended macOS live-route setup: explains the changes, signs in if needed,
-writes the credential helper, backs up and clears stale dialog residue, writes
-the root-owned managed-preferences property list through `sudo`, and asks you
-to restart Claude Desktop. It is resumable and idempotent.
-`--print-commands` changes nothing. `--yes` accepts the explained local changes
-but doesn't bypass browser or `sudo` authentication.
-
-```sh
-hyp client claude-desktop install --print-commands
-```
-
-#### `hyp client claude-desktop status`
-
-```text
-hyp client claude-desktop status
-```
-
-Reports the resolved endpoint, credential mode, helper path, models, and bundle
-ID. A missing helper returns `1`, and so does a generated helper whose baked
-interpreter or CLI path has rotted away, which prints `STALE` and names the
-re-run. This command doesn't verify the installed property list.
-
-```sh
-hyp client claude-desktop status
-```
-
-#### `hyp client claude-desktop verify`
-
-```text
-hyp client claude-desktop verify
-```
-
-Checks that the managed property list is present and current, that the
-credential wrapper it names is present and still runnable, and that stale
-dialog residue is cleared. Those automatic checks determine the exit code. It
-also prints a manual in-app capture check, which doesn't affect the exit code.
-
-```sh
-hyp client claude-desktop verify
-```
-
-#### `hyp client claude-desktop profile`
-
-```text
-hyp client claude-desktop profile [--plist] [--out <path>]
-```
-
-Renders a secret-free managed third-party-inference profile as JSON, or as a
-managed-preferences property-list dictionary with `--plist`. `--out` writes the
-result to a file. Install the helper first.
-
-```sh
-hyp client claude-desktop profile --plist --out ./claude-desktop.plist
-```
-
-#### `hyp client claude-desktop install-helper`
-
-```text
-hyp client claude-desktop install-helper [--path <path>]
-```
-
-Writes the executable, no-argument credential wrapper that the Desktop profile
-references. The default location is in plugin state and outside protected
-desktop directories.
-
-```sh
-hyp client claude-desktop install-helper
 ```
 
 ## Repair saved Codex chats
@@ -1624,7 +1501,7 @@ hyp privacy set <path> sync|local-only|ignore
 
 Upserts an exact host-local path marking. It doesn't write a dotfile or
 delete rows. An `ignore` marking prints a line naming
-`hyp privacy purge --ignored`, which deletes what was already recorded in
+`hyp purge --ignored`, which deletes what was already recorded in
 every ignored folder.
 
 ```sh
@@ -1669,7 +1546,7 @@ path. With no path, uses
 the repository root, or the current directory when outside a repository.
 Use `hyp privacy set <path> sync|local-only|ignore` for host-local markings
 and `hyp privacy show [path]` to report without writing. The receipt names
-`hyp privacy purge --ignored` to delete what was already recorded in ignored
+`hyp purge --ignored` to delete what was already recorded in ignored
 folders.
 
 ```sh
@@ -1719,10 +1596,10 @@ for classification. Existing markings and `.hypignore` files don't change.
 hyp privacy folders ask
 ```
 
-### `hyp privacy purge`
+### `hyp purge`
 
 ```text
-hyp privacy purge <path> | --session <id> [--remote <target> | --local-only] | --ignored | --all [--yes] [--json]
+hyp purge <path> | --session <id> [--remote <target> | --local-only] | --ignored | --all [--yes] [--json]
 ```
 
 **Warning:** This operation permanently deletes matching rows from this
@@ -1751,8 +1628,8 @@ The `<path>`, `--ignored`, and `--all` targets purge locally only. They never
 contact a sink or HypAware Cloud and can't retract exported copies.
 
 ```sh
-hyp privacy purge --session SESSION_ID
-hyp privacy purge --session SESSION_ID --local-only
+hyp purge --session SESSION_ID
+hyp purge --session SESSION_ID --local-only
 ```
 
 Replace `SESSION_ID` with the reviewed session ID. Avoid `--yes` during manual
@@ -2564,34 +2441,25 @@ hyp version
 
 ## Develop plugins
 
-```text
-hyp dev <subcommand> [args...]
-```
+The plugin authoring commands sit beside the other `hyp plugin` commands.
 
-Use `hyp dev --help` and `hyp dev plugin --help` to list developer commands:
-
-```sh
-hyp dev --help
-hyp dev plugin --help
-```
-
-### `hyp dev plugin new`
+### `hyp plugin new`
 
 ```text
-hyp dev plugin new <name> [--kind source|sink|dataset] [--dir <path>]
+hyp plugin new <name> [--kind source|sink|dataset] [--dir <path>]
 ```
 
 Creates a source, sink, or dataset plugin scaffold. It refuses to overwrite an
 existing target.
 
 ```sh
-hyp dev plugin new @example/hypaware-plugin-widget --kind source --dir ./plugins
+hyp plugin new @example/hypaware-plugin-widget --kind source --dir ./plugins
 ```
 
-### `hyp dev plugin doctor`
+### `hyp plugin doctor`
 
 ```text
-hyp dev plugin doctor [dir] [--json]
+hyp plugin doctor [dir] [--json]
 ```
 
 Aggregates static manifest and entrypoint checks, then imports and activates
@@ -2600,7 +2468,7 @@ not a security sandbox. Run it only on code you trust. Warnings can return `0`;
 errors return `1`.
 
 ```sh
-hyp dev plugin doctor ./plugins/hypaware-plugin-widget --json
+hyp plugin doctor ./plugins/hypaware-plugin-widget --json
 ```
 
 ## Use canonical command names
@@ -2613,12 +2481,20 @@ remain compatibility aliases and use the same runners:
 | `hyp init` | `hyp setup` |
 | `hyp unattach` | `hyp detach` |
 | `hyp client history providers` | `hyp backfill list` |
-| `hyp skills install` | `hyp client skills install` |
-| `hyp policy ...`, `hyp ignore`, `hyp unignore`, `hyp purge` | `hyp privacy ...` |
+| `hyp client skills install` | `hyp skills install` |
+| `hyp policy ...`, `hyp ignore`, `hyp unignore` | `hyp privacy ...` |
+| `hyp privacy purge` | `hyp purge` |
+| `hyp report fix` | `hyp fix` |
+| `hyp report recommend` | `hyp recommendation publish` |
+| `hyp report mark` | `hyp recommendation mark` |
+| `hyp report list --recommendations`, `hyp report list --status ...` | `hyp recommendation list` |
+| `hyp report get <rec-id>` | `hyp recommendation get <id>` |
+| `hyp report delete <rec-id>` | `hyp recommendation delete <id>` |
 | `hyp query status`, `hyp query refresh`, `hyp query maintain` | `hyp cache status`, `hyp cache refresh`, `hyp cache maintain` |
-| `hyp graph neighbors` | `hyp query graph neighbors` |
-| `hyp vector search` | `hyp query vector search` |
-| `hyp plugin new`, `hyp plugin doctor` | `hyp dev plugin new`, `hyp dev plugin doctor` |
+| `hyp graph neighbors`, `hyp query graph neighbors` | `hyp query graph` |
+| `hyp vector search`, `hyp query vector search` | `hyp query vector` |
+| `hyp client discover nanoclaw` | `hyp nanoclaw discover` |
+| `hyp dev plugin new`, `hyp dev plugin doctor` | `hyp plugin new`, `hyp plugin doctor` |
 | `hyp mcp` | `hyp mcp serve` |
 | `hyp enrich ...` | `hyp enrichment ...` |
 
