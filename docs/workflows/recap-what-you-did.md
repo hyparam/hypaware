@@ -12,7 +12,7 @@ don't have to rebuild the week from git log and memory.
 
 > From my HypAware history, summarize what I shipped this week, and list anything I started and didn't finish.
 
-> From my HypAware history, I merged several PRs today. Which tasks or tickets need updating?
+> From my HypAware history, list the pull requests I merged [today], and for each one the tickets or tasks it should update.
 
 From a terminal:
 

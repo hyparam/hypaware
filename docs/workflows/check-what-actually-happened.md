@@ -3,9 +3,9 @@
 Don't take the agent's word for what it did. Check the record.
 
 HypAware records every tool call and what came back, with timestamps. Use it
-to check what an agent really did in a session: whether it wrote to the file or
-straight to the database, or whether a job ran once or twice. You get the
-record itself instead of the agent's summary.
+to check what an agent really did in a session: whether it ran the command it
+reported, or whether a job ran once or twice. You get the record itself
+instead of the agent's summary.
 
 ## Ask your agent
 

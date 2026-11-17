@@ -12,7 +12,7 @@ to improve their prompts, skills, and harnesses.
 
 > From my HypAware history, how did the agent decide to [change] in [topic]? What did it see that led there?
 
-> From my HypAware history, were the agent's hypotheses in [session] right, and which ones did it drop?
+> From my HypAware history, in [session], what explanations did the agent consider for [problem], which did it rule out, and was it right to?
 
 From a terminal:
 

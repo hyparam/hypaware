@@ -3,8 +3,8 @@
 Before you fix it, find out whether someone on your team already did.
 
 Once your hosts sync to HypAware Cloud, the questions you ask about your own
-history run across everyone's sessions, including agents running unattended on
-build boxes and remote hosts.
+history run across your team's sessions, including agents running unattended
+on build boxes and remote hosts.
 
 ## Ask your agent
 
@@ -14,7 +14,7 @@ build boxes and remote hosts.
 
 > From our HypAware team history, what has the agent on [hostname] done today, and has it gone quiet?
 
-> From our HypAware team history, what did the agent on [hostname] skip or discard overnight, and did it have the context to make those calls?
+> From our HypAware team history, what did the agent on [hostname] decide on its own overnight, and what was each decision based on?
 
 From a terminal:
 
@@ -29,7 +29,9 @@ Team questions need this host connected to your organization in HypAware Cloud.
 Run `hyp setup` and choose **Sync to the cloud**, or run `hyp remote login`.
 See [Cloud and teams](../TEAM_SETUP.md). What each host shares depends on its
 [privacy settings](../PRIVACY.md): folders marked local-only or ignored never
-reach the team history.
+reach the team history. By default every member can read every member's synced
+sessions; an admin can narrow that, and then team questions cover only the
+sessions you can read.
 
 ## What you get back
 
