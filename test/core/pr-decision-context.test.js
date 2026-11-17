@@ -134,3 +134,36 @@ test('stops on incomplete patches, conversation parts, unknown citations, and am
   await assert.rejects(readMessages({ sessions: [session] }, 'team/project', async () =>
     [{ ...request, part_index: 0, text_part: 'short', chars: 99 }]), /incomplete/)
 })
+
+test('recovers a detached worktree only from one exact branch push just before opening', async () => {
+  const queries = []
+  const request = turn('request', 'user', 0)
+  const clarification = turn('clarification', 'user', 1, { topic_hint: 1 })
+  const replies = [[], [{ session_id: 'pusher' }], [request], [request, clarification]]
+  const result = await discover({ ...pr, headRefName: 'fix/v1.2' }, 'org/repo', async sql => {
+    queries.push(sql)
+    return replies.shift()
+  })
+  assert.match(queries[1], /2026-08-25T04:00:00.000Z/)
+  assert.match(queries[1], /tool_name in/)
+  assert.match(queries[1], /fix\/v1\[\.\]2/)
+  assert.match(queries[1], /limit 2/)
+  assert.match(queries[2], /claude\.origin\.kind/)
+  assert.match(queries[2], /lower\(trim\(content_text\)\) not like '\{%'/)
+  assert.deepEqual(result.sessions[0].candidates.map(c => c.turn.message_id), ['request', 'clarification'])
+
+  const ambiguous = [[], [{ session_id: 'one' }, { session_id: 'two' }]]
+  const missed = await discover(pr, 'org/repo', async () => ambiguous.shift())
+  assert.equal(missed.sessions.length, 0)
+})
+
+test('a numbered design title searches the subject words', async () => {
+  const queries = []
+  const replies = [[{ session_id: 'session' }], []]
+  await discover({ ...pr, title: 'LLP 1000-1001: widget sync' }, 'org/repo', async sql => {
+    queries.push(sql)
+    return replies.shift()
+  })
+  assert.match(queries[1], /like '%widget%'/)
+  assert.doesNotMatch(queries[1], /like '%1000-1001%'/)
+})

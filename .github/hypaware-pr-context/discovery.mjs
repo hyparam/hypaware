@@ -8,7 +8,7 @@ const maxReplies = 3
 // Search title terms literally. A compound such as "auto-update" can appear with a space.
 function topicFilter(title) {
   const terms = (title.replace(/\([^()]*\)/g, ' ').toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) || [])
-    .filter(term => term.length >= 3 && !['the', 'for', 'and', 'with', 'add', 'fix', 'support', 'implement', 'update'].includes(term))
+    .filter(term => term.length >= 3 && /[a-z]/.test(term) && !['llp', 'the', 'for', 'and', 'with', 'add', 'fix', 'support', 'implement', 'update'].includes(term))
   const compound = terms.find(term => term.includes('-'))
   const variants = compound ? [compound, compound.replaceAll('-', ' '), compound.replaceAll('-', '')] : terms.slice(0, 2)
   if (!variants.length) return '1 = 0'
@@ -41,6 +41,7 @@ export function selectCandidates(rows) {
     if (turn && !selected.has(turn.message_id)) selected.set(turn.message_id, { turn, label })
   }
   add(turns[0], 'Possible request')
+  add(turns.slice(1).find(t => t.role === 'user' && t.topic_hint), 'Related developer message')
   let replies = 0
   for (const [i, turn] of turns.entries()) {
     if (i === 0 || turn.role !== 'user' || !turn.choice_hint) continue
@@ -50,11 +51,21 @@ export function selectCandidates(rows) {
     add(turns.slice(i + 1, i + 5).find(t => t.role === 'assistant'), 'Agent follow-up')
     if (++replies === maxReplies) break
   }
-  return Array.from(selected.values()).sort((a, b) => a.turn.message_created_at.localeCompare(b.turn.message_created_at))
+  return turns.filter(turn => selected.has(turn.message_id)).map(turn => selected.get(turn.message_id))
 }
 
 export const rootText = `(is_sidechain is null or is_sidechain = false) and agent_id is null
   and (conversation_id is null or conversation_id = session_id)`
+
+// Older recordings lack origin labels. Drop known injected text before it can
+// be attributed to a developer, including tool echoes recorded with the user role.
+const claudeOrigin = "json_extract_string(attributes, '$.claude.origin.kind')"
+const codexKinds = "json_extract_string(attributes, '$.codex.content_item_kinds')"
+const injected = ['<', '[', '{', '# agents.md', '# /loop', 'retained source order', 'base directory for this skill',
+  'this session is being continued', 'message type:', 'tool loaded.', 'another claude session sent']
+export const developerText = `(${claudeOrigin} = 'human' or ${codexKinds} like '%"user.text"%'
+  or (${claudeOrigin} is null and ${codexKinds} is null and coalesce(user_type, 'user') in ('user','external')
+  and coalesce(entrypoint, '') <> 'sdk-cli' and ${injected.map(prefix => 'lower(trim(content_text)) not like ' + quote(prefix + '%')).join(' and ')}))`
 
 export function repoFilter(repo) {
   const remoteNames = ['https://github.com/', 'git@github.com:', 'ssh://git@github.com/']
@@ -70,9 +81,20 @@ export async function discover(pr, repo, query, now = Date.now()) {
   const to = isoDay(end)
   const scope = `date between '${from}' and '${to}' and message_created_at <= ${quote(new Date(end).toISOString())}
     and ${repoFilter(repo)}`
-  const sessions = await query(`select distinct session_id from ai_gateway_messages
+  let sessions = await query(`select distinct session_id from ai_gateway_messages
     where ${scope} and git_branch = ${quote(pr.headRefName)} and session_id is not null
     order by session_id limit ${maxSessions + 1}`)
+  // A separate worktree can push the PR branch while the recorder still sees master.
+  // Accept only a single root shell session that pushed this exact ref just before opening.
+  if (!sessions.length && /^[a-zA-Z0-9_./-]{1,255}$/.test(pr.headRefName)) {
+    const literal = pr.headRefName.replaceAll('.', '[.]')
+    const push = `(^|["';&|])[ ]*git push (-u |--set-upstream )?origin (HEAD:refs/heads/)?${literal}($|[ "';&|])`
+    const pushes = await query(`select distinct session_id from ai_gateway_messages where ${scope} and ${rootText}
+      and message_created_at between ${quote(new Date(opened - 3_600_000).toISOString())} and ${quote(pr.createdAt)}
+      and part_type = 'tool_call' and tool_name in ('Bash', 'exec', 'exec_command') and session_id is not null
+      and regexp_like(tool_args, ${quote(push)}) limit 2`)
+    if (pushes.length === 1) sessions = pushes
+  }
   /** @type {Array<{ candidates: ReturnType<typeof selectCandidates>, count: number, capped: boolean }>} */
   const previews = []
   const topic = topicFilter(pr.title)
@@ -82,16 +104,17 @@ export async function discover(pr, repo, query, now = Date.now()) {
     const root = `${scope} and session_id = ${quote(session_id)} and part_type = 'text'
       and ${rootText}`
     const [seed] = await query(`select message_id, message_created_at from ai_gateway_messages
-      where ${root} and role = 'user' and message_id is not null and length(content_text) between 1 and 3000 and (${topic})
+      where ${root} and role = 'user' and ${developerText} and message_id is not null and length(content_text) between 1 and 3000 and (${topic})
       order by message_created_at, message_id limit 1`)
     if (!seed) {
       previews.push({ candidates: [], count: 0, capped: false })
       continue
     }
     const rows = await query(`select distinct date, session_id, message_id, message_created_at, role,
+      case when role = 'user' and (${topic}) then 1 else 0 end as topic_hint,
       case when role = 'user' and length(content_text) <= 200 and (${replyHint}) then 1 else 0 end as choice_hint,
       case when role = 'assistant' and (${proposalHint}) then 1 else 0 end as proposal_hint
-      from ai_gateway_messages where ${root} and role in ('user','assistant') and message_id is not null
+      from ai_gateway_messages where ${root} and (role = 'assistant' or (role = 'user' and ${developerText})) and message_id is not null
       and length(content_text) between 1 and 3000 and message_created_at >= ${quote(seed.message_created_at)}
       order by message_created_at, message_id limit ${windowRows + 1}`)
     const window = rows.slice(0, windowRows)

@@ -1,7 +1,7 @@
 import { appendFile, readFile } from 'node:fs/promises'
 import { setTimeout as wait } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
-import { discover, messageLink, quote, repoFilter, rootText } from './discovery.mjs'
+import { developerText, discover, messageLink, quote, repoFilter, rootText } from './discovery.mjs'
 
 const start = '<!-- hypaware-pr-context:start -->'
 const end = '<!-- hypaware-pr-context:end -->'
@@ -69,7 +69,7 @@ export async function readMessages(result, repo, query) {
       length(content_text) as chars, substr(content_text, 1, 3001) as text_part
       from ai_gateway_messages where ${repoFilter(repo)} and ${rootText}
       and session_id = ${quote(first.session_id)} and date in (${days.join(',')})
-      and message_id in (${ids.join(',')}) and role in ('user','assistant') and part_type = 'text'
+      and message_id in (${ids.join(',')}) and (role = 'assistant' or (role = 'user' and ${developerText})) and part_type = 'text'
       order by message_id, part_index limit 129`)
     if (rows.length > 128) throw new WorkflowError('Conversation exceeds the text-part limit.')
     for (const { turn } of candidates) {
