@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { Attr, installObservability } from '../../../src/core/observability/index.js'
 import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
+import { dispatch } from '../../../src/core/cli/dispatch.js'
 import { runInitWizard } from '../../../src/core/cli/wizard/index.js'
 import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
@@ -74,6 +75,41 @@ export async function run({ harness, expect }) {
       } } }),
     })
     expect.that('onboarding: opt-in completes', result.exitCode, (code) => code === 0 && loginRan)
+  })
+
+  await step('connect_github', async () => {
+    const configPath = path.join(harness.tmpDir, 'standalone.json')
+    let output = ''
+    let stderr = ''
+    const opts = { env: { ...process.env, HYP_CONFIG: configPath, GITHUB_TOKEN: '' },
+      stdout: { write(chunk) { output += chunk } }, stderr: { write(chunk) { stderr += chunk } } }
+    const fetchOriginal = globalThis.fetch
+    globalThis.fetch = async (input, init) => {
+      switch (String(input)) {
+        case 'https://github.com/login/device/code': return Response.json({
+          device_code: 'hermetic-connect-device', user_code: 'CONN-ECT1', interval: 1,
+          expires_in: 180, verification_uri: 'https://github.com/login/device',
+        })
+        case 'https://github.com/login/oauth/access_token': return Response.json({ access_token: 'hermetic-connect-token', token_type: 'bearer', scope: 'repo' })
+        case 'https://api.github.com/user':
+          expect.that('standalone sign-in uses its OAuth credential', new Headers(init?.headers).get('Authorization'), token => token === 'Bearer hermetic-connect-token')
+          return Response.json({ login: 'smoke-user', id: 7 })
+        default: throw new Error('unexpected external request in GitHub smoke')
+      }
+    }
+    try {
+      const code = await dispatch(['github', 'connect', '--no-browser'], opts)
+      expect.that('standalone connect prints the device code and signs in', { code, output, stderr }, r =>
+        r.code === 0 && !r.stderr && r.output.includes('CONN-ECT1') && r.output.includes('Signed in to GitHub as smoke-user'))
+      const saved = JSON.parse(await fs.readFile(configPath, 'utf8'))
+      expect.that('standalone connect enables GitHub and its graph dependency', saved.plugins.map(plugin => plugin.name), names =>
+        ['@hypaware/context-graph', '@hypaware/github'].every(required => names.filter(name => name === required).length === 1))
+      output = ''
+      const status = await dispatch(['github', 'status'], opts)
+      expect.that('fresh CLI boot reads the saved credentials', { status, output, stderr }, r =>
+        r.status === 0 && !r.stderr && r.output.includes('authenticated as smoke-user'))
+      await logoutGithub(requireGithubRuntime().stateDir)
+    } finally { globalThis.fetch = fetchOriginal }
   })
 
   await step('activate', async () => {
@@ -229,7 +265,7 @@ export async function run({ harness, expect }) {
 
   await obs.shutdown()
   const traces = await expect.traces()
-  for (const [name, status] of [['wizard.github.offer', 'accepted'], ['wizard.github.login', 'ok']]) {
+  for (const [name, status] of [['wizard.github.offer', 'accepted'], ['wizard.github.login', 'ok'], ['github.connect', 'ok']]) {
     expect.that(`telemetry: ${name} outcome`, traces,
       (rows) => rows.some((row) => row.name === name && row.attributes?.status === status))
   }
@@ -243,6 +279,8 @@ export async function run({ harness, expect }) {
     )
   )
   const logs = await expect.logs()
+  expect.that('telemetry: standalone sign-in completed without exposing credentials', logs, rows =>
+    rows.some(row => row.body === 'github.login_completed') && !/hermetic-connect-(token|device)|CONN-ECT1/.test(JSON.stringify([rows, traces])))
   expect.that(
     'telemetry: GitHub projection completed automatically',
     logs,

@@ -1654,6 +1654,8 @@ function renderInactivePluginError({ stderr, inactive, discovery, env }) {
     )
   } else if (inactive.plugin === '@hypaware/linear') {
     stderr.write('  repair: run `hyp linear connect` to sign in and choose teams to collect\n')
+  } else if (inactive.plugin === '@hypaware/github') {
+    stderr.write('  repair: run `hyp github connect` to enable collection and sign in\n')
   } else if (inactive.state === 'disabled-local') {
     stderr.write(
       `  repair: set "enabled": true on the {"name": "${inactive.plugin}"} entry in plugins[] in ${displayConfigPath(discovery.configPath, env)}\n`

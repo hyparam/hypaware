@@ -25,6 +25,7 @@ const REPO_SLUG = /^[^/\s]+\/[^/\s]+$/
 export async function runGithub(_argv, ctx) {
   ctx.stdout.write(
     'hyp github <subcommand>\n' +
+      '  connect [--no-browser]      enable GitHub collection and sign in\n' +
       '  login [--no-browser]        sign in with a GitHub device code\n' +
       '  logout                     remove local OAuth tokens\n' +
       '  status                     verify authentication and show its source\n' +

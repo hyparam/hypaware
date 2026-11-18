@@ -43,6 +43,7 @@ import { runSinkMaintain } from '../commands/sink.js'
 import { runSync } from '../commands/sync.js'
 import { runInit } from '../commands/init.js'
 import { runJoin, runLeave } from '../commands/central.js'
+import { runGithubConnect } from '../commands/github.js'
 import { runLinearConnect } from '../commands/linear.js'
 import { runPurge } from '../commands/purge.js'
 import {
@@ -117,6 +118,10 @@ const CORE_COMMAND_GROUPS = [
   {
     name: 'dev plugin',
     summary: 'Scaffold and diagnose plugins under development',
+  },
+  {
+    name: 'github',
+    summary: 'Connect GitHub and collect repository activity',
   },
   {
     name: 'linear',
@@ -333,6 +338,15 @@ function buildCoreCommands(registry) {
       summary: 'Load and cross-validate the active config file',
       usage: 'hyp config validate [file]',
       run: runConfigValidate,
+    },
+    {
+      name: 'github connect',
+      category: 'capture-movement',
+      summary: 'Enable GitHub collection and sign in',
+      usage: coreUsage('github connect'),
+      help: 'Enables GitHub collection and opens device-code sign-in. --no-browser prints the URL and code.',
+      bootProfile: 'none',
+      run: runGithubConnect,
     },
     {
       name: 'linear connect',
