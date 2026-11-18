@@ -134,7 +134,7 @@ test('unknown method and unknown resource are proper errors', async () => {
 // The mark, registered but never a tool: a `cli-only` verb is hidden on every
 // transport, so the instructions must not render the rule 5 line for it.
 const hiddenMarkVerb = {
-  name: 'report mark', tool: 'set_recommendation_status', summary: 'mark', exposure: 'cli-only',
+  name: 'recommendation mark', tool: 'set_recommendation_status', summary: 'mark', exposure: 'cli-only',
   inputSchema: { type: 'object', properties: {} }, operation: async () => ({}), render: () => ({ stdout: '' }),
 }
 
@@ -167,8 +167,8 @@ test('initialize over stdio carries instructions with the stdio CLI line and not
   ])
   const text = init.result.instructions
   assert.equal(typeof text, 'string')
-  assert.ok(text.includes('hyp report get <id>'))
-  assert.ok(text.includes('hyp report mark <id> applied --reason ... --link ...'))
+  assert.ok(text.includes('hyp recommendation get <id>'))
+  assert.ok(text.includes('hyp recommendation mark <id> applied --reason ... --link ...'))
   // The hidden mark is not listed, so no line names it or calls marking expected through it.
   assert.ok(!list.result.tools.some((/** @type {any} */ t) => t.name === 'set_recommendation_status'))
   assert.ok(!text.includes('set_recommendation_status'))
@@ -215,13 +215,13 @@ test('initialize for an http read principal with every contract bound renders th
   const r = await s.handleMessage({ jsonrpc: '2.0', id: 2, method: 'initialize' })
   const text = /** @type {any} */ (r).result.instructions
   assert.ok(text.includes('You cannot mark recommendations from here.'))
-  assert.ok(text.includes('The person marks it with hyp report mark or the dashboard.'))
+  assert.ok(text.includes('The person marks it with hyp recommendation mark or the dashboard.'))
   assert.ok(text.includes('include_evidence'))
   // No mark line: not the tool, not rule 5, and no CLI command for the agent to run.
   assert.ok(!text.includes('set_recommendation_status'))
   assert.doesNotMatch(text, /expected last step/)
-  assert.ok(!text.includes('hyp report mark <id>'))
-  assert.ok(!text.includes('hyp report get'))
+  assert.ok(!text.includes('hyp recommendation mark <id>'))
+  assert.ok(!text.includes('hyp recommendation get'))
 })
 
 test('instructions are built once per assembly, on the first initialize, not per request', async () => {

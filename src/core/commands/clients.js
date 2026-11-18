@@ -86,18 +86,18 @@ export async function runAttach(argv, ctx) {
  * @param {CommandRunContext} ctx
  * @ref LLP 0554#nanoclaw-discovery: explicit or bounded ancestor candidates, never a home crawl
  */
-export async function runClientDiscover(argv, ctx) {
+export async function runNanoclawDiscover(argv, ctx) {
   const parsed = parseCommandArgv(argv, {
     type: 'object',
-    properties: { client: { type: 'string' }, root: { type: 'string' }, json: { type: 'boolean' } },
-    positional: ['client', 'root'],
+    properties: { root: { type: 'string' }, json: { type: 'boolean' } },
+    positional: ['root'],
   }, STRICT_SHORT_FLAGS)
   if (!('help' in parsed) && !parsed.ok) {
     ctx.stderr.write(`error: ${parsed.error}\n`)
     return 2
   }
-  if ('help' in parsed || parsed.params.client !== 'nanoclaw') {
-    ctx.stderr.write('Usage: hyp client discover nanoclaw [root] [--json]\n')
+  if ('help' in parsed) {
+    ctx.stderr.write('Usage: hyp nanoclaw discover [root] [--json]\n')
     return 2
   }
   const candidates = []
@@ -2167,7 +2167,7 @@ async function resumeRecording({ name, ctx, parsed, ...args }) {
  * @param {string} name
  */
 function writeNotRecordingReceipt(ctx, name) {
-  ctx.stdout.write(`  HypAware stopped recording ${name}. Recorded history is kept; 'hyp privacy purge' deletes it.\n`)
+  ctx.stdout.write(`  HypAware stopped recording ${name}. Recorded history is kept; 'hyp purge' deletes it.\n`)
   ctx.stdout.write(`  Run 'hyp client attach ${name}' to record it again.\n`)
 }
 
@@ -2385,7 +2385,7 @@ function parseIgnoreArgs(argv) {
  * stay until a separate purge, so the write receipt names that step.
  */
 const FOLDER_PURGE_NOTE =
-  'To delete what was already recorded in ignored folders on this machine, run `hyp privacy purge --ignored`.'
+  'To delete what was already recorded in ignored folders on this machine, run `hyp purge --ignored`.'
 
 /**
  * Write a .hypignore at the explicit path, or the repo root by default.
@@ -2912,10 +2912,13 @@ function parseSkillsArgs(argv) {
       client: { type: 'string', default: 'all' },
       attached: { type: 'boolean', default: false },
     },
+    positional: ['client'],
   })
-  if ('help' in parsed) return { client: 'all', attached: false, error: 'usage: hyp skills install [--client <name>|all] [--attached]' }
+  if ('help' in parsed) return { client: 'all', attached: false, error: 'usage: hyp skills install [client|all] [--attached]' }
   if (!parsed.ok) return { client: 'all', attached: false, error: parsed.error }
   const p = /** @type {{ client: string, attached: boolean }} */ (parsed.params)
+  // The positional slot would otherwise swallow a mistyped flag as a client name.
+  if (p.client.startsWith('-')) return { client: 'all', attached: false, error: `unknown flag ${p.client}` }
   return { client: p.client, attached: p.attached }
 }
 

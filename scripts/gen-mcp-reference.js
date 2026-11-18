@@ -51,8 +51,8 @@ const WORKSPACE = path.join(REPO, 'hypaware-core', 'plugins-workspace')
  * stops the generator rather than reaching the page without one.
  */
 const PROMPT_CLI = Object.freeze({
-  fix_recommendation: 'hyp report fix <id>',
-  open_recommendations: 'hyp report list --recommendations --status open',
+  fix_recommendation: 'hyp fix <id>',
+  open_recommendations: 'hyp recommendation list --status open',
   check_team_history: 'hyp ask',
 })
 

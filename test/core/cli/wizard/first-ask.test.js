@@ -268,7 +268,7 @@ test('launchClient: a resolved .exe on win32, and any client elsewhere, spawns d
 })
 
 test('launchClient: a prompt is substituted literally, not read as a replacement pattern', () => {
-  // `hyp report fix` builds its prompt from a fetched page's title, so the
+  // `hyp fix` builds its prompt from a fetched page's title, so the
   // prompt is no longer always a constant this file wrote.
   // @ref LLP 0198#real-launch [tests]: what the spawn carries is the prompt itself
   const spawner = recordingSpawn()

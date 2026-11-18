@@ -287,23 +287,23 @@ the review session or any previously excluded chat.
 
 `hyp privacy show <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
 
-**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp privacy purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive. A directory or `--ignored` purge touches only the local cache; a `--session` purge also deletes that session on configured and signed-in remotes and enrolled servers unless you add `--local-only`. Confirm each purge on its own.
+**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive. A directory or `--ignored` purge touches only the local cache; a `--session` purge also deletes that session on configured and signed-in remotes and enrolled servers unless you add `--local-only`. Confirm each purge on its own.
 
 ```bash
-hyp privacy purge <dir>              # delete cached rows for a directory subtree
-hyp privacy purge --session <id>     # delete one session here and on configured, signed-in and enrolled servers (cheapest: session is the partition key)
-hyp privacy purge --session <id> --local-only   # same, but skip the server-side delete
-hyp privacy purge --ignored          # sweep every cached row whose cwd currently resolves to `ignore`
+hyp purge <dir>              # delete cached rows for a directory subtree
+hyp purge --session <id>     # delete one session here and on configured, signed-in and enrolled servers (cheapest: session is the partition key)
+hyp purge --session <id> --local-only   # same, but skip the server-side delete
+hyp purge --ignored          # sweep every cached row whose cwd currently resolves to `ignore`
 ```
 
-Purge prompts for confirmation on a TTY; it errors on a bare `hyp privacy purge` with no target. Sequencing matters: **ignore the directory or the exact session first, then separately confirm and purge**. Purging without a confirmed exclusion risks re-import by backfill. A directory exclusion blocks re-import from that directory; a session exclusion blocks that id even if the folder stays `sync`. For example, only after the user has approved each action:
+Purge prompts for confirmation on a TTY; it errors on a bare `hyp purge` with no target. Sequencing matters: **ignore the directory or the exact session first, then separately confirm and purge**. Purging without a confirmed exclusion risks re-import by backfill. A directory exclusion blocks re-import from that directory; a session exclusion blocks that id even if the folder stays `sync`. For example, only after the user has approved each action:
 
 ```bash
 hyp privacy set <dir> ignore
-hyp privacy purge <dir>
+hyp purge <dir>
 
 hyp session ignore --json "<session-id>"
-hyp privacy purge --session "<session-id>"
+hyp purge --session "<session-id>"
 ```
 
 Read purge receipts too: distinguish local deletion, confirmed remote deletion,

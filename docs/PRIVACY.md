@@ -70,7 +70,7 @@ Spool cleanup works as follows:
   it by deleting the oldest files first. It is periodic cleanup, not a filesystem
   quota: files can accumulate between checks, and cleanup requires one of those
   processes to run. Deleted bodies cannot supply missing capture detail.
-- `hyp privacy purge` empties it, whatever else you asked that purge to delete, and
+- `hyp purge` empties it, whatever else you asked that purge to delete, and
   `hyp detach claude` empties it on the way out.
 
 ### Proxy mode and certificate cleanup
@@ -195,7 +195,7 @@ Three caveats apply to both surfaces:
 
 > **Caution:** **Prospective only.** A marking gates future recording and syncing.
 > Rows captured before it existed stay in the cache; deleting them is the
-> separate, explicit `hyp privacy purge` step below.
+> separate, explicit `hyp purge` step below.
 
 **Class resolution needs a working directory.** The client sources
 (Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, Droid, OpenClaw,
@@ -279,18 +279,18 @@ insufficient.
 
 Ignoring does not delete earlier records, original client transcripts, or
 exported copies. Unignoring makes the entire transcript eligible for import,
-including turns written while ignored. Use `hyp privacy purge --session <id>`
+including turns written while ignored. Use `hyp purge --session <id>`
 to delete previously captured rows.
 
 ## Deleting what was already recorded
 
-`hyp privacy purge` permanently deletes rows from this host's local cache:
+`hyp purge` permanently deletes rows from this host's local cache:
 
 ```sh
-hyp privacy purge <path>          # rows whose cwd is at or under the path
-hyp privacy purge --session <id>  # one session's rows, here and on your servers
-hyp privacy purge --ignored       # every row whose directory now resolves to ignore
-hyp privacy purge --all           # everything, wholesale
+hyp purge <path>          # rows whose cwd is at or under the path
+hyp purge --session <id>  # one session's rows, here and on your servers
+hyp purge --ignored       # every row whose directory now resolves to ignore
+hyp purge --all           # everything, wholesale
 ```
 
 It prompts on a TTY; pass `--yes` for non-interactive use.
@@ -301,8 +301,8 @@ It prompts on a TTY; pass `--yes` for non-interactive use.
 > confirmation prompt names the servers it will contact:
 
 ```sh
-hyp privacy purge --session <id> --remote <target>  # this host and one server
-hyp privacy purge --session <id> --local-only       # this host only
+hyp purge --session <id> --remote <target>  # this host and one server
+hyp purge --session <id> --local-only       # this host only
 ```
 
 Deleting on a server uses your login, and needs you to be the session's owner
@@ -375,7 +375,7 @@ Some differences from export redaction:
   not recognized, and a nested value that is not text is dropped.
 - Rows recorded before this change keep their content, and so do rows still
   waiting to be written when you upgrade. To remove them, use
-  `hyp privacy purge`.
+  `hyp purge`.
 - The raw-body spool and the LangGraph outbox are written by other programs,
   so their files are not masked. HypAware masks what it records from them.
 

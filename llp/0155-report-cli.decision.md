@@ -8,6 +8,7 @@
 **Related:** LLP 0033, LLP 0058, LLP 0062, LLP 0084, LLP 0104
 **Extended-by:** [LLP 0436](./0436-publish-markdown-report-sources.decision.md) replaces new HTML uploads with Markdown sources rendered by the server.
 **Extended-by:** [LLP 0465](./0465-report-save-store.decision.md) adds `save`, a second local member, a saved section to `list`, and publish by saved name.
+**Extended-by:** LLP 0614 (the recommendation members of the `report` group move to `hyp recommendation`)
 **Superseded-in-part-by:** [LLP 0451](./0451-retire-report-render-command.decision.md) retires `hyp report render`; [LLP 0450](./0450-report-generate-in-current-directory.decision.md) makes `generate` the group's local member.
 
 ## Context

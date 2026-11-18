@@ -41,11 +41,11 @@ agent in the repository it applies to:
 
 > Use HypAware to fix recommendation [recommendation id] in this repo, and mark it applied with the PR link when it lands.
 
-From a terminal, `hyp report fix` does the same:
+From a terminal, `hyp fix` does the same:
 
-<!-- agent: Read recommendation hyprec-0123456789abcdef with hyp report get and apply it in this repository. When it is landed, mark it applied with the pull request link. Over MCP on our team's server, read it with get_recommendation and mark it with set_recommendation_status. -->
+<!-- agent: Read recommendation hyprec-0123456789abcdef with hyp recommendation get and apply it in this repository. When it is landed, mark it applied with the pull request link. Over MCP on our team's server, read it with get_recommendation and mark it with set_recommendation_status. -->
 ```sh
-hyp report fix hyprec-0123456789abcdef
+hyp fix hyprec-0123456789abcdef
 ```
 
 Review the diff before you merge. Details are in

@@ -20,11 +20,11 @@ import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 
 // Commands that read captured data. `query schema` only describes tables.
 const QUERY_COMMANDS = [
-  'query graph neighbors',
+  'query graph',
   'query grep',
   'query overview',
   'query sql',
-  'query vector search'
+  'query vector'
 ]
 
 /** @type {AsyncLocalStorage<{invocation: {command:string,kind:string,degraded:boolean,query:Record<string,any>|null,errorCode:string|null,records:Record<string,any>[],flushers:(()=>void)[],surface:string,emit:(records:Record<string,any>[])=>void,milestone:(name:'first_capture'|'first_query')=>Record<string,any>|null,startDelivery:()=>void,setAdapters:(adapters:string[])=>void}, depth:number}>} */

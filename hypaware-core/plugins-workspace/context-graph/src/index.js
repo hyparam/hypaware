@@ -37,12 +37,12 @@ const CAPABILITY_VERSION = '1.1.0'
  *    every registered source contract
  *  - command `graph compact` - merges duplicate node/edge rows and
  *    rewrites affected partitions into sorted tables
- *  - command `query graph neighbors` (alias `graph neighbors`) - walks the
+ *  - command `query graph` (aliases `query graph neighbors`,
+ *    `graph neighbors`) - walks the
  *    activity graph from a seed node out to N hops, reading the published
  *    node/edge datasets ([LLP 0064])
- *  - groups `graph` and `query graph` - the namespace's own help, so both
- *    `hyp graph --help` and `hyp query graph --help` state the projection
- *    model instead of listing subcommands bare ([LLP 0214])
+ *  - group `graph` - the namespace's own help, so `hyp graph --help` states
+ *    the projection model instead of listing subcommands bare ([LLP 0214])
  *
  * Projection runs via the command or a source's capability call. The graph
  * plugin itself registers no background source or timer.
@@ -77,17 +77,11 @@ export async function activate(ctx) {
   ctx.query.registerDataset(graphDatasetRegistration(NODE_DATASET))
   ctx.query.registerDataset(graphDatasetRegistration(EDGE_DATASET))
 
-  // The group's own voice. Neither prefix has a bare command, so without this
-  // their `--help` is a subcommand table with no prose, and the projection
-  // model has nowhere to be stated.
-  //
-  // Both prefixes are registered because LLP 0248 splits the namespace in two:
-  // `graph project|compact` stay direct operations under `graph`, while the
-  // journey moved to `query graph neighbors`. Registering only one of them
-  // leaves the other rendering a bare table, which is the exact regression
-  // LLP 0214 exists to prevent.
+  // The group's own voice. `graph` has no bare command, so without this its
+  // `--help` is a subcommand table with no prose, and the projection model
+  // has nowhere to be stated. `query graph` is a command of its own now
+  // (LLP 0609) and renders the verb's help instead.
   // @ref LLP 0214#d2 [implements]: a plugin namespace describes itself instead of rendering a bare table
-  // @ref LLP 0248#tree [constrained-by]: `graph` keeps project/compact while the neighbors journey lives under `query graph`
   const groupSummary = 'Build and walk the activity graph projected from recorded sessions'
   const groupHelp = [
     'The graph is a derived projection of the recorded AI sessions: the same',
@@ -102,14 +96,12 @@ export async function activate(ctx) {
     '',
     'Two ways to read it, and they answer different questions:',
     '  hyp query sql "... from node/edge ..."   counts, rankings, group-by',
-    '  hyp query graph neighbors <node>         what connects to X, N hops',
+    '  hyp query graph <node>                   what connects to X, N hops',
     '',
     '`node` and `edge` are ordinary query datasets, so everything in',
     "`hyp query --help` applies to them, including --format and --output.",
   ].join('\n')
-  for (const name of ['graph', 'query graph']) {
-    ctx.commands.registerGroup({ name, plugin: PLUGIN_NAME, summary: groupSummary, help: groupHelp })
-  }
+  ctx.commands.registerGroup({ name: 'graph', plugin: PLUGIN_NAME, summary: groupSummary, help: groupHelp })
 
   ctx.commands.register({
     name: 'graph project',
@@ -151,7 +143,7 @@ export async function activate(ctx) {
     run: runGraphCompact,
   })
 
-  // `graph neighbors` is a verb (LLP 0034 §verbs): registering it projects
+  // `query graph` is a verb (LLP 0034 §verbs): registering it projects
   // both the CLI command and the `graph_neighbors` MCP tool, so the tool
   // lights up wherever this plugin is active, with no core change.
   ctx.verbs.register(graphNeighborsVerb)

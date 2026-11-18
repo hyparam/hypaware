@@ -20,8 +20,9 @@ import { PLUGIN_NAME } from './datasets.js'
  * @ref LLP 0034#verbs [implements]: context-graph registers a verb; `graph_neighbors` becomes a tool with zero core change
  */
 export const graphNeighborsVerb = {
-  name: 'query graph neighbors',
-  aliases: ['graph neighbors'],
+  // @ref LLP 0609#decision [implements]: the seed node is the positional; `neighbors` survives only as an alias
+  name: 'query graph',
+  aliases: ['query graph neighbors', 'graph neighbors'],
   category: 'explore-share',
   audience: 'everyday',
   tool: 'graph_neighbors',
@@ -132,11 +133,11 @@ export const graphNeighborsVerb = {
       if (r.graphEmpty) {
         return {
           stdout: '',
-          stderr: 'hyp graph neighbors: the graph is empty - run `hyp graph project` to build it\n' + notice,
+          stderr: 'hyp query graph: the graph is empty - run `hyp graph project` to build it\n' + notice,
           exitCode: 1,
         }
       }
-      const lines = [`hyp graph neighbors: ${r.error}`]
+      const lines = [`hyp query graph: ${r.error}`]
       for (const c of (r.candidates ?? []).slice(0, 10)) {
         lines.push(`  ${c.node_type}\t${c.natural_key}\t(${shortId(c.node_id)})`)
       }

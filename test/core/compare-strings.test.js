@@ -334,7 +334,7 @@ test('the collation these lists came off really does move with the machine', () 
   //    against every ranked neighbour's index, so `ar - br` decides every pair
   //    it takes part in. Every non-hidden head the bundled plugins can
   //    contribute is ranked, and the four heads that are not (`claude-hook`,
-  //    `codex-hook`, `claude-account`, `gascity`) come only from commands
+  //    `codex-hook`, `gascity`) come only from commands
   //    marked `hidden`, which never reach a help row.
   //
   // Both halves are observable rather than argued: with every bundled plugin

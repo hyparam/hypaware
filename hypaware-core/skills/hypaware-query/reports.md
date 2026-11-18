@@ -40,12 +40,12 @@ discard or rename useful pages merely to fit the allowlist.
   incomplete report; say so when you cite it.
 - `hyp report get <kind> <period> <id> [path] --remote <target>` retrieves a
   published report page; take identifiers from a listing or publish receipt.
-- `hyp report get <hyprec-id> --remote <target>` retrieves one recommendation,
+- `hyp recommendation get <hyprec-id> --remote <target>` retrieves one recommendation,
   its evidence, and status. IDs are `hyprec-` plus a ten-character token, or sixteen hex on older reports;
   legacy `rec-` identifiers are also supported.
 
 When the connected MCP lists `list_recommendations` and `get_recommendation`,
-they read the same recommendations and status as `hyp report list` and `get`.
+they read the same recommendations and status as `hyp recommendation list` and `get`.
 
 Resolve an unclear destination before writes. Preserve the chosen remote and
 organization across related commands; do not invent IDs or hosted links.
@@ -72,11 +72,12 @@ or another page in the report. Supported report filenames are `report.md`,
 `[a-z0-9][a-z0-9-]*`.
 
 When the analysis yields one recommendation rather than a report, publish that
-page on its own with `hyp report recommend <recommendation-page>.md --remote
+page on its own with `hyp recommendation publish <recommendation-page>.md --remote
 <target>`. Its first `# ` heading is the title. The server wraps it in a report
 of kind `recommendation`, mints its `hyprec-` id, and the receipt prints the id
-and its `hyp report get` command. If the installed CLI lacks `recommend`
-(`hyp report --help`), retain the page and report the limitation.
+and its `hyp recommendation get` command. If the installed CLI lacks
+`recommendation publish` (`hyp recommendation --help`), retain the page and
+report the limitation.
 
 Return the report ID and a receipt-backed link or `hyp report get` command with
 the remote. On failure, retain the sources and report the error; do not silently
@@ -93,7 +94,7 @@ explain why rather than forcing it. Preserve the evidence's original local or
 remote scope when verifying claims; a local subset cannot disprove an
 organization-wide finding.
 
-`hyp report fix <id>` starts a fresh client from the shell; do not run it inside
+`hyp fix <id>` starts a fresh client from the shell; do not run it inside
 an existing agent session. Use `get` and work in the current session instead.
 A recommendation already marked `applied` or `dismissed` is not redone without
 the user's request.
@@ -107,13 +108,13 @@ applied. Otherwise, completion does not require a merge the user did not request
 If work stops or validation fails, keep it `in_progress` and explain what remains.
 
 ```sh
-hyp report mark <id> in_progress --reason "<work starting>" --remote <target>
-hyp report mark <id> applied --reason "<completed change and validation>" --remote <target>
+hyp recommendation mark <id> in_progress --reason "<work starting>" --remote <target>
+hyp recommendation mark <id> applied --reason "<completed change and validation>" --remote <target>
 ```
 
 Use `set_recommendation_status` for the same two marks only when the connected
 MCP lists it, with the same id, status, and reason. When it does not, use
-`hyp report mark` where `hyp` is available here. Otherwise tell the user which
+`hyp recommendation mark` where `hyp` is available here. Otherwise tell the user which
 status to set and why, and do not claim the status was recorded.
 
 Check each command's exit status and receipt. On failure, report the error and
@@ -124,7 +125,7 @@ when available; do not invent one or require a PR for a local completed change.
 Dismiss only when authorized by the user, with a reason:
 
 ```sh
-hyp report mark <id> dismissed --reason "<why>" --remote <target>
+hyp recommendation mark <id> dismissed --reason "<why>" --remote <target>
 ```
 
 `open` reopens. Carry the same remote and organization as the read; ordinary

@@ -20,8 +20,7 @@
   },
   "contributes": {
     "commands": [
-      { "name": "query vector", "aliases": ["vector"], "category": "explore-share", "audience": "everyday", "summary": "Vector similarity search (see subcommands: search, status)" },
-      { "name": "query vector search", "aliases": ["vector search"], "category": "explore-share", "audience": "everyday", "summary": "Similarity search across configured local vector indexes" },
+      { "name": "query vector", "aliases": ["vector", "query vector search", "vector search"], "category": "explore-share", "audience": "everyday", "summary": "Similarity search across configured local vector indexes" },
       { "name": "vector status", "aliases": ["query vector status"], "category": "additional", "audience": "operator", "summary": "Per-index vector shard coverage and staleness" }
     ],
     "sources": [{ "name": "vector-search-refresh" }],

@@ -41,7 +41,7 @@ export async function run({ harness, expect }) {
       const records = (await fs.readFile(new URL('../fixtures/nanoclaw-session.jsonl', import.meta.url), 'utf8')).trim().split('\n').map((line, i) => ({ ...JSON.parse(line), sessionId: harness.devRunId, timestamp: new Date(now - 10000 + i).toISOString() }))
       const old = { ...records[0], uuid: 'too-old', timestamp: new Date(now - 2 * 86400000).toISOString() }
       await fs.writeFile(file, [old, ...records].map(record => JSON.stringify(record)).join('\n') + '\n')
-      const discovered = await cli(['client', 'discover', 'nanoclaw', root, '--json'])
+      const discovered = await cli(['nanoclaw', 'discover', root, '--json'])
       const canonicalRoot = await fs.realpath(root)
       expect.that('discovery reports the supported root before configuration', discovered.roots, values => values.length === 1 && values[0] === canonicalRoot)
       expect.that('discovery does not enable capture', discovered.changed, value => value === false)

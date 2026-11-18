@@ -42,7 +42,8 @@ catalog and a fixed number of files per probe, with no persistent state.
 ## NanoClaw discovery {#nanoclaw-discovery}
 
 @ref LLP 0553#capture [extends]: keep config.root explicit; add a read-only
-`hyp client discover nanoclaw [root] [--json]` command usable before setup.
+`hyp nanoclaw discover [root] [--json]` command usable before setup
+(`hyp client discover nanoclaw` remains as an alias).
 An explicit root is checked alone. Otherwise inspect the configured root and
 current-directory ancestors, at most eight candidates total. No sibling,
 home-directory or disk crawl, environment-root invention, or auto-activation.

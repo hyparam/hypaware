@@ -136,7 +136,7 @@ including the scheduled transcript imports, and the running daemon picks this
 up without a restart. Detach also reverses the client's managed settings where supported. For Ollama,
 [verified detach](integrations/ollama.md#stop-and-resume-ollama-recording) keeps the running capture host
 forwarding without recording; it does not change a client's host.
-Recorded history is kept; [`hyp privacy purge`](PRIVACY.md) deletes it.
+Recorded history is kept; [`hyp purge`](PRIVACY.md) deletes it.
 `hyp status` then shows the client as "Not recording". Run `hyp attach codex`
 to record it again. If team policy requires the integration, detach refuses
 and changes nothing.
@@ -151,7 +151,7 @@ Setup and `hyp attach` automatically install HypAware's skills in supported
 clients so your agent can look up recorded sessions. To reinstall the skills:
 
 ```sh
-hyp client skills install
+hyp skills install
 ```
 
 This installs skills for all eligible clients. For launching an agent on a

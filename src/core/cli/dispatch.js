@@ -233,7 +233,7 @@ async function dispatchInternal(argv, opts) {
   // Default stdin to the process stream, exactly as stdout/stderr do. The bin
   // entry calls dispatch(argv) with no opts, so without this fallback every
   // plugin command runs with an undefined ctx.stdin and interactive flows
-  // (e.g. `hyp claude-account login`) wrongly report "needs an interactive
+  // (a plugin's sign-in prompt, say) wrongly report "needs an interactive
   // terminal".
   const stdin = opts.stdin ?? process.stdin
   const env = opts.env ?? process.env
@@ -558,8 +558,7 @@ async function dispatchInternal(argv, opts) {
       // by the same binding, with no second notion of ownership to keep honest.
       // `activePlugins` carries the manifests the one widening reads: the owner
       // keeps the section of a plugin providing a capability it declares in
-      // `requires.capabilities`, which is how `@hypaware/claude-desktop` still
-      // resolves the gateway's pinned `listen`.
+      // `requires.capabilities`.
       // @ref LLP 0422#scope [implements]: the config member joins the split LLP 0420 left it out of
       config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner, activePlugins) : activeConfig,
       plugins: activePlugins,
@@ -1127,13 +1126,13 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   stdout.write('\n')
   // @ref LLP 0248#decision [implements]: everyday journeys get descriptions; operations stay direct in one compact list
   renderJourneyHelpSection(stdout, 'Getting started:', rows, 'getting-started', ['setup', 'status'])
-  renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'query', 'report'])
+  renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'query', 'report', 'recommendation', 'fix'])
   renderJourneyHelpSection(stdout, 'Control capture and movement:', rows, 'capture-movement', [
-    'client', 'backfill', 'privacy', 'session', 'join', 'leave', 'sync',
+    'client', 'skills', 'backfill', 'privacy', 'purge', 'session', 'join', 'leave', 'sync',
   ])
   const preferredAdditional = [
     'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'graph',
-    'vector', 'enrichment', 'source', 'version', 'update', 'dev',
+    'vector', 'enrichment', 'source', 'version', 'update',
   ]
   const additional = orderedHelpNames(rows, 'additional', preferredAdditional)
   if (additional.length > 0) {

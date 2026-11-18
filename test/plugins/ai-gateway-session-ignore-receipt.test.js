@@ -132,9 +132,9 @@ test('a confirmed ignore says earlier rows remain and names the purge for this s
     assert.equal(await runSessionIgnore(['sess-purge-hint'], ctx.ctx), 0)
     const out = ctx.stdout()
     assert.match(out, /To delete what this session already recorded/)
-    assert.match(out, /`hyp privacy purge --session sess-purge-hint`/, 'the exact command, with the real id')
+    assert.match(out, /`hyp purge --session sess-purge-hint`/, 'the exact command, with the real id')
     assert.match(out, /also deletes copies on configured remotes/, 'the remote reach of a session purge is not hidden')
-    assert.match(out, /`hyp privacy purge --session sess-purge-hint --local-only`/)
+    assert.match(out, /`hyp purge --session sess-purge-hint --local-only`/)
   })
 })
 
@@ -146,9 +146,9 @@ test('the --json ignore receipt carries the purge command an agent can run', asy
     const out = JSON.parse(ctx.stdout())
     assert.deepEqual(out.purge, {
       earlier_rows: 'retained',
-      command: "hyp privacy purge --session 'it'\\''s odd'",
+      command: "hyp purge --session 'it'\\''s odd'",
       command_deletes_remote: true,
-      local_only_command: "hyp privacy purge --session 'it'\\''s odd' --local-only",
+      local_only_command: "hyp purge --session 'it'\\''s odd' --local-only",
     })
   })
 })
@@ -159,8 +159,8 @@ test('a dash-led session id binds to --session with = so the purge command parse
     const ctx = fakeCtx({ endpoint: base })
     assert.equal(await runSessionIgnore(['--json', '--', '--opaque-id'], ctx.ctx), 0)
     const out = JSON.parse(ctx.stdout())
-    assert.equal(out.purge.command, 'hyp privacy purge --session=--opaque-id')
-    assert.equal(out.purge.local_only_command, 'hyp privacy purge --session=--opaque-id --local-only')
+    assert.equal(out.purge.command, 'hyp purge --session=--opaque-id')
+    assert.equal(out.purge.local_only_command, 'hyp purge --session=--opaque-id --local-only')
   })
 })
 
@@ -169,7 +169,7 @@ test('the unignore receipt carries no purge hint', async () => {
   await withControlServer(set, async (base) => {
     const human = fakeCtx({ endpoint: base })
     assert.equal(await runSessionUnignore(['sess-purge-hint'], human.ctx), 0)
-    assert.doesNotMatch(human.stdout(), /privacy purge/)
+    assert.doesNotMatch(human.stdout(), /hyp purge/)
     set.add('sess-purge-hint')
     const json = fakeCtx({ endpoint: base })
     assert.equal(await runSessionUnignore(['sess-purge-hint', '--json'], json.ctx), 0)

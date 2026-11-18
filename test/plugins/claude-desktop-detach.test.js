@@ -8,12 +8,6 @@ import test from 'node:test'
 
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
-import {
-  buildManagedProfile,
-  DEFAULT_BUNDLE_ID,
-  renderManagedPreferencesPlist,
-} from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
-
 /**
  * Claude Desktop is not a core-attachable client (LLP 0115#no-attach-on-join,
  * reaffirmed by LLP 0133#one-surface). Its only configuration surface is the
@@ -72,20 +66,23 @@ async function writeManagedPlist(home) {
     'com.anthropic.claudefordesktop.plist'
   )
   await fs.mkdir(path.dirname(plistPath), { recursive: true })
-  await fs.writeFile(
-    plistPath,
-    renderManagedPreferencesPlist(
-      buildManagedProfile({
-        baseUrl: 'http://127.0.0.1:18521',
-        authScheme: 'bearer',
-        models: ['claude-sonnet-4-5'],
-        helperPath: path.join(home, '.hyp', 'bin', 'hyp-claude-desktop-credential'),
-        bundleId: DEFAULT_BUNDLE_ID,
-      })
-    )
-  )
+  await fs.writeFile(plistPath, MANAGED_PLIST)
   return plistPath
 }
+
+// What the removed `hyp claude-desktop install` left on a machine (LLP 0612):
+// XML, so a JSON-reading probe or undo must never be pointed at it.
+const MANAGED_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>inferenceProvider</key>
+  <string>gateway</string>
+  <key>inferenceGatewayBaseUrl</key>
+  <string>http://127.0.0.1:18521</string>
+</dict>
+</plist>
+`
 
 /** @returns {Promise<string>} */
 async function makeHome() {
@@ -98,8 +95,8 @@ test('the claude-desktop manifest declares no attach_probe', async () => {
     client.attach_probe,
     undefined,
     'Desktop has no reversible settings-file write, so it contributes no attach_probe '
-      + '(LLP 0115#no-attach-on-join); the managed plist is placed and undone by '
-      + "'hyp claude-desktop install' / 'hyp claude-desktop verify', not by core attach/detach"
+      + '(LLP 0115#no-attach-on-join); a managed plist left by the removed '
+      + "'hyp claude-desktop install' is not core attach/detach's to read or undo"
   )
 })
 

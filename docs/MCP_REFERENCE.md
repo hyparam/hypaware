@@ -25,7 +25,7 @@ Walk the activity graph from a node out to N hops
 | Auth class | `read`: listed to any caller the host admits |
 | Hints | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `cli+mcp`: a CLI command and an MCP tool on every transport |
-| CLI equivalent | `hyp query graph neighbors <node>` |
+| CLI equivalent | `hyp query graph <node>` |
 | Registered by | `@hypaware/context-graph` |
 
 | Argument | Type | Required | Default | CLI | Description |
@@ -100,7 +100,7 @@ Read one recommendation: its summary, status, status history and report. Set `in
 | Auth class | `read`: listed to any caller the host admits |
 | Hints | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `/v1/mcp` only |
-| CLI equivalent | `hyp report get <rec-id>` |
+| CLI equivalent | `hyp recommendation get <id>` |
 | Registered by | HypAware Cloud, from the shared contract |
 
 | Argument | Type | Required | Default | Description |
@@ -120,7 +120,7 @@ List the recommendations in your org's published reports, summary fields only (n
 | Auth class | `read`: listed to any caller the host admits |
 | Hints | `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `/v1/mcp` only |
-| CLI equivalent | `hyp report list --recommendations` |
+| CLI equivalent | `hyp recommendation list` |
 | Registered by | HypAware Cloud, from the shared contract |
 
 | Argument | Type | Required | Default | Description |
@@ -143,7 +143,7 @@ Set one recommendation's status. After you have fixed it and checked the fix, ma
 | Auth class | `write`, scope `report-publish`: listed only to a credential holding the scope; `hyp mcp serve` passes no scopes |
 | Hints | `readOnlyHint: false`, `destructiveHint: false`, `openWorldHint: false` |
 | Exposure | `/v1/mcp` only |
-| CLI equivalent | `hyp report mark <id> <state>` |
+| CLI equivalent | `hyp recommendation mark <id> <state>` |
 | Registered by | HypAware Cloud, from the shared contract |
 
 | Argument | Type | Required | Default | Description |
@@ -172,7 +172,7 @@ Check one recommendation against the current code, make the change in this repos
 | Title | Fix a recommendation |
 | Over stdio | always |
 | Over `/v1/mcp` | when `get_recommendation` is listed |
-| CLI equivalent | `hyp report fix <id>` |
+| CLI equivalent | `hyp fix <id>` |
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -189,7 +189,7 @@ List the open recommendations and pick the ones that apply to this repository.
 | Title | Open recommendations |
 | Over stdio | always |
 | Over `/v1/mcp` | when `list_recommendations` is listed |
-| CLI equivalent | `hyp report list --recommendations --status open` |
+| CLI equivalent | `hyp recommendation list --status open` |
 
 | Argument | Required | Description |
 | --- | --- | --- |
