@@ -188,7 +188,7 @@ test('guide explains human handoffs and verification', async (t) => {
     'Pass no --sync-client, --local-only-client or --new-folders flags',
     'On macOS, setup may open a certificate or password dialog that only the person can answer',
   ]) assert.ok(f.stdout().includes(instruction), instruction)
-  assert.doesNotMatch(f.stdout(), /Suggest a new skill|Recommend a new skill|hyp ask/)
+  assert.doesNotMatch(f.stdout(), /See what your AI usage went into|Show my usage by task|hyp usage/)
 })
 
 /** @type {[string, string[], boolean][]} */

@@ -36,6 +36,7 @@ import {
   runDaemonUninstall,
 } from '../commands/daemon.js'
 import { runAsk } from '../commands/ask.js'
+import { runUsage } from '../commands/usage.js'
 import { runUpdate } from '../commands/update.js'
 import { runMcp } from '../commands/mcp.js'
 import { runSmoke, runVersion } from '../commands/misc.js'
@@ -425,6 +426,34 @@ function buildCoreCommands(registry) {
         'is started here. The refusal names yours when that is why it stopped.',
       ].join('\n'),
       run: runAsk,
+    },
+    {
+      name: 'usage',
+      category: 'explore-share',
+      audience: 'everyday',
+      summary: 'See what your AI usage went into, by task',
+      usage: coreUsage('usage'),
+      help: [
+        'Starts a recorded client that charts, in the chat, what your Claude Code',
+        'and Codex sessions went into over the last 7 days: themes, the pieces of',
+        'work under each, output tokens, and the pull requests each produced. It',
+        'then offers three questions about how you work with agents and answers',
+        'the one you pick.',
+        '',
+        '  --page    make a self-contained HTML page of the same view instead',
+        '',
+        'Optional quoted instructions can name another window or focus:',
+        '  hyp usage "the last 14 days"',
+        '',
+        'The instructions and scripts ship inside hyp; nothing is installed into',
+        "the client's skills. Only clients HypAware is recording (hyp status) and",
+        'whose CLI is on your PATH can be started. If more than one can, asks',
+        'which on a terminal; otherwise starts the first. The client takes over',
+        'the terminal with its normal permissions, in $HYP_HOME/usage rather than',
+        'the current directory, and keeps its working files under',
+        '~/hypaware-reports.',
+      ].join('\n'),
+      run: runUsage,
     },
     {
       name: 'join',

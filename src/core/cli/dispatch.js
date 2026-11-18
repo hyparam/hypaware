@@ -1126,7 +1126,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   stdout.write('\n')
   // @ref LLP 0248#decision [implements]: everyday journeys get descriptions; operations stay direct in one compact list
   renderJourneyHelpSection(stdout, 'Getting started:', rows, 'getting-started', ['setup', 'status'])
-  renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'query', 'report', 'recommendation', 'fix'])
+  renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'usage', 'query', 'report', 'recommendation', 'fix'])
   renderJourneyHelpSection(stdout, 'Control capture and movement:', rows, 'capture-movement', [
     'client', 'skills', 'backfill', 'privacy', 'purge', 'session', 'join', 'leave', 'sync',
   ])

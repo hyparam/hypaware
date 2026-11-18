@@ -13,7 +13,7 @@ import {
   runWizardSuggestSkill,
 } from '../../../../src/core/cli/wizard/suggest_skill.js'
 
-const VERB = /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/
+const VERB = /Run `hyp usage` any time: HypAware shows what your AI usage went into, by task/
 
 function makeBuf() {
   let value = ''
@@ -58,7 +58,7 @@ test('runWizardSuggestSkill: an empty cache states why there is nothing to sugge
   assert.deepEqual(result, { asked: false, reason: 'no-rows' })
   assert.equal(child.calls.length, 0)
   assert.match(stdout.text(), /Nothing recorded yet: HypAware captures from your next session onward/)
-  assert.match(stdout.text(), /Once you have some history, run `hyp ask`/)
+  assert.match(stdout.text(), /Once you have some history, run `hyp usage`/)
 })
 
 // @ref LLP 0398#setup-offer [tests]: nothing launchable means no offer and no mention of the verb
@@ -84,7 +84,7 @@ test('runWizardSuggestSkill: an empty cache with nothing launchable keeps the no
   // Still `no-rows`: the empty-cache rate is measured whatever is on PATH.
   assert.deepEqual(result, { asked: false, reason: 'no-rows' })
   assert.match(stdout.text(), /Nothing recorded yet: HypAware captures from your next session onward/)
-  assert.doesNotMatch(stdout.text(), /hyp ask/)
+  assert.doesNotMatch(stdout.text(), /hyp usage/)
 })
 
 test('anyClientLaunchable: true when a launch binary resolves, false when none does, undefined when it cannot tell', async () => {
@@ -181,7 +181,7 @@ test('runWizardSuggestSkill: interactive false never asks, even with a prompt se
   assert.match(stdout.text(), VERB)
 })
 
-test('runWizardSuggestSkill: yes runs `hyp ask` as a child that inherits the terminal', async () => {
+test('runWizardSuggestSkill: yes runs `hyp usage` as a child that inherits the terminal', async () => {
   // @ref LLP 0398#setup-offer [tests]: the offer taken is the ask itself
   const stdout = makeBuf()
   const child = childExiting(0)
@@ -193,13 +193,13 @@ test('runWizardSuggestSkill: yes runs `hyp ask` as a child that inherits the ter
     spawnFn: child.fn,
   })
   assert.deepEqual(result, { asked: true, launched: true })
-  assert.equal(question.title, 'Suggest a new skill?')
+  assert.equal(question.title, 'See what your AI usage went into?')
   assert.equal(question.default, 'yes')
   // The default acts, so a spent stdin must decline (LLP 0299 #eof-declines).
   assert.equal(question.eofValue, 'no')
   assert.equal(child.calls.length, 1)
   assert.equal(child.calls[0].cmd, process.execPath)
-  assert.equal(child.calls[0].args.at(-1), 'ask')
+  assert.equal(child.calls[0].args.at(-1), 'usage')
   assert.equal(child.calls[0].opts.stdio, 'inherit')
   assert.equal(child.calls[0].opts.env.HYP_HOME, '/h')
   // The child owns the closing screen; nothing is added after it.
@@ -236,7 +236,7 @@ test('runWizardSuggestSkill: a child that could not start degrades to the verb',
     stdout, stderr, env: {}, interactive: true, confirm: async () => 'yes', spawnFn: childExiting(null).fn,
   })
   assert.deepEqual(result, { asked: true, launched: false, reason: 'spawn-failed' })
-  assert.match(stderr.text(), /Could not start hyp ask: ENOENT/)
+  assert.match(stderr.text(), /Could not start hyp usage: ENOENT/)
   assert.match(stdout.text(), VERB)
 })
 

@@ -241,6 +241,18 @@ export function askRoot(hypHome) {
 }
 
 /**
+ * The folder `hyp usage` starts its client in, `<hypHome>/usage`. Fixed and
+ * under `HYP_HOME` on the grounds `askRoot` is: the session stays out of
+ * whatever directory the command (or setup) was run from, and a client that
+ * asks once whether to trust a new folder asks once.
+ * @param {string} hypHome
+ * @returns {string}
+ */
+export function usageRoot(hypHome) {
+  return path.join(hypHome, 'usage')
+}
+
+/**
  * The intrinsic query cache, `<stateRoot>/cache`.
  * @param {string} stateRoot
  * @returns {string}

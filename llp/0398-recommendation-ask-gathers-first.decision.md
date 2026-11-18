@@ -371,6 +371,21 @@ act on later is the shape the Context above shows nobody acts on, and the
 offer is made at the moment the first look has just shown the person their
 own rows.
 
+<a id="setup-offer-usage"></a>**The offer is now the usage-by-task view.**
+Setup's last screen asks "See what your AI usage went into?" and a yes runs
+`hyp usage` rather than `hyp ask`. Everything else in the paragraph above
+holds unchanged: the child on the same terminal, the one line naming the
+verb (now `hyp usage`) on a no or a run that cannot prompt, the
+capture-starts-now note on an empty cache, and no offer when nothing
+launchable resolves. `hyp usage` starts its client in `<HYP_HOME>/usage`,
+so #run-directory still holds for the session setup starts. Unlike the
+recommendation ask it does not gather in-process: the client runs the
+bundled scripts itself and is asked for permission to, so
+#not-preauthorized's "asks for no command" does not describe this launch.
+`hyp ask` keeps the recommendation; setup just no longer offers it last.
+The telemetry names (`wizard.suggest_skill`, `suggest_skill`) are kept so
+the offer stays one series.
+
 <a id="not-preauthorized"></a>**The launch is still not pre-authorized.**
 LLP 0198 #no-preauth stands, and the shipped instructions ask for no
 command at all: reading the three evidence files needs no permission, and
