@@ -188,7 +188,11 @@ test('guide explains human handoffs and verification', async (t) => {
     'Pass no --sync-client, --local-only-client or --new-folders flags',
     'On macOS, setup may open a certificate or password dialog that only the person can answer',
   ]) assert.ok(f.stdout().includes(instruction), instruction)
-  assert.doesNotMatch(f.stdout(), /See what your AI usage went into|Show my usage by task|hyp usage/)
+  // @ref LLP 0462#closing-usage [tests]: the guide ends on the usage view, run by the agent itself
+  for (const instruction of [
+    'See what your AI usage went into?', 'Show my usage by task (default) / Not now.',
+    'run hyp usage and follow the instructions it prints, here in this session',
+  ]) assert.ok(f.stdout().includes(instruction), instruction)
 })
 
 /** @type {[string, string[], boolean][]} */

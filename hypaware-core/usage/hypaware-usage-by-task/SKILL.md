@@ -69,10 +69,12 @@ Flags on `digest.mjs`: `--from YYYY-MM-DD` `--to YYYY-MM-DD` (default last 7 day
    PRs attached, a category, and the theme it rolls up into. Small work joins a neighbour; the
    chart folds anything past three rows in a theme. Merge retries and cross-client duplicates. Give
    every slice above a few thousand output tokens a group; only the tiny tail stays unlabelled.
-   In the same file, write `questions`: three follow-up questions, each about one working habit
-   seen across the window (how requests are opened, what gets restarted, how work is kept track
-   of), whose answer is a simple change in how the person codes with agents (rules in
-   `references/labels.md`). They come from the digest only and cost no extra reads.
+   In the same file, write `questions`: three follow-up questions, each naming one possible
+   frustration seen across the window (requests that needed correcting, work that got restarted,
+   sessions that were hard to find again, or something broader in how they use agents: planning,
+   splitting work, checking results) and asking for a helpful improvement to it, a simple
+   change in how the person codes with agents (rules in `references/labels.md`). They come from
+   the digest only and cost no extra reads.
 5. Do NOT answer a question on a normal run. Reading messages is the slow part, and the chart
    has to appear fast. Answering is a separate step, described below, that runs only when the
    person picks a question.
@@ -84,8 +86,16 @@ Flags on `digest.mjs`: `--from YYYY-MM-DD` `--to YYYY-MM-DD` (default last 7 day
    block exactly as printed, so the columns line up. Leave the questions out of the block; the
    dialog shows them. Add one or two sentences on what stands out. Keep it short: the chart is
    the deliverable.
-8. Ask which question to answer. Use AskUserQuestion with one option per question: a short
-   label naming the habit ("Corrections in PR work") and the full question as the description.
+8. Offer to help with one of them. Use AskUserQuestion, and make it plain that these are
+   offers of a helpful improvement to things that may have been frustrating, not a review of
+   the person. Ask something like "A few things in this window look like they may have been
+   frustrating. Which would you like a suggestion for?" Give one option per question: a short
+   label naming the possible frustration ("Retyping the PR wrap-up", "Restarting the same
+   prompt", "Losing track of sessions"), and as the description one sentence said to the
+   person: what the window shows, with a count where the digest has one, and what the
+   suggestion would save them ("You started the same report prompt in about twenty fresh
+   sessions. I can suggest a way to run it once."). Do not paste the stored question as the
+   description; it is written to be pasted into a new session, not read in a dialog.
    When the person picks one, answer it as described under "Answering a question" below, then
    make the offer under "Then offer a HypAware recommendation". If they dismiss the dialog or
    ask something else, carry on with that; do not ask again.
@@ -111,15 +121,31 @@ their own words, or asking for a recommendation.
    `node scripts/messages.mjs --digest <digest> --slices "<slice ids>" --max 400` and read what
    the person typed, in order. Human messages only. The script shows the first 200 unless
    `--max` is raised; read them all before counting anything.
+   Then read wider, once: run `messages.mjs` again on the slices of the two or three largest
+   groups the question is not about. The answer has to say where else the same habit shows,
+   and that cannot be said from opening prompts alone.
 2. Look for how the work was steered, not what it was about: something built and then reversed,
    the same question asked many times (status checks, "is it better now?"), one conversation
    drifting across unrelated goals, corrections repeated, the same instruction typed by hand in
-   session after session. Pick the one pattern with the largest consequence. Count what you cite.
+   session after session. Look past the single repeated sentence to the broader way the person
+   works with agents: whether work was planned before it was built, how it was split across
+   sessions, what the agent had to be told again, how results were checked, and which client or
+   model was used for what. Pick the one pattern with the largest consequence. Count what you
+   cite. Where the fix to a narrow pattern is really a broader change in approach (plan first,
+   split the work, let the agent run the checks), give the broader change and use the narrow
+   pattern as its evidence.
    Where the fix is "write it down once", check whether it is already written (the repo's
    CLAUDE.md or AGENTS.md, the skill) and say what you found.
-3. Give the Problem, the Fix and the counted evidence in chat, shaped as `references/labels.md`
-   describes under "The recommendation". The answer lives in the chat only: do not write it to
-   `labels.json` or any other file, and do not render or open anything.
+3. Give the answer in chat in four parts, shaped as `references/labels.md` describes under
+   "The recommendation": the Problem, the Fix, the counted evidence, and the wider pattern.
+   The wider pattern is part of every answer, in the first reply. The person should never have
+   to ask "how does this relate to how I use agents in general?". Say what broader habit the
+   narrow case is one instance of, name the two or three other places in the window where the
+   same habit shows (with counts), and give the one broader change that covers all of them,
+   with the narrow fix as its first step. If the wider reading found the habit nowhere else,
+   say that in a sentence instead of stretching it.
+   The answer lives in the chat only: do not write it to `labels.json` or any other file, and
+   do not render or open anything.
 4. If the messages show nothing worth acting on (a one-prompt run, for instance), say so and
    answer from the digest's numbers instead, or not at all. Do not pad.
 

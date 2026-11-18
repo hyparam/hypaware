@@ -68,6 +68,11 @@ export function usagePrompt({ page, workDir, instructions = '' }) {
  * client reading its instructions out of the package rather than from an
  * installed skill.
  *
+ * When stdout is not a terminal the caller is taken to be an agent already in
+ * a session (the way a piped `hyp setup` prints its guide): no client is
+ * started, the work folder is emptied the same way, and the same prompt is
+ * printed for that agent to follow.
+ *
  * The client starts in `<HYP_HOME>/usage`, not the caller's directory: the
  * view is about the person's history rather than any one repository, and a
  * fixed HypAware-owned folder is what lets setup run this as its last step.
@@ -95,6 +100,15 @@ export async function runUsage(argv, ctx, deps = {}) {
     status: 'error',
     page,
   }, async (span) => {
+    // @ref LLP 0462#closing-usage [implements]: an agent that ran the command is the client, so it gets the instructions instead of a nested session
+    if (!isTty(ctx.stdout)) {
+      span.setAttribute('mode', 'handoff')
+      const { workDir } = await freshWorkDir(ctx)
+      ctx.stdout.write(usagePrompt({ page, workDir, instructions: String(parsed.params.instructions ?? '') }) + '\n')
+      markSpanStatus(span, 'ok')
+      return 0
+    }
+    span.setAttribute('mode', 'launch')
     const clients = await askableClients(ctx, deps.collectStatus ? { collectStatus: deps.collectStatus } : {})
     const descriptors = await buildWalkthroughClientDescriptorMap()
     const launchers = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
@@ -114,18 +128,7 @@ export async function runUsage(argv, ctx, deps = {}) {
     }
     span.setAttribute('client', launcher.client)
     ctx.stdout.write(`\nStarting ${launcher.label} on your usage by task...\n\n`)
-    const cwd = usageRoot(hypHomeFromEnv(ctx.env, ctx.env.HOME || os.homedir()))
-    await fsp.mkdir(cwd, { recursive: true, mode: 0o700 })
-    // One folder, emptied before every run and left alone after it, the way
-    // `hyp ask` rewrites its evidence folder. A run that found an earlier
-    // run's labels reused its groupings and repeated its answers, which may
-    // no longer be true, so the emptying is done here rather than asked of
-    // the client. What a run wrote stays readable until the next one. It
-    // sits inside the launch directory so the client writes to it as it
-    // would to its own cwd.
-    const workDir = path.join(cwd, 'latest')
-    await fsp.rm(workDir, { recursive: true, force: true })
-    await fsp.mkdir(workDir, { mode: 0o700 })
+    const { cwd, workDir } = await freshWorkDir(ctx)
     const prompt = usagePrompt({ page, workDir, instructions: String(parsed.params.instructions ?? '') })
     const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd, env: ctx.env })
     if (!result.ok) {
@@ -136,4 +139,25 @@ export async function runUsage(argv, ctx, deps = {}) {
     markSpanStatus(span, 'ok')
     return 0
   })
+}
+
+/**
+ * One folder, emptied before every run and left alone after it, the way
+ * `hyp ask` rewrites its evidence folder. A run that found an earlier run's
+ * labels reused its groupings and repeated its answers, which may no longer
+ * be true, so the emptying is done here rather than asked of the client.
+ * What a run wrote stays readable until the next one. It sits inside the
+ * launch directory so a started client writes to it as it would to its own
+ * cwd.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<{ cwd: string, workDir: string }>}
+ */
+async function freshWorkDir(ctx) {
+  const cwd = usageRoot(hypHomeFromEnv(ctx.env, ctx.env.HOME || os.homedir()))
+  await fsp.mkdir(cwd, { recursive: true, mode: 0o700 })
+  const workDir = path.join(cwd, 'latest')
+  await fsp.rm(workDir, { recursive: true, force: true })
+  await fsp.mkdir(workDir, { mode: 0o700 })
+  return { cwd, workDir }
 }

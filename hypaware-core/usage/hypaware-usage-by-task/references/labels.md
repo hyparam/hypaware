@@ -61,19 +61,30 @@ Top-level field beside `groups`, written in the same pass as the labels, from th
 
 ```json
 "questions": [
-  "Using HypAware, look at my coding sessions from Nov 11 to 17 that ended in a PR. Where did I correct the agent or ask the same thing twice, and what could I have said in the first prompt to avoid it?",
-  "Check my HypAware recordings for Nov 11 to 17: which prompts did I start again in a fresh session (installs, report runs, test prompts)? For each, should it be a script, a skill, or one planned run?",
-  "Using HypAware, find the times from Nov 11 to 17 I asked an agent where an earlier session was or what its status was. What habit would stop me losing track of work between sessions?"
+  "I seem to retype the same closing steps in sessions that end in a PR. Using HypAware, check Nov 11 to 17 and suggest what I could say up front or write down once so I stop repeating them.",
+  "I keep starting the same prompts again in fresh sessions (installs, report runs, test prompts). Check my HypAware recordings for Nov 11 to 17 and suggest whether a script, a skill or one planned run would save me the restarts.",
+  "I seem to lose track of earlier sessions and ask agents where they went. Using HypAware, look at Nov 11 to 17 and suggest one habit that would save me the searching."
 ]
 ```
 
 Exactly three. They are offered in the terminal as a pick-one dialog after the chart, and the
 page skill lists them under its chart. Write each so it also works pasted into a new session.
 
-The goal of the questions is to make the person better at coding with agents: each answer should
-be one simple habit they can use in every session from now on. They are not about understanding
-one task. A question that could only be answered with "here is what happened in that
-conversation" is the wrong question.
+The goal of the questions is a helpful improvement to something that may have been frustrating
+the person: each one names a possible frustration the window shows, and its answer is one simple
+change that would ease it in every session from now on. They are offers of help, not an audit and
+not a critique of how the person works. They are not about understanding one task either. A
+question that could only be answered with "here is what happened in that conversation" is the
+wrong question.
+
+- **Open with the possible frustration, in plain words.** Start each question with what seems to
+  keep happening, said the way the person would say it about their own week: "I seem to retype
+  the same closing steps", "I keep starting the same prompt again", "I seem to lose track of
+  earlier sessions". Say "seem to" or "keep": the digest shows a pattern, not how the person felt
+  about it, so do not state that they were frustrated and do not call anything a mistake.
+- **Then ask for the improvement, and say what it would save.** "Suggest what I could write down
+  once so I stop repeating them", "suggest one habit that would save me the searching". The
+  reader should see what they get from picking it.
 
 - **Ask about a working habit, across the whole window.** Each question covers one way of
   steering agents and looks for it in all the sessions where it shows, not in a single
@@ -85,6 +96,21 @@ conversation" is the wrong question.
     old work to find out where it stood;
   - checking the result: asking afterwards whether docs, tests or a second repo were covered;
   - waiting and handing off: long sessions with few prompts, work moved between clients.
+- **Look wider than repeated prompts.** At least one of the three should be about the broader
+  way the person uses coding agents, not one recurring sentence. Read the digest for the shape
+  of the work as well as its openings:
+  - planning: big pieces of work begun with a one-line request and steered by corrections, where
+    a plan or a written spec first would have carried it;
+  - splitting work: one very long session covering several unrelated goals, or many tiny
+    sessions for what was one job; work done one step at a time that could run side by side;
+  - what the agent is given: the same background explained again in session after session,
+    which belongs in the repository's agent instructions or a skill;
+  - how results are checked: output accepted without a test or review step, or checked by hand
+    every time when the agent could run the check itself;
+  - which tool for which job: one client or model used for everything, or heavy sessions spent
+    on work a smaller, quicker run would do; tool counts that are all reading and no running.
+  The same rule holds: ask only about what the digest shows (session lengths, prompt counts,
+  tool names, clients, models, repos), and say what it shows in the question.
 - **Let the digest pick the three.** Use a habit only when the digest shows it (repeated first
   prompts, many short sessions with the same opening, prompts that are corrections or
   lookups), and put what the chart shows in brackets as examples ("installs, report runs, test
@@ -93,11 +119,11 @@ conversation" is the wrong question.
 - **Make the first question about the work that shipped** (sessions that ended in a PR) when
   there is any, so the first answer applies to the person's normal coding, not to an unusual
   week of test runs.
-- **End each question by asking for the change**: "what could I have said in the first prompt",
-  "should it be a script, a skill, or one planned run", "what habit would stop me". Not
-  "summarise this" and not "break down the tokens".
-- **Name HypAware in every question** ("Using HypAware, ...", "Check my HypAware recordings
-  for ..."). A new session has no reason to open the recordings unless the question says so;
+- **The ask is always for a change**: "what I could say up front", "whether a script, a skill
+  or one planned run would save me the restarts", "one habit that would save me the searching".
+  Not "summarise this", not "break down the tokens", and not "where did I go wrong".
+- **Name HypAware in every question** ("Using HypAware, check ...", "Check my HypAware
+  recordings for ..."). A new session has no reason to open the recordings unless the question says so;
   without it the agent answers from the repo or from memory. The renderer warns when a question
   leaves it out.
 - Make it stand alone: give the dates and name the kind of work in plain words, because a new
@@ -116,11 +142,18 @@ saved one would be stale by the next run. The parts are:
   "task": "Scheduled and custom reports",
   "problem": "What happened and what it cost, for someone who was not there. Two or three sentences.",
   "fix": "The concrete change in how to work next time, and how to tell it worked.",
-  "evidence": ["Counted or dated facts from the messages and the digest, one per line, at most four."]
+  "evidence": ["Counted or dated facts from the messages and the digest, one per line, at most four."],
+  "wider": "The broader habit this is one case of, the two or three other places in the window it shows, and the one broader change that covers them all."
 }
 ```
 
 - Name the behaviour and its consequence, then one change. No list of five tips.
+- The wider pattern is not optional and not a follow-up. A narrow fix on its own ("add the
+  label rule to your instructions") reads as a tip; what helps the person is the habit behind
+  it ("how you work and what finished means are in your head, and the agent learns them one
+  message at a time"). Lead from the narrow case to that habit, show it in other kinds of work
+  from the window, and end on the broader change, with the narrow fix as its first step. Keep
+  it to a short paragraph or three bullets.
 - Evidence is counts, times and PR ids. Do not paste the person's messages; a few quoted words
   are enough to show what kind of message you counted.
 - Say what you inferred and could not check.

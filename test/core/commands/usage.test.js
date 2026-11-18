@@ -19,7 +19,7 @@ async function fixture(t) {
     env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
     cwd: path.join(home, 'some-repo'),
     stdin: { isTTY: false },
-    stdout: { write: (/** @type {string} */ s) => out.push(s) },
+    stdout: { isTTY: true, write: (/** @type {string} */ s) => out.push(s) },
     stderr: { write: (/** @type {string} */ s) => err.push(s) },
   })
   /** @type {string[][]} */ const seenDuringLaunch = []
@@ -87,4 +87,19 @@ test('usage refuses with a repair when no recorded client can be started, and re
   assert.match(err.join(''), /hyp client attach/)
   assert.equal(await runUsage([], ctx, { ...deps, launchClient: async () => ({ ok: false, error: 'ENOENT' }) }), 1)
   assert.match(err.join(''), /could not start claude: ENOENT/)
+})
+
+// @ref LLP 0462#closing-usage [tests]: a piped run hands the instructions to the agent that ran it
+test('usage without a terminal prints the instructions for the calling agent and starts nothing', async (t) => {
+  const { ctx, deps, out, launches, home } = await fixture(t)
+  ctx.stdout.isTTY = false
+  const work = path.join(home, '.hyp', 'usage', 'latest')
+  await fs.mkdir(work, { recursive: true })
+  await fs.writeFile(path.join(work, 'labels.json'), '{"stale":true}')
+  // No launcher is needed: the reader is already a client.
+  assert.equal(await runUsage(['--page'], ctx, { ...deps, resolveLaunchers: async () => [] }), 0)
+  assert.equal(launches.length, 0)
+  assert.ok(out.join('').includes(JSON.stringify(USAGE_INSTRUCTIONS.page)))
+  assert.ok(out.join('').includes(`Your work directory for this run is ${JSON.stringify(work)}`))
+  assert.deepEqual(await fs.readdir(work), [])
 })
