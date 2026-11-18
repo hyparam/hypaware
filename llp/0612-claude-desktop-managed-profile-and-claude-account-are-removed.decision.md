@@ -46,7 +46,17 @@ LLP 0358.
   credential wrapper that runs `hyp claude-account credential`. That command
   no longer exists, so Desktop's inference through the profile stops working
   on such a machine until the plist is removed with `sudo rm`. HypAware never
-  had a command that removed it.
+  had a command that removed it. To clean up:
+  `sudo rm '/Library/Managed Preferences/com.anthropic.claudefordesktop.plist'`,
+  then restart Claude Desktop.
+- The credential files stay on disk:
+  `~/.hyp/hypaware/plugins/@hypaware/claude-account/credentials.json`, which
+  can hold a live refresh token, and
+  `~/.hyp/hypaware/plugins/@hypaware/claude-desktop/credential-helper.sh`. The
+  removed `client claude-account logout` was the only command that deleted the
+  token file, so remove both by hand:
+  `rm ~/.hyp/hypaware/plugins/@hypaware/claude-account/credentials.json ~/.hyp/hypaware/plugins/@hypaware/claude-desktop/credential-helper.sh`.
+  In `org_key` mode the key sits in the config instead; remove `api_key` from it.
 - No live capture path for Desktop remains; sessions arrive on the five-minute
   import.
 

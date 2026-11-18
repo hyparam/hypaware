@@ -1,7 +1,7 @@
 # LLP 0116: The Desktop credential is presented by the client; the gateway stays passthrough
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-07-20
