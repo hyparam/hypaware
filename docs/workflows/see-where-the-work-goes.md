@@ -40,8 +40,9 @@ hyp ask "From my HypAware history, which tickets this sprint took far more agent
 ## Before you start
 
 - **Pull requests** need the [GitHub integration](../integrations/github.md).
-  `hyp setup` offers it at the end; run `hyp setup` again to add it later. Use
-  `hyp github backfill` to bring in history from before you turned it on.
+  Run `hyp github connect` to turn it on and sign in; `hyp setup` also offers
+  it at the end. Use `hyp github backfill` to bring in history from before you
+  turned it on.
 - **Tickets** also need the [Linear integration](../integrations/linear.md).
   Run `hyp linear connect` to sign in and choose your Linear teams. It links
   an issue to the pull requests attached to it in Linear, and collects on the
