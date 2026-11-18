@@ -42,18 +42,21 @@ import {
  * sync-scope lane labels the same rows the same way.
  */
 export const LOCKED_LABEL_SUFFIX = ' · set by your team'
+export const GITHUB_COLLECTION_PLUGINS = ['@hypaware/context-graph', '@hypaware/github']
 
 /**
  * Apply the explicit GitHub collection choice to a composed local config.
  * @param {HypAwareV2Config} config
+ * @param {ReadonlySet<string>} [locked]
  * @ref LLP 0462#parity [implements]: flags and the attended offer share GitHub activation
  */
-export function enableGithubCollection(config) {
+export function enableGithubCollection(config, locked) {
   const plugins = config.plugins ??= []
-  for (const name of ['@hypaware/context-graph', '@hypaware/github']) {
+  for (const name of GITHUB_COLLECTION_PLUGINS) {
+    if (locked?.has(name)) continue
     const existing = plugins.find((plugin) => plugin.name === name)
-    if (existing) existing.enabled = true
-    else plugins.push({ name })
+    if (!existing) plugins.push({ name })
+    else if (existing.enabled === false) existing.enabled = true
   }
 }
 
