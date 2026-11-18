@@ -32,7 +32,7 @@ import {
   setIfString,
   stampUsageOnLastAssistant,
   textBlocksFromContent,
-  toolResultBlockFromPayload,
+  toolResultMessageFromPayload,
   toolUseBlockFromPayload,
 } from './response-items.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
@@ -1261,11 +1261,9 @@ function projectedMessageFromItem(item) {
     break
   }
   case 'function_call_output':
-  case 'custom_tool_call_output': {
-    const block = toolResultBlockFromPayload(payload)
-    message = block ? { role: 'tool', content: [block] } : undefined
+  case 'custom_tool_call_output':
+    message = toolResultMessageFromPayload(payload)
     break
-  }
   case 'reasoning':
     message = reasoningMessageFromPayload(payload)
     break

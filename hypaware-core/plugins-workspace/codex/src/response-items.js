@@ -81,44 +81,88 @@ export function toolUseBlockFromPayload(payload) {
 }
 
 /**
- * `function_call_output` / `custom_tool_call_output` become a
- * `tool_result` block referencing the originating `call_id`. The
+ * `function_call_output` / `custom_tool_call_output` become a tool message
+ * with a `tool_result` block referencing the originating `call_id`. The
  * gateway maps it to a `tool_result` part and back-fills the tool name
  * from the earlier call.
  *
  * @param {Record<string, unknown>} payload
- * @returns {JsonObject | undefined}
+ * @returns {AiGatewayProjectedMessage | undefined}
  */
-export function toolResultBlockFromPayload(payload) {
+export function toolResultMessageFromPayload(payload) {
   const callId = stringValue(payload.call_id) ?? stringValue(payload.id)
   if (!callId) return undefined
-  const text = toolOutputText(payload.output)
+  const output = payload.output
+  const text = toolOutputText(output)
+  const directExitCode = integerExitCode(output)
+  const parsed = directExitCode === undefined
+    ? Array.isArray(output) ? output : parseToolOutputJson(text)
+    : undefined
+  const items = Array.isArray(parsed) ? parsed : undefined
+  const isError = items
+    ? scriptOutputError(toolOutputItemText(items[0])?.slice(0, 8192) ?? '', true)
+    : toolOutputError(directExitCode ?? integerExitCode(parsed), text)
+
   /** @type {JsonObject} */
-  const block = { type: 'tool_result', tool_use_id: callId, is_error: toolOutputError(payload.output, text) }
+  const block = { type: 'tool_result', tool_use_id: callId, is_error: isError }
   if (text !== undefined) block.content = text
-  return block
+  /** @type {AiGatewayProjectedMessage} */
+  const message = { role: 'tool', content: [block] }
+  // A script can handle a failed command. Store a single command's exit code
+  // separately from the script status.
+  if (isError !== null && items?.length === 2) {
+    const commandExitCode = integerExitCode(parseToolOutputJson(toolOutputItemText(items[1])))
+    if (commandExitCode !== undefined) message.attributes = { codex: { exit_code: commandExitCode } }
+  }
+  return message
 }
 
 /**
- * Read only a recognized outer outcome. A successful script can contain a
- * handled inner failure; arbitrary output and still-running tools are unknown.
  * Bound the extra parse work independently of the captured result's size.
- * @param {unknown} output
+ * @param {string | undefined} text
+ */
+function parseToolOutputJson(text) {
+  if (text === undefined || text.length > 65536) return undefined
+  const first = text.trimStart()[0]
+  if (first === '{' || first === '[') return parseMaybeJson(text)
+  return undefined
+}
+
+/** @param {unknown} value */
+function integerExitCode(value) {
+  const code = isPlainObject(value) ? value.exit_code : undefined
+  return typeof code === 'number' && Number.isInteger(code) ? code : undefined
+}
+
+/** @param {unknown} item */
+function toolOutputItemText(item) {
+  if (isPlainObject(item) && (item.type === 'input_text' || item.type === 'output_text')) {
+    return stringValue(item.text)
+  }
+  return undefined
+}
+
+/**
+ * Read only a recognized outer outcome. Arbitrary output and still-running
+ * tools are unknown.
+ * @param {number | undefined} exitCode
  * @param {string | undefined} text
  * @returns {boolean | null}
  */
-function toolOutputError(output, text) {
-  if (isPlainObject(output) && Number.isInteger(output.exit_code)) return output.exit_code !== 0
+function toolOutputError(exitCode, text) {
+  if (exitCode !== undefined) return exitCode !== 0
   if (text === undefined) return null
-  if (text.length <= 65536 && text.trimStart().startsWith('{')) {
-    const value = parseMaybeJson(text)
-    if (isPlainObject(value) && Number.isInteger(value.exit_code)) return value.exit_code !== 0
-  }
   const header = text.slice(0, 8192)
   const command = /^(?:Chunk ID:[^\r\n]*\r?\n)?(?:Wall time:[^\r\n]*\r?\n)?Process exited with code (-?\d+)\r?\n(?:Final output:|Output:)/.exec(header)
   if (command) return Number(command[1]) !== 0
-  if (/^Script failed\r?\nScript error:/.test(header)) return true
-  if (/^Script completed\r?\n(?:Wall time:|Output:)/.test(header)) return false
+  return scriptOutputError(header)
+}
+
+/** @param {string} header */
+function scriptOutputError(header, contentItems = false) {
+  if (contentItems && /^Script failed(?:\r?\n|$)/.test(header)) return true
+  if (/^Script failed\r?\n(?:Script error:|Wall time[: \t][^\r\n]*\r?\nOutput:)/.test(header)) return true
+  if (/^Script completed\r?\n(?:Wall time[: \t]|Output:)/.test(header)) return false
   return null
 }
 
