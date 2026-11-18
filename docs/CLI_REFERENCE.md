@@ -1478,6 +1478,17 @@ Detach when you want to stop all capture for a client.
 Plugin: `@hypaware/github`. Capture writes structural repository activity to
 `github_events` and projects it into the activity graph. See the [GitHub integration](integrations/github.md) for the workflow.
 
+### `hyp github connect`
+
+```text
+hyp github connect [--no-browser]
+```
+
+Enables the GitHub collector and its graph dependency, runs the device-code
+sign-in below, and restarts a running service daemon after sign-in. Re-run the
+command to finish an interrupted connection. The default capture scope remains
+the repositories seen in recorded AI sessions.
+
 ### `hyp github login`
 
 ```text

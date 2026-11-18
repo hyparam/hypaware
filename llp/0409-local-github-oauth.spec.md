@@ -8,6 +8,7 @@
 **Extends:** LLP 0360
 **Related:** LLP 0065, LLP 0361, LLP 0367, LLP 0374, LLP 0392
 **Extended-by:** LLP 0411 (onboarding offers activation and invokes this login)
+**Extended-by:** LLP 0615 (standalone connection enables the collector and invokes this login)
 
 ## Request
 

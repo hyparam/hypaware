@@ -1,19 +1,15 @@
 // @ts-check
 
-import fs from 'node:fs/promises'
-import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/tui-router.js'
 import { multiselect } from '../cli/tui/index.js'
 import { isPromptCancelledError } from '../cli/tui/runtime.js'
-import { prepareLocalConfigWrite } from '../config/schema.js'
+import { readLocalPluginLayers, updateLocalPluginSelection } from '../config/local_plugin_selection.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { getLogger } from '../observability/index.js'
-import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { resolveConfigPath } from '../runtime/boot.js'
 import { pluginStateDir } from '../runtime/paths.js'
-import { withFileLock } from '../util/file_lock.js'
-import { atomicWriteFile } from '../util/fs_atomic.js'
 import { sanitizeLabel } from '../util/json_util.js'
 
 /** @import { CommandRunContext, HypAwareV2Config, JsonObject } from '../../../hypaware-plugin-kernel-types.js' */
@@ -52,7 +48,7 @@ export async function runLinearConnect(argv, ctx) {
   process.on('SIGTERM', cancel)
   let step = 'read_config'
   try {
-    const layers = await readConnectLayers(stateRoot, configPath)
+    const layers = await readLocalPluginLayers(stateRoot, configPath)
     const centralLinear = layers.centralConfig?.plugins?.find(plugin => plugin.name === LINEAR)
     const linear = centralLinear ?? layers.localConfig?.plugins?.find(plugin => plugin.name === LINEAR)
     const centralGraph = layers.centralConfig?.plugins?.find(plugin => plugin.name === GRAPH)
@@ -128,56 +124,23 @@ export async function runLinearConnect(argv, ctx) {
   }
 }
 
-/** @param {string} stateRoot @param {string} configPath */
-async function readConnectLayers(stateRoot, configPath) {
-  const layers = await resolveLayeredConfigFromDisk({ stateRoot, configPath })
-  for (const loaded of [layers.localLoaded, layers.centralLoaded]) {
-    if (loaded?.ok === false && loaded.errorKind !== 'config_missing') throw new Error(`could not load ${loaded.configPath}; validate the config and retry`)
-  }
-  return layers
-}
-
-/** @param {{ stateRoot: string, configPath: string, teams: string[], before: Awaited<ReturnType<typeof readConnectLayers>> }} args */
-async function saveLinearSelection({ stateRoot, configPath: configuredPath, teams, before }) {
-  const configuredFile = await fs.lstat(configuredPath).catch(err => {
-    if (err.code !== 'ENOENT') throw err
-    return undefined
-  })
-  const configPath = configuredFile?.isSymbolicLink() ? await fs.realpath(configuredPath) : configuredPath
-  await fs.mkdir(path.dirname(configPath), { recursive: true })
-  return withFileLock(`${configPath}.linear-connect.lock`, async () => {
-    const stat = await fs.stat(configPath).catch(err => {
-      if (err.code !== 'ENOENT') throw err
-      return undefined
-    })
-    const current = await readConnectLayers(stateRoot, configPath)
+/** @param {{ stateRoot: string, configPath: string, teams: string[], before: Awaited<ReturnType<typeof readLocalPluginLayers>> }} args */
+function saveLinearSelection({ stateRoot, configPath, teams, before }) {
+  return updateLocalPluginSelection({ stateRoot, configPath, select(config, current) {
+    const relevant = (/** @type {HypAwareV2Config | null} */ layer) => layer?.plugins?.filter(plugin => plugin.name === LINEAR || plugin.name === GRAPH) ?? []
     for (const layer of ['centralConfig', 'localConfig']) {
-      const relevant = (/** @type {HypAwareV2Config | null} */ config) => config?.plugins?.filter(plugin => plugin.name === LINEAR || plugin.name === GRAPH) ?? []
       if (!isDeepStrictEqual(relevant(current[layer]), relevant(before[layer]))) throw new Error('Linear or context graph config changed during sign-in')
     }
-    if (Boolean(stat) !== Boolean(current.localConfig)) throw new Error('config changed during save')
-    /** @type {HypAwareV2Config} */
-    const config = current.localConfig ?? { version: 2, plugins: [] }
     const plugins = config.plugins ??= []
-    const next = [...plugins]
     const addOrEnable = (/** @type {typeof LINEAR | typeof GRAPH} */ name, /** @type {JsonObject | undefined} */ changes) => {
       if (current.centralConfig?.plugins?.some(plugin => plugin.name === name)) return
-      const index = next.findIndex(plugin => plugin.name === name)
-      const previous = next[index]
-      const entry = { ...previous, name, ...(previous?.enabled === false ? { enabled: true } : {}),
-        ...(changes ? { config: { ...previous?.config, ...changes } } : {}) }
-      if (index < 0) next.push(entry)
-      else next[index] = entry
+      const existing = plugins.find(plugin => plugin.name === name)
+      const entry = existing ?? { name }
+      if (!existing) plugins.push(entry)
+      if (entry.enabled === false) entry.enabled = true
+      if (changes) entry.config = { ...entry.config, ...changes }
     }
     addOrEnable(GRAPH, undefined)
     addOrEnable(LINEAR, { teams })
-    if (isDeepStrictEqual(plugins, next)) return false
-    await prepareLocalConfigWrite({ targetPath: configPath, force: true })
-    await atomicWriteFile(configPath, JSON.stringify({ ...config, plugins: next }, null, 2) + '\n', {
-      mode: stat ? stat.mode & 0o777 : 0o600,
-      expectedMtimeMs: stat?.mtimeMs,
-      fsync: true,
-    })
-    return true
-  })
+  } })
 }

@@ -76,6 +76,10 @@ export const CORE_COMMAND_ARGS = {
     usage: 'hyp backfill list [--json]',
     schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },
   },
+  'github connect': {
+    usage: 'hyp github connect [--no-browser]',
+    schema: { type: 'object', properties: { 'no-browser': { type: 'boolean' } } },
+  },
   'linear connect': {
     usage: 'hyp linear connect [--no-browser] [--team <key-or-uuid> ...]',
     schema: { type: 'object', properties: { 'no-browser': { type: 'boolean' }, team: { type: 'array', items: { type: 'string' } } } },

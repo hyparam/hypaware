@@ -84,6 +84,7 @@ export const COMMANDS = Object.freeze([
   'gascity list',
   'github',
   'github backfill',
+  'github connect',
   'github login',
   'github logout',
   'github status',
