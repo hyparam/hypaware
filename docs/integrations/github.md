@@ -16,10 +16,15 @@ Run this command to enable collection and sign in:
 hyp github connect
 ```
 
-Follow the device-code instructions in your browser. With `--no-browser`, the
-command prints the URL and code for you to open. It saves the local settings
-and restarts a running service daemon after sign-in. Interactive `hyp setup`
-also offers to connect GitHub during onboarding.
+The command shows a code and opens GitHub in your browser. Enter the code
+there to sign in. With `--no-browser`, the command prints the URL and code for
+you to open. It saves the local settings and restarts a running service daemon
+after sign-in. Interactive `hyp setup` also offers to connect GitHub during
+onboarding.
+
+If your organization manages GitHub collection, connect uses its settings. If
+it turns GitHub or the context graph off, connect makes no change and asks you
+to contact your administrator.
 
 Sign in again or check access at any time:
 
@@ -28,9 +33,10 @@ hyp github login
 hyp github status
 ```
 
-GitHub's device flow grants the `repo` scope, which includes read and write
-access to all your repositories. HypAware uses it to read metadata. By
-default, it polls the repositories it has seen in your recorded sessions.
+HypAware only needs read access, but GitHub has no read-only option, so
+sign-in asks for the `repo` scope: read and write access to all your
+repositories. HypAware uses it only to read metadata. By default, it polls the
+repositories it has seen in your recorded sessions.
 
 ## Import existing activity
 
