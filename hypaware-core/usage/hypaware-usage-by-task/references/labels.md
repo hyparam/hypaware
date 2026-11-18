@@ -107,8 +107,9 @@ conversation" is the wrong question.
 
 ## The recommendation
 
-Optional top-level field beside `groups`, written after reading `messages.mjs` output for the
-largest theme:
+The shape of an answer to one of the three questions, given in chat after reading
+`messages.mjs` output. It is not written to `labels.json`: the answer is for the chat, and a
+saved one would be stale by the next run. The parts are:
 
 ```json
 "recommendation": {

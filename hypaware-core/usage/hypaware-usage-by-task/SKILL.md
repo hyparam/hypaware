@@ -117,9 +117,9 @@ their own words, or asking for a recommendation.
    session after session. Pick the one pattern with the largest consequence. Count what you cite.
    Where the fix is "write it down once", check whether it is already written (the repo's
    CLAUDE.md or AGENTS.md, the skill) and say what you found.
-3. Give the Problem, the Fix and the counted evidence in chat. Also add the answer to the labels
-   file as `recommendation` (see `references/labels.md`), so a page made later in this session
-   can show it. Do not render or open anything.
+3. Give the Problem, the Fix and the counted evidence in chat, shaped as `references/labels.md`
+   describes under "The recommendation". The answer lives in the chat only: do not write it to
+   `labels.json` or any other file, and do not render or open anything.
 4. If the messages show nothing worth acting on (a one-prompt run, for instance), say so and
    answer from the digest's numbers instead, or not at all. Do not pad.
 

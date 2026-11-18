@@ -43,8 +43,8 @@ other skill is missing or has moved; say so instead of copying its files here.
 3. Open the page (`open <file>` on macOS) and reply with its path and one or two sentences on
    what stands out. Say where the PRs came from (HypAware events, `gh`, or none), as the other
    skill requires.
-4. Stop there. Questions are asked and answered in the terminal by the other skill; when one
-   has been answered since the page was made, re-run step 2 so the page shows it.
+4. Stop there. Questions are asked and answered in the terminal by the other skill, and
+   answers stay in the chat; the page does not carry them.
 
 ## What the page contains
 
@@ -60,9 +60,8 @@ of work opens the prompts behind it in a panel under the chart; there is no sepa
 section. There is no small print under the chart: kind of work, output per day, models and the
 list of unclaimed PRs are left off the page.
 
-Under the chart the page lists the three questions from `labels.json`, each with a Copy button,
-and a "Recommendation" section for every answer saved there. The page does not answer anything
-itself.
+Under the chart the page lists the three questions from `labels.json`, each with a Copy button.
+The page does not answer anything itself, and answers given in chat are not saved for it.
 
 The page is framed as usage by task, not by PR: the title is "AI usage by task", the lead
 sentence names the biggest task and its share, and PRs appear as what each task produced.
