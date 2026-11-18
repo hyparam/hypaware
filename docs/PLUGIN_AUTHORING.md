@@ -306,8 +306,10 @@ ctx.skills.register({
 ### Agents
 
 Materialize a custom subagent into client agent directories (e.g.
-`.claude/agents/`). Unlike a skill, an agent is a single markdown
-definition file installed flat as `<agent_dir>/<name>.md`. Declare
+`.claude/agents/`, `.codex/agents/`). Unlike a skill, an agent is a single
+definition file (markdown for Claude, TOML for Codex) installed flat as
+`<agent_dir>/<name>` with its source file's extension (`.md` if it has
+none). Declare
 `contributes.agents: [{ name, clients }]` and register:
 
 ```js
