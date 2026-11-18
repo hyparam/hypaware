@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { discover, renderPreview, selectCandidates } from '../../.github/hypaware-pr-context/discovery.mjs'
 
-import { describe, readMessages, renderDraft, updateBody, codeChanges } from '../../.github/hypaware-pr-context/describe.mjs'
+import { describe, readMessages, renderDraft, updateBody, codeChanges, changeScope } from '../../.github/hypaware-pr-context/describe.mjs'
 
 const pr = { title: 'Widget sync', headRefName: 'work/widget', isCrossRepository: false, createdAt: '2026-08-25T05:00:00Z', closedAt: '2026-08-25T22:00:00Z' }
 function turn(id, role, minute, hints = {}) {
@@ -166,4 +166,23 @@ test('a numbered design title searches the subject words', async () => {
   })
   assert.match(queries[1], /like '%widget%'/)
   assert.doesNotMatch(queries[1], /like '%1000-1001%'/)
+})
+
+
+test('states the actual scope of test and design-only changes, including both sides of renames', () => {
+  const docs = { filename: 'llp/0090-projection.md' }
+  const tests = { filename: 'test/core/legacy-grep.test.js' }
+  const mixed = { filename: 'lib/grep.js' }
+  assert.equal(changeScope([docs]), 'This PR changes documentation only.')
+  assert.equal(changeScope([tests]), 'This PR changes tests only.')
+  assert.equal(changeScope([docs, tests]), 'This PR changes only tests and documentation.')
+  assert.equal(changeScope([tests, mixed]), '')
+  assert.equal(changeScope([{ ...docs, previous_filename: mixed.filename }]), '')
+  const rendered = renderDraft({ why: { text: 'The developer wanted old caches to stay searchable.', sources: ['M1'] }, decisions: [] },
+    [{ id: 'M1', role: 'user', link: 'https://app.hypaware.ai/sessions/one?m=one' }], changeScope([tests]))
+  assert.match(rendered, /Why this PR exists\.\*\* This PR changes tests only\. The developer wanted/)
+  const repeated = renderDraft({ why: { text: 'This PR changes tests only. Old caches needed coverage.', sources: ['M1'] }, decisions: [] },
+    [{ id: 'M1', role: 'user', link: 'https://app.hypaware.ai/sessions/one?m=one' }], changeScope([tests]))
+  assert.equal(repeated.split(changeScope([tests])).length, 2)
+  assert.equal(renderDraft({ why: null, decisions: [] }, [], changeScope([docs])), '')
 })
