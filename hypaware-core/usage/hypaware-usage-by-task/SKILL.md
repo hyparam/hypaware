@@ -12,7 +12,7 @@ to save the answer as a HypAware recommendation.
 
 The whole experience stays in the terminal: a text chart, a pick-one dialog, an answer, an
 offer. This skill writes no HTML and opens nothing. A page of the same view is a separate skill,
-`hypaware-usage-by-task-page`, which reads the files this one leaves behind. Use it only when
+`hypaware-usage-by-task-page`, which can draw from this run's files while the session lasts. Use it only when
 the person asks for a page or for something to share; do not offer it on every run.
 
 ## Why the split between scripts and you
@@ -49,10 +49,12 @@ Flags on `digest.mjs`: `--from YYYY-MM-DD` `--to YYYY-MM-DD` (default last 7 day
 ## Procedure
 
 1. Pick the window from the request; default to the last 7 days ending today. Keep `digest.json`
-   and `labels.json` in `~/hypaware-reports/.usage-by-task/<from>_<to>/` (add the person's name
-   for a teammate), not in a scratch directory, so a later session, or the page skill, can pick
-   them up. If that directory already has a `labels.json` for the window, re-run the digest, keep
-   the labels, and only add the slices recorded since.
+   and `labels.json` in this run's work directory: the one you were given when started, or a
+   new empty temporary directory if you were given none. Nothing is carried from one run to the
+   next. The work directory starts empty and the next run empties it again, so every run names,
+   groups and answers from scratch: an earlier run's labels and answers may no longer be
+   accurate. Do not look for, read or reuse a digest, labels or an answer from an earlier run,
+   and do not write these files anywhere else.
 2. Run `node scripts/digest.mjs --from … --to … --out <work>/digest.json`. If the person
    is new or asked for "quick", run `chart.mjs` on the digest alone right away and show that
    rules-only chart; then improve it with labels.
@@ -116,8 +118,8 @@ their own words, or asking for a recommendation.
    Where the fix is "write it down once", check whether it is already written (the repo's
    CLAUDE.md or AGENTS.md, the skill) and say what you found.
 3. Give the Problem, the Fix and the counted evidence in chat. Also add the answer to the labels
-   file as `recommendation` (see `references/labels.md`), so it is kept with the window and the
-   page skill can show it. Do not render or open anything.
+   file as `recommendation` (see `references/labels.md`), so a page made later in this session
+   can show it. Do not render or open anything.
 4. If the messages show nothing worth acting on (a one-prompt run, for instance), say so and
    answer from the digest's numbers instead, or not at all. Do not pad.
 

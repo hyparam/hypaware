@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { USAGE_INSTRUCTIONS, runUsage, usagePrompt } from '../../../src/core/commands/usage.js'
+import { USAGE_INSTRUCTIONS, runUsage } from '../../../src/core/commands/usage.js'
 
 /** @param {import('node:test').TestContext} t */
 async function fixture(t) {
@@ -22,12 +22,17 @@ async function fixture(t) {
     stdout: { write: (/** @type {string} */ s) => out.push(s) },
     stderr: { write: (/** @type {string} */ s) => err.push(s) },
   })
+  /** @type {string[][]} */ const seenDuringLaunch = []
   const deps = /** @type {any} */ ({
     collectStatus: async () => ({ clients: [{ name: 'claude', attached: true }] }),
     resolveLaunchers: async () => [{ client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] }],
-    launchClient: async (/** @type {any} */ args) => { launches.push(args); return { ok: true, code: 0 } },
+    launchClient: async (/** @type {any} */ args) => {
+      launches.push(args)
+      seenDuringLaunch.push(await fs.readdir(path.join(args.cwd, 'latest')))
+      return { ok: true, code: 0 }
+    },
   })
-  return { ctx, deps, out, err, launches, home }
+  return { ctx, deps, out, err, launches, home, seenDuringLaunch }
 }
 
 test('the instructions and every script they name ship in the package', async () => {
@@ -45,8 +50,9 @@ test('the instructions and every script they name ship in the package', async ()
 })
 
 test('usage starts a recorded client on the bundled instructions, in a folder under HYP_HOME', async (t) => {
-  const { ctx, deps, launches, home } = await fixture(t)
+  const { ctx, deps, launches, home, seenDuringLaunch } = await fixture(t)
   assert.equal(await runUsage(['the last 14 days'], ctx, deps), 0)
+  assert.deepEqual(seenDuringLaunch[0], [])
   assert.equal(launches.length, 1)
   const { prompt, cwd } = launches[0]
   assert.ok(prompt.includes(JSON.stringify(USAGE_INSTRUCTIONS.chat)))
@@ -56,6 +62,13 @@ test('usage starts a recorded client on the bundled instructions, in a folder un
   // rooted wherever setup was typed.
   assert.equal(cwd, path.join(home, '.hyp', 'usage'))
   assert.ok((await fs.stat(cwd)).isDirectory())
+  // One folder inside the launch directory, named in the prompt and left in
+  // place afterwards. The next run must not see what this one wrote there.
+  const work = path.join(cwd, 'latest')
+  assert.ok(prompt.includes(`Your work directory for this run is ${JSON.stringify(work)}`))
+  await fs.writeFile(path.join(work, 'labels.json'), '{"stale":true}')
+  assert.equal(await runUsage([], ctx, deps), 0)
+  assert.deepEqual(seenDuringLaunch[1], [])
 })
 
 test('usage --page starts the client on the page instructions', async (t) => {
@@ -63,7 +76,7 @@ test('usage --page starts the client on the page instructions', async (t) => {
   assert.equal(await runUsage(['--page'], ctx, deps), 0)
   assert.ok(launches[0].prompt.includes(JSON.stringify(USAGE_INSTRUCTIONS.page)))
   assert.doesNotMatch(launches[0].prompt, /Additional instructions/)
-  assert.equal(usagePrompt({ page: true }), launches[0].prompt)
+  assert.match(launches[0].prompt, /Make the HTML page/)
 })
 
 test('usage refuses with a repair when no recorded client can be started, and reports a failed spawn', async (t) => {

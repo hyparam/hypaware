@@ -41,10 +41,10 @@ export const USAGE_INSTRUCTIONS = Object.freeze({
  * name Claude Code's, and a client without it would otherwise skip the
  * questions or stall on a tool it does not have.
  *
- * @param {{ page: boolean, instructions?: string }} args
+ * @param {{ page: boolean, workDir: string, instructions?: string }} args
  * @returns {string}
  */
-export function usagePrompt({ page, instructions = '' }) {
+export function usagePrompt({ page, workDir, instructions = '' }) {
   const file = page ? USAGE_INSTRUCTIONS.page : USAGE_INSTRUCTIONS.chat
   const what = page
     ? 'Make the HTML page of my AI usage by task from this machine\'s HypAware recordings.'
@@ -53,6 +53,7 @@ export function usagePrompt({ page, instructions = '' }) {
     'They ship with the hyp CLI and are not installed as a skill, so read them from that path, ' +
     'and run the scripts from the scripts directory beside each instruction file. ' +
     'Where they call for a pick-one dialog and you have no such tool, list the choices in chat and ask which one. ' +
+    `Your work directory for this run is ${JSON.stringify(workDir)}: it was emptied for this run, and the next run empties it again. ` +
     'Use the default window unless the instructions below specify one.' +
     (instructions ? `\n\nAdditional instructions from the user:\n${instructions}` : '')
 }
@@ -113,9 +114,19 @@ export async function runUsage(argv, ctx, deps = {}) {
     }
     span.setAttribute('client', launcher.client)
     ctx.stdout.write(`\nStarting ${launcher.label} on your usage by task...\n\n`)
-    const prompt = usagePrompt({ page, instructions: String(parsed.params.instructions ?? '') })
     const cwd = usageRoot(hypHomeFromEnv(ctx.env, ctx.env.HOME || os.homedir()))
     await fsp.mkdir(cwd, { recursive: true, mode: 0o700 })
+    // One folder, emptied before every run and left alone after it, the way
+    // `hyp ask` rewrites its evidence folder. A run that found an earlier
+    // run's labels reused its groupings and repeated its answers, which may
+    // no longer be true, so the emptying is done here rather than asked of
+    // the client. What a run wrote stays readable until the next one. It
+    // sits inside the launch directory so the client writes to it as it
+    // would to its own cwd.
+    const workDir = path.join(cwd, 'latest')
+    await fsp.rm(workDir, { recursive: true, force: true })
+    await fsp.mkdir(workDir, { mode: 0o700 })
+    const prompt = usagePrompt({ page, workDir, instructions: String(parsed.params.instructions ?? '') })
     const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd, env: ctx.env })
     if (!result.ok) {
       span.setAttribute('error_kind', 'client-launch')

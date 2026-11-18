@@ -28,10 +28,12 @@ other skill is missing or has moved; say so instead of copying its files here.
 
 ## Procedure
 
-1. Find the window's work directory, `~/hypaware-reports/.usage-by-task/<from>_<to>/` (default
-   window: the last 7 days ending today; a teammate's has their name added).
-   - It has `digest.json` and `labels.json`: use them as they are. Do not relabel and do not
-     re-run the digest unless the person asks for fresh numbers.
+1. Use this run's work directory: the one you were given when started, or the one the
+   `hypaware-usage-by-task` steps already used earlier in this session (default window: the
+   last 7 days ending today). Nothing is carried from one run to the next, so do not look for
+   files from an earlier run.
+   - It has `digest.json` and `labels.json` from earlier in this session: use them as they are.
+     Do not relabel and do not re-run the digest unless the person asks for fresh numbers.
    - It has neither, or only a digest: follow steps 1 to 6 of the `hypaware-usage-by-task`
      procedure to make them. Skip its chat chart and its question dialog; the person asked for
      the page.
