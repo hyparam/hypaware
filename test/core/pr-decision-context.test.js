@@ -81,7 +81,7 @@ test('updates a fork PR using its own sources and the latest author text, once p
   const query = async sql => {
     assert.match(sql, /contributor\/project/)
     assert.doesNotMatch(sql, /team\/project/)
-    if (sql.includes('select distinct session_id')) return [{ session_id: 'session' }]
+    if (sql.includes('git_branch =')) return [{ session_id: 'session' }]
     if (sql.includes('select message_id, message_created_at')) return [request]
     if (sql.includes('choice_hint')) return turns
     return turns.map(t => ({ ...t, part_index: 0, chars: t.message_id.length, text_part: t.message_id }))
@@ -277,4 +277,57 @@ test('a synchronization or merge during the upload wait stops rediscovery and wr
     }, draft: assert.fail })
   assert.equal(queries, 2)
   assert.match(status, /superseded/)
+})
+
+test('matches the quiet push used on PRs 3030 and 3031 while requiring the exact ref', async () => {
+  let push
+  await discover({ ...pr, headRefName: 'docs-guide' }, 'org/repo', async sql => {
+    if (sql.includes('regexp_like(tool_args')) {
+      const literal = sql.match(/regexp_like\(tool_args, '(.+)'\)/)[1].replaceAll("''", "'")
+      push = new RegExp(literal)
+    }
+    return []
+  })
+  assert.match('cd work && git push -q -u origin docs-guide 2>&1', push)
+  assert.doesNotMatch('git push -q -u origin docs-guide-other', push)
+})
+
+test('recognizes a connector-created branch only for the exact repository, branch and full head SHA', async () => {
+  const sha = 'abc123'.repeat(6) + '1234'
+  let connector
+  await discover({ ...pr, headSha: sha }, 'org/repo', async sql => {
+    const match = sql.match(/tool_name = 'exec' and regexp_like\(tool_args, '(.+?)'\)\)/)
+    if (match) connector = new RegExp(match[1].replaceAll("''", "'"))
+    return []
+  })
+  const call = `tools.mcp__codex_apps__github_create_branch({repository_full_name:"org/repo",branch_name:"work/widget",sha:"${sha}"})`
+  assert.ok(connector)
+  assert.match(call, connector)
+  for (const wrong of [call.replace(sha, '0'.repeat(40)), call.replace('org/repo', 'another/repo'), call.replace('work/widget', 'work/widget-two')]) {
+    assert.doesNotMatch(wrong, connector)
+  }
+})
+
+test('a crowded branch spends its session budget on recent work', async () => {
+  const seen = []
+  await discover(pr, 'org/repo', async sql => {
+    seen.push(sql)
+    return []
+  })
+  assert.match(seen[0], /group by session_id\s+order by max\(message_created_at\) desc, session_id/)
+})
+
+test('release and compound titles retain the human wording found on the original PRs', async () => {
+  for (const [title, phrases] of [
+    ['Publish v2.0.0', ['publish', '[$prepare-release]']],
+    ['Shorten the CLI: top-level commands', ['cli', 'top-level', 'top level']],
+  ]) {
+    let seedQuery
+    await discover({ ...pr, title }, 'org/repo', async sql => {
+      if (sql.includes('git_branch =')) return [{ session_id: 'work' }]
+      seedQuery = sql
+      return []
+    })
+    for (const phrase of phrases) assert.ok(seedQuery.includes(`like '%${phrase}%'`))
+  }
 })

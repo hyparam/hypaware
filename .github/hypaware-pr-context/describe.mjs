@@ -197,12 +197,12 @@ function current(pr, event) {
     pr.title === event.title && pr.head.repo?.full_name === event.head.repo?.full_name && pr.head.ref === event.head.ref
 }
 
-export async function describe(event, { github, query, draft = generate, env = process.env, retryDiscovery = false, pause = () => wait(120_000), log = console.info }) {
+export async function describe(event, { github, query, draft = generate, env = process.env, retryDiscovery = false, pause = () => wait(180_000), log = console.info }) {
   const sourceRepo = event.head.repo?.full_name
   if (!sourceRepo) return 'The source repository is unavailable.'
   const pr = await github('')
   if (!current(pr, event)) return 'A newer revision or a closed PR superseded this run.'
-  const target = { title: pr.title, headRefName: pr.head.ref, createdAt: pr.created_at }
+  const target = { title: pr.title, headRefName: pr.head.ref, headSha: pr.head.sha, createdAt: pr.created_at }
   async function sources() {
     const result = await discover(target, sourceRepo, query)
     const messages = await readMessages(result, sourceRepo, query)
