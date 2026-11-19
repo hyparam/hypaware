@@ -23,6 +23,7 @@ prompts you can paste, what comes back, and how to get a better answer.
 | --- | --- |
 | [Pick up where you left off](workflows/pick-up-where-you-left-off.md) | The session that closed, crashed, or got buried, and exactly where it stopped |
 | [Explain why a change was built](workflows/explain-why-a-change-was-built.md) | A PR description or reviewer reply written from the sessions that built the branch |
+| [Add decision context to every pull request](workflows/pr-context.md) | A short, cited introduction at the top of each PR description, refreshed when the author pushes new commits |
 | [Recap what you did](workflows/recap-what-you-did.md) | A day or week of work across every session and repo, ready for standup |
 | [Check what actually happened](workflows/check-what-actually-happened.md) | The tool calls and results that settle what the agent really did |
 

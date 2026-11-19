@@ -48,5 +48,6 @@ later sessions and tells you which were addressed and where.
 
 ## Related
 
+- [Add decision context to every pull request](pr-context.md) to generate a cited introduction automatically with GitHub Actions.
 - [Pick up where you left off](pick-up-where-you-left-off.md)
 - [Follow relationships in the activity graph](../QUERYING.md#follow-relationships-in-the-activity-graph)
