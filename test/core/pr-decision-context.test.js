@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { discover, renderPreview, selectCandidates } from '../../.github/hypaware-pr-context/discovery.mjs'
 
-import { describe, readMessages, renderDraft, updateBody, codeChanges, changeScope } from '../../.github/hypaware-pr-context/describe.mjs'
+import { describe, generate, readMessages, renderDraft, updateBody, codeChanges, changeScope } from '../../.github/hypaware-pr-context/describe.mjs'
 
 const pr = { title: 'Widget sync', headRefName: 'work/widget', isCrossRepository: false, createdAt: '2026-08-25T05:00:00Z', closedAt: '2026-08-25T22:00:00Z' }
 function turn(id, role, minute, hints = {}) {
@@ -330,4 +330,71 @@ test('release and compound titles retain the human wording found on the original
     })
     for (const phrase of phrases) assert.ok(seedQuery.includes(`like '%${phrase}%'`))
   }
+})
+
+test('records the model input, visible reply and usage under the GitHub run attempt', async t => {
+  const draft = { why: { text: 'Document widgets.', sources: ['M1'] }, decisions: [] }
+  const usage = { input_tokens: 48, output_tokens: 14 }
+  const env = { OPENAI_API_KEY: 'provider-credential', HYP_PR_CONTEXT_RECORDING_TOKEN: 'enrollment-credential',
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2' }
+  const messages = [{ id: 'M1', role: 'user', text: 'Explain widgets.' }]
+  const visible = { type: 'message', role: 'assistant', id: 'msg-1',
+    content: [{ type: 'output_text', text: JSON.stringify(draft) }] }
+  let input
+  const calls = []
+  t.mock.method(globalThis, 'fetch', async (url, opts) => {
+    calls.push(url)
+    const body = JSON.parse(opts.body)
+    if (url === 'https://api.openai.com/v1/responses') {
+      input = body
+      assert.equal(opts.headers.authorization, 'Bearer provider-credential')
+      return Response.json({ status: 'completed', id: 'response-1', usage,
+        output: [{ type: 'reasoning', encrypted_content: 'internal-only' }, visible] })
+    }
+    if (url.endsWith('/identity/bootstrap')) {
+      assert.deepEqual(body, { bootstrap_token: env.HYP_PR_CONTEXT_RECORDING_TOKEN })
+      assert.equal(opts.headers.authorization, undefined)
+      return Response.json({ jwt: 'recording-credential' })
+    }
+    assert.equal(url, 'https://api.hypaware.ai/v1/intake?format=openai-responses')
+    assert.equal(opts.headers.authorization, 'Bearer recording-credential')
+    assert.deepEqual(body.request, input)
+    assert.deepEqual(JSON.parse(body.request.input), { title: 'Widgets', messages, changes: [patchFile] })
+    assert.deepEqual(body.response.output, [visible])
+    assert.deepEqual(body.response.usage, usage)
+    assert.equal(body.client_name, 'hypaware-pr-context')
+    assert.equal(body.session_id, 'pr-context-123-2')
+    assert.doesNotMatch(opts.body, /internal-only|-credential/)
+    return Response.json({}, { status: 202 })
+  })
+  const logs = t.mock.method(console, 'info', () => {})
+  const warnings = t.mock.method(console, 'warn', () => {})
+  assert.deepEqual(await generate('Widgets', messages, [patchFile], env, ''), draft)
+  assert.equal(calls.length, 3)
+  assert.equal(warnings.mock.callCount(), 0)
+  assert.match(String(logs.mock.calls[0].arguments[0]), /sessions\/pr-context-123-2/)
+})
+
+test('recording is optional, and an upload failure preserves the provider result or error', async t => {
+  const draft = { why: null, decisions: [] }
+  const env = { OPENAI_API_KEY: 'provider', GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '1' }
+  let calls = 0
+  let failProvider = false
+  const warnings = t.mock.method(console, 'warn', () => {})
+  t.mock.method(globalThis, 'fetch', async url => {
+    calls++
+    if (url.endsWith('/identity/bootstrap')) return Response.json({ jwt: 'gateway' })
+    if (url.includes('/intake?')) return new Response('untrusted server detail', { status: 503 })
+    if (failProvider) return new Response('sensitive error', { status: 429 })
+    return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant',
+      content: [{ type: 'output_text', text: JSON.stringify(draft) }] }] })
+  })
+  assert.deepEqual(await generate('PR', [], [], env, ''), draft)
+  assert.equal(calls, 1)
+  const recording = { ...env, HYP_PR_CONTEXT_RECORDING_TOKEN: 'enrollment' }
+  assert.deepEqual(await generate('PR', [], [], recording, ''), draft)
+  failProvider = true
+  await assert.rejects(generate('PR', [], [], recording, ''), /OpenAI returned HTTP 429/)
+  assert.equal(warnings.mock.callCount(), 2)
+  assert.doesNotMatch(JSON.stringify(warnings.mock.calls.map(c => c.arguments)), /untrusted|sensitive/)
 })

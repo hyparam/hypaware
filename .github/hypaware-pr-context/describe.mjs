@@ -22,10 +22,10 @@ export function updateBody(body, section) {
   return section ? start + '\n' + section + '\n' + end + '\n\n' + original : original
 }
 
-async function request(service, url, token, method = 'GET', body) {
+async function request(service, url, token, method = 'GET', body, timeout = 90_000) {
   const response = await fetch(url, {
-    method, redirect: 'error', signal: AbortSignal.timeout(90_000),
-    headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'user-agent': 'HypAware-PR-context' },
+    method, redirect: 'error', signal: AbortSignal.timeout(timeout),
+    headers: { ...(token ? { authorization: 'Bearer ' + token } : {}), 'content-type': 'application/json', 'user-agent': 'HypAware-PR-context' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   if (!response.ok) {
@@ -141,7 +141,38 @@ function claimSchema(ids, decision) {
   return { type: 'object', properties, required: Object.keys(properties), additionalProperties: false }
 }
 
-async function generate(title, messages, patches, env, scope) {
+async function recordExchange(env, input, response, startedAt) {
+  if (!env.HYP_PR_CONTEXT_RECORDING_TOKEN) return
+  try {
+    if (!/^\d+$/.test(env.GITHUB_RUN_ID) || !/^\d+$/.test(env.GITHUB_RUN_ATTEMPT)) {
+      throw new WorkflowError('Missing GitHub run identity.')
+    }
+    const session = `pr-context-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`
+    const { jwt } = await request('Recording enrollment', 'https://api.hypaware.ai/v1/identity/bootstrap',
+      undefined, 'POST', { bootstrap_token: env.HYP_PR_CONTEXT_RECORDING_TOKEN }, 8000)
+    if (typeof jwt !== 'string' || !jwt) throw new WorkflowError('Recording enrollment returned no gateway credential.')
+    // The Responses API can return reasoning items alongside its visible answer.
+    const output = (response?.output ?? []).filter(item => item.type === 'message' && item.role === 'assistant')
+      .map(item => ({ type: 'message', role: 'assistant', id: item.id,
+        content: (item.content ?? []).flatMap(part => {
+          if (part.type === 'output_text') return [{ type: 'output_text', text: part.text }]
+          if (part.type === 'refusal') return [{ type: 'refusal', refusal: part.refusal }]
+          return []
+        }),
+      }))
+    await request('LLM recording', 'https://api.hypaware.ai/v1/intake?format=openai-responses', jwt, 'POST', {
+      session_id: session, client_name: 'hypaware-pr-context', request_id: response?.id,
+      conversation_started_at: startedAt, message_created_at: new Date().toISOString(),
+      request: input, response: { object: 'response', output, usage: response?.usage },
+    }, 8000)
+    console.info('HypAware LLM recording: https://app.hypaware.ai/sessions/' + session)
+  } catch (error) {
+    console.warn('::warning::Could not record this model call in HypAware. ' +
+      (error instanceof WorkflowError ? error.message : 'Check connectivity to HypAware.'))
+  }
+}
+
+export async function generate(title, messages, patches, env, scope) {
   const ids = messages.map(m => m.id)
   const schema = { type: 'object', additionalProperties: false, required: ['why', 'decisions'], properties: {
     why: { anyOf: [claimSchema(ids, false), { type: 'null' }] },
@@ -151,11 +182,18 @@ async function generate(title, messages, patches, env, scope) {
   const instructions = scope ? prompt + ' ' + scope +
     ' The renderer adds this scope sentence to the why paragraph. Keep your own why text under 35 words. Explain the developer’s goal in the past tense. Describe requested behavior as a goal or proposal. Never say this change implements runtime behavior.' : prompt
   const changes = scope ? patches.map(p => ({ filename: p.filename, status: p.status })) : patches
-  const data = await request('OpenAI', 'https://api.openai.com/v1/responses', env.OPENAI_API_KEY, 'POST', {
+  const input = {
     model: env.OPENAI_MODEL || 'gpt-5-mini', store: false, max_output_tokens: 2500, reasoning: { effort: 'low' },
     instructions, input: JSON.stringify({ title, messages: messages.map(({ id, role, text }) => ({ id, role, text })), changes }),
     text: { format: { type: 'json_schema', name: 'pr_context', strict: true, schema } },
-  })
+  }
+  const startedAt = new Date().toISOString()
+  let data
+  try {
+    data = await request('OpenAI', 'https://api.openai.com/v1/responses', env.OPENAI_API_KEY, 'POST', input)
+  } finally {
+    await recordExchange(env, input, data, startedAt)
+  }
   if (data.status !== 'completed') throw new WorkflowError('The model returned an incomplete response.')
   const output = data.output.flatMap(item => item.content ?? []).find(part => part.type === 'output_text')
   return JSON.parse(output?.text ?? '')

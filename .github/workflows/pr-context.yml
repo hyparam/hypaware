@@ -35,6 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HYP_PR_CONTEXT_TOKEN: ${{ secrets.HYP_PR_CONTEXT_TOKEN }}
+          HYP_PR_CONTEXT_RECORDING_TOKEN: ${{ secrets.HYP_PR_CONTEXT_RECORDING_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.HYP_PR_CONTEXT_MODEL }}
         run: node .github/hypaware-pr-context/describe.mjs
