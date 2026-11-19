@@ -21,6 +21,16 @@ From a terminal:
 hyp ask "From my HypAware history, summarize what I shipped this week, and list anything I started and didn't finish."
 ```
 
+For a chart of the last 7 days by task, with no prompt to write, run
+[`hyp usage`](../CLI_REFERENCE.md#hyp-usage). It groups your Claude Code and
+Codex sessions by what they were for and shows the output tokens and pull
+requests behind each, where a recap prompt gives you prose in the format you
+ask for.
+
+```sh
+hyp usage
+```
+
 ## What you get back
 
 A summary grouped by repository or task, built from the sessions in the window
@@ -38,4 +48,6 @@ paragraph for a status update, or hours per project.
 
 ## Related
 
+- [See where the work goes](see-where-the-work-goes.md), for the sessions
+  behind a ticket or pull request.
 - [Summarize a known period](../QUERYING.md#summarize-a-known-period) with SQL.

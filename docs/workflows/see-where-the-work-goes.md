@@ -37,12 +37,33 @@ From a terminal:
 hyp ask "From my HypAware history, which tickets this sprint took far more agent work than the rest, and why?"
 ```
 
+## See your own week at a glance
+
+For the broad version of the question, with no prompt to write, run:
+
+```sh
+hyp usage
+```
+
+It charts what your Claude Code and Codex sessions went into over the last 7
+days, grouped by task, with output tokens and the pull requests tied to each
+piece of work. It then offers up to three suggestions for making your work
+with agents easier and answers the one you pick. `hyp usage --page` makes an
+HTML page of the same view, and `hyp usage "the last 14 days"` changes the
+window. See [`hyp usage`](../CLI_REFERENCE.md#hyp-usage).
+
+It covers your own sessions on this machine and groups by task, not by ticket.
+Use the prompts above to start from one ticket or PR, or to look across a team.
+
 ## Before you start
 
 - **Pull requests** need the [GitHub integration](../integrations/github.md).
   Run `hyp github connect` to turn it on and sign in; `hyp setup` also offers
   it at the end. Use `hyp github backfill` to bring in history from before you
   turned it on.
+- **`hyp usage` needs neither integration.** Without GitHub data it shows the
+  tasks alone. A piece of work shown without a pull request means none was
+  seen for it, not that none was opened.
 - **Tickets** also need the [Linear integration](../integrations/linear.md).
   Run `hyp linear connect` to sign in and choose your Linear teams. It links
   an issue to the pull requests attached to it in Linear, and collects on the
