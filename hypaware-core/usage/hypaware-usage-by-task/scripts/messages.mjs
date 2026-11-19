@@ -43,12 +43,13 @@ const tmp = join(TMP, "messages.json");
 const args = ["query", "sql", sql, "--format", "json", "--output", tmp]; if (D.remote) args.push("--remote", D.remote); if (D.remote && D.org) args.push("--org", D.org);
 execFileSync(process.execPath, [HYP, ...args], { stdio: ["ignore", "ignore", "inherit"] });
 // A Claude Code session recorded on both lanes (proxy and transcript) holds each message twice: read the lane with
-// more of them, which is the proxy unless it was attached part-way through the session.
+// more of them on that day, which is the proxy unless it was not attached yet.
 const all = JSON.parse(readFileSync(tmp, "utf8")); rmSync(TMP, { recursive: true, force: true });
-const per = new Map(); for (const r of all) { const o = per.get(r.session_id) ?? per.set(r.session_id, {}).get(r.session_id); o[r.conversation_source] = (o[r.conversation_source] ?? 0) + 1; }
+const dayKey = (r) => r.session_id + "|" + String(r.date).slice(0, 10);
+const per = new Map(); for (const r of all) { const k = dayKey(r); const o = per.get(k) ?? per.set(k, {}).get(k); o[r.conversation_source] = (o[r.conversation_source] ?? 0) + 1; }
 const LANES = ["claude_code", "claude", "claude-desktop"];
-const lane = (sid) => { const o = per.get(sid); return LANES.reduce((best, l) => (o[l] ?? -1) > (o[best] ?? -1) ? l : best, LANES[0]); };
-const rows = all.filter((r) => days.has(r.session_id + "|" + String(r.date).slice(0, 10)) && (r.conversation_source === "codex" || lane(r.session_id) === r.conversation_source));
+const lane = (k) => { const o = per.get(k); return LANES.reduce((best, l) => (o[l] ?? -1) > (o[best] ?? -1) ? l : best, LANES[0]); };
+const rows = all.filter((r) => days.has(dayKey(r)) && (r.conversation_source === "codex" || lane(dayKey(r)) === r.conversation_source));
 const PFX = Math.max(8, ...picked.map((s) => s.id.indexOf("|")));
 console.log(`${rows.length} human messages in ${ids.length} session${ids.length > 1 ? "s" : ""}${rows.length > MAX ? `; showing the first ${MAX}` : ""}`);
 for (const r of rows.slice(0, MAX)) {

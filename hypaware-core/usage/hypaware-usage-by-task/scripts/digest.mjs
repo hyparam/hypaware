@@ -55,9 +55,9 @@ const OWNER = opt('--owner', null);
 // Claude Code is recorded on two lanes: "claude_code" (the gateway proxy, complete while it is attached) and "claude"
 // (the session transcripts: history imported at setup, and machines recording without the proxy). A new install has
 // only the second, so both are read. Claude Desktop's code sessions are the same again: "claude_code" through the
-// proxy, "claude-desktop" from its own transcripts. A session on more than one lane is counted from one of them, the
-// one holding more output: normally the proxy, but a transcript lane when the proxy was attached part-way through.
-// See onePerLane.
+// proxy, "claude-desktop" from its own transcripts. A session on more than one lane is counted from one of them on each
+// day, the one holding more output that day: normally the proxy, but a transcript lane on the days before the proxy was
+// attached. The choice is per day so those days are not dropped when the proxy wins later on. See onePerLane.
 const WHERE = `date >= '${D0}' AND date <= '${D1}' AND conversation_source IN ('claude_code','claude','claude-desktop','codex')` + (GW.length ? ` AND gateway_id IN (${GW.map((g) => `'${g}'`).join(',')})` : '');
 const USAGE = `JSON_EXTRACT(attributes,'$.usage') IS NOT NULL`;
 const tsum = (f) => `SUM(COALESCE(CAST(JSON_EXTRACT(attributes,'$.usage.${f}') AS BIGINT),0)) AS ${f}`;
@@ -80,11 +80,12 @@ const rows = hypSql(`SELECT session_id, date, conversation_source, model, COUNT(
  MIN(COALESCE(repo_root, cwd)) AS repo_a, MAX(COALESCE(repo_root, cwd)) AS repo_b, MIN(git_branch) AS branch_a, MAX(git_branch) AS branch_b
  FROM ai_gateway_messages WHERE ${WHERE} AND ${USAGE}
  GROUP BY session_id, date, conversation_source, model`);
-const laneOut = new Map(); // session -> { claude_code, claude } output tokens
-for (const r of rows) if (r.conversation_source !== "codex") { const o = laneOut.get(r.session_id) ?? laneOut.set(r.session_id, {}).get(r.session_id); o[r.conversation_source] = (o[r.conversation_source] ?? 0) + r.output_tokens; }
+const laneOut = new Map(); // "session|day" -> { claude_code, claude } output tokens
+const dayOf = (r) => String(r.date ?? r.first_at).slice(0, 10); // a PR mention row has no date, only first_at
+for (const r of rows) if (r.conversation_source !== "codex") { const k = r.session_id + "|" + dayOf(r); const o = laneOut.get(k) ?? laneOut.set(k, {}).get(k); o[r.conversation_source] = (o[r.conversation_source] ?? 0) + r.output_tokens; }
 const LANES = ["claude_code", "claude", "claude-desktop"]; // on a tie the earlier one wins
-const lane = (sid) => { const o = laneOut.get(sid); return !o ? null : LANES.reduce((best, l) => (o[l] ?? -1) > (o[best] ?? -1) ? l : best, LANES[0]); };
-const onePerLane = (r) => r.conversation_source === "codex" || lane(r.session_id) === null || lane(r.session_id) === r.conversation_source;
+const lane = (sid, day) => { const o = laneOut.get(sid + "|" + day); return !o ? null : LANES.reduce((best, l) => (o[l] ?? -1) > (o[best] ?? -1) ? l : best, LANES[0]); };
+const onePerLane = (r) => { if (r.conversation_source === "codex") return true; const l = lane(r.session_id, dayOf(r)); return l === null || l === r.conversation_source; };
 { const n = rows.length; rows.splice(0, n, ...rows.filter(onePerLane)); }
 lap("sql: token aggregates");
 
