@@ -54,6 +54,13 @@ hyp ask "which sessions touched the auth module"
 hyp ask            # suggest a skill based on your recent sessions
 ```
 
+See what your AI usage went into, by task, with a few suggestions to pick from:
+
+```sh
+hyp usage          # in the chat
+hyp usage --page   # as an HTML page
+```
+
 Or ask from inside any session. Install the HypAware skills and your client
 looks up past sessions itself whenever a question calls for it:
 

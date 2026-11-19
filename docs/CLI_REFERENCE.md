@@ -191,6 +191,58 @@ therefore does not prove a client started.
 hyp ask "which sessions changed the authentication module"
 ```
 
+### `hyp usage`
+
+```text
+hyp usage [--page] ["instructions"]
+```
+
+Starts a recorded AI client that shows, in the chat, what your Claude Code and
+Codex sessions went into over the last 7 days: themes, the pieces of work under
+each, output tokens, and the pull requests tied to each where HypAware can see
+them. It then offers up to three suggestions for making your work with agents
+easier and answers the one you pick. Guided setup offers to run it as its last
+step, and the agent setup guide ends on the same offer.
+
+`--page` makes a self-contained HTML page of the same view instead, written to
+`~/hypaware-reports`. Optional quoted instructions change the window or the
+focus.
+
+The instructions and scripts the client follows ship inside `hyp`. Nothing is
+installed into the client's skills. The client starts in `<HYP_HOME>/usage`,
+not the current directory, with its normal permissions, and works in
+`<HYP_HOME>/usage/latest`. That folder is emptied at the start of every run, so
+the numbers, groupings and answers are worked out fresh each time and nothing
+is reused from an earlier run. Answers stay in the chat.
+
+Recorded means what it does for `hyp ask`: attached, or configured with no
+attach marker to write, with its CLI on `PATH`. If more than one such client
+could be started, it asks which, with the same 10-second deadline and the same
+order (ascending client id). With `HYP_NO_TUI=1`, or input that is not a
+terminal, it starts the first.
+
+When output is not a terminal, the caller is taken to be an agent already in a
+session. `hyp usage` then starts no client: it empties the same folder and
+prints the instructions for that agent to follow, and returns `0`. This needs
+no startable client. `hyp usage | cat` shows what would be handed over.
+
+Pull requests are optional. They come from HypAware's GitHub capture when the
+machine has it and from `gh` when it is installed and signed in. With neither,
+the view is the task list alone. A piece of work shown without a pull request
+means none was seen for it, not that none was opened. Only Claude Code and
+Codex sessions are charted; a window with no such sessions is reported in
+words, after one retry over the last 30 days.
+
+```sh
+hyp usage
+hyp usage --page
+hyp usage "the last 14 days"
+```
+
+A started client or a declined client pick returns `0`. No startable recorded
+client, or a client that fails to start, returns `1`. Invalid flags return `2`.
+The exit status does not show whether the client finished the view.
+
 ## Query recorded data
 
 ```text
