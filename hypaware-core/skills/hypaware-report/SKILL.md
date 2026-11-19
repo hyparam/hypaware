@@ -54,8 +54,9 @@ Keep the report concise, specific, and useful for a team discussion.
 
 Draft in `./hypaware-report-<from>-to-<to>/` or the requested destination.
 Append `-2`, `-3`, etc. if it exists. Produce `report.md` with a clear report
-and a linked list of actionable recommendations, each on its own
-`recommendation-<slug>.md` page and linked with an H3 heading such as
+and a linked list of actionable recommendations under a
+`## Recommendations` heading, each on its own `recommendation-<slug>.md` page
+and linked with an H3 heading such as
 `### [1. Improve handoffs](recommendation-improve-handoffs.md)`. Each
 recommendation page opens with a `# ` title naming the action and a short
 paragraph stating the problem and the fix, which the server reads as its title
