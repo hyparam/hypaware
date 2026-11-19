@@ -54,7 +54,7 @@ a person's decision.
 **When the mark is not available.** If the tool list has no
 `set_recommendation_status`, you cannot mark from here. Tell the person the
 recommendation id, the state you propose (`applied` or `dismissed`), a
-reason, and links to the change; they mark it with `hyp report mark` or the
-dashboard. On the `hyp` route, mark with `hyp report mark <id> applied
+reason, and links to the change; they mark it with `hyp recommendation mark` or the
+dashboard. On the `hyp` route, mark with `hyp recommendation mark <id> applied
 --reason "..." --link <url> --remote <target>`; if `hyp` asks for
 `hyp remote login`, stop and give the same hand-off instead of logging in.

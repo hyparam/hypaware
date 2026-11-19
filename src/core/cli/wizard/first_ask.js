@@ -176,8 +176,7 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
 /**
  * The launchers `hyp report generate` may start: a resolved launcher whose
  * client has the `hypaware-report` skill on disk, paired with that skill's
- * path. Setup asks the same question before it names the command, so the
- * pointer and the command can never disagree about who qualifies.
+ * path.
  *
  * @ref LLP 0450#launch [implements]: only a recorded, launchable client with its installed report skill
  * @param {{
@@ -316,7 +315,7 @@ export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn, plat
   // A replacer function, not the string: a string replacement expands the
   // `$&`-family patterns, so a prompt carrying one substituted the matched
   // `{prompt}` back into itself. Harmless while every caller passed a
-  // constant; `hyp report fix` builds its prompt from a fetched page's title.
+  // constant; `hyp fix` builds its prompt from a fetched page's title.
   const args = launcher.args.map((a) => a.replaceAll('{prompt}', () => prompt))
   return new Promise((resolve) => {
     let settled = false

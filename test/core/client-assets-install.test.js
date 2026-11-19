@@ -359,6 +359,35 @@ test('hyp skills install respects --client filtering', async () => {
   await assert.rejects(fs.access(path.join(home, '.claude', 'agents', 'test-analyst.md')))
 })
 
+// @ref LLP 0611#decision [tests]: the client is a positional, equal to --client
+test('hyp skills install takes the client as a positional', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-assets-'))
+  const sourceFile = path.join(home, 'src-agent.md')
+  await fs.writeFile(sourceFile, 'body\n', 'utf8')
+  const target = path.join(home, '.claude', 'agents', 'test-analyst.md')
+
+  for (const [client, installed] of /** @type {[string, boolean][]} */ ([['codex', false], ['claude', true]])) {
+    const { kernel, registry } = agentsKernelAndRegistry()
+    kernel.agents.register({
+      name: 'test-analyst',
+      plugin: /** @type {any} */ ('@hypaware/claude'),
+      clients: ['claude'],
+      sourceFile,
+    })
+    const stdout = makeBuf()
+    const code = await dispatch(['skills', 'install', client], {
+      stdout,
+      stderr: makeBuf(),
+      env: { ...process.env, HOME: home },
+      registry,
+      kernel,
+    })
+    assert.equal(code, 0)
+    if (installed) await fs.access(target)
+    else await assert.rejects(fs.access(target))
+  }
+})
+
 test('bundled @hypaware/claude manifest declares the hypaware-analyst agent', async () => {
   const manifestPath = path.resolve(
     'hypaware-core/plugins-workspace/claude/hypaware.plugin.json'

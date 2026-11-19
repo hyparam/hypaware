@@ -8,6 +8,7 @@
 **Date:** 2026-10-03
 **Extends:** LLP 0414 (#not-yet: the first item, "Record that a recommendation was acted on", is the gap this closes; #list-shows-ids and #page-is-the-brief: the listing and the brief gain the state), LLP 0155 (#core-group: the `report` group gains two server-facing members, `recommend` and `mark`, on the same target and credential resolution; #fail-fast: the state vocabulary and the link grammar are copied for refusal before bytes move, the server stays authoritative)
 **Related:** LLP 0225 (#decision: the receipt and the listing are remote text a person reads, so they are escaped; the page tail is the page's own text and is not), LLP 0402 and LLP 0432 in the server corpus (the id this verb takes), the hypaware-server recommendation-status RFC (the states, the status ledger and route, the recommendation index route, and the standalone publish route this decision is the client of)
+**Extended-by:** LLP 0614 (`mark` and the standalone publish are spelled `hyp recommendation mark|publish`)
 
 > LLP 0414 made a recommendation something the CLI can start a client on
 > and left one thing undone: nothing recorded whether anyone acted. This

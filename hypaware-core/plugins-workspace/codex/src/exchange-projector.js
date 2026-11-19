@@ -18,7 +18,7 @@ import {
   setIfString,
   stampUsageOnLastAssistant,
   textBlocksFromContent,
-  toolResultBlockFromPayload,
+  toolResultMessageFromPayload,
   toolUseBlockFromPayload,
 } from './response-items.js'
 import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } from 'hypaware/core/util'
@@ -572,8 +572,8 @@ function responsesInputMessages(input, skipInputIndex = -1) {
       continue
     }
     if (itemType === 'function_call_output' || itemType === 'custom_tool_call_output') {
-      const block = toolResultBlockFromPayload(item)
-      if (block) out.push({ role: 'tool', content: [block] })
+      const message = toolResultMessageFromPayload(item)
+      if (message) out.push(message)
       continue
     }
     if (itemType === 'reasoning') {

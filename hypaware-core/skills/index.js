@@ -14,7 +14,7 @@ export const SHARED_SKILLS_DIR = path.dirname(fileURLToPath(import.meta.url))
 /**
  * Register every shared skill for one client. Each client plugin registers
  * its own entries against the one shared tree, so the registry keeps one
- * entry per plugin registration and `hyp client skills install` places the
+ * entry per plugin registration and `hyp skills install` places the
  * same files under each client's `skill_dir`.
  *
  * @param {PluginActivationContext} ctx

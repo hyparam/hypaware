@@ -39,7 +39,7 @@ hyp query sql "select distinct s.natural_key session
   where a.edge_type = 'at'" --remote HYP_CENTRAL
 
 # From a PR, walk out to its reviews, actors, and referenced commits.
-hyp graph neighbors owner/repo#123 --type PullRequest --depth 2 --direction both --remote HYP_CENTRAL
+hyp query graph owner/repo#123 --type PullRequest --depth 2 --direction both --remote HYP_CENTRAL
 ```
 
 The performance tiers in the main skill apply here too: resolve seed node_ids first and inline them as literals rather than using a scalar subquery.

@@ -28,7 +28,7 @@ const grepVerb = {
 }
 // The mark as the local host registers it: a `cli-only` verb, never a tool.
 const hiddenMarkVerb = {
-  name: 'report mark', tool: 'set_recommendation_status', summary: 'mark', exposure: 'cli-only',
+  name: 'recommendation mark', tool: 'set_recommendation_status', summary: 'mark', exposure: 'cli-only',
   inputSchema: { type: 'object', properties: {} }, operation: async () => ({}), render: () => ({ stdout: '' }),
 }
 const fakeQuery = { listDatasets: () => [], getDataset: () => undefined, registerDataset() {} }
@@ -117,9 +117,9 @@ test('over stdio: prompts capability, all three prompts listed, and the CLI fix'
   assert.ok(!tools.result.tools.some((/** @type {any} */ t) => t.name === 'set_recommendation_status'))
 
   const text = textOf(fix)
-  assert.ok(text.includes(`hyp report get ${ID}`))
+  assert.ok(text.includes(`hyp recommendation get ${ID}`))
   // The mark is the last step, by the CLI, and the hidden tool is never named.
-  assert.match(text, new RegExp(`\\n4\\. Run hyp report mark ${ID} applied --reason "[^"]*" --link [^\\n]*$`))
+  assert.match(text, new RegExp(`\\n4\\. Run hyp recommendation mark ${ID} applied --reason "[^"]*" --link [^\\n]*$`))
   assert.ok(!text.includes('set_recommendation_status'))
   // A login prompt stops the agent: it hands off and never logs in itself.
   assert.ok(text.includes('If hyp asks for hyp remote login, stop: do not run the login yourself.'))
@@ -206,9 +206,9 @@ test('the open list over stdio names the CLI with its flags and the login stop',
   const r = renderPrompt('open_recommendations', { kind: 'weekly', limit: 5 }, new Set(['query_sql']), 'stdio')
   assert.ok(r.ok)
   const text = r.result.messages[0].content.text
-  assert.ok(text.includes('Run hyp report list --recommendations --status open --kind weekly --limit 5.'))
+  assert.ok(text.includes('Run hyp recommendation list --status open --kind weekly --limit 5.'))
   assert.ok(text.includes('hyp remote login'))
-  assert.ok(text.includes('hyp report get <id>'))
+  assert.ok(text.includes('hyp recommendation get <id>'))
   assert.ok(!text.includes('list_recommendations'))
 })
 

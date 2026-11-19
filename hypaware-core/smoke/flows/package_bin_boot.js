@@ -91,7 +91,7 @@ export async function run({ harness, expect }) {
         `hypaware --help lists journey rows and compact operations (rows=${helpRows.join(',') || '<none>'}; additional=${additional.join(',') || '<none>'}; stdout=${truncate(helpResult.stdout)})`,
         { helpRows, additional },
         (v) => v.helpRows.includes('status') && v.helpRows.includes('setup') &&
-          v.additional.includes('daemon') && v.additional.includes('dev')
+          v.additional.includes('daemon') && v.additional.includes('plugin')
       )
 
       const smokeResult = spawnSync(

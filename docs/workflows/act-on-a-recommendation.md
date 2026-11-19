@@ -14,18 +14,18 @@ raise it again.
 
 > From our HypAware team history, which open recommendations apply to this repo?
 
-From a terminal, `hyp report fix` starts your agent on the change:
+From a terminal, `hyp fix` starts your agent on the change:
 
-<!-- agent: Read recommendation hyprec-0123456789abcdef with hyp report get and apply it in this repository. When it is landed, mark it applied with the pull request link. Over MCP on our team's server, read it with get_recommendation and mark it with set_recommendation_status. -->
+<!-- agent: Read recommendation hyprec-0123456789abcdef with hyp recommendation get and apply it in this repository. When it is landed, mark it applied with the pull request link. Over MCP on our team's server, read it with get_recommendation and mark it with set_recommendation_status. -->
 ```sh
-hyp report fix hyprec-0123456789abcdef
+hyp fix hyprec-0123456789abcdef
 ```
 
 Replace the id with one from your report, or list the open ones:
 
 <!-- agent: Use HypAware to list our organization's open recommendations. Over MCP on our team's server, use list_recommendations. -->
 ```sh
-hyp report list --status open
+hyp recommendation list --status open
 ```
 
 ## What you get back

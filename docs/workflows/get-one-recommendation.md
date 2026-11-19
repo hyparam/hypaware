@@ -64,7 +64,7 @@ The agent writes one `recommendation-<slug>.md` page in the current
 directory. Publish it:
 
 ```sh
-hyp report recommend ./recommendation-<slug>.md
+hyp recommendation publish ./recommendation-<slug>.md
 ```
 
 HypAware Cloud gives it a `hyprec-` id. Once the fix is merged, mark it
@@ -94,4 +94,4 @@ A week after the fix lands, ask:
   whole period and rank everything it finds.
 - [Act on a recommendation](act-on-a-recommendation.md), when someone else's
   report gave you the id.
-- [`hyp report recommend`](../CLI_REFERENCE.md#hyp-report-recommend)
+- [`hyp recommendation publish`](../CLI_REFERENCE.md#hyp-recommendation-publish)

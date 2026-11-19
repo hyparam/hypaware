@@ -27,11 +27,11 @@ on the same macOS or Linux host as NanoClaw. Use Node.js 22.13 or newer for
 both the CLI and daemon, with the unflagged `node:sqlite` builtin available.
 
 NanoClaw is opt-in and is not selected by `hyp setup`. To find a supported local
-root, run `hyp client discover nanoclaw` from the installation or a group
+root, run `hyp nanoclaw discover` from the installation or a group
 workspace, or pass a candidate explicitly:
 
 ```sh
-hyp client discover nanoclaw /absolute/path/to/nanoclaw --json
+hyp nanoclaw discover /absolute/path/to/nanoclaw --json
 ```
 
 Discovery checks catalog and directory metadata only and changes no settings.

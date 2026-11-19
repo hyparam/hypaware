@@ -20,12 +20,12 @@ const BOUNDED = 'Keep reads bounded: prefer LIMIT, run at most two heavy reads a
 const MARK_EXPECTED = 'When you have fixed a recommendation and checked the fix, marking it applied with '
   + `${MARK_TOOL} is the expected last step, with a reason and a link to the change, such as the pull request. `
   + 'No approval is needed.'
-const STDIO_CLI = 'Recommendations are not tools here. Read one with hyp report get <id>. '
-  + 'When you have fixed it and checked the fix, the last step is hyp report mark <id> applied '
+const STDIO_CLI = 'Recommendations are not tools here. Read one with hyp recommendation get <id>. '
+  + 'When you have fixed it and checked the fix, the last step is hyp recommendation mark <id> applied '
   + '--reason ... --link ..., which runs on this machine with the person\'s session.'
 export const HAND_OFF = 'You cannot mark recommendations from here. When you have acted on one, tell the person '
   + 'the recommendation id, the state you propose (applied or dismissed), a reason, and links to the change, '
-  + 'such as the pull request. The person marks it with hyp report mark or the dashboard.'
+  + 'such as the pull request. The person marks it with hyp recommendation mark or the dashboard.'
 
 /**
  * How an assembly reaches recommendations, from the tools it shows and its

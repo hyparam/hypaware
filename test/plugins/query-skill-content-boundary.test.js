@@ -180,8 +180,8 @@ test('team history teaches available remote commands without replica enrollment'
     const body = String(section(await readSkill(client, 'hypaware-query/SKILL.md'), '## Team history questions'))
     const reference = await readSkill(client, 'hypaware-query/team-history.md')
     const text = body + reference
-    const named = [...text.matchAll(/hyp (query (?:graph neighbors|sql|grep))\b/g)].map(m => m[1])
-    assert.deepEqual([...new Set(named)].sort(), ['query graph neighbors', 'query grep', 'query sql'])
+    const named = [...text.matchAll(/hyp (query (?:graph|sql|grep))\b/g)].map(m => m[1])
+    assert.deepEqual([...new Set(named)].sort(), ['query graph', 'query grep', 'query sql'])
     for (const name of named) assert.ok(known.has(name), `${client}: ${name} must exist without the retired plugin`)
     assert.doesNotMatch(text, /hyp (?:fastask|query team-graph|query evidence|graph replica)\b/)
   }

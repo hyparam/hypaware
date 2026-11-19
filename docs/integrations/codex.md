@@ -127,7 +127,7 @@ new messages. Backups remain private under
 
 Each backup is a full, unmasked copy of the repaired chats and of Codex's
 state database, private to your user account. HypAware never deletes it:
-not after a successful repair or restore, and not on `hyp privacy purge`, detach, or
+not after a successful repair or restore, and not on `hyp purge`, detach, or
 daemon uninstall. HypAware does not capture or export it. A chat you later
 delete in Codex, or purge from HypAware, stays in the backup until you delete
 the folder. Deleting it is safe once every repair has finished and you no

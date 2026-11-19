@@ -377,7 +377,7 @@ test('render: a state without items renders exactly as it does today', () => {
 })
 
 /**
- * The picker `hyp report fix` builds (LLP 0414 #listing-is-the-picker): one
+ * The picker `hyp fix` builds (LLP 0414 #listing-is-the-picker): one
  * option per listed report, label and summary each, boxed. The only select
  * whose height is set by server data rather than by the code.
  *

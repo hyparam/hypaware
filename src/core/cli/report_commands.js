@@ -44,7 +44,7 @@ const execFileAsync = promisify(execFile)
  * Reports-plane text on its way to a person's terminal. Every field the
  * server sends is remote-authored, and an ESC or `\r` in a title could
  * repaint the listing line that pairs a title with the id a reader pastes
- * into `hyp report fix`. Machine renders (`--json`, the client's prompt)
+ * into `hyp fix`. Machine renders (`--json`, the client's prompt)
  * stay byte-exact.
  *
  * @ref LLP 0225#decision [constrained-by]: remote text is escaped where a person reads it, never where a program does
@@ -118,7 +118,7 @@ async function askBounded(ask, ctx, spec, deadlineMs) {
  * @returns {number}
  */
 function unansweredListing(ctx) {
-  ctx.stderr.write("hyp report fix: no answer at the picker - nothing started.\nusage: hyp report fix <id> [--org <org>] [--remote <target>]\n  the id comes from 'hyp report list'\n")
+  ctx.stderr.write("hyp fix: no answer at the picker - nothing started.\nusage: hyp fix <id> [--org <org>] [--remote <target>]\n  the id comes from 'hyp recommendation list'\n")
   return 2
 }
 
@@ -538,7 +538,7 @@ export async function runReportPublish(argv, ctx) {
 }
 
 /**
- * `hyp report recommend <file.md>`: publish one recommendation page with no
+ * `hyp recommendation publish <file.md>`: publish one recommendation page with no
  * report around it. The server stores the page as a recommendation of its
  * own, mints the `hyprec-` id, and dedupes a same-day retry by content hash,
  * so the receipt is the id and the read that takes it. A server from before
@@ -553,17 +553,17 @@ export async function runReportPublish(argv, ctx) {
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
-export async function runReportRecommend(argv, ctx) {
-  const gate = parseCoreCommandArgv('report recommend', argv, ctx)
+export async function runRecommendationPublish(argv, ctx) {
+  const gate = parseCoreCommandArgv('recommendation publish', argv, ctx)
   if (!gate.ok) return gate.code
   const source = /** @type {string | undefined} */ (gate.params.source)
   if (!source) {
-    ctx.stderr.write('usage: hyp report recommend <file.md> [--title <title>] [--org <org>] [--remote <target>]\n')
+    ctx.stderr.write('usage: hyp recommendation publish <file.md> [--title <title>] [--org <org>] [--remote <target>]\n')
     return 2
   }
   const ext = path.extname(source).toLowerCase()
   if (ext !== '.md' && ext !== '.markdown') {
-    ctx.stderr.write(`hyp report recommend: a recommendation page must be Markdown (.md or .markdown); the remote renders HTML (got '${esc(ext || source)}')\n`)
+    ctx.stderr.write(`hyp recommendation publish: a recommendation page must be Markdown (.md or .markdown); the remote renders HTML (got '${esc(ext || source)}')\n`)
     return 2
   }
   /** @type {Buffer} */
@@ -571,7 +571,7 @@ export async function runReportRecommend(argv, ctx) {
   try {
     body = await fs.readFile(source)
   } catch {
-    ctx.stderr.write(`hyp report recommend: no such file: ${esc(source)}\n`)
+    ctx.stderr.write(`hyp recommendation publish: no such file: ${esc(source)}\n`)
     return 2
   }
   // Emptiness, not presence, as `publish` reads the same parameter: `--title ''`
@@ -582,10 +582,10 @@ export async function runReportRecommend(argv, ctx) {
   // --title is refused server-side after the upload; catch it here first.
   // @ref LLP 0155#fail-fast [implements]: the server stays authoritative on the page rules; this rejects the one certain miss
   if (title === undefined && pageTitle(body.toString('utf8'), 'md') === undefined) {
-    ctx.stderr.write(`hyp report recommend: ${esc(source)} has no '# ' heading to take the title from - add one or pass --title <title>\n`)
+    ctx.stderr.write(`hyp recommendation publish: ${esc(source)} has no '# ' heading to take the title from - add one or pass --title <title>\n`)
     return 2
   }
-  const resolved = resolveReportsTarget(gate.params, ctx, 'report recommend')
+  const resolved = resolveReportsTarget(gate.params, ctx, 'recommendation publish')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -594,7 +594,7 @@ export async function runReportRecommend(argv, ctx) {
   if (title !== undefined) url.searchParams.set('title', title)
   applyOrgParam(gate.params, url)
 
-  const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report recommend' }, (token) =>
+  const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'recommendation publish' }, (token) =>
     fetch(url, {
       method: 'POST',
       headers: {
@@ -608,7 +608,7 @@ export async function runReportRecommend(argv, ctx) {
     })
   )
   if (!outcome.ok) {
-    ctx.stderr.write(`hyp report recommend: ${outcome.error}\n`)
+    ctx.stderr.write(`hyp recommendation publish: ${outcome.error}\n`)
     return outcome.exitCode
   }
   const { response } = outcome
@@ -618,11 +618,11 @@ export async function runReportRecommend(argv, ctx) {
     // does, for that answer only: a 404 that names an error (an unknown
     // `--org`, say) is about the request, and shadowing it would misdirect the
     // one reader who can act on it.
-    ctx.stderr.write(`hyp report recommend: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot publish a standalone recommendation - is the server up to date? publish the page inside a report with 'hyp report publish' meanwhile`)}\n`)
+    ctx.stderr.write(`hyp recommendation publish: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot publish a standalone recommendation - is the server up to date? publish the page inside a report with 'hyp report publish' meanwhile`)}\n`)
     return 1
   }
   if (response.status !== 200 && response.status !== 201) {
-    ctx.stderr.write(`hyp report recommend: ${await describeErrorResponse(response)}\n`)
+    ctx.stderr.write(`hyp recommendation publish: ${await describeErrorResponse(response)}\n`)
     return 1
   }
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
@@ -644,7 +644,7 @@ export async function runReportRecommend(argv, ctx) {
   } else {
     ctx.stdout.write(`published ${shown} (${where})\n`)
   }
-  ctx.stdout.write(`  view: ${['hyp report get', id ?? '<id>', ...targetFlags(gate.params)].join(' ')}\n`)
+  ctx.stdout.write(`  view: ${['hyp recommendation get', id ?? '<id>', ...targetFlags(gate.params)].join(' ')}\n`)
   return 0
 }
 
@@ -663,28 +663,54 @@ export async function runReportRecommend(argv, ctx) {
 export async function runReportList(argv, ctx) {
   const gate = parseCoreCommandArgv('report list', argv, ctx)
   if (!gate.ok) return gate.code
-  const json = gate.params.json === true
-  const status = Array.isArray(gate.params.status) ? gate.params.status.map(String) : []
+  return listFromRemote(gate.params, ctx, 'report list')
+}
+
+/**
+ * `hyp recommendation list`: the recommendations themselves, flat across
+ * reports and standalone ones, from the server's `_recommendations` route. The
+ * same listing `hyp report list --recommendations` still answers.
+ *
+ * @ref LLP 0614#list [implements]: recommendations are listed under their own noun
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runRecommendationList(argv, ctx) {
+  const gate = parseCoreCommandArgv('recommendation list', argv, ctx)
+  if (!gate.ok) return gate.code
+  return listFromRemote({ ...gate.params, recommendations: true }, ctx, 'recommendation list')
+}
+
+/**
+ * @param {Record<string, any>} params the gate's parsed parameters
+ * @param {CommandRunContext} ctx
+ * @param {string} cmd the invoked command, for error prefixes
+ * @returns {Promise<number>}
+ */
+async function listFromRemote(params, ctx, cmd) {
+  const json = params.json === true
+  const status = Array.isArray(params.status) ? params.status.map(String) : []
   // Presence of `--status`, not the length of what survived the codec's comma
   // split: the array coercion drops empty parts, so `--status ''` (an unset
   // shell variable) parses to `[]`, and reading the length would quietly list
   // reports instead of the flat form the flag asks for.
-  const flat = gate.params.recommendations === true || Array.isArray(gate.params.status)
+  const flat = params.recommendations === true || Array.isArray(params.status)
   // The remote's selectors and filters. `--local` refuses them because none
   // has a local meaning; their absence is also what makes a remote read
   // implicit, the one case a failed read degrades to the saved section.
-  const remoteFlags = ['kind', 'period', 'limit', 'before', 'org', 'remote'].filter((flag) => gate.params[flag] !== undefined)
-  if (flat) remoteFlags.push(gate.params.recommendations === true ? 'recommendations' : 'status')
+  const remoteFlags = ['kind', 'period', 'limit', 'before', 'org', 'remote'].filter((flag) => params[flag] !== undefined)
+  if (flat) remoteFlags.push(params.recommendations === true ? 'recommendations' : 'status')
   // @ref LLP 0465#list [implements]: saved reports are a section of the one listing; --local is that section alone
-  if (gate.params.local === true) {
+  if (params.local === true) {
     if (remoteFlags.length > 0) {
-      ctx.stderr.write(`hyp report list: --local lists saved reports only and takes none of ${remoteFlags.map((f) => `--${f}`).join(', ')}\n`)
+      ctx.stderr.write(`hyp ${cmd}: --local lists saved reports only and takes none of ${remoteFlags.map((f) => `--${f}`).join(', ')}\n`)
       ctx.stderr.write('usage: hyp report list [--local] [--json]\n')
       return 2
     }
     const inventory = await localReportInventory(reportsStoreRoot(ctx))
     if (inventory.error) {
-      ctx.stderr.write(`hyp report list: cannot read saved reports in ${esc(inventory.root)}: ${esc(inventory.error)}\n`)
+      ctx.stderr.write(`hyp ${cmd}: cannot read saved reports in ${esc(inventory.root)}: ${esc(inventory.error)}\n`)
       return 1
     }
     if (json) {
@@ -696,7 +722,7 @@ export async function runReportList(argv, ctx) {
   }
   // @ref LLP 0467#json-remote-only [implements]: --json is the remote listing alone, so its paging stays the remote's; saved rows are --local --json
   const inventory = flat || json ? null : await localReportInventory(reportsStoreRoot(ctx))
-  if (inventory?.error) ctx.stderr.write(`hyp report list: cannot read saved reports in ${esc(inventory.root)}: ${esc(inventory.error)}\n`)
+  if (inventory?.error) ctx.stderr.write(`hyp ${cmd}: cannot read saved reports in ${esc(inventory.root)}: ${esc(inventory.error)}\n`)
   /**
    * A remote read that failed. With nothing selecting or filtering the remote,
    * saved reports to show, and a person reading (not `--json`, whose array a
@@ -717,33 +743,35 @@ export async function runReportList(argv, ctx) {
     ctx.stderr.write(`${line}\n`)
     return code
   }
-  const resolved = resolveReportsTarget(gate.params, ctx, 'report list')
+  const resolved = resolveReportsTarget(params, ctx, cmd)
   if ('error' in resolved) return failRemote(resolved.error, 2)
   const url = new URL(flat ? `${resolved.endpoint}/_recommendations` : resolved.endpoint)
   // Same reason `--json` below reads the gate: `valueFlag()` drops a value
   // whose first character is `-`, so `--limit -5` used to list with the
   // server's default and exit 0 instead of refusing the token.
   for (const flag of ['kind', 'period', 'limit', 'before']) {
-    const value = gate.params[flag]
+    const value = params[flag]
     if (value !== undefined) url.searchParams.set(flag, String(value))
   }
   if (status.length > 0) url.searchParams.set('status', status.join(','))
-  applyOrgParam(gate.params, url)
+  // @ref LLP 0614#list [implements]: the server's own filter, passed through
+  if (flat && params.standalone === true) url.searchParams.set('standalone', 'true')
+  applyOrgParam(params, url)
 
-  const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report list' }, (token) =>
+  const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: cmd }, (token) =>
     fetch(url, { headers: { authorization: `Bearer ${token}` } })
   )
-  if (!outcome.ok) return failRemote(`hyp report list: ${outcome.error}`, outcome.exitCode)
+  if (!outcome.ok) return failRemote(`hyp ${cmd}: ${outcome.error}`, outcome.exitCode)
   const { response } = outcome
   if (flat && response.status === 404) {
     // Only the flat form asks for a route an older server may not have, and it
     // answers 404 with nothing `describeErrorResponse` can name. One that does
     // name an error came from a server that has the route, so it keeps its own
     // word, the same relay the plain form gives below.
-    ctx.stderr.write(`hyp report list: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot list recommendations on their own - is the server up to date? 'hyp report list' with no --recommendations/--status lists them under their reports`)}\n`)
+    ctx.stderr.write(`hyp ${cmd}: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot list recommendations on their own - is the server up to date? 'hyp report list' with no --recommendations/--status lists them under their reports`)}\n`)
     return 1
   }
-  if (response.status !== 200) return failRemote(`hyp report list: ${await describeErrorResponse(response)}`, 1)
+  if (response.status !== 200) return failRemote(`hyp ${cmd}: ${await describeErrorResponse(response)}`, 1)
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   if (flat) {
     const rows = Array.isArray(parsed?.recommendations) ? parsed.recommendations : []
@@ -752,7 +780,7 @@ export async function runReportList(argv, ctx) {
       return 0
     }
     if (rows.length === 0) {
-      ctx.stdout.write("no recommendations match - 'hyp report list' shows every report; 'hyp report recommend <file.md>' publishes one on its own\n")
+      ctx.stdout.write("no recommendations match - 'hyp report list' shows every report; 'hyp recommendation publish <file.md>' publishes one on its own\n")
       return 0
     }
     for (const c of rows) {
@@ -864,10 +892,11 @@ function recommendationState(c) {
  * @ref LLP 0414#page-is-the-brief [implements]: the recommendation is read by id from the server, never from a file the CLI wrote
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {string} [cmd] the invoked command, for the argument spec and error prefixes
  * @returns {Promise<number>}
  */
-export async function runReportGet(argv, ctx) {
-  const gate = parseCoreCommandArgv('report get', argv, ctx)
+export async function runReportGet(argv, ctx, cmd = 'report get') {
+  const gate = parseCoreCommandArgv(cmd, argv, ctx)
   if (!gate.ok) return gate.code
   const [kind, period, id, ...fileSegments] = positionals(argv, VALUE_FLAGS)
   // A kind may legally be spelled like a recommendation id (KIND_RE admits
@@ -875,24 +904,24 @@ export async function runReportGet(argv, ctx) {
   // lone id, or an id with one stray positional, is taken as a recommendation.
   if (kind && RECOMMENDATION_ID_RE.test(kind) && id === undefined) {
     if (period !== undefined) {
-      ctx.stderr.write(`hyp report get: '${kind}' is a recommendation id and takes no other positional\n`)
+      ctx.stderr.write(`hyp ${cmd}: '${kind}' is a recommendation id and takes no other positional\n`)
       return 2
     }
-    const resolved = resolveReportsTarget(gate.params, ctx, 'report get')
+    const resolved = resolveReportsTarget(gate.params, ctx, cmd)
     if ('error' in resolved) {
       ctx.stderr.write(`${resolved.error}\n`)
       return 2
     }
-    const found = await resolveRecommendation({ ctx, gate, resolved, cmd: 'report get' }, kind)
+    const found = await resolveRecommendation({ ctx, gate, resolved, cmd }, kind)
     if (typeof found === 'number') return found
-    const page = await fetchRecommendationPage({ ctx, gate, resolved, cmd: 'report get' }, found)
+    const page = await fetchRecommendationPage({ ctx, gate, resolved, cmd }, found)
     if (typeof page === 'number') return page
     const output = /** @type {string | undefined} */ (gate.params.output)
     if (output) {
       try {
         await fs.writeFile(output, page.bytes)
       } catch (err) {
-        ctx.stderr.write(`hyp report get: ${err instanceof Error ? err.message : String(err)}\n`)
+        ctx.stderr.write(`hyp ${cmd}: ${err instanceof Error ? err.message : String(err)}\n`)
         return 1
       }
       ctx.stderr.write(`saved ${page.bytes.length} bytes to ${output}\n`)
@@ -999,7 +1028,7 @@ const PAGE_EXTS = ['md', 'html']
 const NAMES_EXTENSION_RE = /\.[0-9]*[a-z][a-z0-9]*$/i
 
 /**
- * `hyp report fix [id]`: start an attached client on one of a report's
+ * `hyp fix [id]`: start an attached client on one of a report's
  * recommendations, in the directory the command was typed in.
  *
  * The id is the server's (`hyprec-` and its token, minted at
@@ -1008,7 +1037,7 @@ const NAMES_EXTENSION_RE = /\.[0-9]*[a-z][a-z0-9]*$/i
  * With no id on a terminal, the recent listing becomes a picker, one row
  * per recommendation across the reports it names; piped, the id is
  * required. The client is told to read the page through
- * `hyp report get <id>` and implement it here: the fix applies to a
+ * `hyp recommendation get <id>` and implement it here: the fix applies to a
  * repository, so unlike the recommendation ask this session starts where
  * it was typed, not in a folder HypAware owns, and nothing is written to
  * disk for it.
@@ -1030,9 +1059,9 @@ const NAMES_EXTENSION_RE = /\.[0-9]*[a-z][a-z0-9]*$/i
  * @returns {Promise<number>}
  */
 export async function runReportFix(argv, ctx, deps = {}) {
-  const gate = parseCoreCommandArgv('report fix', argv, ctx)
+  const gate = parseCoreCommandArgv('fix', argv, ctx)
   if (!gate.ok) return gate.code
-  const resolved = resolveReportsTarget(gate.params, ctx, 'report fix')
+  const resolved = resolveReportsTarget(gate.params, ctx, 'fix')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -1048,7 +1077,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   }
 
   /** @param {(token: string) => Promise<Response>} send */
-  const request = (send) => reportsRequest({ ctx, ...resolved, write: false, cmd: 'report fix' }, send)
+  const request = (send) => reportsRequest({ ctx, ...resolved, write: false, cmd: 'fix' }, send)
 
   // 1. Which recommendation: the id given, else one picked from the listing.
   /** @type {FixRecommendation} */
@@ -1060,16 +1089,16 @@ export async function runReportFix(argv, ctx, deps = {}) {
     // Grammar first, as the server does: an id that could never have been
     // minted is refused without a round trip.
     if (!RECOMMENDATION_ID_RE.test(id)) {
-      ctx.stderr.write(`hyp report fix: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-qcyx22sjav)\n`)
+      ctx.stderr.write(`hyp fix: '${id}' is not a recommendation id - take one from 'hyp recommendation list' (they look like hyprec-qcyx22sjav)\n`)
       return 2
     }
-    const found = await resolveRecommendation({ ctx, gate, resolved, cmd: 'report fix' }, id)
+    const found = await resolveRecommendation({ ctx, gate, resolved, cmd: 'fix' }, id)
     if (typeof found === 'number') return found
     recommendation = found.recommendation
     report = found.report
   } else {
     if (!interactive) {
-      ctx.stderr.write("usage: hyp report fix <id> [--org <org>] [--remote <target>]\n  the id comes from 'hyp report list'; run on a terminal to pick one from a list instead\n")
+      ctx.stderr.write("usage: hyp fix <id> [--org <org>] [--remote <target>]\n  the id comes from 'hyp recommendation list'; run on a terminal to pick one from a list instead\n")
       return 2
     }
     const url = new URL(resolved.endpoint)
@@ -1080,11 +1109,11 @@ export async function runReportFix(argv, ctx, deps = {}) {
     applyOrgParam(gate.params, url)
     const outcome = await request((token) => fetch(url, { headers: { authorization: `Bearer ${token}` } }))
     if (!outcome.ok) {
-      ctx.stderr.write(`hyp report fix: ${outcome.error}\n`)
+      ctx.stderr.write(`hyp fix: ${outcome.error}\n`)
       return outcome.exitCode
     }
     if (outcome.response.status !== 200) {
-      ctx.stderr.write(`hyp report fix: ${await describeErrorResponse(outcome.response)}\n`)
+      ctx.stderr.write(`hyp fix: ${await describeErrorResponse(outcome.response)}\n`)
       return 1
     }
     const parsed = /** @type {any} */ (await outcome.response.json().catch(() => null))
@@ -1142,7 +1171,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
       if (rows.length > 0) groups.push({ report: r, rows, byId })
     }
     if (groups.length === 0) {
-      ctx.stdout.write("no recommendations to fix - the listed reports carry none, or none are published yet ('hyp report list')\n")
+      ctx.stdout.write("no recommendations to fix - the listed reports carry none, or none are published yet ('hyp recommendation list')\n")
       return 0
     }
     const reportOptions = groups.map((g, i) => {
@@ -1194,7 +1223,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
       // answers off-list is a loop with nothing to end it.
       hit = group.byId.get(String(picked))
       if (!hit) {
-        ctx.stderr.write(`hyp report fix: the picker answered '${esc(String(picked))}', which is not one of the recommendations offered\n`)
+        ctx.stderr.write(`hyp fix: the picker answered '${esc(String(picked))}', which is not one of the recommendations offered\n`)
         return 1
       }
     }
@@ -1207,7 +1236,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   const descriptors = await buildWalkthroughClientDescriptorMap()
   const launchers = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
   if (launchers.length === 0) {
-    ctx.stderr.write('hyp report fix: no recorded client can be started here.\n')
+    ctx.stderr.write('hyp fix: no recorded client can be started here.\n')
     ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
     return 1
   }
@@ -1235,10 +1264,10 @@ export async function runReportFix(argv, ctx, deps = {}) {
 
   // 3. The page, fetched here only to prove the id still names one and to
   // put its title on the launch line. The client reads it itself, through
-  // `hyp report get <id>`: the same read a session asked to fix an id
+  // `hyp recommendation get <id>`: the same read a session asked to fix an id
   // makes on its own, so there is one way to see a recommendation and no
   // file under HYP_HOME to keep in step with the server.
-  const page = await fetchRecommendationPage({ ctx, gate, resolved, cmd: 'report fix' }, { recommendation, report })
+  const page = await fetchRecommendationPage({ ctx, gate, resolved, cmd: 'fix' }, { recommendation, report })
   if (typeof page === 'number') return page
 
   // 4. The launch, in the directory the command was typed in.
@@ -1249,12 +1278,12 @@ export async function runReportFix(argv, ctx, deps = {}) {
   // The target flags ride along so the client resolves the same org and
   // remote this run did; the credential reaches it through the inherited
   // environment, as every `hyp` call the client makes already relies on.
-  const readCommand = ['hyp report get', recommendation.id, ...targetFlags(gate.params)].join(' ')
+  const readCommand = ['hyp recommendation get', recommendation.id, ...targetFlags(gate.params)].join(' ')
   const queryFlags = queryTargetFlags(resolved, gate.params)
   // The outcome is recorded by the client that produced it, through the same
   // verb a person would use, against the same target this run resolved.
   // @ref LLP 0461#fix-asks-for-the-mark [implements]: the launched session is told how to close the loop it was started on
-  const markCommand = ['hyp report mark', recommendation.id].join(' ')
+  const markCommand = ['hyp recommendation mark', recommendation.id].join(' ')
   const markFlags = targetFlags(gate.params).map((f) => ` ${f}`).join('')
   const prompt =
     `Run \`${readCommand}\` and read its output. It is one HypAware recommendation (${where}): "${title}", ` +
@@ -1272,7 +1301,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   ctx.stdout.write(`\nStarting ${launcher.label} on "${esc(title)}"...\n\n`)
   const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd: ctx.cwd, env: ctx.env })
   if (!result.ok) {
-    ctx.stderr.write(`hyp report fix: could not start ${launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
+    ctx.stderr.write(`hyp fix: could not start ${launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
     return 1
   }
   return 0
@@ -1308,7 +1337,7 @@ function recommendationLabel(page) {
  */
 async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
   if (!RECOMMENDATION_ID_RE.test(id)) {
-    ctx.stderr.write(`hyp ${cmd}: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-qcyx22sjav)\n`)
+    ctx.stderr.write(`hyp ${cmd}: '${id}' is not a recommendation id - take one from 'hyp recommendation list' (they look like hyprec-qcyx22sjav)\n`)
     return 2
   }
   const url = new URL(`${resolved.endpoint}/_recommendations/${encodeURIComponent(id)}`)
@@ -1323,7 +1352,7 @@ async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
     // same 404 an unknown id gets, and nothing in the response separates the
     // two, so both readings are named: the listing the id came from is what
     // tells them apart.
-    ctx.stderr.write(`hyp ${cmd}: no recommendation '${id}' in this org - list them with 'hyp report list'; if it is on that listing, '${resolved.target}' cannot resolve recommendation ids - is the server up to date?\n`)
+    ctx.stderr.write(`hyp ${cmd}: no recommendation '${id}' in this org - list them with 'hyp recommendation list'; if it is on that listing, '${resolved.target}' cannot resolve recommendation ids - is the server up to date?\n`)
     return 1
   }
   if (outcome.response.status !== 200) {
@@ -1402,7 +1431,7 @@ async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommend
   // decision on the bytes the reader sees. Both are the identity on every
   // KIND_RE/PERIOD_RE value, so a conforming server's hint is unchanged.
   if (report === null) {
-    ctx.stderr.write(`hyp ${cmd}: '${esc(recommendation.id)}' has no page to read - it may have been deleted; list what is published with 'hyp report list --recommendations'\n`)
+    ctx.stderr.write(`hyp ${cmd}: '${esc(recommendation.id)}' has no page to read - it may have been deleted; list what is published with 'hyp recommendation list'\n`)
     return 1
   }
   const listCommand = [`hyp report list --kind ${shellWord(esc(report.kind))} --period ${shellWord(esc(report.period))}`, ...targetFlags(gate.params)].join(' ')
@@ -1439,8 +1468,8 @@ function targetFlags(params) {
  * *resolved* target, not the typed one, because a bare run resolved its target
  * from config and echoing what was typed would name no remote at all.
  *
- * Every re-run sentence `report fix` puts in front of the launched client comes
- * from here, the prompt and the citations tail of the `hyp report get` it sends
+ * Every re-run sentence `fix` puts in front of the launched client comes
+ * from here, the prompt and the citations tail of the `hyp recommendation get` it sends
  * the client to read alike: a `<target>` placeholder in either leaves the client
  * nothing to substitute, so its cheapest path is to drop the flag and query the
  * local cache, which is what those sentences exist to prevent.
@@ -1675,7 +1704,7 @@ function pageTitle(text, ext) {
 }
 
 /**
- * `hyp report mark <id> <state>`: record what became of a recommendation.
+ * `hyp recommendation mark <id> <state>`: record what became of a recommendation.
  * One PUT to the server's status route appends an event; the server keeps
  * the ledger and the vocabulary, the CLI carries the id, the state, the
  * reason and the links, and says it came from the CLI. Any state may follow
@@ -1688,22 +1717,22 @@ function pageTitle(text, ext) {
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
-export async function runReportMark(argv, ctx) {
-  const gate = parseCoreCommandArgv('report mark', argv, ctx)
+export async function runRecommendationMark(argv, ctx) {
+  const gate = parseCoreCommandArgv('recommendation mark', argv, ctx)
   if (!gate.ok) return gate.code
   const id = gate.params.id !== undefined ? String(gate.params.id).trim() : ''
   const state = typeof gate.params.state === 'string' ? gate.params.state : ''
   if (!id || !state) {
-    ctx.stderr.write('usage: hyp report mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]\n')
+    ctx.stderr.write('usage: hyp recommendation mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]\n')
     return 2
   }
   if (!RECOMMENDATION_ID_RE.test(id)) {
-    ctx.stderr.write(`hyp report mark: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-qcyx22sjav)\n`)
+    ctx.stderr.write(`hyp recommendation mark: '${id}' is not a recommendation id - take one from 'hyp recommendation list' (they look like hyprec-qcyx22sjav)\n`)
     return 2
   }
   const reason = gate.params.reason === undefined ? '' : oneLine(String(gate.params.reason))
   if (state === 'dismissed' && !reason) {
-    ctx.stderr.write('hyp report mark: dismissed needs --reason "<why>" - the reason is what the next reader sees in place of the change\n')
+    ctx.stderr.write('hyp recommendation mark: dismissed needs --reason "<why>" - the reason is what the next reader sees in place of the change\n')
     return 2
   }
   const links = Array.isArray(gate.params.link) ? gate.params.link.map(String) : []
@@ -1712,16 +1741,16 @@ export async function runReportMark(argv, ctx) {
   // link is the one field a later reader follows to the diff, so a run that
   // asked for one and carries none is refused rather than recorded without it.
   if (Array.isArray(gate.params.link) && links.length === 0) {
-    ctx.stderr.write('hyp report mark: --link takes an absolute http(s) URL, got an empty value\n')
+    ctx.stderr.write('hyp recommendation mark: --link takes an absolute http(s) URL, got an empty value\n')
     return 2
   }
   for (const link of links) {
     if (!isHttpUrl(link)) {
-      ctx.stderr.write(`hyp report mark: --link takes an absolute http(s) URL, got '${link}'\n`)
+      ctx.stderr.write(`hyp recommendation mark: --link takes an absolute http(s) URL, got '${link}'\n`)
       return 2
     }
   }
-  const resolved = resolveReportsTarget(gate.params, ctx, 'report mark')
+  const resolved = resolveReportsTarget(gate.params, ctx, 'recommendation mark')
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -1729,22 +1758,22 @@ export async function runReportMark(argv, ctx) {
   const url = new URL(`${resolved.endpoint}/_recommendations/${encodeURIComponent(id)}/status`)
   applyOrgParam(gate.params, url)
   const body = JSON.stringify({ state, ...(reason ? { reason } : {}), ...(links.length > 0 ? { links } : {}), via: 'cli' })
-  const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report mark' }, (token) =>
+  const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'recommendation mark' }, (token) =>
     fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body })
   )
   if (!outcome.ok) {
-    ctx.stderr.write(`hyp report mark: ${outcome.error}\n`)
+    ctx.stderr.write(`hyp recommendation mark: ${outcome.error}\n`)
     return outcome.exitCode
   }
   const { response } = outcome
   if (response.status === 404) {
     // As on the resolve route: an unknown id and a server that predates the
     // status route answer alike, so both readings are named.
-    ctx.stderr.write(`hyp report mark: no recommendation '${id}' in this org - list them with 'hyp report list'; if it is on that listing, '${resolved.target}' cannot record recommendation status - is the server up to date?\n`)
+    ctx.stderr.write(`hyp recommendation mark: no recommendation '${id}' in this org - list them with 'hyp recommendation list'; if it is on that listing, '${resolved.target}' cannot record recommendation status - is the server up to date?\n`)
     return 1
   }
   if (response.status !== 200 && response.status !== 201) {
-    ctx.stderr.write(`hyp report mark: ${await describeErrorResponse(response)}\n`)
+    ctx.stderr.write(`hyp recommendation mark: ${await describeErrorResponse(response)}\n`)
     return 1
   }
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
@@ -1774,11 +1803,12 @@ export async function runReportMark(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {string} [cmd] the invoked command, for the argument spec and error prefixes
  * @returns {Promise<number>}
  * @ref LLP 0155#delete-confirm [implements]: org-wide destructive verb confirms like purge, not like remote remove
  */
-export async function runReportDelete(argv, ctx) {
-  const gate = parseCoreCommandArgv('report delete', argv, ctx)
+export async function runReportDelete(argv, ctx, cmd = 'report delete') {
+  const gate = parseCoreCommandArgv(cmd, argv, ctx)
   if (!gate.ok) return gate.code
   const [kind, period, id] = positionals(argv, VALUE_FLAGS)
   // As in `report get`, only a lone recommendation id is the record form;
@@ -1788,7 +1818,7 @@ export async function runReportDelete(argv, ctx) {
     ctx.stderr.write('usage: hyp report delete <kind> <period> <id> | <rec-id> [--yes] [--org <org>] [--remote <target>]\n')
     return 2
   }
-  const resolved = resolveReportsTarget(gate.params, ctx, 'report delete')
+  const resolved = resolveReportsTarget(gate.params, ctx, cmd)
   if ('error' in resolved) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
@@ -1804,7 +1834,7 @@ export async function runReportDelete(argv, ctx) {
   let what = `report ${kind}/${period}/${id}`
   let path = `${encodeURIComponent(String(kind))}/${encodeURIComponent(String(period))}/${encodeURIComponent(String(id))}`
   if (recId) {
-    const found = await resolveRecommendation({ ctx, gate, resolved, cmd: 'report delete' }, recId)
+    const found = await resolveRecommendation({ ctx, gate, resolved, cmd }, recId)
     if (typeof found === 'number') return found
     // Inside a report, and on a server from before recommendation records
     // (where a standalone one is a one-page report), the page goes with its
@@ -1813,7 +1843,7 @@ export async function runReportDelete(argv, ctx) {
     if (found.report !== null) {
       const r = found.report
       const command = [`hyp report delete ${shellWord(esc(r.kind))} ${shellWord(esc(r.period))} ${shellWord(esc(r.id))}`, ...targetFlags(gate.params)].join(' ')
-      ctx.stderr.write(`hyp report delete: '${recId}' is a page of report ${esc(r.kind)}/${esc(r.period)}/${esc(r.id)}, and a report is deleted whole - nothing was deleted; '${command}' deletes the report and every page in it\n`)
+      ctx.stderr.write(`hyp ${cmd}: '${recId}' is a page of report ${esc(r.kind)}/${esc(r.period)}/${esc(r.id)}, and a report is deleted whole - nothing was deleted; '${command}' deletes the report and every page in it\n`)
       return 1
     }
     const title = found.recommendation.title ? ` "${esc(found.recommendation.title)}"` : ''
@@ -1831,20 +1861,67 @@ export async function runReportDelete(argv, ctx) {
   const url = new URL(`${resolved.endpoint}/${path}`)
   applyOrgParam(gate.params, url)
 
-  const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report delete' }, (token) =>
+  const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd }, (token) =>
     fetch(url, { method: 'DELETE', headers: { authorization: `Bearer ${token}` } })
   )
   if (!outcome.ok) {
-    ctx.stderr.write(`hyp report delete: ${outcome.error}\n`)
+    ctx.stderr.write(`hyp ${cmd}: ${outcome.error}\n`)
     return outcome.exitCode
   }
   const { response } = outcome
   if (response.status !== 200) {
-    ctx.stderr.write(`hyp report delete: ${await describeErrorResponse(response)}\n`)
+    ctx.stderr.write(`hyp ${cmd}: ${await describeErrorResponse(response)}\n`)
     return 1
   }
   ctx.stdout.write(`deleted ${recId ?? `${kind}/${period}/${id}`}\n`)
   return 0
+}
+
+/**
+ * The lone recommendation id `hyp recommendation get|delete` take, checked
+ * before the shared runner sees it, so a report's `<kind> <period> <id>` form
+ * is never reachable through the recommendation commands.
+ *
+ * @param {string} cmd
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {number | undefined} an exit code when the arguments are refused
+ */
+function refuseNonRecommendationId(cmd, argv, ctx) {
+  const gate = parseCoreCommandArgv(cmd, argv, ctx)
+  if (!gate.ok) return gate.code
+  const id = gate.params.id === undefined ? '' : String(gate.params.id)
+  if (!RECOMMENDATION_ID_RE.test(id)) {
+    ctx.stderr.write(`hyp ${cmd}: ${id ? `'${esc(id)}' is not a recommendation id` : 'a recommendation id is required'} - take one from 'hyp recommendation list' (they look like hyprec-qcyx22sjav)\n`)
+    return 2
+  }
+  return undefined
+}
+
+/**
+ * `hyp recommendation get <id>`: a recommendation's page with the evidence it
+ * cites, the read `hyp report get <rec-id>` still makes.
+ *
+ * @ref LLP 0614#decision [implements]: a recommendation is read under its own noun
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runRecommendationGet(argv, ctx) {
+  return refuseNonRecommendationId('recommendation get', argv, ctx) ?? runReportGet(argv, ctx, 'recommendation get')
+}
+
+/**
+ * `hyp recommendation delete <id>`: delete a recommendation published on its
+ * own. One that is a page of a report is refused, as in `hyp report delete`.
+ *
+ * @ref LLP 0614#decision [implements]: a standalone recommendation is deleted under its own noun
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runRecommendationDelete(argv, ctx) {
+  return refuseNonRecommendationId('recommendation delete', argv, ctx) ?? runReportDelete(argv, ctx, 'recommendation delete')
 }
 
 /* ---------- helpers ---------- */
