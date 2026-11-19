@@ -240,9 +240,10 @@ test('a held source probe coalesces bookkeeping while exports continue', async t
   const exported = (await read(home, 'settled-z-local')).length
   const heartbeat = statusAt(stateRoot).uptimeMs
   await delay(120)
+  // One export can outlast the fixed window on a slow runner, so wait for it.
+  await until(async () => (await read(home, 'settled-z-local')).length > exported, 'probe wait does not block destination work')
   assert.equal(statusAt(stateRoot).uptimeMs, heartbeat, 'no overlapping bookkeeping pass can persist around the held probe')
   assert.equal((await read(home, 'probe')).length, held, 'no second active bookkeeping pass')
-  assert.ok((await read(home, 'settled-z-local')).length > exported, 'probe wait does not block destination work')
   await fs.rm(path.join(home, 'hold-probe'))
   await until(async () => (await read(home, 'probe')).length > held)
   await daemon.stop()
