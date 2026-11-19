@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const D = JSON.parse(readFileSync(opt("--digest", "digest.json"), "utf8"));
+// the window goes into the SQL as written, so take it only as two YYYY-MM-DD dates
+if (![D.window?.from, D.window?.to].every((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d)))) { console.error("the digest has no window of two YYYY-MM-DD dates"); process.exit(2); }
 const want = new Set((opt("--slices", "") || "").split(",").map((x) => x.trim()).filter(Boolean));
 const MAX = Number(opt("--max", 200)), CH = Number(opt("--chars", 300));
 // A slice is one session on one day. Only those days are printed: a multi-day session is several slices, and a

@@ -7,6 +7,8 @@ import { readFileSync } from "node:fs";
 export const argv = process.argv.slice(2);
 export const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 export const D = JSON.parse(readFileSync(opt("--digest", "digest.json"), "utf8"));
+// the window is printed into the chart and the page as written, so take it only as two YYYY-MM-DD dates
+if (![D.window?.from, D.window?.to].every((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d)))) { console.error("the digest has no window of two YYYY-MM-DD dates"); process.exit(2); }
 export const LAB = opt("--labels", null) ? JSON.parse(readFileSync(opt("--labels"), "utf8")) : null;
 export const warn = (m) => process.stderr.write(`warning: ${m}\n`);
 

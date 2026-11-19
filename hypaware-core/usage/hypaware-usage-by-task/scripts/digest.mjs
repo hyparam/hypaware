@@ -16,8 +16,13 @@ const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const has = (k) => argv.includes(k);
 const iso = (d) => d.toISOString().slice(0, 10);
-const D1 = opt("--to", iso(new Date()));
-const D0 = opt("--from", iso(new Date(Date.parse(D1) - 6 * 864e5)));
+// The window goes into the SQL and onto the page as written, so each end must be a real calendar day.
+const day = (k, d) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(d)) && Number.isFinite(Date.parse(d)) && iso(new Date(Date.parse(d))) === d) return d;
+  console.error(`${k} must be a date written YYYY-MM-DD, got ${JSON.stringify(d)}`); process.exit(2);
+};
+const D1 = day("--to", opt("--to", iso(new Date())));
+const D0 = day("--from", opt("--from", iso(new Date(Date.parse(D1) - 6 * 864e5))));
 const REMOTE = opt("--remote", null);
 // operator only: read another org on the remote by label; every read is recorded in that org's audit trail
 const ORG = opt("--org", null);
