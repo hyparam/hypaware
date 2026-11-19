@@ -26,8 +26,8 @@ hyp client status codex
 ```
 
 Attach covers both the CLI and the desktop app, installs HypAware's skills in
-`~/.codex/skills`, and adds a hook that records each session's working
-directory.
+`~/.codex/skills` and its `hypaware-analyst` agent in `~/.codex/agents`, and
+adds a hook that records each session's working directory.
 
 ## Import existing history
 

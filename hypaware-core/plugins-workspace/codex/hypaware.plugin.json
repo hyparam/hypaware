@@ -26,6 +26,7 @@
     "client": {
       "name": "codex",
       "skill_dir": ".codex/skills",
+      "agent_dir": ".codex/agents",
       "attach_probe": {
         "format": "toml",
         "settings_file": ".codex/config.toml",
@@ -50,6 +51,9 @@
       { "name": "hypaware-reference", "clients": ["codex"] },
       { "name": "hypaware-privacy", "clients": ["codex"] },
       { "name": "hypaware-report", "clients": ["codex"] }
+    ],
+    "agents": [
+      { "name": "hypaware-analyst", "clients": ["codex"] }
     ],
     "config_sections": [
       {

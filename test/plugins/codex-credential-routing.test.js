@@ -477,5 +477,6 @@ function stubContext(gateway) {
     backfills: { register() {} },
     commands: { register() {} },
     skills: { register() {} },
+    agents: { register() {} },
   })
 }
