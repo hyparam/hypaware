@@ -181,8 +181,100 @@ test('states the actual scope of test and design-only changes, including both si
   const rendered = renderDraft({ why: { text: 'The developer wanted old caches to stay searchable.', sources: ['M1'] }, decisions: [] },
     [{ id: 'M1', role: 'user', link: 'https://app.hypaware.ai/sessions/one?m=one' }], changeScope([tests]))
   assert.match(rendered, /Why this PR exists\.\*\* This PR changes tests only\. The developer wanted/)
-  const repeated = renderDraft({ why: { text: 'This PR changes tests only. Old caches needed coverage.', sources: ['M1'] }, decisions: [] },
+  const repeated = renderDraft({ why: { text: 'Old caches needed coverage. This PR changes tests only.', sources: ['M1'] }, decisions: [] },
     [{ id: 'M1', role: 'user', link: 'https://app.hypaware.ai/sessions/one?m=one' }], changeScope([tests]))
   assert.equal(repeated.split(changeScope([tests])).length, 2)
   assert.equal(renderDraft({ why: null, decisions: [] }, [], changeScope([docs])), '')
+})
+
+test('an automatic run retries empty discovery and cites the source chat of a delegated docs PR', async () => {
+  const parent = '10000000-0000-7000-9000-000000000001'
+  const child = '10000000-0000-7000-9000-000000000002'
+  const created = '2026-08-25T10:05:00Z'
+  const event = { ...apiPR, title: 'Write the widget guide (DOC-326)', created_at: created, changed_files: 2 }
+  const request = { ...turn('request', 'user', 0), session_id: parent }
+  const files = [{ ...patchFile, filename: 'docs/widget.md' },
+    { filename: 'docs/images/widget.png', status: 'added', additions: 0, deletions: 0 }]
+  let body = event.body
+  let retries = 0
+  const logs = []
+  const github = async (path, method, payload) => {
+    if (path) return files
+    if (method === 'PATCH') body = payload.body
+    return { ...event, body }
+  }
+  const query = async sql => {
+    assert.match(sql, /contributor\/project/)
+    if (sql.includes('git_branch =')) return []
+    if (sql.includes('regexp_like(tool_args')) return retries ? [{ session_id: child }] : []
+    if (sql.includes('agent_created_thread')) return [{ parent, delivered_at: created }]
+    if (sql.includes('select distinct tool_result_for')) return [{ tool_result_for: 'call_123' }]
+    if (sql.includes('tool_call_id =')) return [{ tool_call_id: 'call_123' }]
+    if (sql.includes('order by message_created_at desc')) return [{ ...request, is_request: 1 }]
+    if (sql.includes('as text_part')) return [{ ...request, part_index: 0, chars: 6, text_part: 'widget' }]
+    return []
+  }
+  const result = await describe(event, { github, query, retryDiscovery: true, pause: async () => { retries++ },
+    log: line => logs.push(line), draft: async (title, messages, patches, env, scope) => {
+      assert.equal(messages.length, 1)
+      assert.match(messages[0].link, new RegExp(parent))
+      assert.equal(scope, 'This PR changes documentation only.')
+      return { why: { text: 'The developer wanted a widget guide.', sources: ['M1'] }, decisions: [] }
+    } })
+  assert.equal(retries, 1)
+  assert.match(result, /Cited context/)
+  assert.match(body, /Developer message 1/)
+  assert.ok(body.endsWith(event.body))
+  assert.match(logs.join('\n'), /0 session/)
+  assert.doesNotMatch(logs.join('\n'), /handoff DOC-326/)
+})
+
+test('a documentation screenshot can accompany a guide without hiding incomplete code patches', () => {
+  const docs = { ...patchFile, filename: 'docs/guide.md' }
+  const image = { filename: 'docs/images/setup.png', status: 'added', additions: 0, deletions: 0 }
+  assert.equal(changeScope([docs, image]), 'This PR changes documentation only.')
+  assert.doesNotThrow(() => codeChanges([docs, image], 2))
+  assert.throws(() => codeChanges([docs, image], 3), /incomplete file list/)
+  assert.throws(() => codeChanges([image, { ...patchFile, additions: 2 }], 2), /incomplete patch/)
+  assert.throws(() => codeChanges([{ ...image, filename: 'src/runtime.png' }], 1), /incomplete patch/)
+})
+
+test('a delegated chat requires a reciprocal creation receipt and the latest matching human command', async () => {
+  const child = '10000000-0000-7000-9000-000000000002'
+  const link = { parent: '10000000-0000-7000-9000-000000000001', delivered_at: pr.createdAt }
+  const receipt = { tool_result_for: 'call_123' }
+  const call = { tool_call_id: receipt.tool_result_for }
+  const unrelated = { ...turn('other', 'user', 0), is_request: 0 }
+  for (const responses of [
+    [[], []], // No handoff envelope.
+    [[], [link, link]], // Ambiguous source.
+    [[], [link], []], // No receipt for this child.
+    [[], [link], [receipt], []], // The receipt did not come from creating a chat.
+    [[], [link], [receipt], [call], [unrelated]],
+  ]) {
+    const remaining = [[{ session_id: child }], ...responses]
+    const result = await discover({ ...pr, title: 'A widget guide (DOC-326)' }, 'team/project', async sql => {
+      assert.match(sql, /team\/project/)
+      assert.ok(remaining.length)
+      return remaining.shift()
+    })
+    assert.equal(result.sessions[0].candidates.length, 0)
+    assert.equal(remaining.length, 0)
+  }
+})
+
+test('a synchronization or merge during the upload wait stops rediscovery and writeback', async () => {
+  let closed = false
+  let queries = 0
+  const status = await describe(apiPR, { retryDiscovery: true, pause: async () => { closed = true },
+    github: async (path, method) => {
+      assert.equal(method, undefined)
+      return { ...apiPR, state: closed ? 'closed' : 'open' }
+    }, query: async () => {
+      assert.equal(closed, false)
+      queries++
+      return []
+    }, draft: assert.fail })
+  assert.equal(queries, 2)
+  assert.match(status, /superseded/)
 })
