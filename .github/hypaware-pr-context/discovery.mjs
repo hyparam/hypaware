@@ -73,6 +73,46 @@ export function repoFilter(repo) {
   return `lower(git_remote) in (${remoteNames.join(', ')})`
 }
 
+// A Codex-created chat receives the assignment as a tool result. Only cite the
+// original human command after both sides of that specific handoff agree.
+async function handoffRequest(scope, child, ticket, query) {
+  const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+  const validId = new RegExp('^' + uuid + '$')
+  if (!validId.test(child)) return
+  const envelope = '^<codex_delegation>\r?\n *<source_thread_id>(' + uuid + ')</source_thread_id>'
+  const links = await query(`select distinct regexp_extract(content_text, ${quote(envelope)}, 1) as parent,
+    message_created_at as delivered_at from ai_gateway_messages where ${scope} and ${rootText}
+    and session_id = ${quote(child)} and json_extract_string(attributes, '$.codex.thread_source') = 'agent_created_thread'
+    and role = 'tool' and part_type = 'tool_result' and provider_type = 'function_call_output'
+    and tool_name is null and tool_result_for = message_id and message_id like 'fco%'
+    and regexp_like(content_text, ${quote(envelope)}) limit 2`)
+  if (links.length !== 1) return
+  const { parent, delivered_at } = links[0]
+  if (!validId.test(parent) || parent === child) return
+  const delivered = Date.parse(delivered_at)
+  const before = ms => quote(new Date(delivered - ms).toISOString())
+  const source = `${scope} and ${rootText} and session_id = ${quote(parent)}`
+  const nearDelivery = `${source} and message_created_at between ${before(120_000)} and ${before(0)}`
+  const receipts = await query(`select distinct tool_result_for from ai_gateway_messages where ${nearDelivery}
+    and role = 'tool' and part_type = 'tool_result' and tool_result_for is not null and coalesce(is_error, false) = false
+    and replace(content_text, chr(92), '') like ${quote('%"threadId":"' + child + '"%')} limit 2`)
+  if (receipts.length !== 1) return
+  const calls = await query(`select distinct tool_call_id from ai_gateway_messages where ${nearDelivery}
+    and role = 'assistant' and part_type = 'tool_call' and tool_call_id = ${quote(receipts[0].tool_result_for)}
+    and (tool_name = 'create_thread' or (tool_name = 'exec' and tool_args like '%mcp__codex_app__create_thread(%')) limit 1`)
+  if (!calls.length) return
+  // Inspect only the immediately preceding human message. An older matching
+  // command could have started another task in the same source chat.
+  const [last] = await query(`select distinct date, session_id, message_id, message_created_at, role,
+    case when regexp_like(lower(trim(content_text)), '^/handoff[ \t]')
+      and regexp_like(lower(content_text), ${quote('(^|[^a-z0-9-])' + ticket + '([^a-z0-9-]|$)')})
+      and length(content_text) between 1 and 3000 then 1 else 0 end as is_request
+    from ai_gateway_messages where ${source} and message_created_at between ${before(600_000)} and ${before(0)}
+    and role = 'user' and part_type = 'text' and message_id is not null
+    and ${codexKinds} = '["user.text"]' order by message_created_at desc, message_id desc limit 1`)
+  if (last?.is_request) return { turn: last, label: 'Developer handoff request' }
+}
+
 export async function discover(pr, repo, query, now = Date.now()) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || pr.isCrossRepository || !pr.headRefName) throw new Error('Expected a same-repository PR and branch')
   const opened = Date.parse(pr.createdAt)
@@ -98,6 +138,7 @@ export async function discover(pr, repo, query, now = Date.now()) {
   /** @type {Array<{ candidates: ReturnType<typeof selectCandidates>, count: number, capped: boolean }>} */
   const previews = []
   const topic = topicFilter(pr.title)
+  const tickets = [...new Set(pr.title.toLowerCase().match(/\b[a-z][a-z0-9]{1,9}-[1-9][0-9]*\b/g))]
   for (const { session_id } of sessions.slice(0, maxSessions)) {
     // The design request can predate the feature branch. Keep the repository and
     // session filters for the drill-down. Only root text has a root-session link.
@@ -107,7 +148,8 @@ export async function discover(pr, repo, query, now = Date.now()) {
       where ${root} and role = 'user' and ${developerText} and message_id is not null and length(content_text) between 1 and 3000 and (${topic})
       order by message_created_at, message_id limit 1`)
     if (!seed) {
-      previews.push({ candidates: [], count: 0, capped: false })
+      const command = tickets.length === 1 ? await handoffRequest(scope, session_id, tickets[0], query) : undefined
+      previews.push({ candidates: command ? [command] : [], count: command ? 1 : 0, capped: false })
       continue
     }
     const rows = await query(`select distinct date, session_id, message_id, message_created_at, role,
