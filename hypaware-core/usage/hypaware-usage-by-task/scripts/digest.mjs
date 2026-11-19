@@ -101,7 +101,9 @@ lap("sql: tool counts");
 const pkey = (repo, n) => `github.com/${repo}/pull/${n}`;
 const chunk = (xs, n) => { const o = []; for (let i = 0; i < xs.length; i += n) o.push(xs.slice(i, i + n)); return o; };
 const lit = (xs) => xs.map((x) => `'${String(x).replace(/'/g, "''")}'`).join(",");
-let prs = {}; const graphLinks = []; const sources = []; let ghLogins = null;
+let prs = {}; const graphLinks = []; const sources = [];
+/** @type {string[] | null} */
+let ghLogins = null;
 if (opt("--prs", "auto") !== "none") {
   try {
     const ev = hypSql(`SELECT repo, number, actor_login, state, MIN(created_at) AS created_at FROM github_events
