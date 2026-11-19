@@ -39,7 +39,9 @@ export const USAGE_INSTRUCTIONS = Object.freeze({
  * follow one by path because it has no skill of that name to load. The
  * dialog sentence is for clients with no pick-one tool: the instructions
  * name Claude Code's, and a client without it would otherwise skip the
- * questions or stall on a tool it does not have.
+ * questions or stall on a tool it does not have. The chart sentence is here
+ * as well as in the instructions because a client that summarises the
+ * script's output in a line, as one did, has shown the person nothing.
  *
  * @param {{ page: boolean, workDir: string, instructions?: string }} args
  * @returns {string}
@@ -52,7 +54,9 @@ export function usagePrompt({ page, workDir, instructions = '' }) {
   return `${what} Follow the instructions at ${JSON.stringify(file)} as you would an installed skill. ` +
     'They ship with the hyp CLI and are not installed as a skill, so read them from that path, ' +
     'and run the scripts from the scripts directory beside each instruction file. ' +
-    'Where they call for a pick-one dialog and you have no such tool, list the choices in chat and ask which one. ' +
+    'I cannot see what the scripts print, so paste the chart itself into your reply in a code block; do not just describe it. ' +
+    'Where they call for a pick-one dialog, use your question tool (AskUserQuestion in Claude Code) in the same turn as the chart; ' +
+    'only if you have no such tool, list the choices in chat and ask which one. ' +
     `Your work directory for this run is ${JSON.stringify(workDir)}: it was emptied for this run, and the next run empties it again. ` +
     'Use the default window unless the instructions below specify one.' +
     (instructions ? `\n\nAdditional instructions from the user:\n${instructions}` : '')

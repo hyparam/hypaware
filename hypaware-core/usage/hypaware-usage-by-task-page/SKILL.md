@@ -34,6 +34,8 @@ other skill is missing or has moved; say so instead of copying its files here.
    files from an earlier run.
    - It has `digest.json` and `labels.json` from earlier in this session: use them as they are.
      Do not relabel and do not re-run the digest unless the person asks for fresh numbers.
+   - The window has no sessions (see step 2 of that procedure): do not render a page. Say
+     what that step says to say and stop.
    - It has neither, or only a digest: follow steps 1 to 6 of the `hypaware-usage-by-task`
      procedure to make them. Skip its chat chart and its question dialog; the person asked for
      the page.
@@ -41,8 +43,8 @@ other skill is missing or has moved; say so instead of copying its files here.
    ~/hypaware-reports/<to>-usage-by-task.html` (or the place the person names). Read the stderr
    warnings and fix `labels.json` until there are none, as in the other skill.
 3. Open the page (`open <file>` on macOS) and reply with its path and one or two sentences on
-   what stands out. Say where the PRs came from (HypAware events, `gh`, or none), as the other
-   skill requires.
+   what stands out. When the page shows PRs, say where they came from (HypAware events or `gh`); when it
+   shows none, do not remark on it, as the other skill says.
 4. Stop there. Questions are asked and answered in the terminal by the other skill, and
    answers stay in the chat; the page does not carry them.
 

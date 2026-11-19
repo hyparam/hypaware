@@ -33,7 +33,12 @@ and it is never called for another org. Where an install has no GitHub capture, 
 source as before. On this machine the graph reads pass `--include-local-only`: without it the graph
 hides session ids and PR keys on rows recorded only here, and no session links to a PR. Those reads
 return ids only, never conversation text; the prompt reads do not pass the flag. With neither, or with `--prs none`, the chart is the task list alone, with no
-PRs and no PR figures. Say which of these happened when you show the chart.
+PRs and no PR figures. That is a normal way to run, not a fault: GitHub capture, the graph and
+`gh` are all optional. When PRs are shown, say in a few words where they came from. When there
+are none, or the graph or `gh` was not available, say nothing about it: do not report missing
+GitHub data, a missing graph or an unsigned `gh` as a problem, and do not suggest setting them
+up, unless the person asks why there are no PRs. The digest's stderr lines about them are
+progress notes, not warnings.
 
 | Script | What it does | Time |
 |---|---|---|
@@ -58,6 +63,25 @@ Flags on `digest.mjs`: `--from YYYY-MM-DD` `--to YYYY-MM-DD` (default last 7 day
 2. Run `node scripts/digest.mjs --from … --to … --out <work>/digest.json`. If the person
    is new or asked for "quick", run `chart.mjs` on the digest alone right away and show that
    rules-only chart; then improve it with labels.
+   Then look at how much the window holds; the digest's last line on stderr gives the slice
+   and PR counts. A new machine, or a quiet week, changes what to do next:
+   - **No sessions at all.** Do not label, chart or offer questions. Run the digest once more
+     over the last 30 days. If that has sessions, say the last 7 days were empty, carry on
+     with the 30-day window and name it in the reply. If it is empty too, say so in two or
+     three sentences and stop: nothing from Claude Code or Codex is recorded on this machine
+     yet, recording covers sessions from now on (and history only where it was imported),
+     `hyp status` shows whether the clients are attached, and `hyp usage` will have something
+     to show after a few sessions. Do not invent a chart, numbers or suggestions, and do not
+     add anything about GitHub or PR data.
+   - **Fewer than five sessions.** Show the chart, and say in the sentence above it that it is
+     a small window (name the count). Group by the goals that are really there, even if that
+     is one or two themes; do not split one job to fill the chart. Write only the questions
+     the digest supports, which may be two, one or none (see step 4 and
+     `references/labels.md`). With none, end after the chart and say more will show after a
+     few more sessions.
+   - **No PRs.** The chart is the task list alone. Carry on without remarking on it (see
+     "Scripts" above: PR data is optional); skip the rule
+     that the first question be about work that shipped.
 3. Read `digest.json`. It is one record per session-day slice: client, repos, branches,
    first three and last human prompts, top tool names, tokens, PR links seen (with minutes
    after the PR was created) and `prs_rule` (what the timing rule already attributed). The
@@ -67,14 +91,16 @@ Flags on `digest.mjs`: `--from YYYY-MM-DD` `--to YYYY-MM-DD` (default last 7 day
    product areas or goals the window's work went into (never more than eight). Then write two
    or three groups per theme (about fifteen in all), each named by what it was for, with the right
    PRs attached, a category, and the theme it rolls up into. Small work joins a neighbour; the
-   chart folds anything past three rows in a theme. Merge retries and cross-client duplicates. Give
-   every slice above a few thousand output tokens a group; only the tiny tail stays unlabelled.
-   In the same file, write `questions`: three follow-up questions, each naming one possible
-   frustration seen across the window (requests that needed correcting, work that got restarted,
-   sessions that were hard to find again, or something broader in how they use agents: planning,
-   splitting work, checking results) and asking for a helpful improvement to it, a simple
-   change in how the person codes with agents (rules in `references/labels.md`). They come from
-   the digest only and cost no extra reads.
+   chart folds what is left past three rows in a theme. Merge retries and cross-client duplicates. Put
+   every slice above a few thousand output tokens in some group, joining a neighbour when it is too
+   small for a group of its own; only the tiny tail stays unlabelled.
+   In the same file, write `questions`: three follow-up questions (fewer in a small window,
+   as step 2 says), each naming one place in the
+   window where the work took extra effort (steps typed again by hand, work that was restarted,
+   sessions that were hard to find again, an agent that waited to be told what came next) and
+   asking for something that would make it easier next time: most often something to set up
+   once, sometimes a different way to run the work (rules in `references/labels.md`, voice
+   under "How to say it" below). They come from the digest only and cost no extra reads.
 5. Do NOT answer a question on a normal run. Reading messages is the slow part, and the chart
    has to appear fast. Answering is a separate step, described below, that runs only when the
    person picks a question.
@@ -82,18 +108,27 @@ Flags on `digest.mjs`: `--from YYYY-MM-DD` `--to YYYY-MM-DD` (default last 7 day
    slice or PR id means a typo in labels.json, a "rows in the ranked table" warning means too
    many themes, and a "will be cut off" warning means a label or theme is too long. Fix and
    re-run until there are none.
-7. Show the chart in chat. Put what `chart.mjs` printed, down to the last bar row, in a code
-   block exactly as printed, so the columns line up. Leave the questions out of the block; the
-   dialog shows them. Add one or two sentences on what stands out. Keep it short: the chart is
+7. Show the chart in chat. The person does not see what a script printed: tool output is
+   collapsed or hidden in their client, so the chart reaches them only if you type it into
+   your reply. Put everything `chart.mjs` printed in a code block exactly as printed, so the
+   columns line up, as the first thing in the reply. A reply that only describes the chart in
+   a sentence has left out the deliverable. Do not end your turn here: write the chart and
+   the sentences as text, then go straight on to step 8 in the same turn. The questions are not in it; the dialog shows them. A last
+   line, when present, lists PRs the person opened that no recorded session is tied to. Add
+   one or two sentences on what stands out. Keep it short: the chart is
    the deliverable.
-8. Offer to help with one of them. Use AskUserQuestion, and make it plain that these are
-   offers of a helpful improvement to things that may have been frustrating, not a review of
-   the person. Ask something like "A few things in this window look like they may have been
-   frustrating. Which would you like a suggestion for?" Give one option per question: a short
-   label naming the possible frustration ("Retyping the PR wrap-up", "Restarting the same
-   prompt", "Losing track of sessions"), and as the description one sentence said to the
-   person: what the window shows, with a count where the digest has one, and what the
-   suggestion would save them ("You started the same report prompt in about twenty fresh
+8. Offer to help with one of them, when there is at least one question. With two or three,
+   call the AskUserQuestion tool, right after the chart text and in the same turn, so the
+   person picks from a dialog. If that tool is in your tool list you must use it; a numbered
+   list typed into the reply is only for a client that has no such tool. With one, ask in chat whether they want that suggestion, as a yes or
+   no. With none, skip this step. These are offers, written the way
+   "How to say it" below describes. Ask something like "Here are three places this week where
+   your agents could have taken more off your hands. Which would you like a suggestion for?"
+   Give one option per question: a short label naming what the person would get ("PRs opened
+   your way without asking", "One run for the report prompt", "A quick way back to a
+   session"), and as the description one sentence said to the person: what the window shows,
+   with the agent or the work as its subject and a count where the digest has one, and what
+   the suggestion would save them ("The same report prompt was started in about twenty fresh
    sessions. I can suggest a way to run it once."). Do not paste the stored question as the
    description; it is written to be pasted into a new session, not read in a dialog.
    When the person picks one, answer it as described under "Answering a question" below, then
@@ -104,8 +139,9 @@ Flags on `digest.mjs`: `--from YYYY-MM-DD` `--to YYYY-MM-DD` (default last 7 day
 
 One line per theme with its output tokens and share of the window, and under it the pieces of
 work, each with a bar for output tokens and the PRs it opened (open and closed ones are marked;
-merged ones are not). At most three named rows per theme; the rest fold into one "smaller
-pieces of work" row. Output tokens are the measure because they track how much the models
+merged ones are not; a row with more than five PRs names the first four and counts the rest). Up to three named
+rows per theme; two or more left over fold into one "smaller pieces of work" row, and a single
+one left over is shown as a fourth row. Output tokens are the measure because they track how much the models
 actually wrote. Token kinds are never added together. The header line gives the totals: output
 tokens, sessions, PRs tied to sessions, and the share of output that went into work with a PR.
 
@@ -122,32 +158,60 @@ their own words, or asking for a recommendation.
    the person typed, in order. Human messages only. The script shows the first 200 unless
    `--max` is raised; read them all before counting anything.
    Then read wider, once: run `messages.mjs` again on the slices of the two or three largest
-   groups the question is not about. The answer has to say where else the same habit shows,
-   and that cannot be said from opening prompts alone.
-2. Look for how the work was steered, not what it was about: something built and then reversed,
-   the same question asked many times (status checks, "is it better now?"), one conversation
-   drifting across unrelated goals, corrections repeated, the same instruction typed by hand in
-   session after session. Look past the single repeated sentence to the broader way the person
-   works with agents: whether work was planned before it was built, how it was split across
-   sessions, what the agent had to be told again, how results were checked, and which client or
-   model was used for what. Pick the one pattern with the largest consequence. Count what you
-   cite. Where the fix to a narrow pattern is really a broader change in approach (plan first,
-   split the work, let the agent run the checks), give the broader change and use the narrow
-   pattern as its evidence.
-   Where the fix is "write it down once", check whether it is already written (the repo's
-   CLAUDE.md or AGENTS.md, the skill) and say what you found.
+   groups the question is not about. The answer has to say where else the same kind of
+   setup would help, and that cannot be said from opening prompts alone.
+2. Look for where the work took more effort than it needed to, not what it was about:
+   something built and then redone, the same question asked many times (status checks, "is
+   it better now?"), one conversation covering unrelated goals, the agent stopping to be told
+   the next step, the same instruction given by hand in session after session. Look past the
+   single repeated sentence to how the work was set up: whether there was a plan before the
+   build, how it was split across sessions, what the agent had to be told again, how results
+   were checked, and which client or model was used for what. Pick the one with the largest
+   cost. Count what you cite.
+   Look first for something that can be set up once, because that is a fix the person can
+   keep: a section in the repo's CLAUDE.md or AGENTS.md, a skill or slash command, a hook, a
+   permission so the agent stops asking, a script. Check whether it is already written (the
+   repo's CLAUDE.md or AGENTS.md, the skill) and say what you found. A different way of
+   running the work (plan first, a fresh session per goal, let the agent run the checks) is a
+   good answer too when that is what the messages point to; offer it as something to try.
 3. Give the answer in chat in four parts, shaped as `references/labels.md` describes under
-   "The recommendation": the Problem, the Fix, the counted evidence, and the wider pattern.
-   The wider pattern is part of every answer, in the first reply. The person should never have
-   to ask "how does this relate to how I use agents in general?". Say what broader habit the
-   narrow case is one instance of, name the two or three other places in the window where the
-   same habit shows (with counts), and give the one broader change that covers all of them,
-   with the narrow fix as its first step. If the wider reading found the habit nowhere else,
-   say that in a sentence instead of stretching it.
+   "The recommendation" and worded as "How to say it" below describes: what happened, what
+   would help, what it is based on, and where else it would help.
+   "Where else it would help" is part of every answer, in the first reply. The person should
+   never have to ask "how does this relate to how I use agents in general?". From the wider
+   read, name the two or three other places in the window where the same kind of setup would
+   have saved effort (with counts), and what to add for each: usually more lines for the same
+   file, or a second skill. Close on the one thing to do first. If the wider reading found
+   nowhere else, say that in a sentence instead of stretching it.
    The answer lives in the chat only: do not write it to `labels.json` or any other file, and
    do not render or open anything.
 4. If the messages show nothing worth acting on (a one-prompt run, for instance), say so and
    answer from the digest's numbers instead, or not at all. Do not pad.
+
+## How to say it
+
+This applies to the three questions, the dialog and every answer. The person is reading about
+their own week, and it should read as help, never as a review of them.
+
+- **The subject is the agent, the setup or the work, not the person.** "The agent stopped and
+  waited for a go-ahead 21 times", "nothing in the repo told it which base branch to use",
+  "the same closing steps were needed in 13 sessions". Not "you typed go 21 times", "you keep
+  forgetting", "you tend to".
+- **Do not describe the person.** No "habit", "behaviour", "pattern in how you work",
+  "tendency", "issue", "mistake", and nothing about what is "in your head". Say what the
+  recordings show happened, and what it cost in waiting, retyping or rework.
+- **What the person did right is evidence, so use it.** They already stated the rule, caught
+  the error or built the workaround. "You gave the commit rule three times, so it is clear
+  what it should be" turns their messages into the source of the fix, not the fault.
+- **Put the gap where it can be fixed.** Something was missing from the agent's instructions,
+  its permissions or its tools. Say what was missing.
+- **A suggestion about how to run the work is an option, with a reason.** "A fresh session
+  per ticket would have kept each one under the context limit; worth trying on the next
+  ticket." Not "you should", and not "you run sessions too long".
+- **Counts measure the cost, not the person.** Count waits, repeats, redone work and time.
+- **Do not reuse a sentence from these instructions or from `references/labels.md`.** The
+  examples show the voice. Every answer is written from what this person's messages show, and
+  two people with different weeks should not get the same closing line.
 
 ## Then offer a HypAware recommendation
 
@@ -156,10 +220,10 @@ a `hyprec-` id, it shows up for the team, and it can be implemented and marked f
 the next thing after an answer, when it applies, is to offer to make one. Do not go on to the
 other two questions first, and do not offer anything else in the same breath.
 
-It applies when the answer named a real problem with a concrete fix someone could carry out
+It applies when the answer named a concrete fix someone could carry out
 (a change to a repo's agent instructions, a script, a skill, a default). It does not apply when
-step 4 found nothing worth acting on, when the fix is only a personal habit with nothing to
-change anywhere, or when the view is a teammate's (the recommendation would be about their
+step 4 found nothing worth acting on, when the suggestion is only a different way to run the
+work with nothing to change anywhere, or when the view is a teammate's (the recommendation would be about their
 prompts; leave it to them).
 
 - Offer it in one line at the end of the answer, as a yes or no: "Want me to save this as a
@@ -167,7 +231,7 @@ prompts; leave it to them).
   published, because a recommendation leaves this machine and the answer in chat does not.
 - Never create or publish one without a yes. A yes to answering a question is not a yes to this.
 - On a yes, load the `hypaware-query` skill and follow it to make the recommendation, carrying
-  over the Problem, Fix and counted evidence already written. Do not re-read the messages and
+  over what happened, what would help and the counted evidence already written. Do not re-read the messages and
   do not quote them beyond a few words. Give the `hyprec-` id back in chat.
 - On a no, or no reply, leave it. The dialog already offered the other questions; the person
   can ask for one when they want it.
@@ -178,7 +242,7 @@ The digest reads one person at a time. For someone else on the team, run it agai
 server and say whose machines to read:
 
 1. List machines and their owners (the recorded user id is unreliable, so go by home directory):
-   `hyp query sql "SELECT gateway_id, regexp_extract(MIN(cwd), '^/(Users|home)/[^/]+') AS home FROM ai_gateway_messages WHERE date >= '<from>' AND conversation_source IN ('claude_code','codex') GROUP BY gateway_id" --remote <target>`
+   `hyp query sql "SELECT gateway_id, regexp_extract(MIN(cwd), '^/(Users|home)/[^/]+') AS home FROM ai_gateway_messages WHERE date >= '<from>' AND conversation_source IN ('claude_code','claude','claude-desktop','codex') GROUP BY gateway_id" --remote <target>`
 2. `node scripts/digest.mjs --remote <target> --gateways <gw-a,gw-b> --from … --to … --out …`
    (add `--owner <github-org>` for your own org so `gh` can fill in PR titles)
    The person's GitHub login is inferred from the PRs their sessions opened and printed to stderr.

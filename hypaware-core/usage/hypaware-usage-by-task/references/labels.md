@@ -50,7 +50,7 @@ Fields:
   - `fix` a defect or broken behaviour;
   - `investigate` analysis, research, questions and data lookups that did not ship code;
   - `other` setup, tooling, running report generators, anything else.
-- `slices`: slice ids from the digest (`<8-char session prefix>|<YYYY-MM-DD>`). A slice goes in
+- `slices`: slice ids from the digest (`<session prefix>|<YYYY-MM-DD>`, copied exactly; the prefix is eight characters or longer). A slice goes in
   at most one group.
 - `prs`: PR ids from the digest's `prs` map (`repo#number`). Only PRs the user authored in the
   window exist there; anything else is dropped with a warning.
@@ -61,67 +61,72 @@ Top-level field beside `groups`, written in the same pass as the labels, from th
 
 ```json
 "questions": [
-  "I seem to retype the same closing steps in sessions that end in a PR. Using HypAware, check Nov 11 to 17 and suggest what I could say up front or write down once so I stop repeating them.",
-  "I keep starting the same prompts again in fresh sessions (installs, report runs, test prompts). Check my HypAware recordings for Nov 11 to 17 and suggest whether a script, a skill or one planned run would save me the restarts.",
-  "I seem to lose track of earlier sessions and ask agents where they went. Using HypAware, look at Nov 11 to 17 and suggest one habit that would save me the searching."
+  "My agents seem to need the same closing steps spelled out in every session that ends in a PR. Using HypAware, check Nov 11 to 17 and draft what I could add to the repo's agent instructions so they do it without being asked.",
+  "The same prompts were started again in fresh sessions (installs, report runs, test prompts). Check my HypAware recordings for Nov 11 to 17 and suggest whether a script, a skill or one planned run would save the restarts.",
+  "Finding earlier sessions took a few tries this week. Using HypAware, look at Nov 11 to 17 and suggest a quick way to get back to one."
 ]
 ```
 
-Exactly three. They are offered in the terminal as a pick-one dialog after the chart, and the
+Three, when the window supports three. A small window (fewer than five sessions) often does
+not: write one only for something the digest shows in at least two sessions or in one long
+one, and leave the list shorter or empty before padding it. Never more than three. They are offered in the terminal as a pick-one dialog after the chart, and the
 page skill lists them under its chart. Write each so it also works pasted into a new session.
 
-The goal of the questions is a helpful improvement to something that may have been frustrating
-the person: each one names a possible frustration the window shows, and its answer is one simple
-change that would ease it in every session from now on. They are offers of help, not an audit and
-not a critique of how the person works. They are not about understanding one task either. A
-question that could only be answered with "here is what happened in that conversation" is the
-wrong question.
+The goal of the questions is to make the person's next week with agents easier. Each one names
+a place in the window where the work took extra effort, and its answer is one thing that would
+remove that effort in every session from now on. They are offers of help, worded as
+`SKILL.md` describes under "How to say it": never an audit, and never a description of the
+person. They are not about understanding one task either. A question that could only be
+answered with "here is what happened in that conversation" is the wrong question.
 
-- **Open with the possible frustration, in plain words.** Start each question with what seems to
-  keep happening, said the way the person would say it about their own week: "I seem to retype
-  the same closing steps", "I keep starting the same prompt again", "I seem to lose track of
-  earlier sessions". Say "seem to" or "keep": the digest shows a pattern, not how the person felt
-  about it, so do not state that they were frustrated and do not call anything a mistake.
-- **Then ask for the improvement, and say what it would save.** "Suggest what I could write down
-  once so I stop repeating them", "suggest one habit that would save me the searching". The
-  reader should see what they get from picking it.
-
-- **Ask about a working habit, across the whole window.** Each question covers one way of
-  steering agents and looks for it in all the sessions where it shows, not in a single
-  conversation. Habits worth asking about, when the digest shows them:
-  - how requests are opened: corrections, the same thing asked twice, scope that grew mid-way;
+- **Open with what happened, with the agent or the work as the subject.** "My agents seem to
+  need the same closing steps spelled out", "the same prompt was started again in fresh
+  sessions", "finding earlier sessions took a few tries". Say "seem to": the digest shows what
+  was typed, not why, and not how the person felt about it. No "I keep", no "habit", nothing
+  that reads as a fault.
+- **Then ask for what would help, and say what it would save.** "Draft what I could add to the
+  repo's agent instructions so they do it without being asked", "suggest a quick way to get
+  back to one". The reader should see what they get from picking it.
+- **Prefer something that can be set up once.** A section for CLAUDE.md or AGENTS.md, a skill
+  or slash command, a hook, a permission, a script. These are fixes the person keeps. Where
+  the digest shows them, ask about:
+  - instructions the agent needed again: closing steps, base branches, commit rules, the same
+    background explained in session after session;
+  - go-aheads and status checks: an agent that stopped to be told the next step, or was asked
+    whether something merged, ran or passed, which a permission or a standing instruction
+    would cover;
   - starting over: the same prompt begun in several fresh sessions, retries, parallel runs
-    compared by eye;
-  - keeping track: "where is the session where I...", status checks, "is it done?", reopening
-    old work to find out where it stood;
-  - checking the result: asking afterwards whether docs, tests or a second repo were covered;
-  - waiting and handing off: long sessions with few prompts, work moved between clients.
-- **Look wider than repeated prompts.** At least one of the three should be about the broader
-  way the person uses coding agents, not one recurring sentence. Read the digest for the shape
-  of the work as well as its openings:
-  - planning: big pieces of work begun with a one-line request and steered by corrections, where
+    compared by eye, which a script, a skill or one planned run would cover;
+  - keeping track: "where is the session where I...", reopening old work to find where it
+    stood, which a note at the end of a session or a naming rule would cover;
+  - checking the result: docs, tests or a second repo asked about afterwards, which a
+    checklist in the instructions or a hook would cover.
+- **One of the three may be about how the work is run**, when the digest shows it and nothing
+  to set up would cover it. Read the digest for the shape of the work as well as its openings:
+  - planning: a big piece of work begun from a one-line request and reshaped as it went, where
     a plan or a written spec first would have carried it;
   - splitting work: one very long session covering several unrelated goals, or many tiny
     sessions for what was one job; work done one step at a time that could run side by side;
-  - what the agent is given: the same background explained again in session after session,
-    which belongs in the repository's agent instructions or a skill;
-  - how results are checked: output accepted without a test or review step, or checked by hand
-    every time when the agent could run the check itself;
   - which tool for which job: one client or model used for everything, or heavy sessions spent
-    on work a smaller, quicker run would do; tool counts that are all reading and no running.
-  The same rule holds: ask only about what the digest shows (session lengths, prompt counts,
-  tool names, clients, models, repos), and say what it shows in the question.
-- **Let the digest pick the three.** Use a habit only when the digest shows it (repeated first
+    on work a smaller, quicker run would do.
+  Word these as something to try, with what it would save.
+- **Three different kinds of fix.** Try for three that would be fixed in three different
+  places (an instruction file, a skill or script, a permission or hook, a way of running the
+  work), so the three answers cannot come out as the same advice.
+  The same rule holds for all of them: ask only about what the digest shows (session lengths,
+  prompt counts, tool names, clients, models, repos), and say what it shows in the question.
+- **Let the digest pick the three.** Use one only when the digest shows it (repeated first
   prompts, many short sessions with the same opening, prompts that are corrections or
   lookups), and put what the chart shows in brackets as examples ("installs, report runs, test
-  prompts") so the agent knows where to look. Prefer the habit that touches the most sessions
-  or output. Do not write a question about a habit the digest gives no sign of.
+  prompts") so the agent knows where to look. Prefer what touches the most sessions
+  or output. Do not write a question about something the digest gives no sign of.
 - **Make the first question about the work that shipped** (sessions that ended in a PR) when
   there is any, so the first answer applies to the person's normal coding, not to an unusual
   week of test runs.
-- **The ask is always for a change**: "what I could say up front", "whether a script, a skill
-  or one planned run would save me the restarts", "one habit that would save me the searching".
-  Not "summarise this", not "break down the tokens", and not "where did I go wrong".
+- **The ask is always for something that would help**: "what I could add to the agent
+  instructions", "whether a script, a skill or one planned run would save the restarts", "a
+  quick way to get back to one". Not "summarise this", not "break down the tokens", and not
+  "where did I go wrong".
 - **Name HypAware in every question** ("Using HypAware, check ...", "Check my HypAware
   recordings for ..."). A new session has no reason to open the recordings unless the question says so;
   without it the agent answers from the repo or from memory. The renderer warns when a question
@@ -129,7 +134,7 @@ wrong question.
 - Make it stand alone: give the dates and name the kind of work in plain words, because a new
   session has not seen the chart. No slice ids, file paths or skill names.
 - One or two sentences, under 240 characters, in the person's voice ("I", "my").
-- Three different habits. Do not ask about customers or other people by name.
+- Do not ask about customers or other people by name.
 
 ## The recommendation
 
@@ -140,20 +145,26 @@ saved one would be stale by the next run. The parts are:
 ```json
 "recommendation": {
   "task": "Scheduled and custom reports",
-  "problem": "What happened and what it cost, for someone who was not there. Two or three sentences.",
-  "fix": "The concrete change in how to work next time, and how to tell it worked.",
-  "evidence": ["Counted or dated facts from the messages and the digest, one per line, at most four."],
-  "wider": "The broader habit this is one case of, the two or three other places in the window it shows, and the one broader change that covers them all."
+  "what_happened": "What the recordings show and what it cost, for someone who was not there, with the agent or the work as the subject. Two or three sentences.",
+  "what_would_help": "The one thing to set up or try, with the text to add where it is a file, and how to tell it worked.",
+  "based_on": ["Counted or dated facts from the messages and the digest, one per line, at most four."],
+  "where_else": "The two or three other places in the window where the same kind of setup would have saved effort, what to add for each, and the one thing to do first."
 }
 ```
 
-- Name the behaviour and its consequence, then one change. No list of five tips.
-- The wider pattern is not optional and not a follow-up. A narrow fix on its own ("add the
-  label rule to your instructions") reads as a tip; what helps the person is the habit behind
-  it ("how you work and what finished means are in your head, and the agent learns them one
-  message at a time"). Lead from the narrow case to that habit, show it in other kinds of work
-  from the window, and end on the broader change, with the narrow fix as its first step. Keep
-  it to a short paragraph or three bullets.
+- Word all of it as `SKILL.md` describes under "How to say it". Say what happened and what it
+  cost, then one thing that would help. No list of five tips.
+- Where the fix is a file, draft it. Give the lines to add to CLAUDE.md or AGENTS.md, the
+  steps of the skill, the permission entry, taken from what the person already told their
+  agents. "You gave the commit rule three times, so here it is as a section" is the answer;
+  "consider documenting your workflow" is not. Then offer to add it.
+- "Where else it would help" is not optional and not a follow-up. A single fix on its own
+  reads as a tip. From the wider read, show the same kind of gap in other work from the
+  window, each with a count and with what to add for it, so the person sees how far one
+  afternoon of setup would reach. Keep it to a short paragraph or three bullets, and write
+  its closing line from this person's week, not from a stock sentence.
+- A suggestion about how to run the work (plan first, a session per goal) is welcome where the
+  messages point to it. Give it as something to try and say what it would save.
 - Evidence is counts, times and PR ids. Do not paste the person's messages; a few quoted words
   are enough to show what kind of message you counted.
 - Say what you inferred and could not check.
@@ -161,7 +172,10 @@ saved one would be stale by the next run. The parts are:
 ## Choosing themes
 
 The page fails when the top table reads like a session list. Aim for **five to seven themes,
-never more than eight** (the renderer warns above eight).
+never more than eight** (the renderer warns above eight). That is for a normal week. A window
+with fewer than ten sessions, or one where a single job is most of the output, has as many
+themes as it had separate goals, even one or two: do not split one job by day or by branch to
+reach five.
 
 - Pick themes first, then sort groups into them. Read the PR titles and first prompts, ask
   "what were the handful of things this person was trying to get done?", and write those down
@@ -176,14 +190,17 @@ never more than eight** (the renderer warns above eight).
 - A theme under about 2% of output tokens should be folded into a neighbour or a catch-all,
   unless it carries a PR that fits nowhere else.
 - Assign every slice above a few thousand output tokens to some group, so little is left for the
-  "Other sessions" row. That does not mean a group each: see "How many groups" below.
+  "Other sessions" row. That does not mean a group each: see "How many groups" below. The two
+  rules do not compete. The size floor there is for groups, not slices: a slice too small to be
+  a group joins the nearest group in its theme, or a catch-all group. It is not left out.
 - Do not name customers or other people in a theme or label; say "a customer org".
 
 ## How many groups
 
-Aim for **two or three groups per theme, about fifteen in the chart**. The chart shows at most
-three named rows per theme and folds the rest into one "smaller pieces of work" row, so a
-fourth and fifth group in a theme are names nobody will see.
+Aim for **two or three groups per theme, about fifteen in the chart**. The chart shows up to
+three named rows per theme and folds two or more left over into one "smaller pieces of work"
+row (a single one left over is shown as a fourth row), so a fourth and fifth group in a theme
+are names nobody will see.
 
 - A group should be at least about 2% of the period's output tokens. Anything smaller joins a
   neighbour in the same theme; do not name an 8K-token session on a 2M-token page.
@@ -206,6 +223,11 @@ fourth and fifth group in a theme are names nobody will see.
 - Keep `prs_rule` attributions unless the prompts clearly contradict them. Add a PR the rule
   missed when the prompt names the work (for example the prompt says "server + hypscope" and
   only the server PR was caught) or when the branch in `branches` matches the PR's title.
+- A PR belongs to one group: the one holding the session that opened it. When two slices both
+  carry it in `prs_rule`, the one with `prs_graph` evidence wins, then the one with the fewest
+  minutes in `prs_seen`. A coordinating session that started the session which opened the PR
+  sees its link minutes later and gets it by the rule too; the PR goes with the session that
+  did the work, not the one that started it. The same holds for a review agent's session.
 - Never attach a PR a session merely read, reviewed or mentioned. `prs_seen` lists every PR link
   with how many minutes after creation it first appeared; large numbers mean "mentioned", small
   numbers mean "opened here".

@@ -37,13 +37,22 @@ function hypSql(sql, graphIds = false) {
 }
 const GW = (opt('--gateways', '') || '').split(',').filter((g) => /^[\w-]+$/.test(g));
 const OWNER = opt('--owner', null);
-const WHERE = `date >= '${D0}' AND date <= '${D1}' AND conversation_source IN ('claude_code','codex')` + (GW.length ? ` AND gateway_id IN (${GW.map((g) => `'${g}'`).join(',')})` : '');
+// Claude Code is recorded on two lanes: "claude_code" (the gateway proxy, complete while it is attached) and "claude"
+// (the session transcripts: history imported at setup, and machines recording without the proxy). A new install has
+// only the second, so both are read. Claude Desktop's code sessions are the same again: "claude_code" through the
+// proxy, "claude-desktop" from its own transcripts. A session on more than one lane is counted from one of them, the
+// one holding more output: normally the proxy, but a transcript lane when the proxy was attached part-way through.
+// See onePerLane.
+const WHERE = `date >= '${D0}' AND date <= '${D1}' AND conversation_source IN ('claude_code','claude','claude-desktop','codex')` + (GW.length ? ` AND gateway_id IN (${GW.map((g) => `'${g}'`).join(',')})` : '');
 const USAGE = `JSON_EXTRACT(attributes,'$.usage') IS NOT NULL`;
 const tsum = (f) => `SUM(COALESCE(CAST(JSON_EXTRACT(attributes,'$.usage.${f}') AS BIGINT),0)) AS ${f}`;
 // Human-typed turns: the 1.48+ label, or, for rows recorded before the label existed, the text heuristic from hypaware-query/sql.md.
+// Codex's approval reviewer runs under the parent session id and is handed the transcript and the planned action
+// as user text. Its turns carry the model "codex-auto-review"; nobody typed them, and on a machine with approvals on
+// they outnumber typed messages a hundred to one.
 const HUMAN = `(JSON_EXTRACT_STRING(attributes,'$.claude.origin.kind') = 'human'
- OR JSON_EXTRACT_STRING(attributes,'$.codex.content_item_kinds') LIKE '%"user.text"%'
- OR (conversation_source = 'claude_code' AND JSON_EXTRACT_STRING(attributes,'$.claude.origin.kind') IS NULL AND JSON_EXTRACT_STRING(attributes,'$.claude.prompt_source') IS NULL
+ OR (JSON_EXTRACT_STRING(attributes,'$.codex.content_item_kinds') LIKE '%"user.text"%' AND (model IS NULL OR model <> 'codex-auto-review'))
+ OR (conversation_source IN ('claude_code','claude','claude-desktop') AND JSON_EXTRACT_STRING(attributes,'$.claude.origin.kind') IS NULL AND JSON_EXTRACT_STRING(attributes,'$.claude.prompt_source') IS NULL
      AND COALESCE(is_sidechain,false) = false AND (agent_id IS NULL OR agent_id = '') AND (entrypoint IS NULL OR entrypoint <> 'sdk-cli')
      AND substr(content_text,1,1) NOT IN ('<','[') AND content_text NOT LIKE 'Base directory for this skill%' AND content_text NOT LIKE 'Tool loaded.%'
      AND content_text NOT LIKE 'Skill /%' AND content_text NOT LIKE 'This session is being continued%' AND content_text NOT LIKE 'Another Claude session sent%'))`;
@@ -56,26 +65,32 @@ const rows = hypSql(`SELECT session_id, date, conversation_source, model, COUNT(
  MIN(COALESCE(repo_root, cwd)) AS repo_a, MAX(COALESCE(repo_root, cwd)) AS repo_b, MIN(git_branch) AS branch_a, MAX(git_branch) AS branch_b
  FROM ai_gateway_messages WHERE ${WHERE} AND ${USAGE}
  GROUP BY session_id, date, conversation_source, model`);
+const laneOut = new Map(); // session -> { claude_code, claude } output tokens
+for (const r of rows) if (r.conversation_source !== "codex") { const o = laneOut.get(r.session_id) ?? laneOut.set(r.session_id, {}).get(r.session_id); o[r.conversation_source] = (o[r.conversation_source] ?? 0) + r.output_tokens; }
+const LANES = ["claude_code", "claude", "claude-desktop"]; // on a tie the earlier one wins
+const lane = (sid) => { const o = laneOut.get(sid); return !o ? null : LANES.reduce((best, l) => (o[l] ?? -1) > (o[best] ?? -1) ? l : best, LANES[0]); };
+const onePerLane = (r) => r.conversation_source === "codex" || lane(r.session_id) === null || lane(r.session_id) === r.conversation_source;
+{ const n = rows.length; rows.splice(0, n, ...rows.filter(onePerLane)); }
 lap("sql: token aggregates");
 
 // 2. first three and last human-typed prompts per session-day
-const prompts = hypSql(`SELECT session_id, date, rn, rd, substr(content_text,1,240) AS prompt FROM (
- SELECT session_id, date, content_text,
-  ROW_NUMBER() OVER (PARTITION BY session_id, date ORDER BY message_created_at) AS rn,
-  ROW_NUMBER() OVER (PARTITION BY session_id, date ORDER BY message_created_at DESC) AS rd
+const prompts = hypSql(`SELECT session_id, date, conversation_source, rn, rd, substr(content_text,1,240) AS prompt FROM (
+ SELECT session_id, date, conversation_source, content_text,
+  ROW_NUMBER() OVER (PARTITION BY session_id, date, conversation_source ORDER BY message_created_at) AS rn,
+  ROW_NUMBER() OVER (PARTITION BY session_id, date, conversation_source ORDER BY message_created_at DESC) AS rd
  FROM ai_gateway_messages WHERE ${WHERE} AND role='user' AND part_type='text' AND ${HUMAN}) t
- WHERE rn <= 3 OR rd = 1 ORDER BY session_id, date, rn`);
+ WHERE rn <= 3 OR rd = 1 ORDER BY session_id, date, rn`).filter(onePerLane);
 lap("sql: human prompts");
 
 // 3. PR links per session with first mention
-const mentions = hypSql(`SELECT session_id, regexp_extract(content_text, '${PR_RE}') AS pr, MIN(message_created_at) AS first_at
+const mentions = hypSql(`SELECT session_id, conversation_source, regexp_extract(content_text, '${PR_RE}') AS pr, MIN(message_created_at) AS first_at
  FROM ai_gateway_messages WHERE ${WHERE} AND content_text LIKE '%github.com/%/pull/%'
- GROUP BY session_id, regexp_extract(content_text, '${PR_RE}')`).filter((m) => m.pr);
+ GROUP BY session_id, conversation_source, regexp_extract(content_text, '${PR_RE}')`).filter((m) => m.pr && onePerLane(m));
 lap("sql: PR mentions");
 
 // 4. top tool names per session-day (cheap signal: what kind of work it was)
-const tools = hypSql(`SELECT session_id, date, tool_name, COUNT(*) AS n FROM ai_gateway_messages
- WHERE ${WHERE} AND part_type='tool_call' AND tool_name IS NOT NULL GROUP BY session_id, date, tool_name`);
+const tools = hypSql(`SELECT session_id, date, conversation_source, tool_name, COUNT(*) AS n FROM ai_gateway_messages
+ WHERE ${WHERE} AND part_type='tool_call' AND tool_name IS NOT NULL GROUP BY session_id, date, conversation_source, tool_name`).filter(onePerLane);
 lap("sql: tool counts");
 
 // 5. Pull requests. HypAware's own GitHub events and graph come first: they work for any org, need no
@@ -119,7 +134,7 @@ if (opt("--prs", "auto") !== "none") {
       if (prs[k] && !seen.has(sid + k)) { seen.add(sid + k); graphLinks.push({ session_id: sid, pr: k }); }
     }
     lap(`sql: session to PR links from the graph (${sn.length} sessions, ${at.length} commits seen, ${graphLinks.length} links)`);
-  } catch (e) { process.stderr.write("  graph not readable here; PR links fall back to the link-timing rule\n"); }
+  } catch (e) { process.stderr.write("  note: no graph here, so PR links use the link-timing rule (expected where the graph is not built)\n"); }
   // gh: titles, plus any PR the events have not caught up with. Never for another org: its name would go to GitHub.
   if (!has("--no-gh") && !ORG) try {
     const found = JSON.parse(execFileSync("gh", ["search", "prs", ...(OWNER ? ["--owner", OWNER] : ["--author", "@me"]), "--created", `${D0}..${D1}`, "--limit", "500",
@@ -136,8 +151,13 @@ if (opt("--prs", "auto") !== "none") {
 }
 
 // assemble slices
-const CL = { claude_code: "Claude Code", codex: "Codex" };
-const key = (s, d) => `${s.slice(0, 8)}|${d}`;
+const CL = { claude_code: "Claude Code", claude: "Claude Code", "claude-desktop": "Claude Code", codex: "Codex" };
+// A slice id is a session prefix and a day. Eight characters is enough for random ids, but Codex ids are time-ordered:
+// their first eight characters are the same for every session started in the same minute or so, and sessions an
+// orchestrator starts together would be merged into one slice. So the prefix grows until every session has its own.
+const SIDS = [...new Set(rows.map((r) => r.session_id))];
+let PFX = 8; while (PFX < 36 && new Set(SIDS.map((s) => s.slice(0, PFX))).size < SIDS.length) PFX++;
+const key = (s, d) => `${s.slice(0, PFX)}|${d}`;
 const slices = new Map();
 const short = (p) => p ? p.replace(/^\/Users\/[^/]+\//, "~/") : null;
 for (const r of rows) {
