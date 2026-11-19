@@ -1,6 +1,6 @@
 # labels.json contract
 
-`chart.mjs --labels labels.json` reads this file, and so does the page skill's `render.mjs`. It
+`chart.mjs --labels labels.json` reads this file, and so does the page's `render.mjs`. It
 carries names and groupings only. Every token count shown is summed by the script from the slice ids you list, so a wrong id
 cannot move numbers around; it is just ignored with a warning on stderr.
 
@@ -70,12 +70,12 @@ Top-level field beside `groups`, written in the same pass as the labels, from th
 Three, when the window supports three. A small window (fewer than five sessions) often does
 not: write one only for something the digest shows in at least two sessions or in one long
 one, and leave the list shorter or empty before padding it. Never more than three. They are offered in the terminal as a pick-one dialog after the chart, and the
-page skill lists them under its chart. Write each so it also works pasted into a new session.
+page lists them under its chart. Write each so it also works pasted into a new session.
 
 The goal of the questions is to make the person's next week with agents easier. Each one names
 a place in the window where the work took extra effort, and its answer is one thing that would
 remove that effort in every session from now on. They are offers of help, worded as
-`SKILL.md` describes under "How to say it": never an audit, and never a description of the
+`INSTRUCTIONS.md` describes under "How to say it": never an audit, and never a description of the
 person. They are not about understanding one task either. A question that could only be
 answered with "here is what happened in that conversation" is the wrong question.
 
@@ -152,7 +152,7 @@ saved one would be stale by the next run. The parts are:
 }
 ```
 
-- Word all of it as `SKILL.md` describes under "How to say it". Say what happened and what it
+- Word all of it as `INSTRUCTIONS.md` describes under "How to say it". Say what happened and what it
   cost, then one thing that would help. No list of five tips.
 - Where the fix is a file, draft it. Give the lines to add to CLAUDE.md or AGENTS.md, the
   steps of the skill, the permission entry, taken from what the person already told their

@@ -28,15 +28,15 @@ export const USAGE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)),
 
 /** The instruction file each form of the command starts the client on. */
 export const USAGE_INSTRUCTIONS = Object.freeze({
-  chat: path.join(USAGE_DIR, 'hypaware-usage-by-task', 'SKILL.md'),
-  page: path.join(USAGE_DIR, 'hypaware-usage-by-task-page', 'SKILL.md'),
+  chat: path.join(USAGE_DIR, 'hypaware-usage-by-task', 'INSTRUCTIONS.md'),
+  page: path.join(USAGE_DIR, 'hypaware-usage-by-task-page', 'INSTRUCTIONS.md'),
 })
 
 /**
  * The prompt a client is started on.
  *
- * The instruction files are written as skills, and the client is told to
- * follow one by path because it has no skill of that name to load. The
+ * The client is told to follow an instruction file by path: it is not a
+ * skill, so there is no name for the client to load it by. The
  * dialog sentence is for clients with no pick-one tool: the instructions
  * name Claude Code's, and a client without it would otherwise skip the
  * questions or stall on a tool it does not have. The chart sentence is here
@@ -51,8 +51,8 @@ export function usagePrompt({ page, workDir, instructions = '' }) {
   const what = page
     ? 'Make the HTML page of my AI usage by task from this machine\'s HypAware recordings.'
     : 'Show me what my AI usage went into, by task, from this machine\'s HypAware recordings.'
-  return `${what} Follow the instructions at ${JSON.stringify(file)} as you would an installed skill. ` +
-    'They ship with the hyp CLI and are not installed as a skill, so read them from that path, ' +
+  return `${what} Follow the instructions at ${JSON.stringify(file)}. ` +
+    'They ship with the hyp CLI and are not an installed skill, so read them from that path, ' +
     'and run the scripts from the scripts directory beside each instruction file. ' +
     'I cannot see what the scripts print, so paste the chart itself into your reply in a code block; do not just describe it. ' +
     'Where they call for a pick-one dialog, use your question tool (AskUserQuestion in Claude Code) in the same turn as the chart; ' +

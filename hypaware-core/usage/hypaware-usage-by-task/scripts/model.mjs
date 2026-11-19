@@ -1,5 +1,5 @@
 // Shared model for the usage-by-task views: reads digest.json (+ optional labels.json) and works out the groups,
-// themes and chart rows. Numbers come only from the digest. chart.mjs (text, this skill) and the page skill's
+// themes and chart rows. Numbers come only from the digest. chart.mjs (text) and the page's
 // render.mjs (HTML) both import this, so the two views always agree.
 import { compareStrings as cmp } from "../../../../src/core/util/compare_strings.js";
 import { readFileSync } from "node:fs";

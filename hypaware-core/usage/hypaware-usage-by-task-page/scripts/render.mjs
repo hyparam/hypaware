@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// groups, themes, rows and the three questions come from the usage-by-task skill's model, shared with its text chart
+// groups, themes, rows and the three questions come from the usage-by-task model, shared with its text chart
 import { cmp, argv, opt, D, LAB, warn, CATS, LEGACY, MAX_THEMES, byId, NOPR, prs, fresh, addSlice, groups, assigned, ruleGroups, claimed, unclaimed, THEMED, shown, tok, esc, fmt, mc, cls, bar, prtag, prlink, sortedPrs, chip, T, prOut, ccOut, pct, f1, cut, ROWS_PER_THEME, themeRows, sections, LABEL_MAX, QS, ROW_FLOOR, THEME_MAX } from "../../hypaware-usage-by-task/scripts/model.mjs";
 const OUT = opt("--out", `${D.window.to}-usage-by-task.html`);
 const CW = 800, HEAD = 30, ROW = 24, GAP = 10, xLab = 12, xBar = 312, barMax = 100, xl = 480, xr = 556;

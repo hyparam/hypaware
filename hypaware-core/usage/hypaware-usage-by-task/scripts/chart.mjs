@@ -14,7 +14,7 @@ const tprs = (g) => g.prs.size ? "  " + prList(sortedPrs(g)) : "";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const span = (d) => MONTHS[Number(d.slice(5, 7)) - 1] + " " + Number(d.slice(8, 10));
 const lines = ["AI usage by task, " + span(D.window.from) + " to " + span(D.window.to),
-  tok(T.tokens.output) + " output tokens, " + T.sessions + " sessions" + (NOPR ? "" : ", " + claimed.size + " PRs tied to sessions, " + pct(prOut, T.tokens.output) + "% of output in PR work"),
+  tok(T.tokens.output) + " output tokens, " + T.sessions + " sessions" + (NOPR ? "" : ", " + claimed.size + " PRs tied to sessions, " + pct(prOut, T.tokens.output) + "% of output in work tied to a PR"),
   "Bar = output tokens."];
 for (const sec of sections) {
   lines.push("");
