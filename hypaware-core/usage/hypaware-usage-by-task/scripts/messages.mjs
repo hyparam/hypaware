@@ -3,7 +3,7 @@
 // read how the work was steered and write one recommendation. Human messages only, never model output.
 // usage: node messages.mjs --digest digest.json --slices "<id>,<id>" [--max 200] [--chars 300]
 import { execFileSync } from "node:child_process";
-import { readFileSync, unlinkSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,12 +36,15 @@ const sql = `SELECT session_id, date, conversation_source, MIN(message_created_a
 // there that node cannot start without a shell, an npx run puts nothing there, and another install's hyp would read
 // with a different version than the one these scripts shipped with.
 const HYP = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "bin", "hypaware.js");
-const tmp = join(tmpdir(), `hyp-msgs-${process.pid}.json`);
+// the result holds recorded prompts: it goes to a folder only this user can read, removed on any exit
+const TMP = mkdtempSync(join(tmpdir(), "hyp-msgs-"));
+process.on("exit", () => rmSync(TMP, { recursive: true, force: true }));
+const tmp = join(TMP, "messages.json");
 const args = ["query", "sql", sql, "--format", "json", "--output", tmp]; if (D.remote) args.push("--remote", D.remote); if (D.remote && D.org) args.push("--org", D.org);
 execFileSync(process.execPath, [HYP, ...args], { stdio: ["ignore", "ignore", "inherit"] });
 // A Claude Code session recorded on both lanes (proxy and transcript) holds each message twice: read the lane with
 // more of them, which is the proxy unless it was attached part-way through the session.
-const all = JSON.parse(readFileSync(tmp, "utf8")); unlinkSync(tmp);
+const all = JSON.parse(readFileSync(tmp, "utf8")); rmSync(TMP, { recursive: true, force: true });
 const per = new Map(); for (const r of all) { const o = per.get(r.session_id) ?? per.set(r.session_id, {}).get(r.session_id); o[r.conversation_source] = (o[r.conversation_source] ?? 0) + 1; }
 const LANES = ["claude_code", "claude", "claude-desktop"];
 const lane = (sid) => { const o = per.get(sid); return LANES.reduce((best, l) => (o[l] ?? -1) > (o[best] ?? -1) ? l : best, LANES[0]); };

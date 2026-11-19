@@ -210,7 +210,8 @@ ${qSection}
 <h2>Key figures</h2>
 ${figures}
 ${RS ? `<script type="application/json" id="rsdata">${JSON.stringify(RS).replace(/</g, "\\u003c")}</script><script>${RS_SCRIPT}</script>` : ""}<script>${SCRIPT}</script>${QS.length ? `<script>${COPY_SCRIPT}</script>` : ""}</body></html>`;
-mkdirSync(dirname(OUT) || ".", { recursive: true }); writeFileSync(OUT, page);
+// the page holds recorded prompts: a new folder and the file are this user's alone
+mkdirSync(dirname(OUT) || ".", { recursive: true, mode: 0o700 }); writeFileSync(OUT, page, { mode: 0o600 });
 // stdout: a short summary the caller can relay
 console.log(`wrote ${OUT}`);
 if (unclaimed.length) console.log(`unclaimed PRs: ${unclaimed.join(", ")}`);

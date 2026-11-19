@@ -7,7 +7,7 @@
 // Deterministic. Prints timings to stderr.
 import { compareStrings as cmp } from "../../../../src/core/util/compare_strings.js";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,13 +38,17 @@ const lap = (n) => { const t = performance.now(); process.stderr.write(`  ${((t 
 // graphIds: the graph tables hide natural_key (the session id, the PR "owner/repo#n") on rows recorded only on this
 // machine unless --include-local-only is passed, and then no session matches. Those reads return ids only, never
 // conversation text, and the flag applies to the local cache, so it is added for local graph reads and nowhere else.
+// Query results hold recorded prompts: they go to a folder only this user can read, removed on any exit.
+const TMP = mkdtempSync(join(tmpdir(), "hyp-usage-"));
+process.on("exit", () => rmSync(TMP, { recursive: true, force: true }));
+let nTmp = 0;
 function hypSql(sql, graphIds = false) {
-  const path = join(tmpdir(), `hyp-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+  const path = join(TMP, `${nTmp++}.json`);
   const args = ["query", "sql", sql, "--format", "json", "--output", path];
   if (REMOTE) args.push("--remote", REMOTE); else if (graphIds) args.push("--include-local-only");
   if (REMOTE && ORG) args.push("--org", ORG);
   execFileSync(process.execPath, [HYP, ...args], { stdio: ["ignore", "ignore", "inherit"] });
-  const data = JSON.parse(readFileSync(path, "utf8")); unlinkSync(path); return data;
+  try { return JSON.parse(readFileSync(path, "utf8")); } finally { rmSync(path, { force: true }); }
 }
 const GW = (opt('--gateways', '') || '').split(',').filter((g) => /^[\w-]+$/.test(g));
 const OWNER = opt('--owner', null);
