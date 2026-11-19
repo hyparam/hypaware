@@ -1121,11 +1121,11 @@ async function runGuardedInitWizard(opts, guard) {
   }
 
   // The closing offer comes last, after whichever of the narration and the
-  // sync step this path ran: suggest a new skill? A
-  // yes runs `hyp ask`, which starts the client in its own folder under
+  // sync step this path ran: the usage-by-task view. A yes runs
+  // `hyp usage`, which starts the client in its own folder under
   // `HYP_HOME`, never in the directory `hyp init` was run from; that is
-  // what lets setup make the offer instead of printing a question to type.
-  // @ref LLP 0398#setup-offer [implements]: setup offers to run the ask; a yes runs it as a child on this terminal
+  // what lets setup make the offer instead of printing a command to type.
+  // @ref LLP 0398#setup-offer-usage [implements]: setup offers `hyp usage`; a yes runs it as a child on this terminal
   /** @type {WizardSuggestSkillResult | undefined} */
   let suggestSkill
   if (interactive && !cancelled && opts.finale?.dryRun !== true && (await guard.checkpoint())) {

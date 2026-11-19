@@ -182,7 +182,7 @@ test('runWizardSuggestSkill: interactive false never asks, even with a prompt se
 })
 
 test('runWizardSuggestSkill: yes runs `hyp usage` as a child that inherits the terminal', async () => {
-  // @ref LLP 0398#setup-offer [tests]: the offer taken is the ask itself
+  // @ref LLP 0398#setup-offer-usage [tests]: the offer taken is `hyp usage` itself
   const stdout = makeBuf()
   const child = childExiting(0)
   /** @type {any} */

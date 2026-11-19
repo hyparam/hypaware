@@ -61,7 +61,8 @@ const OWNER = opt('--owner', null);
 const WHERE = `date >= '${D0}' AND date <= '${D1}' AND conversation_source IN ('claude_code','claude','claude-desktop','codex')` + (GW.length ? ` AND gateway_id IN (${GW.map((g) => `'${g}'`).join(',')})` : '');
 const USAGE = `JSON_EXTRACT(attributes,'$.usage') IS NOT NULL`;
 const tsum = (f) => `SUM(COALESCE(CAST(JSON_EXTRACT(attributes,'$.usage.${f}') AS BIGINT),0)) AS ${f}`;
-// Human-typed turns: the 1.48+ label, or, for rows recorded before the label existed, the text heuristic from hypaware-query/sql.md.
+// Human-typed turns: the 1.48+ label, or, for rows recorded before the label existed, a text heuristic kept here (the
+// hypaware-query skill's sql.md no longer carries one).
 // Codex's approval reviewer runs under the parent session id and is handed the transcript and the planned action
 // as user text. Its turns carry the model "codex-auto-review"; nobody typed them, and on a machine with approvals on
 // they outnumber typed messages a hundred to one.

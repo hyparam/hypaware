@@ -15,8 +15,8 @@
  * under `HYP_HOME` (LLP 0398 #run-directory), never in the directory
  * setup was run from, which was the reason setup used to print and stop.
  *
- * @ref LLP 0398#setup-offer [implements]: setup offers the recommendation instead of listing questions
- * @ref LLP 0398#run-directory [constrained-by]: the client starts in the evidence folder, so setup may start it
+ * @ref LLP 0398#setup-offer-usage [implements]: setup offers `hyp usage` where it offered the recommendation
+ * @ref LLP 0398#run-directory [constrained-by]: the client starts in a folder under HYP_HOME, so setup may start it
  *
  * @import { ClientDescriptor } from '../../../../src/core/types.js'
  * @import { FinaleSummary } from '../../../../src/core/cli/types.js'
