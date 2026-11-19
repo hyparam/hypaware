@@ -134,7 +134,9 @@ export async function runUsage(argv, ctx, deps = {}) {
     ctx.stdout.write(`\nStarting ${launcher.label} on your usage by task...\n\n`)
     const { cwd, workDir } = await freshWorkDir(ctx)
     const prompt = usagePrompt({ page, workDir, instructions: String(parsed.params.instructions ?? '') })
-    const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd, env: ctx.env })
+    // The client starts in the usage folder, so a relative HYP_HOME would name a different home from there.
+    const env = ctx.env.HYP_HOME ? { ...ctx.env, HYP_HOME: path.resolve(ctx.env.HYP_HOME) } : ctx.env
+    const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd, env })
     if (!result.ok) {
       span.setAttribute('error_kind', 'client-launch')
       ctx.stderr.write(`hyp usage: could not start ${launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
@@ -158,7 +160,8 @@ export async function runUsage(argv, ctx, deps = {}) {
  * @returns {Promise<{ cwd: string, workDir: string }>}
  */
 async function freshWorkDir(ctx) {
-  const cwd = usageRoot(hypHomeFromEnv(ctx.env, ctx.env.HOME || os.homedir()))
+  // absolute, so the prompt names the same folder from wherever the client starts
+  const cwd = path.resolve(usageRoot(hypHomeFromEnv(ctx.env, ctx.env.HOME || os.homedir())))
   await fsp.mkdir(cwd, { recursive: true, mode: 0o700 })
   const workDir = path.join(cwd, 'latest')
   await fsp.rm(workDir, { recursive: true, force: true })

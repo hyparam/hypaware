@@ -71,6 +71,16 @@ test('usage starts a recorded client on the bundled instructions, in a folder un
   assert.deepEqual(seenDuringLaunch[1], [])
 })
 
+test('a relative HYP_HOME is made absolute for the prompt and the started client', async (t) => {
+  const { ctx, deps, launches, home } = await fixture(t)
+  ctx.env.HYP_HOME = path.relative(process.cwd(), path.join(home, '.hyp'))
+  assert.equal(await runUsage([], ctx, deps), 0)
+  const { prompt, cwd, env } = launches[0]
+  assert.equal(cwd, path.join(home, '.hyp', 'usage'))
+  assert.equal(env.HYP_HOME, path.join(home, '.hyp'))
+  assert.ok(prompt.includes(`Your work directory for this run is ${JSON.stringify(path.join(cwd, 'latest'))}`))
+})
+
 test('usage --page starts the client on the page instructions', async (t) => {
   const { ctx, deps, launches } = await fixture(t)
   assert.equal(await runUsage(['--page'], ctx, deps), 0)
