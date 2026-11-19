@@ -20,6 +20,9 @@ export const NOPR = Object.keys(D.prs ?? {}).length === 0;
 // ISO dates and times order as plain strings, the same on every machine: the CLI's own comparison.
 export { cmp };
 export const prs = D.prs;
+// A PR link is an https URL from GitHub or the graph. The digest is a file on disk that anything can rewrite, and an
+// href escapes quotes but not schemes, so a javascript: or data: URL would run from the page: link it nowhere instead.
+for (const p of Object.values(prs ?? {})) if (p && !/^https:\/\//i.test(String(p.url ?? ""))) p.url = "#";
 
 // ---- groups: from labels.json when given, otherwise from the attribution rule ----
 export const fresh = (label, category, auto) => ({ label, category, auto, slices: [], prs: new Set(), out: 0, cr: 0, inp: 0, cw: 0, msgs: 0, clients: {} });
