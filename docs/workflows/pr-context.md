@@ -25,7 +25,7 @@ Only people with access to the recording can follow it, so we’ve omitted
 the private links here. This is the developer’s message behind the decision
 to recover forward.
 
-![HypAware highlights the developer’s message. “Meh. Too complicated. All i care about is that if a version fails, and then we publish a new one, it updates to the newer one instead of staying on the stuck one”](../images/pr-context-evidence.jpg)
+![HypAware highlights the developer’s message. “Meh. Too complicated. All i care about is that if a version fails, and then we publish a new one, it updates to the newer one instead of staying on the stuck one”](../images/pr-context-evidence.png)
 
 ## How HypAware finds the decisions
 
