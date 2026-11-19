@@ -11,7 +11,8 @@ const tbar = (v) => { const n = Math.max(1, Math.round(v / tmax * TBAR)); return
 const PRS_PER_ROW = 4;
 const prList = (ids) => ids.length <= PRS_PER_ROW + 1 ? ids.map(prtag).join(", ") : ids.slice(0, PRS_PER_ROW).map(prtag).join(", ") + `, +${ids.length - PRS_PER_ROW} more`;
 const tprs = (g) => g.prs.size ? "  " + prList(sortedPrs(g)) : "";
-const span = (d) => new Date(d + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const span = (d) => MONTHS[Number(d.slice(5, 7)) - 1] + " " + Number(d.slice(8, 10));
 const lines = ["AI usage by task, " + span(D.window.from) + " to " + span(D.window.to),
   tok(T.tokens.output) + " output tokens, " + T.sessions + " sessions" + (NOPR ? "" : ", " + claimed.size + " PRs tied to sessions, " + pct(prOut, T.tokens.output) + "% of output in PR work"),
   "Bar = output tokens."];

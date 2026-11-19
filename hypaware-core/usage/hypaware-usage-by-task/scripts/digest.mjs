@@ -5,6 +5,7 @@
 // PRs and the session-to-PR links come from HypAware's GitHub events and graph; gh only adds titles (and is the PR
 // source where GitHub capture has nothing). --gateways picks one person's machines; --org reads another org (operators).
 // Deterministic. Prints timings to stderr.
+import { compareStrings as cmp } from "../../../../src/core/util/compare_strings.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,7 +197,7 @@ if (!keep) {
 prs = Object.fromEntries(Object.entries(prs).filter(([, p]) => keep.includes(p.author)));
 for (const l of links) {
   const p = prs[l.pr]; if (!p) continue;
-  const day = p.createdAt.slice(0, 10), mine = [...slices.values()].filter((s) => s.session_id === l.session_id).sort((a, b) => a.date.localeCompare(b.date));
+  const day = p.createdAt.slice(0, 10), mine = [...slices.values()].filter((s) => s.session_id === l.session_id).sort((a, b) => cmp(a.date, b.date));
   const s = mine.find((x) => x.date === day) ?? [...mine].reverse().find((x) => x.date <= day) ?? mine[0];
   if (s) { s.prs_rule.push(p.id); s.prs_graph.push(p.id); }
 }
@@ -214,7 +215,7 @@ const claimed = new Set(out.flatMap((s) => s.prs_rule));
 const digest = {
   window: { from: D0, to: D1 }, remote: REMOTE, org: ORG, pr_source: sources.join("+") || "none", generated_at: new Date().toISOString(), attrib_window_min: WIN_MIN,
   totals: out.reduce((t, s) => { t.msgs += s.msgs; for (const f in s.tokens) t.tokens[f] += s.tokens[f]; return t; }, { sessions: new Set(out.map((s) => s.session_id)).size, slices: out.length, msgs: 0, tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 } }),
-  prs: Object.fromEntries(Object.values(prs).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map((p) => [p.id, { ...p, claimed_by_rule: claimed.has(p.id) }])),
+  prs: Object.fromEntries(Object.values(prs).sort((a, b) => cmp(a.createdAt, b.createdAt)).map((p) => [p.id, { ...p, claimed_by_rule: claimed.has(p.id) }])),
   slices: out,
 };
 mkdirSync(dirname(OUT) || ".", { recursive: true });

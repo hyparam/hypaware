@@ -1,6 +1,7 @@
 // Shared model for the usage-by-task views: reads digest.json (+ optional labels.json) and works out the groups,
 // themes and chart rows. Numbers come only from the digest. chart.mjs (text, this skill) and the page skill's
 // render.mjs (HTML) both import this, so the two views always agree.
+import { compareStrings as cmp } from "../../../../src/core/util/compare_strings.js";
 import { readFileSync } from "node:fs";
 
 export const argv = process.argv.slice(2);
@@ -16,6 +17,8 @@ export const MAX_THEMES = 8;
 export const byId = new Map(D.slices.map((s) => [s.id, s]));
 // no PR data at all (gh missing, not signed in, or --no-gh): the page is the task list alone, with no PR wording
 export const NOPR = Object.keys(D.prs ?? {}).length === 0;
+// ISO dates and times order as plain strings, the same on every machine: the CLI's own comparison.
+export { cmp };
 export const prs = D.prs;
 
 // ---- groups: from labels.json when given, otherwise from the attribution rule ----
@@ -43,7 +46,7 @@ for (const s of D.slices) {
   if (assigned.has(s.id)) continue;
   const k = s.prs_rule.length ? "pr|" + [...s.prs_rule].sort().join(",") : "slice|" + s.id;
   if (!ruleGroups.has(k)) {
-    const label = s.prs_rule.length ? prs[[...s.prs_rule].sort((a, b) => prs[a].createdAt.localeCompare(prs[b].createdAt))[0]].title + (s.prs_rule.length > 1 ? ` (+${s.prs_rule.length - 1} more PR${s.prs_rule.length > 2 ? "s" : ""})` : "")
+    const label = s.prs_rule.length ? prs[[...s.prs_rule].sort((a, b) => cmp(prs[a].createdAt, prs[b].createdAt))[0]].title + (s.prs_rule.length > 1 ? ` (+${s.prs_rule.length - 1} more PR${s.prs_rule.length > 2 ? "s" : ""})` : "")
       : (s.prompts[0] ?? `Session ${s.id.split("|")[0]} (no human prompt recorded)`);
     ruleGroups.set(k, fresh(label, s.prs_rule.length ? "feature" : "other", true));
   }
@@ -87,13 +90,13 @@ shown.sort((a, b) => b.out - a.out);
 // ---- helpers ----
 export const tok = (n) => n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n);
 export const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;" }[c]));
-export const fmt = (n) => n.toLocaleString("en-US");
+export const fmt = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 export const mc = (g) => Object.entries(g.clients).sort((x, y) => y[1] - x[1])[0]?.[0] ?? "Claude Code";
 export const cls = (g) => mc(g) === "Claude Code" ? "s1" : "s2";
 export const bar = (v, vmax, c, lbl, title) => `<div class="bar" title="${esc(title)}"><div class="fill ${c}" style="width:${vmax ? Math.max(1.5, Math.round(v / vmax * 7600) / 100) : 1.5}%"></div><span class="val">${lbl}</span></div>`;
 export const prtag = (p) => prs[p] ? `${p}${prs[p].state === "MERGED" ? "" : ` (${prs[p].state.toLowerCase()})`}` : p;
 export const prlink = (p) => prs[p] ? `<a href="${esc(prs[p].url)}">${esc(prtag(p))}</a>` : esc(p);
-export const sortedPrs = (g) => [...g.prs].sort((a, b) => prs[a].createdAt.localeCompare(prs[b].createdAt));
+export const sortedPrs = (g) => [...g.prs].sort((a, b) => cmp(prs[a].createdAt, prs[b].createdAt));
 export const chip = (c) => `<span class="chip">${c}</span>`;
 
 // ---- sections ----

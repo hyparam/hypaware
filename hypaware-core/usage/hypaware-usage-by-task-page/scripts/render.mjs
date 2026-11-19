@@ -6,7 +6,7 @@ import { dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // groups, themes, rows and the three questions come from the usage-by-task skill's model, shared with its text chart
-import { argv, opt, D, LAB, warn, CATS, LEGACY, MAX_THEMES, byId, NOPR, prs, fresh, addSlice, groups, assigned, ruleGroups, claimed, unclaimed, THEMED, shown, tok, esc, fmt, mc, cls, bar, prtag, prlink, sortedPrs, chip, T, prOut, ccOut, pct, f1, cut, ROWS_PER_THEME, themeRows, sections, LABEL_MAX, QS, ROW_FLOOR, THEME_MAX } from "../../hypaware-usage-by-task/scripts/model.mjs";
+import { cmp, argv, opt, D, LAB, warn, CATS, LEGACY, MAX_THEMES, byId, NOPR, prs, fresh, addSlice, groups, assigned, ruleGroups, claimed, unclaimed, THEMED, shown, tok, esc, fmt, mc, cls, bar, prtag, prlink, sortedPrs, chip, T, prOut, ccOut, pct, f1, cut, ROWS_PER_THEME, themeRows, sections, LABEL_MAX, QS, ROW_FLOOR, THEME_MAX } from "../../hypaware-usage-by-task/scripts/model.mjs";
 const OUT = opt("--out", `${D.window.to}-usage-by-task.html`);
 const CW = 800, HEAD = 30, ROW = 24, GAP = 10, xLab = 12, xBar = 312, barMax = 100, xl = 480, xr = 556;
 const rowsFlat = []; let cy = 8; const heads = [];
@@ -39,7 +39,7 @@ if (REPO) {
   nodes.sort((a, b) => a.y - b.y); let prev = -Infinity; for (const n of nodes) { n.y = Math.max(n.y, prev + 30, 14); prev = n.y; }
 } else {
   const owner = new Map(); for (const t of touch) if (t.opened) owner.set(t.p, Math.min(owner.get(t.p) ?? Infinity, t.r.y));
-  const R = [...allTouched].sort((a, b) => (owner.get(a) ?? Infinity) - (owner.get(b) ?? Infinity) || prs[a].createdAt.localeCompare(prs[b].createdAt));
+  const R = [...allTouched].sort((a, b) => (owner.get(a) ?? Infinity) - (owner.get(b) ?? Infinity) || cmp(prs[a].createdAt, prs[b].createdAt));
   const span = Math.max(cy, R.length * 22 + 16);
   R.forEach((q, i) => nodes.push({ key: q, y: 8 + (span - 16) * (i + 0.5) / R.length, url: prs[q].url, label: prtag(q), sub: cut(prs[q].title, 20), tip: `${q} · ${prs[q].title}${owner.has(q) ? "" : " · no recorded session opened it"}`, mine: owner.has(q) }));
   for (const t of touch) links.push({ r: t.r, key: t.p, opened: t.opened, w: null, tip: `${t.r.g.label} → ${t.p}: ${t.opened ? "opened in this work" : `link seen ${t.min >= 120 ? Math.round(t.min / 60) + " hours" : t.min + " minutes"} after the PR was opened`}` });
@@ -68,7 +68,7 @@ chart += REPO ? `<g id="rs">${linkSvg}${nodeSvg}</g>` : nodeSvg;
 // repository mode: the data the page script needs to expand a repository into its PRs inside the chart
 const RS = REPO ? { xl, xr, CH, rows: rowsFlat.map((r) => ({ y: r.y, c: mc(r.g) === "Claude Code" ? "l1" : "l2", label: r.g.label })),
   repos: nodes.map((n) => ({ key: n.key, y: n.y, n: n.n, prs: Object.keys(prs).filter((q) => prs[q].repo === n.key).map((q) => ({ tag: prtag(q), title: prs[q].title, url: prs[q].url, at: prs[q].createdAt, row: rowsFlat.findIndex((x) => x.g.prs.has(q)) }))
-    .sort((a, b) => (a.row < 0 ? 1e9 : rowsFlat[a.row].y) - (b.row < 0 ? 1e9 : rowsFlat[b.row].y) || a.at.localeCompare(b.at)) })) } : null;
+    .sort((a, b) => (a.row < 0 ? 1e9 : rowsFlat[a.row].y) - (b.row < 0 ? 1e9 : rowsFlat[b.row].y) || cmp(a.at, b.at)) })) } : null;
 chart += "</svg>";
 
 // facts that used to be charts of their own, now one line each
