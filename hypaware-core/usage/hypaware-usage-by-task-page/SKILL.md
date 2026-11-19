@@ -1,6 +1,6 @@
 ---
 name: hypaware-usage-by-task-page
-description: Make an HTML page of a person's AI coding usage by task (Claude Code and Codex, from HypAware recordings): one chart of themes, pieces of work and the pull requests each produced, key figures, the prompts behind each piece of work, and any answers already written. Use this only when someone asks for a page, an HTML report, a visual or something to open or share of their usage by task, or asks to "make the page" after seeing the usage-by-task chart in the terminal. For the usual question of what their AI usage went into, use hypaware-usage-by-task, which answers in the chat; this skill builds on it.
+description: 'Make an HTML page of a person''s AI coding usage by task (Claude Code and Codex, from HypAware recordings): one chart of themes, pieces of work and the pull requests each produced, key figures, the prompts behind each piece of work, and any answers already written. Use this only when someone asks for a page, an HTML report, a visual or something to open or share of their usage by task, or asks to "make the page" after seeing the usage-by-task chart in the terminal. For the usual question of what their AI usage went into, use hypaware-usage-by-task, which answers in the chat; this skill builds on it.'
 ---
 
 # HypAware usage by task: the page
