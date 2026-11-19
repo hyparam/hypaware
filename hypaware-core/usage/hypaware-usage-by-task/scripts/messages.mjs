@@ -5,7 +5,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const D = JSON.parse(readFileSync(opt("--digest", "digest.json"), "utf8"));
@@ -29,9 +30,13 @@ const HUMAN = `(JSON_EXTRACT_STRING(attributes,'$.claude.origin.kind') = 'human'
 const sql = `SELECT session_id, date, conversation_source, MIN(message_created_at) AS t, substr(content_text,1,${CH}) AS p, length(content_text) AS len FROM ai_gateway_messages
  WHERE date >= '${D.window.from}' AND date <= '${D.window.to}' AND conversation_source IN ('claude_code','claude','claude-desktop','codex') AND session_id IN (${ids.map((i) => `'${i}'`).join(",")}) AND role='user' AND part_type='text' AND ${HUMAN}
  GROUP BY session_id, date, conversation_source, substr(content_text,1,${CH}), length(content_text) ORDER BY t`;
+// hyp is this package's own CLI run under this node, not a hyp looked up on PATH: on Windows npm puts a .cmd shim
+// there that node cannot start without a shell, an npx run puts nothing there, and another install's hyp would read
+// with a different version than the one these scripts shipped with.
+const HYP = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "bin", "hypaware.js");
 const tmp = join(tmpdir(), `hyp-msgs-${process.pid}.json`);
 const args = ["query", "sql", sql, "--format", "json", "--output", tmp]; if (D.remote) args.push("--remote", D.remote); if (D.remote && D.org) args.push("--org", D.org);
-execFileSync("hyp", args, { stdio: ["ignore", "ignore", "inherit"] });
+execFileSync(process.execPath, [HYP, ...args], { stdio: ["ignore", "ignore", "inherit"] });
 // A Claude Code session recorded on both lanes (proxy and transcript) holds each message twice: read the lane with
 // more of them, which is the proxy unless it was attached part-way through the session.
 const all = JSON.parse(readFileSync(tmp, "utf8")); unlinkSync(tmp);

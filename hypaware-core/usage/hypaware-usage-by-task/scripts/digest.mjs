@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
@@ -23,6 +24,10 @@ const ORG = opt("--org", null);
 const WIN_MIN = Number(opt("--attrib-window-min", 15));
 const OUT = opt("--out", "digest.json");
 const T0 = performance.now(); let last = T0;
+// hyp is this package's own CLI run under this node, not a hyp looked up on PATH: on Windows npm puts a .cmd shim
+// there that node cannot start without a shell, an npx run puts nothing there, and another install's hyp would read
+// with a different version than the one these scripts shipped with.
+const HYP = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "bin", "hypaware.js");
 const lap = (n) => { const t = performance.now(); process.stderr.write(`  ${((t - last) / 1000).toFixed(2).padStart(6)}s  ${n}\n`); last = t; };
 
 // graphIds: the graph tables hide natural_key (the session id, the PR "owner/repo#n") on rows recorded only on this
@@ -33,7 +38,7 @@ function hypSql(sql, graphIds = false) {
   const args = ["query", "sql", sql, "--format", "json", "--output", path];
   if (REMOTE) args.push("--remote", REMOTE); else if (graphIds) args.push("--include-local-only");
   if (REMOTE && ORG) args.push("--org", ORG);
-  execFileSync("hyp", args, { stdio: ["ignore", "ignore", "inherit"] });
+  execFileSync(process.execPath, [HYP, ...args], { stdio: ["ignore", "ignore", "inherit"] });
   const data = JSON.parse(readFileSync(path, "utf8")); unlinkSync(path); return data;
 }
 const GW = (opt('--gateways', '') || '').split(',').filter((g) => /^[\w-]+$/.test(g));

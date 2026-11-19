@@ -9,5 +9,5 @@ const here = dirname(fileURLToPath(import.meta.url)); const argv = process.argv.
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const digest = join(tmpdir(), `usage-digest-${process.pid}.json`);
 const pass = ["--from", "--to", "--remote", "--attrib-window-min"].flatMap((k) => opt(k) ? [k, opt(k)] : []);
-execFileSync("node", [join(here, "..", "..", "hypaware-usage-by-task", "scripts", "digest.mjs"), ...pass, "--out", digest], { stdio: "inherit" });
-execFileSync("node", [join(here, "render.mjs"), "--digest", digest, ...(opt("--out") ? ["--out", opt("--out")] : [])], { stdio: "inherit" });
+execFileSync(process.execPath, [join(here, "..", "..", "hypaware-usage-by-task", "scripts", "digest.mjs"), ...pass, "--out", digest], { stdio: "inherit" });
+execFileSync(process.execPath, [join(here, "render.mjs"), "--digest", digest, ...(opt("--out") ? ["--out", opt("--out")] : [])], { stdio: "inherit" });
