@@ -8,6 +8,7 @@
 **Related:** LLP 0015, LLP 0055, LLP 0097, LLP 0098, LLP 0105, LLP 0241, LLP 0261
 **Extended-by:** LLP 0388 (native visibility filtering for withholding-only sources)
 **Extended-by:** LLP 0431 (native suppression for graph-shaped sources without cwd)
+**Extended-by:** LLP 0617 (prepared union aligns partitions by name)
 
 > Squirreling 0.16.1 and Icebird 0.8.25 add schema-addressed native batch
 > scans. Hypaware forwards that path through semantically transparent source

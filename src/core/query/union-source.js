@@ -8,7 +8,7 @@ import { scanColumnOrNulls } from './scan-column.js'
 
 /**
  * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
- * @import { AsyncCells, AsyncRow, AsyncDataSource, ExprNode, PreparedScan, RelationSchema, ScanProperties, ScanRequest } from 'squirreling'
+ * @import { AsyncCells, AsyncRow, AsyncDataSource, ExprNode, Field, PreparedScan, RelationSchema, ScanProperties, ScanRequest, SqlType } from 'squirreling'
  */
 
 /**
@@ -294,9 +294,10 @@ export function unionSources(sources) {
 
 /**
  * Find one logical schema the union can advertise without changing its
- * existing column order. Field ids may differ between independent Iceberg
- * tables, so compatibility is by ordered name, type, and nullability; each
- * prepared request is remapped to the child table's ids below.
+ * existing column order. Field ids and column order may differ between
+ * independent Iceberg tables, so compatibility is by name, type, and
+ * nullability; each prepared request is remapped to the child table's ids
+ * below.
  *
  * A drifted union deliberately returns undefined. Its row path owns absent
  * column padding, whose undefined/null semantics are not part of the native
@@ -325,12 +326,15 @@ function commonSchema(sources, columns) {
   const first = sources[0]
   if (!first.schema) return undefined
   if (!schemaMatchesColumns(first.schema, columns)) return undefined
+  let fields = first.schema.fields
   for (let i = 1; i < sources.length; i++) {
     const source = sources[i]
     if (!source.schema) return undefined
-    if (!schemasAreCompatible(first.schema, source.schema)) return undefined
+    const merged = mergeFields(fields, source.schema)
+    if (!merged) return undefined
+    fields = merged
   }
-  return first.schema
+  return fields === first.schema.fields ? first.schema : { fields }
 }
 
 /**
@@ -344,18 +348,45 @@ function schemaMatchesColumns(schema, columns) {
 }
 
 /**
- * @param {RelationSchema} left
- * @param {RelationSchema} right
- * @returns {boolean}
+ * Merge a partition's schema into the union's logical fields, matching by
+ * name. Returns `fields` itself when nothing changed, a widened copy when a
+ * field turns nullable or unknown, and undefined when the partition drifts
+ * (a different name set) or a type truly conflicts.
+ *
+ * @ref LLP 0617#name-alignment [implements]: same name set in any order; unknown absorbs a known type; nullability widens
+ * @param {readonly Field[]} fields
+ * @param {RelationSchema} other
+ * @returns {readonly Field[] | undefined}
  */
-function schemasAreCompatible(left, right) {
-  if (left.fields.length !== right.fields.length) return false
-  return left.fields.every((field, index) => {
-    const candidate = right.fields[index]
-    return field.name === candidate.name &&
-      field.nullable === candidate.nullable &&
-      isDeepStrictEqual(field.dataType, candidate.dataType)
-  })
+function mergeFields(fields, other) {
+  if (fields.length !== other.fields.length) return undefined
+  const byName = new Map(other.fields.map((field) => [field.name, field]))
+  /** @type {Field[] | undefined} */
+  let merged
+  for (let index = 0; index < fields.length; index++) {
+    const field = fields[index]
+    const candidate = byName.get(field.name)
+    if (!candidate) return undefined
+    const dataType = mergeDataType(field.dataType, candidate.dataType)
+    if (!dataType) return undefined
+    const nullable = field.nullable || candidate.nullable
+    if (dataType === field.dataType && nullable === field.nullable) continue
+    merged ??= fields.slice()
+    merged[index] = { ...field, dataType, nullable }
+  }
+  return merged ?? fields
+}
+
+/**
+ * @param {SqlType} left
+ * @param {SqlType} right
+ * @returns {SqlType | undefined}
+ */
+function mergeDataType(left, right) {
+  if (isDeepStrictEqual(left, right)) return left
+  if (left.type === 'unknown') return left
+  if (right.type === 'unknown') return right
+  return undefined
 }
 
 /**
