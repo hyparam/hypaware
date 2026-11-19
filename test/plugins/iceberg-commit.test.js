@@ -14,6 +14,7 @@ import {
   createBlobStoreIO,
   tableUrlForBlobPrefix,
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
+import { icebergRead } from 'icebird'
 import { markerSubsumedBySnapshot } from '../../hypaware-core/plugins-workspace/format-iceberg/src/state.js'
 import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
@@ -112,6 +113,64 @@ test('commitBatch appends keep schema ids stable across batches', async () => {
       ?? final.metadata?.schemas?.[0]
     const fieldIds = (schema?.fields ?? []).map((f) => [f.name, f.id])
     assert.deepEqual(fieldIds, [['id', 1], ['value', 2]])
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+/**
+ * @param {Awaited<ReturnType<typeof probeTable>>} state
+ * @param {string} name
+ */
+function fieldType(state, name) {
+  const schema = state.metadata?.schemas?.find((s) => s['schema-id'] === state.metadata?.['current-schema-id'])
+  return schema?.fields.find((f) => f.name === name)?.type
+}
+
+// @ref LLP 0618#variant [tests]: a new export table types JSON as variant and keeps the value's shape
+test('commitBatch creates JSON columns as variant and round-trips their values', async () => {
+  const fixture = await freshLocalFsStore()
+  try {
+    const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
+    const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/json_rows')
+    /** @type {readonly ColumnSpec[]} */
+    const columns = [
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'args', type: 'JSON', nullable: true },
+    ]
+    await commitBatch(
+      { tableUrl, columns, rows: [{ id: 1n, args: { command: 'hyp status', n: 2 } }, { id: 2n, args: 'raw text' }], resolver, lister },
+      { exists: false, metadata: null }
+    )
+    const state = await probeTable(tableUrl, resolver, lister)
+    assert.equal(fieldType(state, 'args'), 'variant')
+    const rows = await icebergRead({ tableUrl, resolver, lister })
+    assert.deepEqual(rows.map((row) => row.args), [{ command: 'hyp status', n: 2 }, 'raw text'])
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+// @ref LLP 0618#legacy-tables [tests]: a table created with string JSON keeps the type and takes JSON text until it is rewritten
+test('commitBatch keeps appending JSON text to a table whose JSON column is a legacy string', async () => {
+  const fixture = await freshLocalFsStore()
+  try {
+    const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
+    const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/legacy_json_rows')
+    // A STRING declaration creates the column exactly as the old sink did for JSON.
+    await commitBatch(
+      { tableUrl, columns: [{ name: 'id', type: 'INT64', nullable: false }, { name: 'args', type: 'STRING', nullable: true }], rows: [{ id: 1n, args: '{"a":1}' }], resolver, lister },
+      { exists: false, metadata: null }
+    )
+    const legacy = await probeTable(tableUrl, resolver, lister)
+    await commitBatch(
+      { tableUrl, columns: [{ name: 'id', type: 'INT64', nullable: false }, { name: 'args', type: 'JSON', nullable: true }], rows: [{ id: 2n, args: { b: 2 } }], resolver, lister },
+      { exists: legacy.exists, metadata: legacy.metadata }
+    )
+    const state = await probeTable(tableUrl, resolver, lister)
+    assert.equal(fieldType(state, 'args'), 'string')
+    const rows = await icebergRead({ tableUrl, resolver, lister })
+    assert.deepEqual(rows.map((row) => row.args).sort(), ['{"a":1}', '{"b":2}'])
   } finally {
     await fixture.cleanup()
   }
