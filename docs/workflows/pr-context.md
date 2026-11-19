@@ -11,17 +11,21 @@ For [HypAware PR #1013](https://github.com/hyparam/hypaware/pull/1013), the
 discovery script checked two sessions on the PR branch and found seven
 candidate messages in one of them. All seven went into generation
 alongside the PR title and 17 code and test patches. The resulting
-97-word section cites six messages.
+97-word section cites six messages. This example comes from a local replay.
+The live PR contains an earlier draft based on five hand-selected messages.
 
-> **Why this PR exists.** HypAware needs automatic updates, including a way for a version that fails to boot to pick up a newly published fix rather than remain stuck. [Developer message 1](https://app.hypaware.ai/sessions/3f6427d1-4cc5-4e09-8249-1d86ca47aa99?m=ab1238e3-bc9a-4e05-82be-57844beb060e&d=2026-08-24) · [Developer message 6](https://app.hypaware.ai/sessions/3f6427d1-4cc5-4e09-8249-1d86ca47aa99?m=4bc6f116-d171-4e93-b5b5-2eb36bbdea33&d=2026-08-24)
+> **Why this PR exists.** HypAware needs automatic updates, including a way for a version that fails to boot to pick up a newly published fix rather than remain stuck.
 >
-> - **Reuse global npm installs.** The user chose installing with `npm install -g` and restarting through the service manager, rather than maintaining separate versioned installs. [Agent message 2](https://app.hypaware.ai/sessions/3f6427d1-4cc5-4e09-8249-1d86ca47aa99?m=42570778-a789-4332-a47c-3cee97a4cab5&d=2026-08-24) · [Developer message 3](https://app.hypaware.ai/sessions/3f6427d1-4cc5-4e09-8249-1d86ca47aa99?m=13138489-af6f-46e1-9411-8df8c76b9b23&d=2026-08-24)
-> - **Recover forward, not backward.** The user rejected rollback complexity. The implementation checks before kernel boot so a failing release can still find a newer fix. [Agent message 5](https://app.hypaware.ai/sessions/3f6427d1-4cc5-4e09-8249-1d86ca47aa99?m=cd96549edca7b86c&d=2026-08-24) · [Developer message 6](https://app.hypaware.ai/sessions/3f6427d1-4cc5-4e09-8249-1d86ca47aa99?m=4bc6f116-d171-4e93-b5b5-2eb36bbdea33&d=2026-08-24) · [Agent message 7](https://app.hypaware.ai/sessions/3f6427d1-4cc5-4e09-8249-1d86ca47aa99?m=53cbe69a-6025-47cc-afeb-338bb45b00d1&d=2026-08-24)
-> - **Limit registry checks.** The assistant proposed daily checks, or hourly after an unsuccessful boot, to find fixes without hammering npm; those intervals shipped. [Agent message 7](https://app.hypaware.ai/sessions/3f6427d1-4cc5-4e09-8249-1d86ca47aa99?m=53cbe69a-6025-47cc-afeb-338bb45b00d1&d=2026-08-24)
+> - **Reuse global npm installs.** The user chose installing with `npm install -g` and restarting through the service manager, rather than maintaining separate versioned installs.
+> - **Recover forward, not backward.** The user rejected rollback complexity. The implementation checks before kernel boot so a failing release can still find a newer fix.
+> - **Limit registry checks.** The assistant proposed daily checks, or hourly after an unsuccessful boot, to find fixes without hammering npm; those intervals shipped.
 
-The linked messages open for members with access to the recording. This was
-a local replay. The live PR contains an earlier draft based on five
-hand-selected messages.
+In a generated PR, each citation opens the original message in HypAware.
+Only people with access to the recording can follow it, so we’ve omitted
+the private links here. This is the developer’s message behind the decision
+to recover forward.
+
+![HypAware highlights the developer’s message. “Meh. Too complicated. All i care about is that if a version fails, and then we publish a new one, it updates to the newer one instead of staying on the stuck one”](../images/pr-context-evidence.jpg)
 
 ## How HypAware finds the decisions
 
@@ -121,9 +125,8 @@ before it expires.
 
 After a model call, open the **Update cited PR context** step in the GitHub
 run and follow **HypAware LLM recording**. Each run attempt that calls the
-model gets its own session. For PR #1067, the writer received two candidate
-messages. You can open its prompt and reply, then compare the draft with
-the published introduction. [Recording](https://app.hypaware.ai/sessions/pr-context-44582610761-1) · [PR #1067](https://github.com/hyparam/hypaware/pull/1067)
+model gets its own session. For example, the writer received two candidate
+messages for [PR #1067](https://github.com/hyparam/hypaware/pull/1067).
 
 This query lists the past week's replies and token usage.
 
