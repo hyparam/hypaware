@@ -10,9 +10,16 @@ function topicFilter(title) {
   const terms = (title.replace(/\([^()]*\)/g, ' ').toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) || [])
     .filter(term => term.length >= 3 && /[a-z]/.test(term) && !['llp', 'the', 'for', 'and', 'with', 'add', 'fix', 'support', 'implement', 'update'].includes(term))
   const compound = terms.find(term => term.includes('-'))
-  const variants = compound ? [compound, compound.replaceAll('-', ' '), compound.replaceAll('-', '')] : terms.slice(0, 2)
-  if (!variants.length) return '1 = 0'
-  return variants.map(term => 'lower(content_text) like ' + quote('%' + term + '%')).join(' or ')
+  const variants = new Set(terms.slice(0, 2))
+  if (compound) {
+    variants.add(compound)
+    variants.add(compound.replaceAll('-', ' '))
+    variants.add(compound.replaceAll('-', ''))
+  }
+  // An explicit release skill invocation can be the entire human request.
+  if (/^publish v[0-9]+\.[0-9]+\.[0-9]+$/i.test(title)) variants.add('[$prepare-release]')
+  if (!variants.size) return '1 = 0'
+  return [...variants].map(term => 'lower(content_text) like ' + quote('%' + term + '%')).join(' or ')
 }
 
 function containsAny(terms) {
@@ -121,18 +128,27 @@ export async function discover(pr, repo, query, now = Date.now()) {
   const to = isoDay(end)
   const scope = `date between '${from}' and '${to}' and message_created_at <= ${quote(new Date(end).toISOString())}
     and ${repoFilter(repo)}`
-  let sessions = await query(`select distinct session_id from ai_gateway_messages
+  let sessions = await query(`select session_id from ai_gateway_messages
     where ${scope} and git_branch = ${quote(pr.headRefName)} and session_id is not null
-    order by session_id limit ${maxSessions + 1}`)
+    group by session_id order by max(message_created_at) desc, session_id limit ${maxSessions + 1}`)
   // A separate worktree can push the PR branch while the recorder still sees master.
-  // Accept only a single root shell session that pushed this exact ref just before opening.
+  // Accept one root session that pushed or created this exact ref shortly before opening.
   if (!sessions.length && /^[a-zA-Z0-9_./-]{1,255}$/.test(pr.headRefName)) {
     const literal = pr.headRefName.replaceAll('.', '[.]')
-    const push = `(^|["';&|])[ ]*git push (-u |--set-upstream )?origin (HEAD:refs/heads/)?${literal}($|[ "';&|])`
+    const push = `(^|["';&|])[ ]*git push ((-q|--quiet|-u|--set-upstream) )*origin (HEAD:refs/heads/)?${literal}($|[ "';&|])`
+    const creation = [`regexp_like(tool_args, ${quote(push)})`]
+    if (/^[0-9a-f]{40}$/.test(pr.headSha ?? '')) {
+      // Codex can create the ref through GitHub without a local push. Bind all
+      // three literal parameters to GitHub's PR metadata, including the commit.
+      const args = [['repository_full_name', repo.replaceAll('.', '[.]')], ['branch_name', literal], ['sha', pr.headSha]]
+        .map(([key, value]) => `${key} *: *["']${value}["']`).join(' *, *')
+      const create = 'tools[.]mcp__codex_apps__github_create_branch[(] *[{] *' + args + ' *[}] *[)]'
+      creation.push(`(tool_name = 'exec' and regexp_like(tool_args, ${quote(create)}))`)
+    }
     const pushes = await query(`select distinct session_id from ai_gateway_messages where ${scope} and ${rootText}
       and message_created_at between ${quote(new Date(opened - 3_600_000).toISOString())} and ${quote(pr.createdAt)}
       and part_type = 'tool_call' and tool_name in ('Bash', 'exec', 'exec_command') and session_id is not null
-      and regexp_like(tool_args, ${quote(push)}) limit 2`)
+      and (${creation.join(' or ')}) limit 2`)
     if (pushes.length === 1) sessions = pushes
   }
   /** @type {Array<{ candidates: ReturnType<typeof selectCandidates>, count: number, capped: boolean }>} */
