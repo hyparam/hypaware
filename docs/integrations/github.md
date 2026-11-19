@@ -49,3 +49,7 @@ hyp github sync
 configured selection when you name none. `hyp github sync` runs one poll now.
 See the [GitHub reference](../CLI_REFERENCE.md#collect-github-activity) for
 authentication and import behavior.
+
+## Use the recorded context
+
+Install the GitHub Action to give reviewers a cited introduction on every PR. [Add decision context to every pull request](../workflows/pr-context.md)
