@@ -20,8 +20,9 @@ Once the user has selected a period, an omitted end date means now. "Last week" 
 boundaries require an explicit request. Ask when the subject or intended period
 is unclear, including whether "last month" means a rolling or calendar month.
 State absolute dates, timezone (UTC by default), and today's partial coverage.
-Saved recommendation pages use the report contract's opening `Time zone:`
-label and timezone check, so an independently opened page retains its scope.
+Saved recommendation pages open with a `Time zone:` label and pass the
+hypaware-report timezone check, so an independently opened page retains its
+scope.
 Specific historical questions and date ranges retain their requested scope.
 
 Establish the latest relevant state, the consequence, and a concrete next action
@@ -37,8 +38,8 @@ Answer briefly with the recommendation, supporting evidence, and material
 uncertainty. Do not create a file unless the user requests a saved or published
 artifact. A standalone artifact needs only `recommendation-<slug>.md`, with a
 scope, absolute dates and descriptive H1. Follow the
-[recommendation page format](../hypaware-report/references/report-contract.md#recommendation-pages)
-without starting the full-report workflow. Use [reports.md](reports.md) to save
+[writing rules](#recommendation-writing) without starting the full-report
+workflow. Use [reports.md](reports.md) to save
 or publish it.
 
 When proposing a fix, name its target, the observed incident it addresses, and

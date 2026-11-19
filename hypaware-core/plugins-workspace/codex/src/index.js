@@ -344,6 +344,15 @@ export async function activate(ctx) {
   })
 
   registerSkills(ctx, PLUGIN_NAME, 'codex')
+
+  // Codex reads custom agents as TOML files; no model is set, so the agent
+  // inherits the session's.
+  ctx.agents.register({
+    name: 'hypaware-analyst',
+    plugin: PLUGIN_NAME,
+    clients: ['codex'],
+    sourceFile: path.resolve(import.meta.dirname, '..', 'agents', 'hypaware-analyst.toml'),
+  })
 }
 
 /**
