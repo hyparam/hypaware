@@ -105,6 +105,8 @@ export const sortedPrs = (g) => [...g.prs].sort((a, b) => cmp(prs[a].createdAt, 
 export const chip = (c) => `<span class="chip">${c}</span>`;
 
 // ---- sections ----
+// An empty window is a finding, not a chart: the chart and the page both say so in these words.
+export const EMPTY = "No Claude Code or Codex sessions are recorded in this window, so there is nothing to chart.";
 export const T = D.totals; export const prOut = groups.filter((g) => g.prs.size).reduce((s, g) => s + g.out, 0);
 export const ccOut = D.slices.filter((s) => s.client === "Claude Code").reduce((s, x) => s + x.tokens.output, 0);
 export const pct = (a, b) => Math.round(a / Math.max(b, 1) * 100);

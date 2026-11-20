@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Print the usage-by-task chart as text for the chat: digest.json (+ optional labels.json) -> stdout. Writes no files.
 // usage: node chart.mjs --digest digest.json [--labels labels.json]
-import { argv, opt, D, LAB, warn, CATS, LEGACY, MAX_THEMES, byId, NOPR, prs, fresh, addSlice, groups, assigned, ruleGroups, claimed, unclaimed, THEMED, shown, tok, esc, fmt, mc, cls, bar, prtag, prlink, sortedPrs, chip, T, prOut, ccOut, pct, f1, cut, ROWS_PER_THEME, themeRows, sections, LABEL_MAX, QS, ROW_FLOOR, THEME_MAX } from "./model.mjs";
+import { argv, opt, D, LAB, warn, CATS, LEGACY, MAX_THEMES, byId, NOPR, prs, fresh, addSlice, groups, assigned, ruleGroups, claimed, unclaimed, THEMED, shown, tok, esc, fmt, mc, cls, bar, prtag, prlink, sortedPrs, chip, EMPTY, T, prOut, ccOut, pct, f1, cut, ROWS_PER_THEME, themeRows, sections, LABEL_MAX, QS, ROW_FLOOR, THEME_MAX } from "./model.mjs";
 
 // ---- the same chart as text, for the chat: themes, the pieces of work under each (bar = output tokens), their PRs ----
 // Printed to stdout so the agent can show it in the terminal; the person need not open the page to see the shape of the week.
@@ -36,5 +36,5 @@ for (const sec of sections) {
 // tied to are its last line, so the caller shows the output whole and trims nothing by hand.
 if (unclaimed.length) lines.push("", "PRs with no recorded session: " + prList(unclaimed));
 // An empty window is a finding, not a chart: say so in words so nobody reads three header lines as a result.
-if (!T.sessions) lines.push("", "No Claude Code or Codex sessions are recorded in this window, so there is nothing to chart.");
+if (!T.sessions) lines.push("", EMPTY);
 console.log(lines.join("\n"));

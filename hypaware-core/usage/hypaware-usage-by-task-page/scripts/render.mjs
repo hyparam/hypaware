@@ -6,7 +6,7 @@ import { dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // groups, themes, rows and the three questions come from the usage-by-task model, shared with its text chart
-import { cmp, argv, opt, D, LAB, warn, CATS, LEGACY, MAX_THEMES, byId, NOPR, prs, fresh, addSlice, groups, assigned, ruleGroups, claimed, unclaimed, THEMED, shown, tok, esc, fmt, mc, cls, bar, prtag, prlink, sortedPrs, chip, T, prOut, ccOut, pct, f1, cut, ROWS_PER_THEME, themeRows, sections, LABEL_MAX, QS, ROW_FLOOR, THEME_MAX } from "../../hypaware-usage-by-task/scripts/model.mjs";
+import { cmp, argv, opt, D, LAB, warn, CATS, LEGACY, MAX_THEMES, byId, NOPR, prs, fresh, addSlice, groups, assigned, ruleGroups, claimed, unclaimed, THEMED, shown, tok, esc, fmt, mc, cls, bar, prtag, prlink, sortedPrs, chip, EMPTY, T, prOut, ccOut, pct, f1, cut, ROWS_PER_THEME, themeRows, sections, LABEL_MAX, QS, ROW_FLOOR, THEME_MAX } from "../../hypaware-usage-by-task/scripts/model.mjs";
 const OUT = opt("--out", `${D.window.to}-usage-by-task.html`);
 const CW = 800, HEAD = 30, ROW = 24, GAP = 10, xLab = 12, xBar = 312, barMax = 100, xl = 480, xr = 556;
 const rowsFlat = []; let cy = 8; const heads = [];
@@ -195,17 +195,18 @@ const figures = `<div class="figs"><p class="chart-title">Key figures, each bar 
 // no named task the sentence ends at the session count.
 const TOP = shown.find((t) => !t.auto);
 const MARK = `<svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true"><path d="m75.93 39.66-21.8 12.73v25.51l21.8-12.73z"/><path d="m24.07 39.66v25.5l21.8 12.73v-25.51l-19.81-11.56z"/><path d="m50 19.72-21.85 12.75 21.85 12.75 21.85-12.75z"/><path d="m50 0.5c-0.6255 0-1.251 0.1627-1.811 0.4875l-39.57 22.94c-1.113 0.6457-1.799 1.835-1.799 3.122v45.9c2.081e-4 1.287 0.6855 2.477 1.799 3.122l39.57 22.94c1.12 0.6493 2.501 0.6493 3.621 0l39.57-22.94c1.113-0.6457 1.799-1.835 1.799-3.122v-45.9c-1.98e-4 -1.287-0.6855-2.477-1.799-3.122l-39.57-22.94c-0.5599-0.3247-1.185-0.4875-1.811-0.4875zm-0.7211 10.38a4.123 4.129 0 0 1 2.796 0.4975l30.05 17.53a4.123 4.129 0 0 1 0.979 0.8279 4.123 4.129 0 0 1 0.145 0.1611 4.123 4.129 0 0 1 0.6325 1.1 4.123 4.129 0 0 1 0.05841 0.1813 4.123 4.129 0 0 1 0.2296 1.338v35.02a4.123 4.129 0 0 1-2.047 3.57l-30.05 17.53a4.123 4.129 0 0 1-0.1048 0.03827 4.123 4.129 0 0 1-1.174 0.4331 4.123 4.129 0 0 1-0.1732 0.02409 4.123 4.129 0 0 1-1.295 0.0039 4.123 4.129 0 0 1-0.1028-0.02424 4.123 4.129 0 0 1-1.253-0.4532 4.123 4.129 0 0 1-0.03424-0.01606 4.123 4.129 0 0 1-0.01209-0.0062l-30.05-17.53a4.123 4.129 0 0 1-2.047-3.57v-35.06a4.123 4.129 0 0 1 0.08661-0.4895 4.123 4.129 0 0 1 0.1067-0.6103 4.123 4.129 0 0 1 0.419-0.9427 4.123 4.129 0 0 1 0.2719-0.4754 4.123 4.129 0 0 1 1.04-0.9427 4.123 4.129 0 0 1 0.1208-0.1088l30.05-17.53a4.123 4.129 0 0 1 1.354-0.4975z"/></svg>`;
+// an empty window shows the chart's own sentence in place of the lede and the chart; the page is still written
 const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI usage by task${opt("--name", null) ? ": " + esc(opt("--name")) : ""}, ${D.window.from} to ${D.window.to}</title><style>${CSS}</style></head><body>
 <header class="masthead"><span class="brand">${MARK}Hyperparam</span><span class="doc-label">Usage report · generated ${esc(String(D.generated_at).slice(0, 10))} from HypAware data</span></header>
 <h1>AI usage by task${opt("--name", null) ? ": " + esc(opt("--name")) : ""}</h1>
 <h2>${D.window.from} to ${D.window.to} · Claude Code and Codex${D.org ? " · " + esc(D.org) : D.remote ? " · remote " + esc(D.remote) : " · this machine"}</h2>
-<p class="lede"><strong>${tok(T.tokens.output)} output tokens across ${T.sessions} sessions${TOP ? `, ${pct(TOP.out, T.tokens.output)}% of it on ${esc(TOP.label)}` : ""}.</strong> The chart breaks that down by task${NOPR ? "" : " and shows the pull requests each task produced"}. ${LAB ? "Labels and groupings were chosen by the assistant from a digest of each session's prompts; every number comes from the recordings." : "Rows are labelled by each session's first prompt" + (NOPR ? "." : "; a session is tied to a PR when the PR link appears in it within " + esc(D.attrib_window_min) + " minutes of the PR being opened.")}</p>
+${T.sessions ? `<p class="lede"><strong>${tok(T.tokens.output)} output tokens across ${T.sessions} sessions${TOP ? `, ${pct(TOP.out, T.tokens.output)}% of it on ${esc(TOP.label)}` : ""}.</strong> The chart breaks that down by task${NOPR ? "" : " and shows the pull requests each task produced"}. ${LAB ? "Labels and groupings were chosen by the assistant from a digest of each session's prompts; every number comes from the recordings." : "Rows are labelled by each session's first prompt" + (NOPR ? "." : "; a session is tied to a PR when the PR link appears in it within " + esc(D.attrib_window_min) + " minutes of the PR being opened.")}</p>
 <div class="barchart"><p class="chart-title">Output tokens by task${NOPR ? "" : `, with the ${REPO ? "repositories its pull requests went to" : "pull requests each task produced"}`}</p>
 <div class="stack-legend"><span><i class="s1"></i>Claude Code</span><span><i class="s2"></i>Codex</span>${NOPR ? "" : REPO ? `<span><svg class="key" viewBox="0 0 26 9"><line x1="0" x2="26" y1="4.5" y2="4.5" class="k1" style="stroke-width:5"/></svg>thicker line = more PRs opened in that repository</span>` : `<span><svg class="key" viewBox="0 0 26 9"><line x1="0" x2="26" y1="4.5" y2="4.5" class="k1"/></svg>opened the PR</span><span><svg class="key" viewBox="0 0 26 9"><line x1="0" x2="26" y1="4.5" y2="4.5" class="k2"/></svg>PR link appeared later (read, reviewed or followed up)</span>`}</div>
 <div class="scroll">${chart}</div>
 ${panels}
-</div>
+</div>` : `<p class="lede">${EMPTY}</p>`}
 ${recBlock}
 ${qSection}
 <h2>Key figures</h2>

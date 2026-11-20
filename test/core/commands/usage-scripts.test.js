@@ -223,3 +223,17 @@ test('the chat chart fits 80 columns: PRs go under the row from the bar column, 
   const bare = lines.findIndex((l) => l.includes('session number 2'))
   assert.ok(bare >= 0 && !/^ {48}\S/.test(lines[bare + 1] ?? ''))
 })
+
+test('an empty window says so on the page in place of the lede and the chart, and in the chat chart', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-usage-empty-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const file = await chartDigest(root, [])
+  const sentence = 'No Claude Code or Codex sessions are recorded in this window, so there is nothing to chart.'
+  const { stdout } = await node(path.join(CHAT, 'chart.mjs'), ['--digest', file], { ...process.env })
+  assert.equal(stdout.trimEnd().split('\n').at(-1), sentence)
+  const out = path.join(root, 'empty.html')
+  await node(path.join(PAGE, 'render.mjs'), ['--digest', file, '--out', out], { ...process.env })
+  const page = await fs.readFile(out, 'utf8')
+  assert.ok(page.includes(`<p class="lede">${sentence}</p>`))
+  assert.doesNotMatch(page, /output tokens across|class="barchart"/)
+})
