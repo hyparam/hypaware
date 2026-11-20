@@ -115,6 +115,10 @@ test('usageSessionsRecorded: one bounded query over the last 30 days, false on n
   assert.equal(await usageSessionsRecorded(undefined, now), undefined)
   const failing = { hasDataset: () => true, async run() { throw new Error('cache unreadable') } }
   assert.equal(await usageSessionsRecorded(failing, now), undefined)
+  // A query that outlives its budget is abandoned, and setup goes on. `unref`
+  // so the abandoned query does not hold the test runner open.
+  const stalled = { hasDataset: () => true, run: () => new Promise(() => { setTimeout(() => {}, 5000).unref() }) }
+  assert.equal(await usageSessionsRecorded(/** @type {any} */ (stalled), now, 20), undefined)
 })
 
 test('USAGE_SOURCES matches the sources the usage digest charts', async () => {

@@ -32,11 +32,12 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, withSpan } from '../../observability/index.js'
-import { OVERVIEW_DATASET } from '../../query/overview.js'
+import { OVERVIEW_DATASET, OVERVIEW_TIME_BUDGET_MS } from '../../query/overview.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
 import { buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory } from '../walkthrough.js'
 import { resolveLaunchers } from './first_ask.js'
+import { withDeadline } from './first_look.js'
 
 /**
  * Ask, and on a yes run the real `hyp usage` as a child on this terminal.
@@ -183,21 +184,23 @@ const USAGE_WINDOW_DAYS = 30
  * usage` can fall back to, as the closing offer's `usageRows`. One query
  * that stops at the first row.
  *
- * `undefined` means it could not tell (no runner, or the query threw),
- * which never withholds the offer.
+ * `undefined` means it could not tell (no runner, the query threw, or it
+ * outlived `budgetMs`), which never withholds the offer. The deadline is
+ * the first look's reason: setup must not stall at its last step.
  *
  * @ref LLP 0398#setup-offer-usage-sources [implements]: only the sources the view charts earn the offer
  * @param {OverviewQueryRunner | undefined} runner
  * @param {Date} [now]
+ * @param {number} [budgetMs]
  * @returns {Promise<boolean | undefined>}
  */
-export async function usageSessionsRecorded(runner, now = new Date()) {
+export async function usageSessionsRecorded(runner, now = new Date(), budgetMs = OVERVIEW_TIME_BUDGET_MS) {
   if (!runner) return undefined
   const since = new Date(now.getTime() - (USAGE_WINDOW_DAYS - 1) * 864e5).toISOString().slice(0, 10)
   const sources = USAGE_SOURCES.map((s) => `'${s}'`).join(', ')
   try {
-    const { rows } = await runner.run(`select 1 as n from ${OVERVIEW_DATASET} where date >= '${since}' and conversation_source in (${sources}) limit 1`)
-    return rows.length > 0
+    const result = await withDeadline(runner.run(`select 1 as n from ${OVERVIEW_DATASET} where date >= '${since}' and conversation_source in (${sources}) limit 1`), budgetMs)
+    return result ? result.rows.length > 0 : undefined
   } catch {
     return undefined
   }

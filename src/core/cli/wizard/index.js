@@ -1136,7 +1136,8 @@ async function runGuardedInitWizard(opts, guard) {
     const hasRows = firstLookHadRows(firstLookResult)
     // The first look counts every client; the view charts only Claude Code
     // and Codex, so rows from other clients alone do not earn the offer.
-    const usageRows = hasRows === true ? await usageSessionsRecorded(firstLookRunner) : undefined
+    // After a first look that ran out of time, no second query is tried.
+    const usageRows = hasRows === true && firstLookResult?.shown === true ? await usageSessionsRecorded(firstLookRunner) : undefined
     suggestSkill = await runWizardSuggestSkill({
       stdout: opts.stdout,
       stderr: opts.stderr,

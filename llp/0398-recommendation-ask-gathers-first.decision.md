@@ -389,11 +389,14 @@ the offer stays one series.
 <a id="setup-offer-usage-sources"></a>**The offer needs a Claude Code or Codex session.**
 The first look counts every client's rows, but the usage view charts only
 Claude Code and Codex, the sources `digest.mjs` reads. So after a first
-look with rows, setup runs one more query for those sources over the last
-30 days, the widest window `hyp usage` falls back to, and stops at the
-first row. With none, the offer is skipped and nothing is printed, as when
-nothing launchable resolves, and `wizard.suggest_skill` records
-`no-usage-rows`. A query that fails never withholds the offer.
+look that showed rows within its time budget, setup runs one more query
+for those sources over the last 30 days, the widest window `hyp usage`
+falls back to, and stops at the first row. With none, the offer is skipped
+and nothing is printed, as when nothing launchable resolves, and
+`wizard.suggest_skill` records `no-usage-rows`. A query that fails, or
+outlives the budget `hyp query overview` aims at, never withholds the
+offer, and after a first look that ran out of time no second query is
+tried, so a slow cache cannot stall the end of setup.
 
 <a id="not-preauthorized"></a>**The launch is still not pre-authorized.**
 LLP 0198 #no-preauth stands, and the shipped instructions ask for no
