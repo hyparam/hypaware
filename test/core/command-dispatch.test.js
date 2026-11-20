@@ -521,7 +521,7 @@ test('top-level help renders journey sections and a compact operations list', as
   const additional = out.indexOf('Additional commands:')
   assert.ok(gettingStarted < explore && explore < control && control < additional)
   assert.match(out, /Getting started:\n  setup\s+.*\n  status\s+/)
-  assert.match(out, /Explore and share:\n  ask\s+.*\n  query\s+.*\n  report\s+.*\n  recommendation\s+.*\n  fix\s+/)
+  assert.match(out, /Explore and share:\n  ask\s+.*\n  usage\s+.*\n  query\s+.*\n  report\s+.*\n  recommendation\s+.*\n  fix\s+/)
   assert.match(out, /Control capture and movement:\n  client\s+.*\n  skills\s+.*\n  backfill\s+.*\n  privacy\s+.*\n  purge\s+.*\n  session\s+.*\n  join\s+.*\n  leave\s+.*\n  sync\s+/)
   // `graph` is plugin-contributed (`@hypaware/context-graph`) and only
   // appears once the plugin is config-active; this dispatch has no config,

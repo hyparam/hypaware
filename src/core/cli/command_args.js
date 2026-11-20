@@ -72,6 +72,17 @@ export const CORE_COMMAND_ARGS = {
       positional: ['question'],
     },
   },
+  'usage': {
+    usage: 'hyp usage [--page] [instructions]',
+    schema: {
+      type: 'object',
+      properties: {
+        page: { type: 'boolean', default: false },
+        instructions: { type: 'string' },
+      },
+      positional: ['instructions'],
+    },
+  },
   'backfill list': {
     usage: 'hyp backfill list [--json]',
     schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },

@@ -436,7 +436,7 @@ test('hyp --help renders the exact journey order and compact operations list', a
   assert.equal(code, 0)
   assert.equal(err, '')
   assert.deepEqual(helpSectionNames(out, 'Getting started:'), ['setup', 'status'])
-  assert.deepEqual(helpSectionNames(out, 'Explore and share:'), ['ask', 'query', 'report', 'recommendation', 'fix'])
+  assert.deepEqual(helpSectionNames(out, 'Explore and share:'), ['ask', 'usage', 'query', 'report', 'recommendation', 'fix'])
   assert.deepEqual(helpSectionNames(out, 'Control capture and movement:'), [
     'client', 'skills', 'backfill', 'privacy', 'purge', 'session', 'join', 'leave', 'sync', 'github', 'linear',
   ])

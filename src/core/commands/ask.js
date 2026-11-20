@@ -337,7 +337,7 @@ const FRIENDLY_LAUNCHLESS_LABELS = {
  * @param {{ select?: RunWizardFirstAskOptions['select'], pickDeadlineMs?: number }} deps
  * @returns {Promise<FirstAskLauncher | undefined>}
  */
-async function pickLauncher(launchers, ctx, deps) {
+export async function pickLauncher(launchers, ctx, deps) {
   if (launchers.length < 2) return launchers[0]
   const controller = new AbortController()
   const disarm = armPickDeadline(ctx.stdin, controller, deps.pickDeadlineMs)

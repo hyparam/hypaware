@@ -1,23 +1,27 @@
 // @ts-check
 
 /**
- * The wizard's closing offer: suggest a new skill?
- * A yes runs `hyp ask` for the user, which gathers the evidence and starts
- * their AI client on it. A no names the verb and ends the run.
+ * The wizard's closing offer: see what your AI usage went into?
+ * A yes runs `hyp usage` for the user, which starts their AI client on the
+ * usage-by-task view. A no names the verb and ends the run.
+ *
+ * The offer used to be a skill suggestion (`hyp ask`); the file and its
+ * telemetry names keep that history so the measurement stays one series.
  *
  * This replaces the printed question list. A list of things to ask is
  * output the reader has to act on later; an offer is the act itself, made
  * at the moment the first look has just shown them their own rows. The
- * launch is safe here now: `hyp ask` starts the client in a fixed folder
+ * launch is safe here now: `hyp usage` starts the client in a fixed folder
  * under `HYP_HOME` (LLP 0398 #run-directory), never in the directory
  * setup was run from, which was the reason setup used to print and stop.
  *
- * @ref LLP 0398#setup-offer [implements]: setup offers the recommendation instead of listing questions
- * @ref LLP 0398#run-directory [constrained-by]: the client starts in the evidence folder, so setup may start it
+ * @ref LLP 0398#setup-offer-usage [implements]: setup offers `hyp usage` where it offered the recommendation
+ * @ref LLP 0398#run-directory [constrained-by]: the client starts in a folder under HYP_HOME, so setup may start it
  *
  * @import { ClientDescriptor } from '../../../../src/core/types.js'
  * @import { FinaleSummary } from '../../../../src/core/cli/types.js'
  * @import { RunWizardSuggestSkillOptions, WizardSuggestSkillResult } from '../../../../src/core/cli/wizard/types.js'
+ * @import { OverviewQueryRunner } from '../../../../src/core/query/types.js'
  */
 
 import { spawn } from 'node:child_process'
@@ -28,13 +32,15 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, withSpan } from '../../observability/index.js'
+import { OVERVIEW_DATASET, OVERVIEW_TIME_BUDGET_MS } from '../../query/overview.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
 import { buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory } from '../walkthrough.js'
 import { resolveLaunchers } from './first_ask.js'
+import { withDeadline } from './first_look.js'
 
 /**
- * Ask, and on a yes run the real `hyp ask` as a child on this terminal.
+ * Ask, and on a yes run the real `hyp usage` as a child on this terminal.
  *
  * Never throws and never changes the wizard's exit code: setup finished
  * before this ran, so a declined offer, a failed spawn, or a child that
@@ -53,7 +59,7 @@ export async function runWizardSuggestSkill(opts) {
     },
     async (span) => {
       try {
-        // The recommendation is measured from recorded history, so a cache
+        // The view is measured from recorded history, so a cache
         // with nothing in it gets the offer framed as something to come back
         // to, prefaced by the one fact that makes the emptiness make sense:
         // capture starts now, not retroactively.
@@ -65,11 +71,19 @@ export async function runWizardSuggestSkill(opts) {
           // The emptiness is still worth stating, but the verb is not: with
           // nothing to start, it names a command that would only fail later.
           if (opts.launchable !== false) {
-            opts.stdout.write('Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions.\n')
+            opts.stdout.write('Once you have some history, run `hyp usage`: HypAware shows what your AI usage went into, by task.\n')
           }
           return { asked: false, reason: 'no-rows' }
         }
-        // No client `hyp ask` could start is on PATH, so the step is silent:
+        // Rows, but none the usage view charts (only OpenCode or Cursor,
+        // say): a yes would start a client that reports nothing recorded,
+        // so the step is silent, as it is with nothing launchable.
+        if (opts.usageRows === false) {
+          span.setAttribute('status', 'skipped')
+          span.setAttribute('skip_reason', 'no-usage-rows')
+          return { asked: false, reason: 'no-usage-rows' }
+        }
+        // No client `hyp usage` could start is on PATH, so the step is silent:
         // a yes would spawn a child that finds nothing to launch, and the
         // line naming the verb would send the reader to that same dead end.
         // @ref LLP 0398#setup-offer [implements]: nothing launchable means no offer and no mention of the verb
@@ -102,10 +116,10 @@ export async function runWizardSuggestSkill(opts) {
           // it printed. The legacy prompt adds its own; the TUI does not.
           opts.stdout.write('\n')
           answer = await confirm({
-            title: 'Suggest a new skill?',
-            items: ['HypAware can scan your logs for workflows you keep repeating and recommend a skill your agents can reuse, to save on repeated work.'],
+            title: 'See what your AI usage went into?',
+            items: ['HypAware can chart your recent Claude Code and Codex sessions by the tasks they went into and the pull requests tied to them, then offer up to three suggestions to pick from.'],
             options: [
-              { value: 'yes', label: 'Recommend a new skill', summary: 'Starts an agent in a separate folder.' },
+              { value: 'yes', label: 'Show my usage by task', summary: 'Starts an agent in a separate folder.' },
               { value: 'no', label: 'Not now' },
             ],
             default: 'yes',
@@ -129,13 +143,13 @@ export async function runWizardSuggestSkill(opts) {
         if (result.error) {
           span.setAttribute('status', 'error')
           span.setAttribute(Attr.ERROR_KIND, 'spawn_failed')
-          opts.stderr?.write(`Could not start hyp ask: ${result.error}\n`)
+          opts.stderr?.write(`Could not start hyp usage: ${result.error}\n`)
           writeVerb(opts)
           return { asked: true, launched: false, reason: 'spawn-failed' }
         }
         span.setAttribute('exit_code', result.code ?? -1)
-        // `hyp ask` has already said why when it exits non-zero (nothing
-        // launchable, no evidence); the verb is the only thing to add.
+        // `hyp usage` has already said why when it exits non-zero (nothing
+        // launchable); the verb is the only thing to add.
         if (result.code !== 0) {
           writeVerb(opts)
           return { asked: true, launched: false, reason: 'child-failed' }
@@ -157,7 +171,43 @@ export async function runWizardSuggestSkill(opts) {
 }
 
 /**
- * Whether any client `hyp ask` could start resolves on `$PATH`, as the
+ * The conversation sources the usage view charts: the same list as the
+ * `WHERE` in `hypaware-core/usage/hypaware-usage-by-task/scripts/digest.mjs`.
+ */
+export const USAGE_SOURCES = ['claude_code', 'claude', 'claude-desktop', 'codex']
+
+/** The widest window `hyp usage` reads before it says nothing is recorded. */
+const USAGE_WINDOW_DAYS = 30
+
+/**
+ * Whether Claude Code or Codex sessions are recorded in the window `hyp
+ * usage` can fall back to, as the closing offer's `usageRows`. One query
+ * that stops at the first row.
+ *
+ * `undefined` means it could not tell (no runner, the query threw, or it
+ * outlived `budgetMs`), which never withholds the offer. The deadline is
+ * the first look's reason: setup must not stall at its last step.
+ *
+ * @ref LLP 0398#setup-offer-usage-sources [implements]: only the sources the view charts earn the offer
+ * @param {OverviewQueryRunner | undefined} runner
+ * @param {Date} [now]
+ * @param {number} [budgetMs]
+ * @returns {Promise<boolean | undefined>}
+ */
+export async function usageSessionsRecorded(runner, now = new Date(), budgetMs = OVERVIEW_TIME_BUDGET_MS) {
+  if (!runner) return undefined
+  const since = new Date(now.getTime() - (USAGE_WINDOW_DAYS - 1) * 864e5).toISOString().slice(0, 10)
+  const sources = USAGE_SOURCES.map((s) => `'${s}'`).join(', ')
+  try {
+    const result = await withDeadline(runner.run(`select 1 as n from ${OVERVIEW_DATASET} where date >= '${since}' and conversation_source in (${sources}) limit 1`), budgetMs)
+    return result ? result.rows.length > 0 : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether any client `hyp usage` could start resolves on `$PATH`, as the
  * closing offer's `launchable`.
  *
  * Probes every client that declares a `launch` block, not only the recorded
@@ -245,13 +295,13 @@ export async function recordedAskClientLaunchable(summary, env, deps = {}) {
 }
 
 /**
- * Spawn `hyp ask` on this terminal and wait for it.
+ * Spawn `hyp usage` on this terminal and wait for it.
  *
  * A child rather than an in-process call, for the reason `hyp sync` is
  * (`sync_now.js`): the wizard's own boot withholds registries the command
  * needs, and the child boots from the config setup just wrote and sees the
- * real attached clients. All three stdio are inherited: the ask draws its
- * client pick on this terminal and then hands it to the client.
+ * real attached clients. All three stdio are inherited: the command draws
+ * its client pick on this terminal and then hands it to the client.
  *
  * @param {RunWizardSuggestSkillOptions} opts
  * @returns {Promise<{ code: number | null, error?: string }>}
@@ -264,7 +314,7 @@ function runAskChild(opts) {
     /** @param {{ code: number | null, error?: string }} r */
     const done = (r) => { if (!settled) { settled = true; resolve(r) } }
     try {
-      const child = spawnFn(process.execPath, [binPath, 'ask'], {
+      const child = spawnFn(process.execPath, [binPath, 'usage'], {
         stdio: 'inherit',
         env: opts.env,
       })
@@ -283,5 +333,5 @@ function runAskChild(opts) {
  * @param {RunWizardSuggestSkillOptions} opts
  */
 function writeVerb(opts) {
-  opts.stdout.write('\nRun `hyp ask` any time: HypAware suggests a skill based on your recent sessions.\n')
+  opts.stdout.write('\nRun `hyp usage` any time: HypAware shows what your AI usage went into, by task.\n')
 }

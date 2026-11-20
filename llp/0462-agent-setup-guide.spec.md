@@ -65,8 +65,7 @@ Agent setup offers the same applicable choices as the attended wizard and
 reuses answers already given. It offers detected defaults or customization,
 local versus cloud collection, per-client sharing, new-folder review policy,
 optional history import, GitHub collection, the first-sync review/send-now
-offer. It does not repeat the terminal's closing skill recommendation
-(`hyp ask`). Storage and retention remain
+offer, and the closing usage-by-task view (#closing-usage). Storage and retention remain
 explained defaults, with 120 days local and 90 days cloud unless overridden.
 Cloud sync is the recommended choice, presented before local only; examples
 use cloud retention and explicitly require the separate enrollment step.
@@ -93,9 +92,20 @@ their window or schedule. It is not a promise to stop automatic history import.
 
 Closing offers keep their existing human requirements. The agent shows the
 sync dry-run and offers sending now or waiting, but the person must confirm
-an early first-sync release in a terminal. After sign-ins and verification,
-the agent offers `hyp ask` in an interactive terminal when recorded history and
-a launchable client exist, with a terminal handoff if needed.
+an early first-sync release in a terminal.
+
+<a id="closing-usage"></a>**The guide ends on the usage-by-task view, run by
+the agent.** The attended wizard's last screen offers `hyp usage`
+(LLP 0398#setup-offer-usage), which starts a recorded client on the terminal.
+An agent cannot use that launch: it is already the client, and a second
+session nested under its shell has no terminal to draw on. So `hyp usage`
+with a stdout that is not a terminal starts nothing. It empties the same work
+folder and prints the prompt a started client would have been given, and the
+agent follows it in its own session. This is the same rule that makes a piped
+`hyp setup` print this guide. The guide's last step asks "See what your AI
+usage went into?" only when verification showed recorded sessions, and on a
+yes tells the agent to run `hyp usage` and follow what it prints. No
+launchable client is required, since nothing is launched.
 
 ## Human handoffs {#handoffs}
 

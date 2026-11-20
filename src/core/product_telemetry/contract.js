@@ -157,6 +157,7 @@ export const COMMANDS = Object.freeze([
   'telemetry',
   'unknown',
   'update',
+  'usage',
   'vector status',
   'version'
 ])

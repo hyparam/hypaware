@@ -8,12 +8,14 @@ import process from 'node:process'
 
 import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import {
+  USAGE_SOURCES,
   anyClientLaunchable,
   recordedAskClientLaunchable,
   runWizardSuggestSkill,
+  usageSessionsRecorded,
 } from '../../../../src/core/cli/wizard/suggest_skill.js'
 
-const VERB = /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/
+const VERB = /Run `hyp usage` any time: HypAware shows what your AI usage went into, by task/
 
 function makeBuf() {
   let value = ''
@@ -58,7 +60,7 @@ test('runWizardSuggestSkill: an empty cache states why there is nothing to sugge
   assert.deepEqual(result, { asked: false, reason: 'no-rows' })
   assert.equal(child.calls.length, 0)
   assert.match(stdout.text(), /Nothing recorded yet: HypAware captures from your next session onward/)
-  assert.match(stdout.text(), /Once you have some history, run `hyp ask`/)
+  assert.match(stdout.text(), /Once you have some history, run `hyp usage`/)
 })
 
 // @ref LLP 0398#setup-offer [tests]: nothing launchable means no offer and no mention of the verb
@@ -84,7 +86,46 @@ test('runWizardSuggestSkill: an empty cache with nothing launchable keeps the no
   // Still `no-rows`: the empty-cache rate is measured whatever is on PATH.
   assert.deepEqual(result, { asked: false, reason: 'no-rows' })
   assert.match(stdout.text(), /Nothing recorded yet: HypAware captures from your next session onward/)
-  assert.doesNotMatch(stdout.text(), /hyp ask/)
+  assert.doesNotMatch(stdout.text(), /hyp usage/)
+})
+
+test('runWizardSuggestSkill: rows with no Claude Code or Codex session make no offer and print nothing', async () => {
+  const stdout = makeBuf()
+  const child = childExiting(0)
+  let asked = 0
+  const result = await runWizardSuggestSkill({
+    stdout, env: {}, interactive: true, hasRows: true, usageRows: false, launchable: true,
+    confirm: async () => { asked += 1; return 'yes' }, spawnFn: child.fn,
+  })
+  assert.deepEqual(result, { asked: false, reason: 'no-usage-rows' })
+  assert.equal(asked, 0)
+  assert.equal(child.calls.length, 0)
+  assert.equal(stdout.text(), '')
+})
+
+test('usageSessionsRecorded: one bounded query over the last 30 days, false on no row, undefined when it cannot tell', async () => {
+  /** @type {string[]} */
+  const seen = []
+  /** @param {Record<string, unknown>[]} rows */
+  const runner = (rows) => ({ hasDataset: () => true, async run(/** @type {string} */ sql) { seen.push(sql); return { columns: [], rows } } })
+  const now = new Date('2026-11-20T00:30:00Z')
+  assert.equal(await usageSessionsRecorded(runner([{ n: 1 }]), now), true)
+  assert.equal(seen[0], "select 1 as n from ai_gateway_messages where date >= '2026-10-22' and conversation_source in ('claude_code', 'claude', 'claude-desktop', 'codex') limit 1")
+  assert.equal(await usageSessionsRecorded(runner([]), now), false)
+  assert.equal(await usageSessionsRecorded(undefined, now), undefined)
+  const failing = { hasDataset: () => true, async run() { throw new Error('cache unreadable') } }
+  assert.equal(await usageSessionsRecorded(failing, now), undefined)
+  // A query that outlives its budget is abandoned, and setup goes on. `unref`
+  // so the abandoned query does not hold the test runner open.
+  const stalled = { hasDataset: () => true, run: () => new Promise(() => { setTimeout(() => {}, 5000).unref() }) }
+  assert.equal(await usageSessionsRecorded(/** @type {any} */ (stalled), now, 20), undefined)
+})
+
+test('USAGE_SOURCES matches the sources the usage digest charts', async () => {
+  const digest = await fs.readFile(path.join(import.meta.dirname, '../../../../hypaware-core/usage/hypaware-usage-by-task/scripts/digest.mjs'), 'utf8')
+  const listed = digest.match(/conversation_source IN \(([^)]*)\)/)
+  assert.ok(listed, 'digest.mjs no longer filters on conversation_source IN (...)')
+  assert.deepEqual(listed[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')), USAGE_SOURCES)
 })
 
 test('anyClientLaunchable: true when a launch binary resolves, false when none does, undefined when it cannot tell', async () => {
@@ -181,8 +222,8 @@ test('runWizardSuggestSkill: interactive false never asks, even with a prompt se
   assert.match(stdout.text(), VERB)
 })
 
-test('runWizardSuggestSkill: yes runs `hyp ask` as a child that inherits the terminal', async () => {
-  // @ref LLP 0398#setup-offer [tests]: the offer taken is the ask itself
+test('runWizardSuggestSkill: yes runs `hyp usage` as a child that inherits the terminal', async () => {
+  // @ref LLP 0398#setup-offer-usage [tests]: the offer taken is `hyp usage` itself
   const stdout = makeBuf()
   const child = childExiting(0)
   /** @type {any} */
@@ -193,13 +234,13 @@ test('runWizardSuggestSkill: yes runs `hyp ask` as a child that inherits the ter
     spawnFn: child.fn,
   })
   assert.deepEqual(result, { asked: true, launched: true })
-  assert.equal(question.title, 'Suggest a new skill?')
+  assert.equal(question.title, 'See what your AI usage went into?')
   assert.equal(question.default, 'yes')
   // The default acts, so a spent stdin must decline (LLP 0299 #eof-declines).
   assert.equal(question.eofValue, 'no')
   assert.equal(child.calls.length, 1)
   assert.equal(child.calls[0].cmd, process.execPath)
-  assert.equal(child.calls[0].args.at(-1), 'ask')
+  assert.equal(child.calls[0].args.at(-1), 'usage')
   assert.equal(child.calls[0].opts.stdio, 'inherit')
   assert.equal(child.calls[0].opts.env.HYP_HOME, '/h')
   // The child owns the closing screen; nothing is added after it.
@@ -236,7 +277,7 @@ test('runWizardSuggestSkill: a child that could not start degrades to the verb',
     stdout, stderr, env: {}, interactive: true, confirm: async () => 'yes', spawnFn: childExiting(null).fn,
   })
   assert.deepEqual(result, { asked: true, launched: false, reason: 'spawn-failed' })
-  assert.match(stderr.text(), /Could not start hyp ask: ENOENT/)
+  assert.match(stderr.text(), /Could not start hyp usage: ENOENT/)
   assert.match(stdout.text(), VERB)
 })
 

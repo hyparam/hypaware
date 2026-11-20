@@ -371,6 +371,33 @@ act on later is the shape the Context above shows nobody acts on, and the
 offer is made at the moment the first look has just shown the person their
 own rows.
 
+<a id="setup-offer-usage"></a>**The offer is now the usage-by-task view.**
+Setup's last screen asks "See what your AI usage went into?" and a yes runs
+`hyp usage` rather than `hyp ask`. Everything else in the paragraph above
+holds unchanged: the child on the same terminal, the one line naming the
+verb (now `hyp usage`) on a no or a run that cannot prompt, the
+capture-starts-now note on an empty cache, and no offer when nothing
+launchable resolves. `hyp usage` starts its client in `<HYP_HOME>/usage`,
+so #run-directory still holds for the session setup starts. Unlike the
+recommendation ask it does not gather in-process: the client runs the
+bundled scripts itself and is asked for permission to, so
+#not-preauthorized's "asks for no command" does not describe this launch.
+`hyp ask` keeps the recommendation; setup just no longer offers it last.
+The telemetry names (`wizard.suggest_skill`, `suggest_skill`) are kept so
+the offer stays one series.
+
+<a id="setup-offer-usage-sources"></a>**The offer needs a Claude Code or Codex session.**
+The first look counts every client's rows, but the usage view charts only
+Claude Code and Codex, the sources `digest.mjs` reads. So after a first
+look that showed rows within its time budget, setup runs one more query
+for those sources over the last 30 days, the widest window `hyp usage`
+falls back to, and stops at the first row. With none, the offer is skipped
+and nothing is printed, as when nothing launchable resolves, and
+`wizard.suggest_skill` records `no-usage-rows`. A query that fails, or
+outlives the budget `hyp query overview` aims at, never withholds the
+offer, and after a first look that ran out of time no second query is
+tried, so a slow cache cannot stall the end of setup.
+
 <a id="not-preauthorized"></a>**The launch is still not pre-authorized.**
 LLP 0198 #no-preauth stands, and the shipped instructions ask for no
 command at all: reading the three evidence files needs no permission, and
