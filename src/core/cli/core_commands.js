@@ -436,9 +436,9 @@ function buildCoreCommands(registry) {
       help: [
         'Starts a recorded client that charts, in the chat, what your Claude Code',
         'and Codex sessions went into over the last 7 days: themes, the pieces of',
-        'work under each, output tokens, and the pull requests each produced. It',
-        'then offers three questions about how you work with agents and answers',
-        'the one you pick.',
+        'work under each, output tokens, and the pull requests tied to each,',
+        'where HypAware can see them. It then offers up to three suggestions for',
+        'making your work with agents easier and answers the one you pick.',
         '',
         '  --page    make a self-contained HTML page of the same view instead',
         '',

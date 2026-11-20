@@ -106,7 +106,7 @@ export async function runWizardSuggestSkill(opts) {
           opts.stdout.write('\n')
           answer = await confirm({
             title: 'See what your AI usage went into?',
-            items: ['HypAware can chart your recent Claude Code and Codex sessions by the tasks they went into and the pull requests each produced, then suggest one change to how you work with agents.'],
+            items: ['HypAware can chart your recent Claude Code and Codex sessions by the tasks they went into and the pull requests tied to them, then offer up to three suggestions to pick from.'],
             options: [
               { value: 'yes', label: 'Show my usage by task', summary: 'Starts an agent in a separate folder.' },
               { value: 'no', label: 'Not now' },

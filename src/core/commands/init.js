@@ -383,7 +383,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
       // @ref LLP 0462#closing-usage [implements]: the agent runs the usage view itself, as setup's last offer
       '8. Last, if step 6 showed recorded sessions, ask: See what your AI usage went into?',
       '  Show my usage by task (default) / Not now.',
-      '  A chart of what the recorded Claude Code and Codex sessions went into, by task, then three suggestions to pick from.',
+      '  A chart of what the recorded Claude Code and Codex sessions went into, by task, then up to three suggestions to pick from.',
       '  Show my usage by task: run hyp usage and follow the instructions it prints, here in this session. It starts no other client.',
       '  Not now: say they can run hyp usage in a terminal any time, and finish.',
       '  With no recorded sessions yet, skip the question and say hyp usage will have something to show after a few sessions.',
