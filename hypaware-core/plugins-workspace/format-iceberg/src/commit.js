@@ -75,10 +75,9 @@ export async function commitBatch(input, priorState) {
     ? schemaFromExistingMetadata(input.columns, priorState.metadata)
     : icebergSchemaForColumns(input.columns)
 
-  // Coerce rows AFTER deciding the schema so type errors fire with the
-  // user-facing schema (not the post-merge id-aware one). The two are
-  // structurally equivalent for value coercion.
-  const records = rowsToIcebergRecords(input.columns, input.rows)
+  // Coerce rows AFTER deciding the schema: the target schema says whether a
+  // JSON column takes values (variant) or JSON text (a legacy string column).
+  const records = rowsToIcebergRecords(input.columns, input.rows, targetSchema)
 
   if (!priorState.exists) {
     try {

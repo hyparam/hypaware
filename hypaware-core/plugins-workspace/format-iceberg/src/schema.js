@@ -21,7 +21,7 @@ const ICEBERG_SCHEMA_ID = 0
  *   DOUBLE    -> double
  *   BOOLEAN   -> boolean
  *   TIMESTAMP -> timestamptz   (microsecond-precision, UTC)
- *   JSON      -> string        (canonical-JSON payload)
+ *   JSON      -> variant       (same as the local cache)
  *
  * @param {readonly ColumnSpec[]} columns
  * @returns {Schema}
@@ -79,7 +79,7 @@ export function mergeFieldIdsFromTable(columns, existing) {
     const prior = existingByName.get(column.name)
     const want = icebergTypeForBasicType(column.type, column.name)
     if (prior) {
-      if (prior.type !== want) {
+      if (prior.type !== want && !isLegacyJsonString(column, prior)) {
         throw newSchemaError(
           'iceberg_schema_incompatible',
           `iceberg-format: column "${column.name}" type changed from ${prior.type} to ${want}`
@@ -123,24 +123,30 @@ export function mergeFieldIdsFromTable(columns, existing) {
  * intrinsic cache) but lives in the plugin tree so the writer can
  * evolve independently of the local cache.
  *
- * JSON columns are passed through unchanged; the caller decides whether
- * to canonicalize via `JSON.stringify`. Required nulls throw with
+ * JSON values pass through unchanged into a `variant` column. A table
+ * created before JSON became `variant` still holds `string` JSON columns;
+ * those get the value as JSON text, as they always have, so `schema` (the
+ * table's target schema) decides per column. Required nulls throw with
  * `iceberg_data_write_failed` so the error kind matches the surrounding
  * commit-phase span.
  *
  * @param {readonly ColumnSpec[]} columns
  * @param {readonly Record<string, unknown>[]} rows
+ * @param {Schema} schema
  * @returns {Record<string, unknown>[]}
  */
-export function rowsToIcebergRecords(columns, rows) {
+export function rowsToIcebergRecords(columns, rows, schema) {
+  const typeByName = new Map(schema.fields.map((field) => [field.name, field.type]))
+  const jsonText = columns.map((column) => column.type === 'JSON' && typeByName.get(column.name) === 'string')
   /** @type {Record<string, unknown>[]} */
   const out = new Array(rows.length)
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i]
     /** @type {Record<string, unknown>} */
     const record = {}
-    for (const column of columns) {
-      record[column.name] = coerce(column, row[column.name])
+    for (let c = 0; c < columns.length; c += 1) {
+      const column = columns[c]
+      record[column.name] = coerce(column, row[column.name], jsonText[c])
     }
     out[i] = record
   }
@@ -167,10 +173,8 @@ function icebergTypeForBasicType(type, columnName) {
     case 'TIMESTAMP':
       return 'timestamptz'
     case 'JSON':
-      // V1 stores JSON columns as canonical-JSON strings so any
-      // Iceberg reader can scan them. Switching to `variant` later
-      // (see hyparquet v3 work) is a forward-compatible refinement.
-      return 'string'
+      // @ref LLP 0618#variant [implements]: the archive stores JSON as the cache does
+      return 'variant'
     default:
       throw newSchemaError(
         'iceberg_schema_incompatible',
@@ -180,11 +184,26 @@ function icebergTypeForBasicType(type, columnName) {
 }
 
 /**
+ * A JSON column on a table created while the sink still wrote JSON as
+ * `string`. Iceberg cannot promote string to variant in place, so such a
+ * table keeps its type until it is rewritten.
+ *
+ * @ref LLP 0618#legacy-tables [implements]: an existing string JSON column keeps taking JSON text
+ * @param {ColumnSpec} column
+ * @param {Field} prior
+ * @returns {boolean}
+ */
+function isLegacyJsonString(column, prior) {
+  return column.type === 'JSON' && prior.type === 'string'
+}
+
+/**
  * @param {ColumnSpec} spec
  * @param {unknown} value
+ * @param {boolean} jsonText the target column is a legacy string JSON column
  * @returns {unknown}
  */
-function coerce(spec, value) {
+function coerce(spec, value, jsonText) {
   if (value === undefined || value === null) {
     if (spec.nullable === false) {
       throw newDataError(
@@ -208,6 +227,7 @@ function coerce(spec, value) {
     case 'TIMESTAMP':
       return coerceTimestamp(value, spec.name)
     case 'JSON':
+      if (!jsonText) return value
       return typeof value === 'string' ? value : JSON.stringify(value)
     default:
       return value
