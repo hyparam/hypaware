@@ -386,6 +386,15 @@ bundled scripts itself and is asked for permission to, so
 The telemetry names (`wizard.suggest_skill`, `suggest_skill`) are kept so
 the offer stays one series.
 
+<a id="setup-offer-usage-sources"></a>**The offer needs a Claude Code or Codex session.**
+The first look counts every client's rows, but the usage view charts only
+Claude Code and Codex, the sources `digest.mjs` reads. So after a first
+look with rows, setup runs one more query for those sources over the last
+30 days, the widest window `hyp usage` falls back to, and stops at the
+first row. With none, the offer is skipped and nothing is printed, as when
+nothing launchable resolves, and `wizard.suggest_skill` records
+`no-usage-rows`. A query that fails never withholds the offer.
+
 <a id="not-preauthorized"></a>**The launch is still not pre-authorized.**
 LLP 0198 #no-preauth stands, and the shipped instructions ask for no
 command at all: reading the three evidence files needs no permission, and

@@ -8,9 +8,11 @@ import process from 'node:process'
 
 import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import {
+  USAGE_SOURCES,
   anyClientLaunchable,
   recordedAskClientLaunchable,
   runWizardSuggestSkill,
+  usageSessionsRecorded,
 } from '../../../../src/core/cli/wizard/suggest_skill.js'
 
 const VERB = /Run `hyp usage` any time: HypAware shows what your AI usage went into, by task/
@@ -85,6 +87,41 @@ test('runWizardSuggestSkill: an empty cache with nothing launchable keeps the no
   assert.deepEqual(result, { asked: false, reason: 'no-rows' })
   assert.match(stdout.text(), /Nothing recorded yet: HypAware captures from your next session onward/)
   assert.doesNotMatch(stdout.text(), /hyp usage/)
+})
+
+test('runWizardSuggestSkill: rows with no Claude Code or Codex session make no offer and print nothing', async () => {
+  const stdout = makeBuf()
+  const child = childExiting(0)
+  let asked = 0
+  const result = await runWizardSuggestSkill({
+    stdout, env: {}, interactive: true, hasRows: true, usageRows: false, launchable: true,
+    confirm: async () => { asked += 1; return 'yes' }, spawnFn: child.fn,
+  })
+  assert.deepEqual(result, { asked: false, reason: 'no-usage-rows' })
+  assert.equal(asked, 0)
+  assert.equal(child.calls.length, 0)
+  assert.equal(stdout.text(), '')
+})
+
+test('usageSessionsRecorded: one bounded query over the last 30 days, false on no row, undefined when it cannot tell', async () => {
+  /** @type {string[]} */
+  const seen = []
+  /** @param {Record<string, unknown>[]} rows */
+  const runner = (rows) => ({ hasDataset: () => true, async run(/** @type {string} */ sql) { seen.push(sql); return { columns: [], rows } } })
+  const now = new Date('2026-11-20T00:30:00Z')
+  assert.equal(await usageSessionsRecorded(runner([{ n: 1 }]), now), true)
+  assert.equal(seen[0], "select 1 as n from ai_gateway_messages where date >= '2026-10-22' and conversation_source in ('claude_code', 'claude', 'claude-desktop', 'codex') limit 1")
+  assert.equal(await usageSessionsRecorded(runner([]), now), false)
+  assert.equal(await usageSessionsRecorded(undefined, now), undefined)
+  const failing = { hasDataset: () => true, async run() { throw new Error('cache unreadable') } }
+  assert.equal(await usageSessionsRecorded(failing, now), undefined)
+})
+
+test('USAGE_SOURCES matches the sources the usage digest charts', async () => {
+  const digest = await fs.readFile(path.join(import.meta.dirname, '../../../../hypaware-core/usage/hypaware-usage-by-task/scripts/digest.mjs'), 'utf8')
+  const listed = digest.match(/conversation_source IN \(([^)]*)\)/)
+  assert.ok(listed, 'digest.mjs no longer filters on conversation_source IN (...)')
+  assert.deepEqual(listed[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')), USAGE_SOURCES)
 })
 
 test('anyClientLaunchable: true when a launch binary resolves, false when none does, undefined when it cannot tell', async () => {

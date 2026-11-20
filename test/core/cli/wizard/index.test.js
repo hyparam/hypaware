@@ -1496,9 +1496,11 @@ test('runInitWizard: an attended run skips the run summary, having said each ste
 /**
  * A first-look runner: the probe answers with one day of history, then one
  * query per section. Only the two sections this file asserts on are
- * scripted; the rest come back empty (which renders as absent).
+ * scripted; the rest come back empty (which renders as absent). The closing
+ * offer's Claude Code and Codex check finds a session whenever the provider
+ * section has rows, unless `usageRows` says otherwise.
  */
-function firstLookStub(providerRows, dailyRows) {
+function firstLookStub(providerRows, dailyRows, usageRows = providerRows.length > 0) {
   /** @type {string[]} */
   const seen = []
   return {
@@ -1511,6 +1513,7 @@ function firstLookStub(providerRows, dailyRows) {
         if (sql === OVERVIEW_PROBE_SQL) return { columns: [], rows: [{ date: '2026-07-24', n: 40 }] }
         if (sql.includes('group by 1, 2')) return { columns: [], rows: providerRows }
         if (sql.includes('count(distinct session_id) sessions,')) return { columns: [], rows: dailyRows }
+        if (sql.includes('conversation_source in (')) return { columns: [], rows: usageRows ? [{ n: 1 }] : [] }
         return { columns: [], rows: [] }
       },
     },
@@ -1528,9 +1531,11 @@ test('runInitWizard: an attended run ends on the first look, before the privacy 
   await runInitWizard(opts)
   const text = stdout.text()
   // The window probe, then the two sections setup runs. Repos and tools
-  // are `hyp query overview`'s half (LLP 0198#wizard-sections).
+  // are `hyp query overview`'s half (LLP 0198#wizard-sections). The last
+  // query is the closing offer's check for Claude Code and Codex sessions.
   assert.equal(stub.seen[0], OVERVIEW_PROBE_SQL)
-  assert.equal(stub.seen.length, 3)
+  assert.equal(stub.seen.length, 4)
+  assert.ok(stub.seen[3].endsWith("conversation_source in ('claude_code', 'claude', 'claude-desktop', 'codex') limit 1"), stub.seen[3])
   // Every number in the block is scoped to the window the probe chose.
   assert.match(text, /2026-07-24 to 2026-07-24 \(1 active day, 40 rows\)/)
   assert.match(text, /First look at what HypAware has recorded/)
@@ -2067,6 +2072,22 @@ test('runInitWizard: with no client CLI on PATH, setup never mentions `hyp usage
   await runInitWizard(emptyOpts)
   assert.match(emptyStdout.text(), /Nothing recorded yet/)
   assert.ok(!emptyStdout.text().includes('hyp usage'), emptyStdout.text())
+})
+
+test('runInitWizard: rows from other clients alone make no usage offer', async () => {
+  let asked = 0
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookStub(
+      [{ provider: 'anthropic', model: 'claude-opus-5', input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }],
+      [{ date: '2026-07-24', sessions: 3, input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }],
+      false
+    ).runner,
+    suggestSkill: { confirm: async () => { asked += 1; return 'yes' } },
+  })
+  await runInitWizard(opts)
+  assert.equal(asked, 0)
+  assert.ok(!stdout.text().includes('hyp usage'), stdout.text())
+  assert.doesNotMatch(stdout.text(), /Nothing recorded yet/)
 })
 
 // --- firstLookHadRows ---

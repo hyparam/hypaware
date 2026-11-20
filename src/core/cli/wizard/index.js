@@ -18,6 +18,7 @@
  * } from '../../../../src/core/cli/wizard/types.js'
  * @import { FolderAskMode } from '../../../../src/core/usage-policy/types.js'
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { OverviewQueryRunner } from '../../../../src/core/query/types.js'
  */
 
 import { Attr, getLogger, withSpan } from '../../observability/index.js'
@@ -46,7 +47,7 @@ import { ensureDurableBin } from '../global_install.js'
 import { platformIsSupported, setupUnsupportedNote } from '../../daemon/platform.js'
 import { friendlyClientLabel } from '../../commands/ask.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { anyClientLaunchable, recordedAskClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
+import { anyClientLaunchable, recordedAskClientLaunchable, runWizardSuggestSkill, usageSessionsRecorded } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -996,10 +997,13 @@ async function runGuardedInitWizard(opts, guard) {
   // a change here.
   /** @type {FirstLookResult | undefined} */
   let firstLookResult
+  /** @type {OverviewQueryRunner | undefined} */
+  let firstLookRunner
   if (firstLookRan) {
     const notices = firstLookNoticeSink(opts.stderr)
+    firstLookRunner = opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices)
     firstLookResult = await runWizardFirstLook({
-      runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices),
+      runner: firstLookRunner,
       stdout: opts.stdout,
       color: useColor(opts.stdout, opts.env),
       ...(opts.firstLookBudgetMs !== undefined ? { budgetMs: opts.firstLookBudgetMs } : {}),
@@ -1129,12 +1133,17 @@ async function runGuardedInitWizard(opts, guard) {
   /** @type {WizardSuggestSkillResult | undefined} */
   let suggestSkill
   if (interactive && !cancelled && opts.finale?.dryRun !== true && (await guard.checkpoint())) {
+    const hasRows = firstLookHadRows(firstLookResult)
+    // The first look counts every client; the view charts only Claude Code
+    // and Codex, so rows from other clients alone do not earn the offer.
+    const usageRows = hasRows === true ? await usageSessionsRecorded(firstLookRunner) : undefined
     suggestSkill = await runWizardSuggestSkill({
       stdout: opts.stdout,
       stderr: opts.stderr,
       env: opts.env,
       interactive: true,
-      hasRows: firstLookHadRows(firstLookResult),
+      hasRows,
+      ...(usageRows !== undefined ? { usageRows } : {}),
       ...(opts.stdin ? { stdin: opts.stdin } : {}),
       ...(opts.suggestSkill ?? {}),
       launchable: opts.suggestSkill?.launchable ?? await anyClientLaunchable(opts.env),

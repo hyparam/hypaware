@@ -21,6 +21,7 @@
  * @import { ClientDescriptor } from '../../../../src/core/types.js'
  * @import { FinaleSummary } from '../../../../src/core/cli/types.js'
  * @import { RunWizardSuggestSkillOptions, WizardSuggestSkillResult } from '../../../../src/core/cli/wizard/types.js'
+ * @import { OverviewQueryRunner } from '../../../../src/core/query/types.js'
  */
 
 import { spawn } from 'node:child_process'
@@ -31,6 +32,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, withSpan } from '../../observability/index.js'
+import { OVERVIEW_DATASET } from '../../query/overview.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
 import { buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory } from '../walkthrough.js'
@@ -71,6 +73,14 @@ export async function runWizardSuggestSkill(opts) {
             opts.stdout.write('Once you have some history, run `hyp usage`: HypAware shows what your AI usage went into, by task.\n')
           }
           return { asked: false, reason: 'no-rows' }
+        }
+        // Rows, but none the usage view charts (only OpenCode or Cursor,
+        // say): a yes would start a client that reports nothing recorded,
+        // so the step is silent, as it is with nothing launchable.
+        if (opts.usageRows === false) {
+          span.setAttribute('status', 'skipped')
+          span.setAttribute('skip_reason', 'no-usage-rows')
+          return { asked: false, reason: 'no-usage-rows' }
         }
         // No client `hyp usage` could start is on PATH, so the step is silent:
         // a yes would spawn a child that finds nothing to launch, and the
@@ -157,6 +167,40 @@ export async function runWizardSuggestSkill(opts) {
     },
     { component: 'wizard' }
   )
+}
+
+/**
+ * The conversation sources the usage view charts: the same list as the
+ * `WHERE` in `hypaware-core/usage/hypaware-usage-by-task/scripts/digest.mjs`.
+ */
+export const USAGE_SOURCES = ['claude_code', 'claude', 'claude-desktop', 'codex']
+
+/** The widest window `hyp usage` reads before it says nothing is recorded. */
+const USAGE_WINDOW_DAYS = 30
+
+/**
+ * Whether Claude Code or Codex sessions are recorded in the window `hyp
+ * usage` can fall back to, as the closing offer's `usageRows`. One query
+ * that stops at the first row.
+ *
+ * `undefined` means it could not tell (no runner, or the query threw),
+ * which never withholds the offer.
+ *
+ * @ref LLP 0398#setup-offer-usage-sources [implements]: only the sources the view charts earn the offer
+ * @param {OverviewQueryRunner | undefined} runner
+ * @param {Date} [now]
+ * @returns {Promise<boolean | undefined>}
+ */
+export async function usageSessionsRecorded(runner, now = new Date()) {
+  if (!runner) return undefined
+  const since = new Date(now.getTime() - (USAGE_WINDOW_DAYS - 1) * 864e5).toISOString().slice(0, 10)
+  const sources = USAGE_SOURCES.map((s) => `'${s}'`).join(', ')
+  try {
+    const { rows } = await runner.run(`select 1 as n from ${OVERVIEW_DATASET} where date >= '${since}' and conversation_source in (${sources}) limit 1`)
+    return rows.length > 0
+  } catch {
+    return undefined
+  }
 }
 
 /**
