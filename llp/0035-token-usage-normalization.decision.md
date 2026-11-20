@@ -13,6 +13,8 @@ response body's last block)
 LLP 0553 adds NanoClaw's first-block carrier in its native-only append lane.
 Extended by [LLP 0559](./0559-claude-recording-identity-and-usage.spec.md#usage-carrier)
 for committed Claude carriers across partial transcript reads.
+Extended by [LLP 0619](./0619-codex-compaction-usage-row.decision.md) for
+a Codex remote compaction call, whose usage rides a row of its own.
 
 ## Summary
 

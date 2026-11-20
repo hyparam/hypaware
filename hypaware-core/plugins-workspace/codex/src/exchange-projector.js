@@ -7,6 +7,7 @@ import { createUsagePolicyResolver, isEqualOrDescendant, USAGE_POLICY_DROP } fro
 import { redactRemoteUserinfo } from './git-remote.js'
 import {
   compactionSummaryFromMessage,
+  compactionUsageMessage,
   copyNumberAlias,
   firstString,
   mergeJsonObjects,
@@ -437,7 +438,10 @@ function messagesForTransport(ctx) {
     // /compact returns retained context, not a new billed assistant response.
     // Preserve roles and summary identity, and never stamp its usage on history.
     const output = isPlainObject(ctx.responseBody) ? ctx.responseBody.output : undefined
-    return [...responsesInputMessages(ctx.reqBody.input, ctx.skipInputIndex), ...responsesInputMessages(output)]
+    const messages = [...responsesInputMessages(ctx.reqBody.input, ctx.skipInputIndex), ...responsesInputMessages(output)]
+    const usage = compactionUsageRow(ctx.responseBody, [])
+    if (usage) messages.push(usage)
+    return messages
   }
   return openAiResponsesMessages(ctx.reqBody, ctx.responseBody, ctx.streamEvents, ctx.skipInputIndex)
 }
@@ -526,12 +530,73 @@ function openAiResponsesMessages(reqBody, responseBody, streamEvents, skipInputI
   const messages = responsesInputMessages(reqBody.input, skipInputIndex)
   let assistant = responsesAssistantMessagesFromBody(responseBody)
   if (assistant.length === 0) assistant = responsesAssistantMessagesFromStream(streamEvents)
+  if (assistant.length === 0) {
+    // Nothing here can carry usage. A remote compaction returns only opaque
+    // state, so its usage gets a row of its own; anything else stays dropped.
+    const compaction = compactionUsageRow(responseBody, streamEvents)
+    if (compaction) messages.push(compaction)
+    return messages
+  }
   const usageAttributes = openAiUsageAttributes(
     readOpenAiUsage(responseBody) ?? readOpenAiUsageFromResponsesStream(streamEvents)
   )
   stampUsageOnLastAssistant(assistant, usageAttributes)
   for (const msg of assistant) messages.push(msg)
   return messages
+}
+
+/**
+ * The usage row of a remote compaction call: a response whose output holds a
+ * `compaction` item, on `/responses/compact` or (remote compaction v2) on the
+ * ordinary `/responses` route. Keyed by the response id, which Codex writes to
+ * the rollout as `compacted.compaction_response_id`, so the backfill names the
+ * same row; the item's own id stands in when a body has none. Returns
+ * `undefined` for any other response, or one with no usage or no id. The
+ * stream is read only when the body is not a response, and callers reach this
+ * only for a response with no assistant output, so it is off the common path.
+ *
+ * @ref LLP 0619#live [implements]: the call's usage on its own row, never on
+ *   retained history, and nothing read from the opaque state
+ *
+ * @param {unknown} responseBody
+ * @param {Array<{ event: string, data: string }>} streamEvents
+ * @returns {AiGatewayProjectedMessage | undefined}
+ */
+function compactionUsageRow(responseBody, streamEvents) {
+  /** @type {Record<string, unknown> | undefined} */
+  let response = isPlainObject(responseBody) && Array.isArray(responseBody.output) ? responseBody : undefined
+  /** @type {string | undefined} */
+  let streamId
+  /** @type {string | undefined} */
+  let streamItemId
+  if (!response) {
+    for (const row of streamEvents) {
+      const payload = parseEventData(row.data)
+      if (!isPlainObject(payload)) continue
+      const type = stringValue(payload.type) ?? stringValue(row.event)
+      if (type === 'response.completed') {
+        response = isPlainObject(payload.response) ? payload.response : payload
+        streamId = stringValue(payload.id) ?? stringValue(response.id) ?? streamId
+      } else if (type === 'response.created' && !streamId) {
+        streamId = stringValue(payload.id) ?? stringValue(isPlainObject(payload.response) ? payload.response.id : undefined)
+      } else if (type === 'response.output_item.done' && isPlainObject(payload.item) && isCompactionItem(payload.item)) {
+        streamItemId = stringValue(payload.item.id) ?? streamItemId
+      }
+    }
+  }
+  const output = response && Array.isArray(response.output) ? response.output : []
+  const item = output.find((entry) => isPlainObject(entry) && isCompactionItem(entry))
+  if (!item && !streamItemId) return undefined
+  const id = (response ? stringValue(response.id) : undefined) ?? streamId
+    ?? (isPlainObject(item) ? stringValue(item.id) : undefined) ?? streamItemId
+  const usageAttributes = openAiUsageAttributes(readOpenAiUsage(response))
+  return id && usageAttributes ? compactionUsageMessage(id, usageAttributes) : undefined
+}
+
+/** @param {Record<string, unknown>} item */
+function isCompactionItem(item) {
+  const type = stringValue(item.type)
+  return type === 'compaction' || type === 'compaction_summary' || type === 'context_compaction'
 }
 
 /**
