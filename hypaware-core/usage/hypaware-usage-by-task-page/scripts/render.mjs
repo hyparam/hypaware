@@ -82,7 +82,7 @@ const modelLine = Object.entries(modelAgg).sort((a, b) => b[1] - a[1]).map(([k, 
 // the prompts behind each piece of work: one hidden panel per chart row, opened by clicking the row's label
 const uniq = (xs) => xs.filter((x, i) => x && x !== xs[i - 1]);
 const panel = (r, i) => { const g = r.g; return `<div class="ev" id="ev-${i}"><p class="ev-head"><strong>${esc(g.label)}</strong><a href="#" class="ev-close" data-ev="">close</a></p>` +
-  `<p class="ev-meta">${g.prs.size ? (g.prs.size > 5 ? `${g.prs.size} PRs` : sortedPrs(g).map(prlink).join(", ")) + " · " : NOPR ? "" : "No PR · "}${tok(g.out)} output tokens · ${fmt(g.msgs)} responses${LAB && !g.auto ? " · " + g.category : ""}</p>` +
+  `<p class="ev-meta">${g.prs.size ? (g.prs.size > 5 ? `${g.prs.size} PRs` : sortedPrs(g).map(prlink).join(", ")) + " · " : NOPR ? "" : "No PR seen · "}${tok(g.out)} output tokens · ${fmt(g.msgs)} responses${LAB && !g.auto ? " · " + g.category : ""}</p>` +
   (g.prs.size > 5 ? `<ul class="prl">${sortedPrs(g).map((q) => `<li>${prlink(q)} <span class="more">${esc(prs[q].title)}</span></li>`).join("")}</ul>` : "") +
   `<ul>${[...g.slices].sort((a, b) => b.tokens.output - a.tokens.output).slice(0, 12).map((s) => { const ps = uniq([...s.prompts, s.last_prompt]); return `<li>${ps.length ? ps.map((x) => esc(x)).join('<span class="more"> → </span>') : "(no human prompt recorded)"}<span class="meta">${esc(s.date)} · ${esc(s.client)} · ${tok(s.tokens.output)} output</span></li>`; }).join("")}${g.slices.length > 12 ? `<li class="more">and ${g.slices.length - 12} smaller sessions</li>` : ""}</ul></div>`; };
 // The next step the page leads to: a HypAware recommendation. Each task gets a ready-to-paste prompt that
@@ -188,7 +188,7 @@ const share = (label, total, parts, note) => { const sum = Math.max(1, parts.red
 const figures = `<div class="figs"><p class="chart-title">Key figures, each bar split into its two parts</p>` +
   share("Output tokens", tok(T.tokens.output), [{ name: "Codex", v: T.tokens.output - ccOut, t: tok(T.tokens.output - ccOut), c: "s2" }, { name: "Claude Code", v: ccOut, t: tok(ccOut), c: "s1" }]) +
   share("Sessions", T.sessions, [{ name: "Codex", v: cxSess, t: String(cxSess), c: "s2" }, { name: "Claude Code", v: ccSess, t: String(ccSess), c: "s1" }], `${fmt(T.msgs)} model responses`) +
-  (NOPR ? "" : share("Output in PR work", pct(prOut, T.tokens.output) + "%", [{ name: "In work that opened a PR", v: prOut, t: tok(prOut), c: "ink" }, { name: "No PR", v: T.tokens.output - prOut, t: tok(T.tokens.output - prOut), c: "off" }]) +
+  (NOPR ? "" : share("Output in PR work", pct(prOut, T.tokens.output) + "%", [{ name: "In work that opened a PR", v: prOut, t: tok(prOut), c: "ink" }, { name: "No PR seen", v: T.tokens.output - prOut, t: tok(T.tokens.output - prOut), c: "off" }]) +
   share("PRs opened", claimed.size + unclaimed.length, [{ name: "Tied to a recorded session", v: claimed.size, t: String(claimed.size), c: "ink" }, { name: "No recorded session", v: unclaimed.length, t: String(unclaimed.length), c: "off" }])) +
   share("Prompt tokens", tok(T.tokens.cache_read + T.tokens.input), [{ name: "Read from cache", v: T.tokens.cache_read, t: tok(T.tokens.cache_read), c: "ink" }, { name: "Uncached input", v: T.tokens.input, t: tok(T.tokens.input), c: "off" }]) + `</div>`;
 // the biggest named task, for the lead sentence. Unlabelled rows and the folds do not count, so with
