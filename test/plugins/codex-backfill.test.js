@@ -11,6 +11,7 @@ import {
   AI_GATEWAY_PROJECTED_EXCHANGE_KIND,
   DATASET_NAME,
   aiGatewayBackfillMaterializer,
+  withUsageColumns,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspace/codex/src/backfill.js'
 import { prepareAttach } from '../../hypaware-core/plugins-workspace/codex/src/toml-config.js'
@@ -1421,6 +1422,85 @@ test('a checkpoint inside a turn closes it, so a later token_count bills nothing
     const rows = await materialize((await collect(provider.run(runContext().ctx))).items[0])
     assert.deepEqual(rows.map((r) => r.message_id), ['before'])
     assert.equal(/** @type {any} */ (rows[0].attributes)?.usage, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0619#backfill [tests]: the call's token_usage_record becomes one row, once, at the checkpoint
+test('a remote compaction bills its recorded usage to one row of its own, live and backfill alike', async () => {
+  const env = await stageEnv()
+  try {
+    const record = (/** @type {string} */ responseId, /** @type {number} */ input) => ({
+      type: 'token_usage_record',
+      payload: {
+        thread_id: 'thread-v2', turn_id: 'turn-1', response_id: responseId,
+        usage: { input_tokens: input, cached_input_tokens: 600, output_tokens: 50, reasoning_output_tokens: 0, total_tokens: input + 50 },
+      },
+    })
+    const tokenCount = (/** @type {number} */ input) => ({ type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: input, output_tokens: 10 } } } })
+    await writeModernRollout(env, 'rollout-compact-v2.jsonl', {
+      meta: { id: 'thread-v2', session_id: 'session-v2', cwd: '/work/repo', timestamp: '2026-05-25T00:00:00.000Z' },
+      items: [
+        { timestamp: '2026-05-25T00:00:01.000Z', payload: { type: 'message', id: 'before', role: 'assistant', content: 'Earlier answer' } },
+        // A normal turn's own record is not a compaction and adds nothing.
+        record('resp-turn', 100),
+        tokenCount(100),
+        record('resp-cmp', 1000),
+        { type: 'compacted', timestamp: '2026-05-25T00:00:02.000Z', payload: { message: '', compaction_response_id: 'resp-cmp' } },
+        // The recompute after the checkpoint bills nothing.
+        tokenCount(5000),
+        // A checkpoint whose id matches no record gets no row.
+        record('resp-other', 7),
+        { type: 'compacted', timestamp: '2026-05-25T00:00:03.000Z', payload: { message: '', compaction_response_id: 'resp-mismatch' } },
+        { timestamp: '2026-05-25T00:00:04.000Z', payload: { type: 'message', id: 'after-user', role: 'user', content: 'Continue' } },
+        { timestamp: '2026-05-25T00:00:05.000Z', payload: { type: 'message', id: 'after', role: 'assistant', content: 'Next answer' } },
+        tokenCount(200),
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const first = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(first.items[0])
+    const second = await collect(provider.run(runContext().ctx))
+    assert.deepEqual(await materialize(second.items[0]), rows, 'a repeated import adds nothing')
+    assert.deepEqual(rows.map((r) => r.message_id), ['before', 'resp-cmp', 'after-user', 'after'])
+
+    const row = /** @type {any} */ (rows[1])
+    assert.equal(row.role, 'system')
+    assert.equal(row.part_type, 'status')
+    assert.equal(row.content_text ?? null, null)
+    assert.equal(row.provider_subtype, 'compaction.usage')
+    assert.notEqual(row.is_compact_summary, true)
+    assert.equal(row.message_created_at, '2026-05-25T00:00:02.000Z')
+    assert.deepEqual(row.attributes.usage, { input_tokens: 400, cache_read_tokens: 600, output_tokens: 50, reasoning_tokens: 0, total_tokens: 1050 })
+    for (const key of ['session_id', 'conversation_id', 'cwd', 'client_name']) {
+      assert.equal(row[key], rows[0][key], `${key} matches the session`)
+    }
+    assert.equal(rows[0].identity_source ?? null, rows[3].identity_source ?? null)
+
+    // The session total includes the compaction, and only once.
+    const totals = { input: 0, output: 0 }
+    for (const r of withUsageColumns(rows.map((r) => ({ ...r })))) {
+      totals.input += Number(r.input_tokens) || 0
+      totals.output += Number(r.output_tokens) || 0
+    }
+    assert.deepEqual(totals, { input: 100 + 400 + 200, output: 10 + 50 + 10 })
+
+    const projector = createCodexExchangeProjector({ resolver: createUsagePolicyResolver({ existsSync: () => false }) })
+    const live = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+    const liveRows = await live.projectExchange(/** @type {any} */ ({
+      path: '/v1/responses', provider: 'openai',
+      request_headers: JSON.stringify({ 'x-codex-turn-metadata': JSON.stringify({ session_id: 'session-v2', thread_id: 'thread-v2' }) }),
+      request_body: JSON.stringify({ input: [{ type: 'compaction_trigger' }] }),
+      response_body: JSON.stringify({ id: 'resp-cmp', output: [{ type: 'compaction', encrypted_content: 'opaque-state' }], usage: { input_tokens: 1000, output_tokens: 50 } }),
+    }))
+    const liveUsage = /** @type {any} */ (liveRows.find((r) => /** @type {any} */ (r.attributes)?.usage))
+    assert.equal(liveUsage.part_id, row.part_id, 'live and backfill settle to one row')
+    assert.equal(liveUsage.session_id, row.session_id)
+    assert.equal(liveUsage.conversation_id, row.conversation_id)
+
+    const ignored = createCodexBackfillProvider({ homeDir: env.homeDir, resolver: ignoringResolver('/work/repo') })
+    assert.equal((await collect(ignored.run(runContext().ctx))).items.length, 0)
   } finally {
     await env.cleanup()
   }

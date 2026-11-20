@@ -259,6 +259,7 @@ export function reasoningText(value) {
 // Keep the complete prefix: a generic mention of a summary is not evidence.
 const COMPACTION_SUMMARY_PREFIX = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:'
 const COMPACTION_SUMMARY_KIND = 'compaction.summary'
+const COMPACTION_USAGE_KIND = 'compaction.usage'
 
 /**
  * Recognize Codex's injected plaintext summary message, including replay in a
@@ -319,6 +320,32 @@ export function compactedMessageFromPayload(payload) {
   copyNumberAlias(payload, metadata, 'window_number', 'window_number')
   if (Object.keys(metadata).length > 0) message.compact_metadata = metadata
   return message
+}
+
+/**
+ * The billed usage of one remote compaction call, as a row of its own. The
+ * call returns opaque state and no summary text, so nothing in the history can
+ * carry its usage: the row holds a status block and the usage, and no text.
+ * Both lanes key it by the compaction's response id, so a live capture and a
+ * rollout import of the same call settle to one `part_id`.
+ *
+ * @ref LLP 0619#row [implements]: role system and a status block, so it sums
+ *   in totals but is never a usage carrier or a rendered conversation turn
+ *
+ * @param {string} responseId
+ * @param {JsonObject} usageAttributes `{ usage }` from the lane's normalizer
+ * @returns {AiGatewayProjectedMessage}
+ */
+export function compactionUsageMessage(responseId, usageAttributes) {
+  return {
+    role: 'system',
+    message_id: responseId,
+    content: [{ type: 'status', status: COMPACTION_USAGE_KIND }],
+    provider_type: 'compaction',
+    provider_subtype: COMPACTION_USAGE_KIND,
+    compact_metadata: { compaction_response_id: responseId },
+    attributes: usageAttributes,
+  }
 }
 
 /** Compare snapshot text without allocating copies of retained prompts.

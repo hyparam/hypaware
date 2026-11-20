@@ -2803,9 +2803,115 @@ test('compact endpoint output is historical context, including retained user mes
       usage: { input_tokens: 100, output_tokens: 10 },
     }),
   }), context()))
-  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant'])
-  assert.ok(projection.messages.every((/** @type {any} */ m) => m.attributes?.usage === undefined))
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant', 'system'])
+  assert.ok(projection.messages.slice(0, 2).every((/** @type {any} */ m) => m.attributes?.usage === undefined))
+  // @ref LLP 0619#live [tests]: the call's usage on its own row, never on retained history
+  const usageRow = projection.messages[2]
+  assert.equal(usageRow.message_id, 'cmp-1', 'a body with no response id keys the row by the compaction item')
+  assert.deepEqual(usageRow.content, [{ type: 'status', status: 'compaction.usage' }])
+  assert.equal(usageRow.provider_subtype, 'compaction.usage')
+  assert.equal(usageRow.is_compact_summary, undefined)
+  assert.deepEqual(usageRow.attributes, { usage: { input_tokens: 100, output_tokens: 10 } })
   assert.ok(!JSON.stringify(projection).includes('opaque-state'))
+  assert.ok(!JSON.stringify(projection).includes('Unsupported plaintext'))
+})
+
+/**
+ * A remote compaction v2 call, as Codex sends it on the ordinary Responses
+ * route: the history plus a `compaction_trigger`, answered by one opaque
+ * `compaction` item and the call's usage on `response.completed`.
+ *
+ * @param {Record<string, unknown>} [overrides]
+ */
+function compactionV2Exchange(overrides = {}) {
+  const compaction = { type: 'compaction', id: 'cmp-v2', encrypted_content: 'opaque-state' }
+  return exchange({
+    path: '/backend-api/codex/responses',
+    is_sse: true,
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      cwd: '/work/clean',
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Earlier question' }] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Earlier answer' }] },
+        { type: 'compaction_trigger' },
+      ],
+    }),
+    stream_events: [
+      { event: 'response.created', data: JSON.stringify({ type: 'response.created', response: { id: 'resp-cmp' } }) },
+      { event: 'response.output_item.done', data: JSON.stringify({ type: 'response.output_item.done', item: compaction }) },
+      { event: 'response.completed', data: JSON.stringify({ type: 'response.completed', response: {
+        id: 'resp-cmp', output: [compaction],
+        usage: { input_tokens: 1000, input_tokens_details: { cached_tokens: 600 }, output_tokens: 50, total_tokens: 1050 },
+      } }) },
+    ],
+    ...overrides,
+  })
+}
+
+test('a remote compaction v2 response bills its usage to one row of its own, keyed by the response id', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(compactionV2Exchange(), context()))
+  const withUsage = projection.messages.filter((/** @type {any} */ m) => m.attributes?.usage)
+  assert.equal(withUsage.length, 1, 'no retained history message carries the call usage')
+  const row = projection.messages.at(-1)
+  assert.equal(row, withUsage[0])
+  assert.equal(row.role, 'system')
+  assert.equal(row.message_id, 'resp-cmp')
+  assert.deepEqual(row.compact_metadata, { compaction_response_id: 'resp-cmp' })
+  assert.deepEqual(row.attributes.usage, { input_tokens: 400, cache_read_tokens: 600, output_tokens: 50, total_tokens: 1050 })
+  assert.ok(!JSON.stringify(projection).includes('opaque-state'))
+
+  // A response with no compaction item and no assistant output still drops its usage.
+  const plain = /** @type {any} */ (projector.project(compactionV2Exchange({ stream_events: [
+    { event: 'response.completed', data: JSON.stringify({ type: 'response.completed', response: { id: 'resp-empty', output: [], usage: { input_tokens: 5 } } }) },
+  ] }), context()))
+  assert.ok(plain.messages.every((/** @type {any} */ m) => m.attributes?.usage === undefined))
+})
+
+// @ref LLP 0619#live [tests]: other output beside the compaction item is discarded, so the call bills once, on its own row
+test('a remote compaction v2 reply with other output items bills only its compaction row', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const reply = { type: 'message', role: 'assistant', id: 'msg-x', content: [{ type: 'output_text', text: 'Discarded reply' }] }
+  const compaction = { type: 'compaction', id: 'cmp-v2', encrypted_content: 'opaque-state' }
+  const usage = { input_tokens: 1000, input_tokens_details: { cached_tokens: 600 }, output_tokens: 50, total_tokens: 1050 }
+  const streamed = compactionV2Exchange({ stream_events: [
+    { event: 'response.created', data: JSON.stringify({ type: 'response.created', response: { id: 'resp-cmp' } }) },
+    { event: 'response.output_item.done', data: JSON.stringify({ type: 'response.output_item.done', item: reply }) },
+    { event: 'response.output_item.done', data: JSON.stringify({ type: 'response.output_item.done', item: compaction }) },
+    { event: 'response.completed', data: JSON.stringify({ type: 'response.completed', response: { id: 'resp-cmp', output: [reply, compaction], usage } }) },
+  ] })
+  const body = compactionV2Exchange({ is_sse: false, stream_events: [], response_body: JSON.stringify({ id: 'resp-cmp', output: [reply, compaction], usage }) })
+  for (const ex of [streamed, body]) {
+    const projection = /** @type {any} */ (projector.project(ex, context()))
+    const withUsage = projection.messages.filter((/** @type {any} */ m) => m.attributes?.usage)
+    assert.equal(withUsage.length, 1)
+    assert.equal(withUsage[0].role, 'system')
+    assert.equal(withUsage[0].message_id, 'resp-cmp')
+    assert.deepEqual(withUsage[0].attributes.usage, { input_tokens: 400, cache_read_tokens: 600, output_tokens: 50, total_tokens: 1050 })
+    assert.ok(!JSON.stringify(projection).includes('Discarded reply'))
+    assert.ok(!JSON.stringify(projection).includes('opaque-state'))
+  }
+})
+
+test('the compaction usage row is one status part with no text, and an ignored cwd drops it', async () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const gateway = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+  const rows = await gateway.projectExchange(compactionV2Exchange())
+  const usageRows = rows.filter((/** @type {any} */ r) => r.attributes?.usage)
+  assert.equal(usageRows.length, 1)
+  const row = /** @type {any} */ (usageRows[0])
+  assert.equal(row.part_id, 'resp-cmp#0')
+  assert.equal(row.part_type, 'status')
+  assert.equal(row.content_text ?? null, null)
+  assert.equal(row.provider_type, 'compaction')
+  assert.equal(row.provider_subtype, 'compaction.usage')
+  assert.notEqual(row.is_compact_summary, true)
+  assert.ok(!JSON.stringify(rows).includes('opaque-state'))
+
+  // @ref LLP 0619#privacy [tests]: the hypignore capture drop covers the call like any exchange
+  const ignored = createCodexExchangeProjector({ resolver: ignoringResolver('/work/clean') })
+  assert.equal(ignored.project(compactionV2Exchange(), context()), USAGE_POLICY_DROP)
 })
 
 test('Responses input omits opaque compaction variants and never marks reasoning as compaction', () => {

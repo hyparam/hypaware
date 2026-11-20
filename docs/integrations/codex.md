@@ -15,6 +15,12 @@ integration.
 Prompts, responses, tool calls, and token counts from Codex's session files, with
 the working directory of each session. Codex does not report cost.
 
+A remote compaction call's tokens are recorded on a row of their own: a
+`role = 'system'` status row with `provider_subtype = 'compaction.usage'` and
+no text. Sum its token columns with the rest. The import finds these calls
+only in session files from Codex versions that record them, and not for
+background or incomplete compactions.
+
 ## Set it up
 
 `hyp setup` offers Codex when it finds `~/.codex/config.toml`. To add it later:
