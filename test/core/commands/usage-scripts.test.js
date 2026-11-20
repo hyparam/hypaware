@@ -172,3 +172,54 @@ test('the page escapes every digest field and links PRs over https only', async 
     if (process.platform !== 'win32') assert.equal((await fs.stat(out)).mode & 0o777, 0o600)
   }
 })
+
+/**
+ * A chart digest with one session per entry of `prsBy`, each tied by the
+ * repo rule to those PRs, written to `root`. A short id is a merged PR, so its
+ * tag carries no state.
+ * @param {string} root
+ * @param {string[][]} prsBy
+ */
+async function chartDigest(root, prsBy) {
+  /** @type {Record<string, any>} */
+  const prs = {}
+  for (const id of prsBy.flat()) prs[id] = { id, repo: id.split('#')[0], number: Number(id.split('#')[1]), author: 'me', title: `title ${id}`, state: id.length < 6 ? 'MERGED' : 'OPEN', createdAt: `2026-11-18T10:${String(Object.keys(prs).length).padStart(2, '0')}:00Z`, url: `https://github.com/o/${id.replace('#', '/pull/')}`, claimed_by_rule: true }
+  const slices = prsBy.map((ids, i) => ({
+    id: `s${i}|2026-11-18`, session_id: `s${i}`, date: '2026-11-18', client: 'Claude Code', models: { m: 100 }, repos: [], branches: [],
+    first_at: '2026-11-18T10:00:00Z', last_at: '2026-11-18T11:00:00Z', msgs: 3, tokens: { input: 1, output: 100 * (i + 1), cache_read: 1, cache_write: 1 },
+    prompts: [`a long first prompt for session number ${i} that runs well past the label width`], last_prompt: null, tools: {},
+    prs_seen: [], prs_rule: ids, prs_graph: [],
+  }))
+  const file = path.join(root, 'chart.json')
+  await fs.writeFile(file, JSON.stringify({
+    window: { from: '2026-11-18', to: '2026-11-18' }, remote: null, org: null, pr_source: 'gh', generated_at: '2026-11-19', attrib_window_min: 120,
+    totals: { sessions: slices.length, slices: slices.length, msgs: 3 * slices.length, tokens: { input: 2, output: slices.reduce((n, s) => n + s.tokens.output, 0), cache_read: 2, cache_write: 2 } },
+    prs, slices,
+  }))
+  return file
+}
+
+test('the chat chart fits 80 columns: PRs go under the row from the bar column, at most four to a line', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-usage-chart-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const many = Array.from({ length: 7 }, (_, i) => `hypaware-server#${1730 + i}`)
+  const short = Array.from({ length: 5 }, (_, i) => `h#${i + 1}`)
+  const file = await chartDigest(root, [many, short, []])
+  const { stdout } = await node(path.join(CHAT, 'chart.mjs'), ['--digest', file], { ...process.env })
+  const lines = stdout.trimEnd().split('\n')
+  for (const line of lines) assert.ok(line.length < 80, `${line.length} columns: ${line}`)
+  assert.equal(lines[1], '600 output tokens, 3 sessions, 12 PRs tied to sessions,')
+  assert.match(lines[2], /^\d+% of output in work tied to a PR$/)
+  const tagLines = lines.filter((l) => /^ {48}\S/.test(l))
+  for (const l of tagLines) assert.ok(l.split(', ').length <= 4, l)
+  // Seven long tags: the first four, one to a line, then the count of the rest,
+  // which does not fit after the fourth.
+  assert.deepEqual(tagLines.filter((l) => !l.includes('h#')).map((l) => l.trim()), [
+    'hypaware-server#1730 (open),', 'hypaware-server#1731 (open),', 'hypaware-server#1732 (open),', 'hypaware-server#1733 (open),', '+3 more',
+  ])
+  // Five short tags: all shown, four on the first line though a fifth would fit.
+  assert.deepEqual(tagLines.filter((l) => l.includes('h#')).map((l) => l.trim()), ['h#1, h#2, h#3, h#4,', 'h#5'])
+  // A row with no PR is followed by no tag line.
+  const bare = lines.findIndex((l) => l.includes('session number 2'))
+  assert.ok(bare >= 0 && !/^ {48}\S/.test(lines[bare + 1] ?? ''))
+})
