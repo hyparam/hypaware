@@ -530,12 +530,14 @@ function openAiResponsesMessages(reqBody, responseBody, streamEvents, skipInputI
   const messages = responsesInputMessages(reqBody.input, skipInputIndex)
   let assistant = responsesAssistantMessagesFromBody(responseBody)
   if (assistant.length === 0) assistant = responsesAssistantMessagesFromStream(streamEvents)
-  if (assistant.length === 0) {
-    // Nothing here can carry usage. A remote compaction returns only opaque
-    // state, so its usage gets a row of its own; anything else stays dropped.
+  if (assistant.length === 0 || endsWithCompactionTrigger(reqBody.input)) {
+    // A remote compaction returns opaque state, so its usage gets a row of its
+    // own. Codex discards any other output a compaction reply holds, so that
+    // output is not projected and carries no usage. With no compaction item and
+    // no assistant output, nothing can carry the usage and it stays dropped.
     const compaction = compactionUsageRow(responseBody, streamEvents)
     if (compaction) messages.push(compaction)
-    return messages
+    if (compaction !== undefined || assistant.length === 0) return messages
   }
   const usageAttributes = openAiUsageAttributes(
     readOpenAiUsage(responseBody) ?? readOpenAiUsageFromResponsesStream(streamEvents)
@@ -551,16 +553,17 @@ function openAiResponsesMessages(reqBody, responseBody, streamEvents, skipInputI
  * ordinary `/responses` route. Keyed by the response id, which Codex writes to
  * the rollout as `compacted.compaction_response_id`, so the backfill names the
  * same row; the item's own id stands in when a body has none. Returns
- * `undefined` for any other response, or one with no usage or no id. The
- * stream is read only when the body is not a response, and callers reach this
- * only for a response with no assistant output, so it is off the common path.
+ * `undefined` for any other response and `null` for a compaction with no
+ * usage or no id. The stream is read only when the body is not a response, and
+ * callers reach this only for a response with no assistant output or a request
+ * ending in `compaction_trigger`, so it is off the common path.
  *
  * @ref LLP 0619#live [implements]: the call's usage on its own row, never on
  *   retained history, and nothing read from the opaque state
  *
  * @param {unknown} responseBody
  * @param {Array<{ event: string, data: string }>} streamEvents
- * @returns {AiGatewayProjectedMessage | undefined}
+ * @returns {AiGatewayProjectedMessage | null | undefined}
  */
 function compactionUsageRow(responseBody, streamEvents) {
   /** @type {Record<string, unknown> | undefined} */
@@ -590,7 +593,19 @@ function compactionUsageRow(responseBody, streamEvents) {
   const id = (response ? stringValue(response.id) : undefined) ?? streamId
     ?? (isPlainObject(item) ? stringValue(item.id) : undefined) ?? streamItemId
   const usageAttributes = openAiUsageAttributes(readOpenAiUsage(response))
-  return id && usageAttributes ? compactionUsageMessage(id, usageAttributes) : undefined
+  return id && usageAttributes ? compactionUsageMessage(id, usageAttributes) : null
+}
+
+/**
+ * Whether a Responses request is a remote compaction v2 call, which Codex
+ * sends as the history followed by one `compaction_trigger` item. One look at
+ * the last item, so a normal turn pays nothing for the check.
+ *
+ * @param {unknown} input
+ */
+function endsWithCompactionTrigger(input) {
+  const last = Array.isArray(input) ? input.at(-1) : undefined
+  return isPlainObject(last) && last.type === 'compaction_trigger'
 }
 
 /** @param {Record<string, unknown>} item */

@@ -2869,6 +2869,31 @@ test('a remote compaction v2 response bills its usage to one row of its own, key
   assert.ok(plain.messages.every((/** @type {any} */ m) => m.attributes?.usage === undefined))
 })
 
+// @ref LLP 0619#live [tests]: other output beside the compaction item is discarded, so the call bills once, on its own row
+test('a remote compaction v2 reply with other output items bills only its compaction row', () => {
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const reply = { type: 'message', role: 'assistant', id: 'msg-x', content: [{ type: 'output_text', text: 'Discarded reply' }] }
+  const compaction = { type: 'compaction', id: 'cmp-v2', encrypted_content: 'opaque-state' }
+  const usage = { input_tokens: 1000, input_tokens_details: { cached_tokens: 600 }, output_tokens: 50, total_tokens: 1050 }
+  const streamed = compactionV2Exchange({ stream_events: [
+    { event: 'response.created', data: JSON.stringify({ type: 'response.created', response: { id: 'resp-cmp' } }) },
+    { event: 'response.output_item.done', data: JSON.stringify({ type: 'response.output_item.done', item: reply }) },
+    { event: 'response.output_item.done', data: JSON.stringify({ type: 'response.output_item.done', item: compaction }) },
+    { event: 'response.completed', data: JSON.stringify({ type: 'response.completed', response: { id: 'resp-cmp', output: [reply, compaction], usage } }) },
+  ] })
+  const body = compactionV2Exchange({ is_sse: false, stream_events: [], response_body: JSON.stringify({ id: 'resp-cmp', output: [reply, compaction], usage }) })
+  for (const ex of [streamed, body]) {
+    const projection = /** @type {any} */ (projector.project(ex, context()))
+    const withUsage = projection.messages.filter((/** @type {any} */ m) => m.attributes?.usage)
+    assert.equal(withUsage.length, 1)
+    assert.equal(withUsage[0].role, 'system')
+    assert.equal(withUsage[0].message_id, 'resp-cmp')
+    assert.deepEqual(withUsage[0].attributes.usage, { input_tokens: 400, cache_read_tokens: 600, output_tokens: 50, total_tokens: 1050 })
+    assert.ok(!JSON.stringify(projection).includes('Discarded reply'))
+    assert.ok(!JSON.stringify(projection).includes('opaque-state'))
+  }
+})
+
 test('the compaction usage row is one status part with no text, and an ignored cwd drops it', async () => {
   const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
   const gateway = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })

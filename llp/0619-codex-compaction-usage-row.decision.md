@@ -11,8 +11,10 @@
 > Each Codex remote compaction call's billed usage lands on one row of its
 > own: role `system`, one `status` block, no text, keyed by the call's
 > response id. Live capture reads it from the response, the rollout import
-> from the call's `token_usage_record`, and both settle to one `part_id`. It
-> counts in every token total. No retained history message carries it.
+> from the call's `token_usage_record`, and both settle to one `part_id`. Every
+> code reader that sums token columns or `attributes.usage` counts it; a query
+> that keeps only assistant rows misses it (see Readers). No retained history
+> message carries it.
 
 ## Context
 
@@ -56,13 +58,28 @@ the totals."
   block is the same shape the session-usage rows of other adapters use.
 
 - <a id="live"></a>**Live capture.** The exchange projector builds the row when
-  a response has no assistant output and its output holds a compaction item
-  (`compaction`, `compaction_summary` or `context_compaction`). It reads the
-  body, or for a streamed reply the `response.completed` event, and keys the
-  row by the response id (else the stream's `response.created` id, else the
-  compaction item's id). On `/responses/compact` the retained history keeps
-  its roles and carries no usage; the usage row is added after it. The stream
-  is scanned only when there is no assistant output, so a normal turn does no
+  a response's output holds a compaction item (`compaction`,
+  `compaction_summary` or `context_compaction`), and it looks for one when the
+  response has no assistant output or the request ends in a
+  `compaction_trigger` item. On `/responses` it reads the body, or for a
+  streamed reply the `response.completed` event, and keys the row by the
+  response id (else the stream's `response.created` id, else the compaction
+  item's id). `/responses/compact` was never streamed (Codex posted to it and
+  parsed the JSON body), so there only the body is read. On
+  `/responses/compact` the retained history keeps its roles and carries no
+  usage; the usage row is added after it.
+
+  A v2 compaction reply may hold other output items beside the compaction
+  item, such as an assistant message. Codex discards them: they never enter
+  the conversation or the rollout. The projector does the same. When the
+  output holds a compaction item, the other output is not projected, so its
+  text is not stored and it carries no usage. The compaction row alone bills
+  the call, which is what the import writes, so live and backfill agree.
+  Keeping that text as an assistant row would add a turn the conversation
+  never had, and a row only the live lane can write.
+
+  The stream is scanned only when there is no assistant output or the request
+  ends in `compaction_trigger`, a one-item check, so a normal turn does no
   extra work.
 
 - <a id="backfill"></a>**Backfill.** The rollout does record the call's tokens.
@@ -118,6 +135,13 @@ decision:
 - **Shows it as an empty row:** the server's session evidence for Ask returns
   it with no text. `grep` can match it on session, model or cwd with an empty
   snippet. Not changed here.
+- **Misses it (text, not code):** two texts imply usage is on assistant rows
+  only, so a total built from them leaves the row out. They are the canonical
+  query in LLP 0035 (`WHERE role = 'assistant'`), which already misses other
+  adapters' system usage rows, and the hypaware-analyst agent text
+  (`hypaware-core/plugins-workspace/claude/agents/hypaware-analyst.md` line
+  39, "one assistant part per captured response"). No code reader that makes
+  a usage total filters by role. Not changed here.
 
 ## Recovery
 
@@ -128,11 +152,14 @@ rollout file still exists, and it is inside the import or sweep window. `hyp
 backfill` does that, and so does the first scheduled sweep after the upgrade
 restarts the daemon (the sweep's file fingerprints live in memory). Background
 compaction writes no record, and older Codex writes none either, so those calls
-stay short.
+stay short. An incomplete compaction (`response.incomplete`) gets no row in
+either lane: live builds none, and Codex writes no checkpoint for the import
+to match its record to.
 
 ## CPU and memory
 
-- Live: O(1) more per exchange with assistant output. With none, one pass over
-  the response output and, for a stream with no body output, one pass over its
-  events.
+- Live: O(1) more per exchange with assistant output (a look at the request's
+  last input item). With none, or when that item is a `compaction_trigger`,
+  one pass over the response output and, for a stream with no body output, one
+  pass over its events.
 - Backfill: one slot holding the last record; no per-session growth.
