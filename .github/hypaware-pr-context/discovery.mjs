@@ -8,27 +8,94 @@ const maxReplies = 3
 // session past either is not cited: its task boundaries could not all be read.
 const maxPushes = 200
 const maxPushArgs = 20_000
-// A git push at the start of a command, with or without `-C <dir>`.
-const pushStart = String.raw`(?:^|["';&|])[ ]*git (?:-C [^ "';&|]+ )?push`
-const pushCommand = new RegExp(pushStart + String.raw`(?=$|[ "';&|])`, 'g')
-// The branch it pushes to origin: any flags around the remote, and the
-// destination of `<src>:<dst>` (`HEAD:<branch>`, `<sha>:refs/heads/<branch>`).
-const pushTarget = new RegExp(pushStart + String.raw`(?: +-[^ "';&|]*)* +origin(?: +-[^ "';&|]*)* +(?:[^ :"';&|]*:)?(?:refs/heads/)?([A-Za-z0-9_.][A-Za-z0-9_./-]*)(?=$|[ "';&|])`, 'y')
+// A git push anywhere in a piece of a command: `git`, then its own options
+// (`-C <dir>`, quoted or not, `-c <key=value>`, flags), then `push`.
+const gitOptions = String.raw`(?:\s+(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|-c\s+\S+|-\S+))*`
+const gitPush = new RegExp(String.raw`(?:^|\s)git${gitOptions}\s+push(?=\s|$)`)
+// The subcommand of a piece that starts with git, after any VAR= prefixes.
+const gitSubcommand = new RegExp(String.raw`^git${gitOptions}\s+(\S+)`)
+// What splits one command from the next: a line, `;`, `&&`, `||`, a pipe,
+// `&`, a subshell, a backtick or `$(`.
+const commandBreak = /\n|;|&&|\|\||\||&|\(|\)|`|\$\(/
+// A branch name a push can name. `HEAD`, `$VAR` or a pattern is not one.
+const branchName = /^[A-Za-z0-9_.][A-Za-z0-9_./-]*$/
+
+/**
+ * The text a tool call ran: every string in its parsed arguments except a
+ * description, or null when they do not parse.
+ * @param {string} args
+ */
+function commandText(args) {
+  let parsed
+  try {
+    parsed = JSON.parse(args)
+  } catch {
+    return null
+  }
+  /** @type {string[]} */
+  const texts = []
+  /** @param {unknown} value @param {string} key */
+  const walk = (value, key) => {
+    if (typeof value === 'string') {
+      if (key !== 'description') texts.push(value)
+    } else if (Array.isArray(value)) {
+      for (const item of value) walk(item, key)
+    } else if (value && typeof value === 'object') {
+      for (const [name, item] of Object.entries(value)) walk(item, name)
+    }
+  }
+  walk(parsed, '')
+  return texts.join('\n')
+}
+
+/**
+ * The branches one push command names on origin, or null when it names
+ * another remote, none, or one that cannot be read. Flags anywhere, and the
+ * destination of `<src>:<dst>` (`HEAD:<branch>`, `<sha>:refs/heads/<branch>`).
+ * @param {string} rest what follows `push`
+ */
+function pushedTo(rest) {
+  const words = []
+  for (const word of rest.trim().split(/\s+/)) {
+    // A redirection ends the command's own words.
+    if (/[<>]/.test(word)) break
+    if (word && !word.startsWith('-')) words.push(word)
+  }
+  const [remote, ...refspecs] = words
+  if (remote !== 'origin' || refspecs.length === 0) return null
+  const branches = []
+  for (const refspec of refspecs) {
+    const branch = (refspec.replace(/^\+/, '').split(':').at(-1) ?? '').replace(/^refs\/heads\//, '')
+    if (!branchName.test(branch) || branch === 'HEAD') return null
+    branches.push(branch)
+  }
+  return branches
+}
 
 /**
  * The branches a session pushed, in time order, or null when any push in it
- * cannot be read: another remote, a bare push, `HEAD`, a call too long to read.
+ * cannot be read: another remote, a bare push, `HEAD`, a `$VAR`, arguments
+ * that do not parse, a call too long to read.
  * @param {Array<{ message_created_at: string, tool_args: string | null }>} calls
  */
 function pushedBranches(calls) {
   const pushes = []
   for (const call of calls) {
     if (typeof call.tool_args !== 'string') return null
-    for (const found of call.tool_args.matchAll(pushCommand)) {
-      pushTarget.lastIndex = found.index
-      const ref = pushTarget.exec(call.tool_args)?.[1]
-      if (!ref || ref === 'HEAD') return null
-      pushes.push({ at: Date.parse(call.message_created_at), ref })
+    const text = commandText(call.tool_args)
+    if (text === null) return null
+    const at = Date.parse(call.message_created_at)
+    // A backslash at a line's end continues the command on the next line.
+    for (const piece of text.replace(/\\\r?\n/g, ' ').split(commandBreak)) {
+      // A push named inside another git command's words (a commit message,
+      // a log search) is not a push.
+      const own = gitSubcommand.exec(piece.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*/, ''))
+      if (own && own[1] !== 'push') continue
+      const found = gitPush.exec(piece)
+      if (!found) continue
+      const branches = pushedTo(piece.slice(found.index + found[0].length))
+      if (!branches) return null
+      for (const ref of branches) pushes.push({ at, ref })
     }
   }
   return pushes
@@ -199,7 +266,7 @@ export async function discover(pr, repo, query, now = Date.now()) {
     const calls = await query(`select distinct message_created_at,
       case when length(tool_args) <= ${maxPushArgs} then tool_args end as tool_args
       from ai_gateway_messages where ${scope} and ${rootText} and session_id = ${quote(session_id)} and part_type = 'tool_call'
-      and tool_name in ('Bash', 'exec', 'exec_command') and regexp_like(tool_args, ${quote(pushCommand.source)})
+      and tool_name in ('Bash', 'exec', 'exec_command') and tool_args like '%git%push%'
       order by message_created_at limit ${maxPushes + 1}`)
     const pushes = calls.length > maxPushes ? null : pushedBranches(calls)
     if (!pushes) {

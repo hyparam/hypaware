@@ -419,6 +419,32 @@ test('every push form the seats use bounds the context, and a push it cannot rea
   ]) assert.deepEqual(await ids([...taskA, ...later(command)], prA), [], command)
 })
 
+test('a push is read from the command text a call ran, and one that cannot be read cites nothing (#3051)', async () => {
+  const later = (/** @type {object} */ call) => [...taskB('Give each codex compaction call a usage row of its own').slice(0, 3), { ...push('b-push', '12:30', 'work/compaction'), ...call }]
+  const ran = (/** @type {string} */ command) => later({ tool_args: JSON.stringify({ command, description: 'Push the branch' }) })
+  const ownOnly = ['a-request', 'a-options', 'a-pick', 'a-follow-up', 'a-round', 'a-round-reply']
+  // Read: task B's push bounds PR A in each of these.
+  for (const command of [
+    'cd /work/seat/tasks/compaction\ngit push -q -u origin work/compaction 2>&1 | tail -2',
+    'GIT_SSH_COMMAND=ssh git push origin work/compaction',
+    '(cd /work && git push origin work/compaction)',
+    'out=$(git push origin work/compaction 2>&1); echo "$out"',
+    'echo `git push origin work/compaction`',
+    'git -c credential.helper= push origin work/compaction',
+    'git -C "$PWD" push -u origin work/compaction',
+    'git push \\\n  --force-with-lease origin \\\n  work/compaction',
+  ]) assert.deepEqual(await ids([...taskA, ...ran(command)], prA), ownOnly, command)
+  // A commit message that names a push is not one; the push after it is read.
+  assert.deepEqual(await ids([...taskA, ...ran('git commit -m "make git push work" && git push origin work/compaction')], prA), ownOnly)
+  // Not read: a push it finds but cannot read, or arguments that do not parse.
+  for (const call of [
+    { tool_args: JSON.stringify({ command: 'cd /work\ngit push origin "$BRANCH"' }) },
+    { tool_args: JSON.stringify({ command: 'FOO=1 git push upstream work/compaction' }) },
+    { tool_args: JSON.stringify({ command: 'cd /work\ngit push' }) },
+    { tool_args: '{"command":"cd /work && git push origin work/compaction"' },
+  ]) assert.deepEqual(await ids([...taskA, ...later(call)], prA), [], call.tool_args)
+})
+
 test('release and compound titles retain the human wording found on the original PRs', async () => {
   for (const [title, phrases] of [
     ['Publish v2.0.0', ['publish', '[$prepare-release]']],
