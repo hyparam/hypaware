@@ -28,13 +28,13 @@ test('rejects fork branches before querying organization data', async () => {
 test('scope includes pre-branch request and renders capped searches and empty sessions explicitly', async () => {
   const seed = turn('start', 'user', 0)
   const window = [seed, ...Array.from({ length: 80 }, (_, i) => turn('other-' + i, 'assistant', 1))]
-  const responses = [[{ session_id: 'x' }, { session_id: 'y' }], [], [seed], window]
+  const responses = [[{ session_id: 'x' }, { session_id: 'y' }], [], [], [], [seed], window]
   const queries = []
   const result = await discover({ ...pr, headRefName: "dev/o'brien" }, 'org/repo', async sql => {
     queries.push(sql)
     return responses.shift()
   })
-  assert.equal(queries.length, 4)
+  assert.equal(queries.length, 6)
   assert.match(queries[0], /git_branch = 'dev\/o''brien'/)
   for (const sql of queries) {
     assert.match(sql, /date between '2026-08-23' and '2026-08-25'/)
@@ -140,7 +140,7 @@ test('recovers a detached worktree only from one exact branch push just before o
   const queries = []
   const request = turn('request', 'user', 0)
   const clarification = turn('clarification', 'user', 1, { topic_hint: 1 })
-  const replies = [[], [{ session_id: 'pusher' }], [request], [request, clarification]]
+  const replies = [[], [{ session_id: 'pusher' }], [], [request], [request, clarification]]
   const result = await discover({ ...pr, headRefName: 'fix/v1.2' }, 'org/repo', async sql => {
     queries.push(sql)
     return replies.shift()
@@ -149,8 +149,8 @@ test('recovers a detached worktree only from one exact branch push just before o
   assert.match(queries[1], /tool_name in/)
   assert.match(queries[1], /fix\/v1\[\.\]2/)
   assert.match(queries[1], /limit 2/)
-  assert.match(queries[2], /claude\.origin\.kind/)
-  assert.match(queries[2], /lower\(trim\(content_text\)\) not like '\{%'/)
+  assert.match(queries[3], /claude\.origin\.kind/)
+  assert.match(queries[3], /lower\(trim\(content_text\)\) not like '\{%'/)
   assert.deepEqual(result.sessions[0].candidates.map(c => c.turn.message_id), ['request', 'clarification'])
 
   const ambiguous = [[], [{ session_id: 'one' }, { session_id: 'two' }]]
@@ -160,13 +160,13 @@ test('recovers a detached worktree only from one exact branch push just before o
 
 test('a numbered design title searches the subject words', async () => {
   const queries = []
-  const replies = [[{ session_id: 'session' }], []]
+  const replies = [[{ session_id: 'session' }], [], []]
   await discover({ ...pr, title: 'LLP 1000-1001: widget sync' }, 'org/repo', async sql => {
     queries.push(sql)
     return replies.shift()
   })
-  assert.match(queries[1], /like '%widget%'/)
-  assert.doesNotMatch(queries[1], /like '%1000-1001%'/)
+  assert.match(queries[2], /like '%widget%'/)
+  assert.doesNotMatch(queries[2], /like '%1000-1001%'/)
 })
 
 
@@ -253,7 +253,7 @@ test('a delegated chat requires a reciprocal creation receipt and the latest mat
     [[], [link], [receipt], []], // The receipt did not come from creating a chat.
     [[], [link], [receipt], [call], [unrelated]],
   ]) {
-    const remaining = [[{ session_id: child }], ...responses]
+    const remaining = [[{ session_id: child }], [], ...responses]
     const result = await discover({ ...pr, title: 'A widget guide (DOC-326)' }, 'team/project', async sql => {
       assert.match(sql, /team\/project/)
       assert.ok(remaining.length)
@@ -325,7 +325,8 @@ test('a session that worked on two PRs seeds each one on its own request (#3051)
   const row = (/** @type {string} */ id, /** @type {string} */ role, /** @type {string} */ time, /** @type {string} */ branch, /** @type {string} */ text) => ({
     session_id: 'one-session', message_id: id, role, message_created_at: at(time), date: '2026-11-20', part_type: 'text',
     is_sidechain: false, agent_id: null, conversation_id: null, git_remote: 'https://github.com/org/repo', git_branch: branch,
-    attributes: '{"claude":{"origin":{"kind":"human"}}}', user_type: 'user', entrypoint: 'cli', content_text: text })
+    attributes: '{"claude":{"origin":{"kind":"human"}}}', user_type: 'user', entrypoint: 'cli', content_text: text,
+    tool_name: null, tool_args: null })
   const rows = [
     row('a-request', 'user', '09:00', 'work/picks', 'Apply the wording picks to the codex setup page'),
     row('a-reply', 'assistant', '09:05', 'work/picks', 'The picks are applied.'),
@@ -343,6 +344,53 @@ test('a session that worked on two PRs seeds each one on its own request (#3051)
   assert.equal(await request({ title: 'Codex compaction usage rows', headRefName: 'work/compaction', createdAt: '2026-11-20T13:00:00Z' }), 'b-request')
   // A PR opened before any request still finds the earliest one after it.
   assert.equal(await request({ title: 'Codex setup wording picks', headRefName: 'work/picks', createdAt: '2026-11-20T08:00:00Z' }), 'a-request')
+})
+
+test('a push of another branch bounds where a PR\'s context starts and ends (#3051)', async () => {
+  // One seat session: task A, its PR and a review round, then task B. Each
+  // task's request, options and pick come before its first push.
+  const at = (/** @type {string} */ time) => new Date(`2026-11-20T${time}:00Z`)
+  const fields = { session_id: 'seat', date: '2026-11-20', is_sidechain: false, agent_id: null, conversation_id: null,
+    git_remote: 'https://github.com/org/repo', git_branch: 'seat', attributes: '{"claude":{"origin":{"kind":"human"}}}', user_type: 'user', entrypoint: 'cli' }
+  const text = (/** @type {string} */ id, /** @type {string} */ role, /** @type {string} */ time, /** @type {string} */ content) =>
+    ({ ...fields, part_type: 'text', message_id: id, role, message_created_at: at(time), content_text: content, tool_name: null, tool_args: null })
+  const push = (/** @type {string} */ id, /** @type {string} */ time, /** @type {string} */ ref) =>
+    ({ ...fields, part_type: 'tool_call', message_id: id, role: 'assistant', message_created_at: at(time), content_text: null, tool_name: 'Bash', tool_args: `{"command":"git push -q -u origin ${ref} 2>&1 | tail -2"}` })
+  const taskA = [
+    text('a-request', 'user', '09:00', 'Apply the wording picks to the codex setup page'),
+    text('a-options', 'assistant', '09:05', 'Two options for the label: option a or option b.'),
+    text('a-pick', 'user', '09:10', 'go with option a'),
+    text('a-follow-up', 'assistant', '09:12', 'Option a is in.'),
+    push('a-push', '09:30', 'work/picks'),
+    text('a-round', 'user', '10:30', 'go with option b instead'),
+    text('a-round-reply', 'assistant', '10:32', 'Option b is in and pushed.'),
+    push('a-push-2', '10:40', 'work/picks'),
+  ]
+  const taskB = (/** @type {string} */ request) => [
+    text('b-request', 'user', '12:00', request),
+    text('b-options', 'assistant', '12:05', 'Option one or option two for the row.'),
+    text('b-pick', 'user', '12:10', 'go with option two'),
+    push('b-push', '12:30', 'work/compaction'),
+  ]
+  const ids = async (/** @type {any[]} */ rows, /** @type {object} */ target) => {
+    const query = async (/** @type {string} */ sql) => (await collect(executeSql({ query: sql, tables: { ai_gateway_messages: rows } })))
+      .map(found => Object.fromEntries(Object.entries(found).map(([key, value]) => [key, value instanceof Date ? value.toISOString() : value])))
+    const { sessions } = await discover({ ...pr, closedAt: undefined, ...target }, 'org/repo', query, Date.parse('2026-11-20T14:00:00Z'))
+    return sessions[0].candidates.map(({ turn }) => turn.message_id)
+  }
+  const prA = { title: 'Codex setup wording picks', headRefName: 'work/picks', createdAt: '2026-11-20T10:00:00Z' }
+  const prB = { title: 'Codex compaction usage rows', headRefName: 'work/compaction', createdAt: '2026-11-20T13:00:00Z' }
+
+  // The earlier PR keeps its own review round and ends there: task B's
+  // request, options and pick are not shown for it.
+  const both = [...taskA, ...taskB('Give each codex compaction call a usage row of its own')]
+  assert.deepEqual(await ids(both, prA), ['a-request', 'a-options', 'a-pick', 'a-follow-up', 'a-round', 'a-round-reply'])
+  assert.deepEqual(await ids(both, prB), ['b-request', 'b-options', 'b-pick'])
+  // A later PR whose own request names no title word does not fall back to
+  // the earlier task's: there is no seed, so nothing is cited.
+  assert.deepEqual(await ids([...taskA, ...taskB('Take the next row and open the PR')], prB), [])
+  // Alone in its session, a task reads as it did before these bounds.
+  assert.deepEqual(await ids(taskA, prA), ['a-request', 'a-options', 'a-pick', 'a-follow-up', 'a-round', 'a-round-reply'])
 })
 
 test('release and compound titles retain the human wording found on the original PRs', async () => {

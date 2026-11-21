@@ -4,6 +4,12 @@ const isoDay = time => new Date(time).toISOString().slice(0, 10)
 const maxSessions = 4
 const windowRows = 80
 const maxReplies = 3
+// Pushes read per session. A session with more is not cited: its task
+// boundaries could not all be read.
+const maxPushes = 200
+// The ref a `git push origin <ref>` names, in the forms the branch push match
+// below accepts. Flags such as --tags start with `-` and name no ref.
+const pushedRef = `(?:^|["';&|])[ ]*git push (?:(?:-q|--quiet|-u|--set-upstream) )*origin (?:HEAD:refs/heads/)?([A-Za-z0-9_.][A-Za-z0-9_./-]*)(?:$|[ "';&|])`
 
 // Search title terms literally. A compound such as "auto-update" can appear with a space.
 function topicFilter(title) {
@@ -164,8 +170,23 @@ export async function discover(pr, repo, query, now = Date.now()) {
     // word. Seed on the latest matching request made before the PR opened, and
     // only without one on the earliest made after it (#3051).
     const beforeOpen = `message_created_at <= ${quote(pr.createdAt)}`
+    // A push of another branch marks where the session moved to other work, so
+    // no seed comes from before the last one ahead of this PR's first push.
+    const pushes = await query(`select distinct message_created_at, regexp_extract(tool_args, ${quote(pushedRef)}, 1) as ref
+      from ai_gateway_messages where ${scope} and ${rootText} and session_id = ${quote(session_id)} and part_type = 'tool_call'
+      and tool_name in ('Bash', 'exec', 'exec_command') and regexp_like(tool_args, ${quote(pushedRef)})
+      order by message_created_at limit ${maxPushes + 1}`)
+    if (pushes.length > maxPushes) {
+      previews.push({ candidates: [], count: 0, capped: true })
+      continue
+    }
+    const other = pushes.filter(push => push.ref !== pr.headRefName && push.ref !== 'HEAD').map(push => Date.parse(push.message_created_at))
+    const ownFirst = pushes.find(push => push.ref === pr.headRefName && Date.parse(push.message_created_at) <= opened)
+    const anchor = ownFirst ? Date.parse(ownFirst.message_created_at) : opened
+    const movedOn = other.filter(at => at < anchor).at(-1)
     const [seed] = await query(`select message_id, message_created_at from ai_gateway_messages
       where ${root} and role = 'user' and ${developerText} and message_id is not null and length(content_text) between 1 and 3000 and (${topic})
+      ${movedOn === undefined ? '' : `and message_created_at > ${quote(new Date(movedOn).toISOString())}`}
       order by case when ${beforeOpen} then 0 else 1 end, case when ${beforeOpen} then message_created_at end desc,
       message_created_at, message_id limit 1`)
     if (!seed) {
@@ -173,12 +194,21 @@ export async function discover(pr, repo, query, now = Date.now()) {
       previews.push({ candidates: command ? [command] : [], count: command ? 1 : 0, capped: false })
       continue
     }
+    // The next task's request and its choices come before its push, so the
+    // window ends at this PR's last push ahead of that push, or at the opening
+    // if later. Without a push of its own seen, it ends at that push.
+    const seeded = Date.parse(seed.message_created_at)
+    const next = other.find(at => at > seeded)
+    const own = pushes.filter(push => push.ref === pr.headRefName).map(push => Date.parse(push.message_created_at))
+      .filter(at => at > seeded && (next === undefined || at < next)).at(-1)
+    const until = next === undefined ? undefined : own === undefined ? next : Math.max(own, Math.min(opened, next))
     const rows = await query(`select distinct date, session_id, message_id, message_created_at, role,
       case when role = 'user' and (${topic}) then 1 else 0 end as topic_hint,
       case when role = 'user' and length(content_text) <= 200 and (${replyHint}) then 1 else 0 end as choice_hint,
       case when role = 'assistant' and (${proposalHint}) then 1 else 0 end as proposal_hint
       from ai_gateway_messages where ${root} and (role = 'assistant' or (role = 'user' and ${developerText})) and message_id is not null
       and length(content_text) between 1 and 3000 and message_created_at >= ${quote(seed.message_created_at)}
+      ${until === undefined ? '' : `and message_created_at <= ${quote(new Date(until).toISOString())}`}
       order by message_created_at, message_id limit ${windowRows + 1}`)
     const window = rows.slice(0, windowRows)
     const index = window.findIndex(row => row.message_id === seed.message_id)
