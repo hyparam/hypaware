@@ -160,9 +160,14 @@ export async function discover(pr, repo, query, now = Date.now()) {
     // session filters for the drill-down. Only root text has a root-session link.
     const root = `${scope} and session_id = ${quote(session_id)} and part_type = 'text'
       and ${rootText}`
+    // One session can carry several tasks, and an earlier one can share a title
+    // word. Seed on the latest matching request made before the PR opened, and
+    // only without one on the earliest made after it (#3051).
+    const beforeOpen = `message_created_at <= ${quote(pr.createdAt)}`
     const [seed] = await query(`select message_id, message_created_at from ai_gateway_messages
       where ${root} and role = 'user' and ${developerText} and message_id is not null and length(content_text) between 1 and 3000 and (${topic})
-      order by message_created_at, message_id limit 1`)
+      order by case when ${beforeOpen} then 0 else 1 end, case when ${beforeOpen} then message_created_at end desc,
+      message_created_at, message_id limit 1`)
     if (!seed) {
       const command = tickets.length === 1 ? await handoffRequest(scope, session_id, tickets[0], query) : undefined
       previews.push({ candidates: command ? [command] : [], count: command ? 1 : 0, capped: false })

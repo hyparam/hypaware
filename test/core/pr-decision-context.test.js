@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { collect, executeSql } from 'squirreling'
 import { discover, renderPreview, selectCandidates } from '../../.github/hypaware-pr-context/discovery.mjs'
 
 import { describe, generate, readMessages, renderDraft, updateBody, codeChanges, changeScope } from '../../.github/hypaware-pr-context/describe.mjs'
@@ -315,6 +316,33 @@ test('a crowded branch spends its session budget on recent work', async () => {
     return []
   })
   assert.match(seen[0], /group by session_id\s+order by max\(message_created_at\) desc, session_id/)
+})
+
+test('a session that worked on two PRs seeds each one on its own request (#3051)', async () => {
+  // The real queries run over one recorded session: task A's request, its PR,
+  // then task B's request, whose wording shares a title word with task A's.
+  const at = (/** @type {string} */ time) => new Date(`2026-11-20T${time}:00Z`)
+  const row = (/** @type {string} */ id, /** @type {string} */ role, /** @type {string} */ time, /** @type {string} */ branch, /** @type {string} */ text) => ({
+    session_id: 'one-session', message_id: id, role, message_created_at: at(time), date: '2026-11-20', part_type: 'text',
+    is_sidechain: false, agent_id: null, conversation_id: null, git_remote: 'https://github.com/org/repo', git_branch: branch,
+    attributes: '{"claude":{"origin":{"kind":"human"}}}', user_type: 'user', entrypoint: 'cli', content_text: text })
+  const rows = [
+    row('a-request', 'user', '09:00', 'work/picks', 'Apply the wording picks to the codex setup page'),
+    row('a-reply', 'assistant', '09:05', 'work/picks', 'The picks are applied.'),
+    row('b-request', 'user', '12:00', 'work/compaction', 'Give each codex compaction call a usage row of its own'),
+    row('b-reply', 'assistant', '12:05', 'work/compaction', 'Each compaction call now gets its own row.'),
+  ]
+  const query = async (/** @type {string} */ sql) => (await collect(executeSql({ query: sql, tables: { ai_gateway_messages: rows } })))
+    .map(found => Object.fromEntries(Object.entries(found).map(([key, value]) => [key, value instanceof Date ? value.toISOString() : value])))
+  const now = Date.parse('2026-11-20T14:00:00Z')
+  const request = async (/** @type {object} */ target) => {
+    const { sessions } = await discover({ ...pr, closedAt: undefined, ...target }, 'org/repo', query, now)
+    return sessions[0].candidates.find(({ label }) => label === 'Possible request')?.turn.message_id
+  }
+  assert.equal(await request({ title: 'Codex setup wording picks', headRefName: 'work/picks', createdAt: '2026-11-20T10:00:00Z' }), 'a-request')
+  assert.equal(await request({ title: 'Codex compaction usage rows', headRefName: 'work/compaction', createdAt: '2026-11-20T13:00:00Z' }), 'b-request')
+  // A PR opened before any request still finds the earliest one after it.
+  assert.equal(await request({ title: 'Codex setup wording picks', headRefName: 'work/picks', createdAt: '2026-11-20T08:00:00Z' }), 'a-request')
 })
 
 test('release and compound titles retain the human wording found on the original PRs', async () => {
