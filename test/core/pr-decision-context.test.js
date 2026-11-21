@@ -458,10 +458,18 @@ test('a push inside a quoted command is read, and a long run of git options read
   // `-c` and `-C` take a value that can start with `-`; many of them in a row
   // must not make the match backtrack.
   // A command that is not a push, with 24 of them, beside the real push.
-  const options = 'timeout 60 git ' + '-c -x '.repeat(24) + 'pull origin master\ngit push origin work/compaction'
+  const options = 'echo git ' + '-c -x '.repeat(24) + 'pull origin master\ngit push origin work/compaction'
   const started = Date.now()
   assert.deepEqual(await ids([...taskA, ...later(options)], prA), ownOnly)
   assert.ok(Date.now() - started < 1000, `${Date.now() - started} ms`)
+})
+
+test('a quoted mention of this PR\'s branch is not its first push (#3051)', async () => {
+  // Task B's own request names no title word, so only the push bounds can
+  // keep task A's request out. An early echo of B's branch must not anchor B.
+  const mention = push('b-mention', '09:10', 'work/compaction', 'echo "git push origin work/compaction"')
+  const rows = [...taskA, mention, ...taskB('Take the next row and open the PR')]
+  assert.deepEqual(await ids(rows, prB), [])
 })
 
 test('release and compound titles retain the human wording found on the original PRs', async () => {

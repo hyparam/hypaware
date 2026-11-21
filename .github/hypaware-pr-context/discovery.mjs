@@ -20,6 +20,8 @@ const gitSubcommand = new RegExp(String.raw`^git${gitOptions}\s+(\S+)`)
 // What splits one command from the next: a line, `;`, `&&`, `||`, a pipe,
 // `&`, a subshell, a backtick or `$(`.
 const commandBreak = /\n|;|&&|\|\||\||&|\(|\)|`|\$\(/
+// Words that run the command after them: `sudo`, `env`, `timeout 60`.
+const commandWrapper = /^(?:(?:sudo|env|command|exec|nohup|time)\s+|timeout\s+\S+\s+)*/
 // A branch name a push can name. `HEAD`, `$VAR` or a pattern is not one.
 const branchName = /^[A-Za-z0-9_.][A-Za-z0-9_./-]*$/
 
@@ -94,13 +96,17 @@ function pushedBranches(calls) {
     for (const piece of text.replace(/\\\r?\n/g, ' ').split(commandBreak)) {
       // A push named inside another git command's words (a commit message,
       // a log search) is not a push.
-      const own = gitSubcommand.exec(piece.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*/, ''))
+      const lead = piece.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*/, '').replace(commandWrapper, '')
+      const own = gitSubcommand.exec(lead)
       if (own && own[1] !== 'push') continue
       const found = gitPush.exec(piece)
       if (!found) continue
       const branches = pushedTo(piece.slice(found.index + found[0].length))
       if (!branches) return null
-      for (const ref of branches) pushes.push({ at, ref })
+      // Run, not quoted or echoed: only such a push can be a PR's own first
+      // push. A mention still bounds or closes, never anchors.
+      const command = own !== null
+      for (const ref of branches) pushes.push({ at, ref, command })
     }
   }
   return pushes
@@ -279,7 +285,7 @@ export async function discover(pr, repo, query, now = Date.now()) {
       continue
     }
     const other = pushes.filter(push => push.ref !== pr.headRefName).map(push => push.at)
-    const ownFirst = pushes.find(push => push.ref === pr.headRefName && push.at <= opened)
+    const ownFirst = pushes.find(push => push.ref === pr.headRefName && push.command && push.at <= opened)
     const anchor = ownFirst ? ownFirst.at : opened
     const movedOn = other.filter(at => at < anchor).at(-1)
     const [seed] = await query(`select message_id, message_created_at from ai_gateway_messages
