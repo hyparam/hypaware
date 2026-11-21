@@ -9,9 +9,12 @@ const maxReplies = 3
 const maxPushes = 200
 const maxPushArgs = 20_000
 // A git push anywhere in a piece of a command: `git`, then its own options
-// (`-C <dir>`, quoted or not, `-c <key=value>`, flags), then `push`.
-const gitOptions = String.raw`(?:\s+(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|-c\s+\S+|-\S+))*`
-const gitPush = new RegExp(String.raw`(?:^|\s)git${gitOptions}\s+push(?=\s|$)`)
+// (`-C <dir>`, quoted or not, `-c <key=value>`, flags), then `push`. The
+// alternatives cannot match the same text, so a long run of options stays
+// linear: a quoted value only as quoted, `-c` and `-C` only with their value.
+const gitOptions = String.raw`(?:\s+(?:-C\s+(?:"[^"]*"|'[^']*'|[^\s"']\S*)|-c\s+\S+|-(?![cC](?:\s|$))\S+))*`
+// `git` starts a command, or a quoted one (`bash -c "git push ..."`, `eval`).
+const gitPush = new RegExp(String.raw`(?:^|[\s"'])git${gitOptions}\s+push(?=[\s"']|$)`)
 // The subcommand of a piece that starts with git, after any VAR= prefixes.
 const gitSubcommand = new RegExp(String.raw`^git${gitOptions}\s+(\S+)`)
 // What splits one command from the next: a line, `;`, `&&`, `||`, a pipe,
@@ -56,9 +59,11 @@ function commandText(args) {
  */
 function pushedTo(rest) {
   const words = []
-  for (const word of rest.trim().split(/\s+/)) {
-    // A redirection ends the command's own words.
-    if (/[<>]/.test(word)) break
+  for (const raw of rest.trim().split(/\s+/)) {
+    // A redirection ends the command's own words; the quote that closes a
+    // `bash -c "..."` is not part of the last one.
+    if (/[<>]/.test(raw)) break
+    const word = raw.replace(/^["']+|["']+$/g, '')
     if (word && !word.startsWith('-')) words.push(word)
   }
   const [remote, ...refspecs] = words

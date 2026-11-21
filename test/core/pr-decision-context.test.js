@@ -445,6 +445,25 @@ test('a push is read from the command text a call ran, and one that cannot be re
   ]) assert.deepEqual(await ids([...taskA, ...later(call)], prA), [], call.tool_args)
 })
 
+test('a push inside a quoted command is read, and a long run of git options reads at once (#3051)', async () => {
+  const later = (/** @type {string} */ command) => [...taskB('Give each codex compaction call a usage row of its own').slice(0, 3),
+    push('b-push', '12:30', 'work/compaction', command)]
+  const ownOnly = ['a-request', 'a-options', 'a-pick', 'a-follow-up', 'a-round', 'a-round-reply']
+  for (const command of [
+    'bash -c "git push origin work/compaction"',
+    "sh -c 'git push -u origin work/compaction'",
+    'eval "git push origin work/compaction"',
+    'bash <<< "git push origin work/compaction"',
+  ]) assert.deepEqual(await ids([...taskA, ...later(command)], prA), ownOnly, command)
+  // `-c` and `-C` take a value that can start with `-`; many of them in a row
+  // must not make the match backtrack.
+  // A command that is not a push, with 24 of them, beside the real push.
+  const options = 'timeout 60 git ' + '-c -x '.repeat(24) + 'pull origin master\ngit push origin work/compaction'
+  const started = Date.now()
+  assert.deepEqual(await ids([...taskA, ...later(options)], prA), ownOnly)
+  assert.ok(Date.now() - started < 1000, `${Date.now() - started} ms`)
+})
+
 test('release and compound titles retain the human wording found on the original PRs', async () => {
   for (const [title, phrases] of [
     ['Publish v2.0.0', ['publish', '[$prepare-release]']],
