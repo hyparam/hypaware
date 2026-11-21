@@ -4,12 +4,35 @@ const isoDay = time => new Date(time).toISOString().slice(0, 10)
 const maxSessions = 4
 const windowRows = 80
 const maxReplies = 3
-// Pushes read per session. A session with more is not cited: its task
-// boundaries could not all be read.
+// Push commands read per session, and the longest tool call read for them. A
+// session past either is not cited: its task boundaries could not all be read.
 const maxPushes = 200
-// The ref a `git push origin <ref>` names, in the forms the branch push match
-// below accepts. Flags such as --tags start with `-` and name no ref.
-const pushedRef = `(?:^|["';&|])[ ]*git push (?:(?:-q|--quiet|-u|--set-upstream) )*origin (?:HEAD:refs/heads/)?([A-Za-z0-9_.][A-Za-z0-9_./-]*)(?:$|[ "';&|])`
+const maxPushArgs = 20_000
+// A git push at the start of a command, with or without `-C <dir>`.
+const pushStart = String.raw`(?:^|["';&|])[ ]*git (?:-C [^ "';&|]+ )?push`
+const pushCommand = new RegExp(pushStart + String.raw`(?=$|[ "';&|])`, 'g')
+// The branch it pushes to origin: any flags around the remote, and the
+// destination of `<src>:<dst>` (`HEAD:<branch>`, `<sha>:refs/heads/<branch>`).
+const pushTarget = new RegExp(pushStart + String.raw`(?: +-[^ "';&|]*)* +origin(?: +-[^ "';&|]*)* +(?:[^ :"';&|]*:)?(?:refs/heads/)?([A-Za-z0-9_.][A-Za-z0-9_./-]*)(?=$|[ "';&|])`, 'y')
+
+/**
+ * The branches a session pushed, in time order, or null when any push in it
+ * cannot be read: another remote, a bare push, `HEAD`, a call too long to read.
+ * @param {Array<{ message_created_at: string, tool_args: string | null }>} calls
+ */
+function pushedBranches(calls) {
+  const pushes = []
+  for (const call of calls) {
+    if (typeof call.tool_args !== 'string') return null
+    for (const found of call.tool_args.matchAll(pushCommand)) {
+      pushTarget.lastIndex = found.index
+      const ref = pushTarget.exec(call.tool_args)?.[1]
+      if (!ref || ref === 'HEAD') return null
+      pushes.push({ at: Date.parse(call.message_created_at), ref })
+    }
+  }
+  return pushes
+}
 
 // Search title terms literally. A compound such as "auto-update" can appear with a space.
 function topicFilter(title) {
@@ -172,17 +195,20 @@ export async function discover(pr, repo, query, now = Date.now()) {
     const beforeOpen = `message_created_at <= ${quote(pr.createdAt)}`
     // A push of another branch marks where the session moved to other work, so
     // no seed comes from before the last one ahead of this PR's first push.
-    const pushes = await query(`select distinct message_created_at, regexp_extract(tool_args, ${quote(pushedRef)}, 1) as ref
+    // A push it cannot read could be the other task's, so it cites nothing.
+    const calls = await query(`select distinct message_created_at,
+      case when length(tool_args) <= ${maxPushArgs} then tool_args end as tool_args
       from ai_gateway_messages where ${scope} and ${rootText} and session_id = ${quote(session_id)} and part_type = 'tool_call'
-      and tool_name in ('Bash', 'exec', 'exec_command') and regexp_like(tool_args, ${quote(pushedRef)})
+      and tool_name in ('Bash', 'exec', 'exec_command') and regexp_like(tool_args, ${quote(pushCommand.source)})
       order by message_created_at limit ${maxPushes + 1}`)
-    if (pushes.length > maxPushes) {
+    const pushes = calls.length > maxPushes ? null : pushedBranches(calls)
+    if (!pushes) {
       previews.push({ candidates: [], count: 0, capped: true })
       continue
     }
-    const other = pushes.filter(push => push.ref !== pr.headRefName && push.ref !== 'HEAD').map(push => Date.parse(push.message_created_at))
-    const ownFirst = pushes.find(push => push.ref === pr.headRefName && Date.parse(push.message_created_at) <= opened)
-    const anchor = ownFirst ? Date.parse(ownFirst.message_created_at) : opened
+    const other = pushes.filter(push => push.ref !== pr.headRefName).map(push => push.at)
+    const ownFirst = pushes.find(push => push.ref === pr.headRefName && push.at <= opened)
+    const anchor = ownFirst ? ownFirst.at : opened
     const movedOn = other.filter(at => at < anchor).at(-1)
     const [seed] = await query(`select message_id, message_created_at from ai_gateway_messages
       where ${root} and role = 'user' and ${developerText} and message_id is not null and length(content_text) between 1 and 3000 and (${topic})
@@ -199,7 +225,7 @@ export async function discover(pr, repo, query, now = Date.now()) {
     // if later. Without a push of its own seen, it ends at that push.
     const seeded = Date.parse(seed.message_created_at)
     const next = other.find(at => at > seeded)
-    const own = pushes.filter(push => push.ref === pr.headRefName).map(push => Date.parse(push.message_created_at))
+    const own = pushes.filter(push => push.ref === pr.headRefName).map(push => push.at)
       .filter(at => at > seeded && (next === undefined || at < next)).at(-1)
     const until = next === undefined ? undefined : own === undefined ? next : Math.max(own, Math.min(opened, next))
     const rows = await query(`select distinct date, session_id, message_id, message_created_at, role,

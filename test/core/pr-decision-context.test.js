@@ -83,6 +83,7 @@ test('updates a fork PR using its own sources and the latest author text, once p
     assert.match(sql, /contributor\/project/)
     assert.doesNotMatch(sql, /team\/project/)
     if (sql.includes('git_branch =')) return [{ session_id: 'session' }]
+    if (sql.includes('length(tool_args)')) return []
     if (sql.includes('select message_id, message_created_at')) return [request]
     if (sql.includes('choice_hint')) return turns
     return turns.map(t => ({ ...t, part_index: 0, chars: t.message_id.length, text_part: t.message_id }))
@@ -207,6 +208,7 @@ test('an automatic run retries empty discovery and cites the source chat of a de
   const query = async sql => {
     assert.match(sql, /contributor\/project/)
     if (sql.includes('git_branch =')) return []
+    if (sql.includes('length(tool_args)')) return []
     if (sql.includes('regexp_like(tool_args')) return retries ? [{ session_id: child }] : []
     if (sql.includes('agent_created_thread')) return [{ parent, delivered_at: created }]
     if (sql.includes('select distinct tool_result_for')) return [{ tool_result_for: 'call_123' }]
@@ -346,41 +348,43 @@ test('a session that worked on two PRs seeds each one on its own request (#3051)
   assert.equal(await request({ title: 'Codex setup wording picks', headRefName: 'work/picks', createdAt: '2026-11-20T08:00:00Z' }), 'a-request')
 })
 
-test('a push of another branch bounds where a PR\'s context starts and ends (#3051)', async () => {
-  // One seat session: task A, its PR and a review round, then task B. Each
-  // task's request, options and pick come before its first push.
-  const at = (/** @type {string} */ time) => new Date(`2026-11-20T${time}:00Z`)
-  const fields = { session_id: 'seat', date: '2026-11-20', is_sidechain: false, agent_id: null, conversation_id: null,
-    git_remote: 'https://github.com/org/repo', git_branch: 'seat', attributes: '{"claude":{"origin":{"kind":"human"}}}', user_type: 'user', entrypoint: 'cli' }
-  const text = (/** @type {string} */ id, /** @type {string} */ role, /** @type {string} */ time, /** @type {string} */ content) =>
-    ({ ...fields, part_type: 'text', message_id: id, role, message_created_at: at(time), content_text: content, tool_name: null, tool_args: null })
-  const push = (/** @type {string} */ id, /** @type {string} */ time, /** @type {string} */ ref) =>
-    ({ ...fields, part_type: 'tool_call', message_id: id, role: 'assistant', message_created_at: at(time), content_text: null, tool_name: 'Bash', tool_args: `{"command":"git push -q -u origin ${ref} 2>&1 | tail -2"}` })
-  const taskA = [
-    text('a-request', 'user', '09:00', 'Apply the wording picks to the codex setup page'),
-    text('a-options', 'assistant', '09:05', 'Two options for the label: option a or option b.'),
-    text('a-pick', 'user', '09:10', 'go with option a'),
-    text('a-follow-up', 'assistant', '09:12', 'Option a is in.'),
-    push('a-push', '09:30', 'work/picks'),
-    text('a-round', 'user', '10:30', 'go with option b instead'),
-    text('a-round-reply', 'assistant', '10:32', 'Option b is in and pushed.'),
-    push('a-push-2', '10:40', 'work/picks'),
-  ]
-  const taskB = (/** @type {string} */ request) => [
-    text('b-request', 'user', '12:00', request),
-    text('b-options', 'assistant', '12:05', 'Option one or option two for the row.'),
-    text('b-pick', 'user', '12:10', 'go with option two'),
-    push('b-push', '12:30', 'work/compaction'),
-  ]
-  const ids = async (/** @type {any[]} */ rows, /** @type {object} */ target) => {
-    const query = async (/** @type {string} */ sql) => (await collect(executeSql({ query: sql, tables: { ai_gateway_messages: rows } })))
-      .map(found => Object.fromEntries(Object.entries(found).map(([key, value]) => [key, value instanceof Date ? value.toISOString() : value])))
-    const { sessions } = await discover({ ...pr, closedAt: undefined, ...target }, 'org/repo', query, Date.parse('2026-11-20T14:00:00Z'))
-    return sessions[0].candidates.map(({ turn }) => turn.message_id)
-  }
-  const prA = { title: 'Codex setup wording picks', headRefName: 'work/picks', createdAt: '2026-11-20T10:00:00Z' }
-  const prB = { title: 'Codex compaction usage rows', headRefName: 'work/compaction', createdAt: '2026-11-20T13:00:00Z' }
+// One recorded seat session for the #3051 tests: task A, its PR and a review
+// round, then task B. Each task's request, options and pick come before its
+// first push.
+const at = (/** @type {string} */ time) => new Date(`2026-11-20T${time}:00Z`)
+const fields = { session_id: 'seat', date: '2026-11-20', is_sidechain: false, agent_id: null, conversation_id: null,
+  git_remote: 'https://github.com/org/repo', git_branch: 'seat', attributes: '{"claude":{"origin":{"kind":"human"}}}', user_type: 'user', entrypoint: 'cli' }
+const text = (/** @type {string} */ id, /** @type {string} */ role, /** @type {string} */ time, /** @type {string} */ content) =>
+  ({ ...fields, part_type: 'text', message_id: id, role, message_created_at: at(time), content_text: content, tool_name: null, tool_args: null })
+const push = (/** @type {string} */ id, /** @type {string} */ time, /** @type {string} */ ref, command = `git push -q -u origin ${ref} 2>&1 | tail -2`) =>
+  ({ ...fields, part_type: 'tool_call', message_id: id, role: 'assistant', message_created_at: at(time), content_text: null, tool_name: 'Bash', tool_args: JSON.stringify({ command }) })
 
+const taskA = [
+  text('a-request', 'user', '09:00', 'Apply the wording picks to the codex setup page'),
+  text('a-options', 'assistant', '09:05', 'Two options for the label: option a or option b.'),
+  text('a-pick', 'user', '09:10', 'go with option a'),
+  text('a-follow-up', 'assistant', '09:12', 'Option a is in.'),
+  push('a-push', '09:30', 'work/picks'),
+  text('a-round', 'user', '10:30', 'go with option b instead'),
+  text('a-round-reply', 'assistant', '10:32', 'Option b is in and pushed.'),
+  push('a-push-2', '10:40', 'work/picks'),
+]
+const taskB = (/** @type {string} */ request) => [
+  text('b-request', 'user', '12:00', request),
+  text('b-options', 'assistant', '12:05', 'Option one or option two for the row.'),
+  text('b-pick', 'user', '12:10', 'go with option two'),
+  push('b-push', '12:30', 'work/compaction'),
+]
+const ids = async (/** @type {any[]} */ rows, /** @type {object} */ target) => {
+  const query = async (/** @type {string} */ sql) => (await collect(executeSql({ query: sql, tables: { ai_gateway_messages: rows } })))
+    .map(found => Object.fromEntries(Object.entries(found).map(([key, value]) => [key, value instanceof Date ? value.toISOString() : value])))
+  const { sessions } = await discover({ ...pr, closedAt: undefined, ...target }, 'org/repo', query, Date.parse('2026-11-20T14:00:00Z'))
+  return sessions[0].candidates.map(({ turn }) => turn.message_id)
+}
+const prA = { title: 'Codex setup wording picks', headRefName: 'work/picks', createdAt: '2026-11-20T10:00:00Z' }
+const prB = { title: 'Codex compaction usage rows', headRefName: 'work/compaction', createdAt: '2026-11-20T13:00:00Z' }
+
+test('a push of another branch bounds where a PR\'s context starts and ends (#3051)', async () => {
   // The earlier PR keeps its own review round and ends there: task B's
   // request, options and pick are not shown for it.
   const both = [...taskA, ...taskB('Give each codex compaction call a usage row of its own')]
@@ -391,6 +395,28 @@ test('a push of another branch bounds where a PR\'s context starts and ends (#30
   assert.deepEqual(await ids([...taskA, ...taskB('Take the next row and open the PR')], prB), [])
   // Alone in its session, a task reads as it did before these bounds.
   assert.deepEqual(await ids(taskA, prA), ['a-request', 'a-options', 'a-pick', 'a-follow-up', 'a-round', 'a-round-reply'])
+})
+
+test('every push form the seats use bounds the context, and a push it cannot read cites nothing (#3051)', async () => {
+  const later = (/** @type {string} */ command) => [...taskB('Give each codex compaction call a usage row of its own').slice(0, 3),
+    push('b-push', '12:30', 'work/compaction', command)]
+  const ownOnly = ['a-request', 'a-options', 'a-pick', 'a-follow-up', 'a-round', 'a-round-reply']
+  for (const command of [
+    'git push origin HEAD:work/compaction',
+    'git -C /work/seat/tasks/compaction push -q -u origin work/compaction',
+    'git push --force-with-lease=work/compaction:abc123 origin work/compaction',
+    'git push origin 0123456789abcdef0123456789abcdef01234567:refs/heads/work/compaction',
+    'git push origin fix-local:work/compaction',
+    'cd /work && git status && git push --no-verify -f origin work/compaction',
+  ]) assert.deepEqual(await ids([...taskA, ...later(command)], prA), ownOnly, command)
+  // A push it cannot read could be the next task's, so the session is not cited.
+  for (const command of [
+    'git push https://github.com/org/repo work/compaction',
+    'git push',
+    'git push -u origin HEAD',
+    'git push upstream work/compaction',
+    'git push origin work/compaction && git push other work/compaction',
+  ]) assert.deepEqual(await ids([...taskA, ...later(command)], prA), [], command)
 })
 
 test('release and compound titles retain the human wording found on the original PRs', async () => {
