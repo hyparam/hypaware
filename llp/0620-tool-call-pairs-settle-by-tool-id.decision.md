@@ -194,11 +194,16 @@ recomposed key:
 - `message_id`, `provider_uuid`, `part_index`, the recomposed `part_id`;
 - the thread links;
 - `agent_id` and `is_sidechain`;
-- the minimized frame.
+- the minimized frame;
+- and, when the native row has a value, the fields `assignTranscriptIdentity`
+  copies only when set: `request_id`, `prompt_id`, `entrypoint`,
+  `provider_type`, `provider_subtype`, `user_type`, `permission_mode` and the
+  like. That is what flush settlement writes when its lookup hits, so a
+  merged row and a row settled at flush agree.
 
 **Content and timestamps, from the earliest copy.** That is the row with
 the smallest `message_created_at`, native included, with ties going to a
-live row. It supplies the content (tool input or result),
+live row. A row with no `message_created_at` is never the earliest. It supplies the content (tool input or result),
 `message_created_at` and `date`.
 
 - A replay's `message_created_at` is the replay's request time (`gapMessage`
@@ -213,7 +218,8 @@ live row. It supplies the content (tool input or result),
 
 - `conversation_source`;
 - the columns only the OTEL lane fills: `system_text`, `client_version`,
-  `entrypoint`, `status`, and `model` on a result row;
+  `status`, and `model` on a result row; `entrypoint` too when the native
+  row has none;
 - on the server, the stamped `gateway_id`. In a cross-machine pair, usage
   then stays with the host that captured it live, which is usually the
   carrier's host.

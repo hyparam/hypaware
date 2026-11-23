@@ -535,6 +535,9 @@ function hashCwd(cwd) {
 function settleMissReason(row, index, eventText) {
   if (index.ordered.length === 0) return 'no_transcript'
   if (eventText) return 'text_unconfirmed'
+  // `findOtelToolMatch` looks up no tool id for any other lane (the proxy
+  // lane's rows go straight to the content key), so no tool reason applies.
+  if (row.conversation_source !== 'claude_code') return 'content_no_match'
   const id = stringValue(row.tool_call_id)
   if (!id || (row.part_type !== 'tool_call' && row.part_type !== 'tool_result')) return 'content_no_match'
   const entry = row.role === 'assistant' && row.part_type === 'tool_call'

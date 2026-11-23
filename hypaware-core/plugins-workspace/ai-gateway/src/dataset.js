@@ -510,6 +510,10 @@ const CONTENT_COLUMNS = Object.freeze([
  * @returns {ClaudeToolPairMerge}
  */
 export function mergeClaudeToolPair(rows) {
+  // The hosted pass deletes what this merges, so a caller's grouping is not
+  // trusted: every row must carry the same key.
+  const key = rows.length > 0 ? claudeToolPairKey(rows[0]) : undefined
+  if (!key || rows.some((row) => claudeToolPairKey(row) !== key)) return { status: 'no_pair', discardedUsage: [] }
   /** @type {Record<string, unknown>[]} */
   const live = []
   /** @type {Record<string, unknown> | undefined} */
@@ -593,7 +597,13 @@ function compareCreatedAt(a, b) {
   return ta < tb ? -1 : 1
 }
 
-/** @param {unknown} value */
+/**
+ * A row's `message_created_at` in milliseconds, from the forms the column is
+ * stored and read in (a Date, an ISO string, or epoch milliseconds). A bigint
+ * is not one of them, so it reads as missing, like any unreadable value.
+ *
+ * @param {unknown} value
+ */
 function createdAtMs(value) {
   const ms = value instanceof Date ? value.getTime() : typeof value === 'string' || typeof value === 'number' ? new Date(value).getTime() : NaN
   return Number.isFinite(ms) ? ms : undefined

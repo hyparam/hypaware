@@ -333,3 +333,62 @@ test('the flush logs one aggregated miss event; the maintenance re-settle passes
   assert.equal(misses[0].attributes?.miss_count, 2)
   assert.equal(misses[0].attributes?.miss_no_transcript, 2)
 })
+
+test('entrypoint follows flush settlement: the native value when it has one, else the live row\'s', () => {
+  const live = liveRow({ entrypoint: 'sdk-ts' })
+  const withNative = /** @type {Record<string, unknown>} */ (mergeClaudeToolPair([live, nativeRow({ entrypoint: 'cli' })]).survivor)
+  assert.equal(withNative.entrypoint, 'cli')
+  const withoutNative = /** @type {Record<string, unknown>} */ (mergeClaudeToolPair([live, nativeRow({ entrypoint: null })]).survivor)
+  assert.equal(withoutNative.entrypoint, 'sdk-ts')
+})
+
+test('a tie on message_created_at goes to the live copy', () => {
+  const at = '2026-11-20T10:00:00.500Z'
+  const survivor = /** @type {Record<string, unknown>} */ (mergeClaudeToolPair([
+    nativeRow({ message_created_at: at, tool_args: '{"command":"native"}' }),
+    liveRow({ message_created_at: at, tool_args: '{"command":"live"}' }),
+  ]).survivor)
+  assert.equal(survivor.tool_args, '{"command":"live"}')
+})
+
+test('a row with no message_created_at is never the earliest, live or native', () => {
+  const undatedNative = nativeRow({ message_created_at: null, tool_args: '{"command":"native"}' })
+  const datedLive = liveRow({ message_created_at: '2026-11-20T10:00:01.000Z', tool_args: '{"command":"live"}' })
+  const first = /** @type {Record<string, unknown>} */ (mergeClaudeToolPair([undatedNative, datedLive]).survivor)
+  assert.equal(first.tool_args, '{"command":"live"}')
+
+  const datedNative = nativeRow({ message_created_at: '2026-11-20T10:00:01.000Z', tool_args: '{"command":"native"}' })
+  const undatedLive = liveRow({ message_created_at: null, tool_args: '{"command":"live"}' })
+  const second = /** @type {Record<string, unknown>} */ (mergeClaudeToolPair([undatedLive, datedNative]).survivor)
+  assert.equal(second.tool_args, '{"command":"native"}')
+  assert.equal(second.message_created_at, '2026-11-20T10:00:01.000Z')
+})
+
+test('rows of different keys are never merged, whatever the caller grouped', () => {
+  assert.equal(mergeClaudeToolPair([liveRow(), nativeRow({ part_type: 'tool_result', role: 'user' })]).status, 'no_pair')
+  assert.equal(mergeClaudeToolPair([liveRow(), nativeRow({ session_id: 'other-session' })]).status, 'no_pair')
+  assert.equal(mergeClaudeToolPair([liveRow(), nativeRow({ client_name: 'codex' })]).status, 'no_pair')
+  assert.equal(mergeClaudeToolPair([]).status, 'no_pair')
+})
+
+test('an unreadable transcript and a proxy-lane row get their own reasons', async (t) => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-pairs-unreadable-'))
+  t.after(() => fs.rm(homeDir, { recursive: true, force: true }))
+  const storage = /** @type {any} */ ({})
+  /** @type {string[]} */
+  const reasons = []
+  const throwing = createClaudeSettlementEnricher({
+    homeDir,
+    stateFile: path.join(homeDir, 'state', 'session-context.jsonl'),
+    transcriptLoader: /** @type {any} */ ({ load: async () => { throw new Error('EACCES') } }),
+  })
+  await throwing.settle([fallbackTool()], { storage, onSettleMiss: (r) => reasons.push(r) })
+  assert.deepEqual(reasons, ['transcript_unreadable'])
+
+  await writeTranscript(homeDir, [
+    { sessionId: SESSION, uuid: 'u-1', parentUuid: null, type: 'user', message: { role: 'user', content: 'go' }, timestamp: '2026-11-20T10:00:00.000Z' },
+  ])
+  reasons.length = 0
+  await enricher(homeDir).settle([fallbackTool({ conversation_source: 'claude-cli-proxy' })], { storage, onSettleMiss: (r) => reasons.push(r) })
+  assert.deepEqual(reasons, ['content_no_match'], 'no tool lookup ran for this lane, so no tool reason is given')
+})
