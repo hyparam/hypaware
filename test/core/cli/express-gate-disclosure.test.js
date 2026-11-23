@@ -127,7 +127,7 @@ test('renderSelect: an option summary lands on its own indented line under its r
   }
   const lines = render(state, { color: false }).split('\n')
 
-  const cursorRow = lines.findIndex((l) => l.trim() === '> Record and sync everything')
+  const cursorRow = lines.findIndex((l) => l.trim() === '\u276f Record and sync everything')
   assert.notEqual(cursorRow, -1, 'the cursor row rendered')
   assert.equal(lines[cursorRow + 1], '    Configures Claude Code to record through HypAware.')
 

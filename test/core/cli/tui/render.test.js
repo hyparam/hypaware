@@ -37,7 +37,7 @@ test('multiselect: colored frame contains at least one SGR escape', () => {
   assert.match(out, COLOR_RE)
 })
 
-test('multiselect: cursor row uses pointer ">", others use space', () => {
+test('multiselect: cursor row uses the chevron pointer, others use space', () => {
   /** @type {any} */
   const state = {
     kind: 'multiselect',
@@ -52,7 +52,7 @@ test('multiselect: cursor row uses pointer ">", others use space', () => {
   }
   const lines = render(state, { color: false }).split('\n')
   assert.ok(lines.some((l) => l.startsWith('  [ ] A')))
-  assert.ok(lines.some((l) => l.startsWith('> [x] B')))
+  assert.ok(lines.some((l) => l.startsWith('\u276f [x] B')))
   assert.ok(lines.some((l) => l.startsWith('  [ ] C')))
 })
 
@@ -116,7 +116,7 @@ test('multiselect: empty options renders title + hint + submit row without optio
   assert.match(out, /^nothing\n/)
   assert.doesNotMatch(out, /\[x\]|\[ \] /)
   // With no options the cursor rests on the submit row.
-  assert.match(out, /> \[ Submit \]\n/)
+  assert.match(out, /\u276f \[ Submit \]\n/)
 })
 
 test('multiselect: submit row renders below the options, pointer-free when not focused', () => {
@@ -151,8 +151,8 @@ test('multiselect: submit row carries the pointer when the cursor is on it', () 
     status: 'active',
   }
   const lines = render(state, { color: false }).split('\n')
-  assert.ok(lines.some((l) => l === '> [ Submit ]'))
-  assert.ok(lines.every((l) => !l.startsWith('> [x]') && !l.startsWith('> [ ] ')))
+  assert.ok(lines.some((l) => l === '\u276f [ Submit ]'))
+  assert.ok(lines.every((l) => !l.startsWith('\u276f [x]') && !l.startsWith('\u276f [ ] ')))
 })
 
 test('multiselect: error line is included when set', () => {
@@ -198,7 +198,7 @@ test('select: renders pointer-and-label rows', () => {
   const out = render(state, { color: false })
   assert.match(out, /^choose\n/)
   assert.match(out, /  Alpha\n/)
-  assert.match(out, /> Beta\n/)
+  assert.match(out, /\u276f Beta\n/)
 })
 
 test('text: render shows "> " followed by the value', () => {
@@ -274,8 +274,9 @@ test('render: hint override replaces default hint line', () => {
 })
 
 // Context lines (LLP 0190): the wizard's defaults gates list what they are
-// about to accept between the title and the hint, verbatim and unstyled.
-test('render: items render verbatim between the title and the hint', () => {
+// about to accept under the title, verbatim and unstyled. The key help
+// closes the frame, under the options.
+test('render: items render verbatim under the title, the hint under the options', () => {
   /** @type {any} */
   const state = {
     kind: 'select',
@@ -289,7 +290,10 @@ test('render: items render verbatim between the title and the hint', () => {
   assert.equal(lines[0], 'HypAware will record:')
   assert.equal(lines[1], '  Claude Code')
   assert.equal(lines[2], '  OpenClaw · set by your team')
-  assert.match(lines[3], /enter pick/)
+  assert.equal(lines[3], '')
+  assert.equal(lines[4], '\u276f Record all')
+  assert.equal(lines[5], '')
+  assert.equal(lines[6], 'Enter to confirm · Esc to cancel')
 })
 
 // The frame (LLP 0198 #frame): the closing ask draws as its own screen.
@@ -315,7 +319,7 @@ test('box: frame is wrapped in a border, every row padded to one width', () => {
     assert.equal(line.length, width, `row is padded to the frame width: ${JSON.stringify(line)}`)
     assert.ok(line.startsWith('│ ') && line.endsWith(' │'), `row is bordered: ${JSON.stringify(line)}`)
   }
-  assert.ok(lines.some((l) => l.includes('> What AI tasks cost the most tokens this week?')))
+  assert.ok(lines.some((l) => l.includes('\u276f What AI tasks cost the most tokens this week?')))
 })
 
 test('box: a frame wider than the terminal is dropped, not soft-wrapped', () => {
@@ -373,7 +377,9 @@ test('render: a state without items renders exactly as it does today', () => {
   }
   const lines = render(state, { color: false }).split('\n')
   assert.equal(lines[0], 'Pick one')
-  assert.match(lines[1], /enter pick/)
+  assert.equal(lines[1], '')
+  assert.equal(lines[2], '\u276f A')
+  assert.match(lines[4], /Enter to confirm/)
 })
 
 /**
@@ -418,7 +424,7 @@ test('select: the option under the cursor stays drawn as the cursor leaves the w
     const frame = render(reportPicker(60, cursor), { color: false, columns: 80, rows: 24 })
     const label = `rec-${String(cursor).padStart(2, '0')}`
     assert.ok(
-      frame.split('\n').some((l) => l.includes(`> ${label}`)),
+      frame.split('\n').some((l) => l.includes(`\u276f ${label}`)),
       `cursor row ${label} is drawn`,
     )
     assert.ok(countPhysicalRows(frame, 80) <= 23, `cursor ${cursor} keeps the frame inside the terminal`)
