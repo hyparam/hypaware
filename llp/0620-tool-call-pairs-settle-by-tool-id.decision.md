@@ -229,7 +229,13 @@ live row. It supplies the content (tool input or result),
   machines), the earliest live row's copy is kept and the others are
   discarded, never summed. These keys are counted, because they are the
   only ones whose token sums change (#hosted, verification).
-- The token columns are re-derived from the result (LLP 0590).
+- The token columns (LLP 0590) move with the usage, **copied as stored on
+  the carrier, never re-derived.** A carrier's columns can be null while its
+  `attributes.usage` is set: rows from a client before LLP 0590 that reached
+  the server before its mover began filling the columns
+  (hypaware-server #1666, 2026-11-08). Re-deriving them on the survivor
+  would add usage the column sums never held. Copying them keeps every
+  column sum exactly as it was, apart from the multi-carrier keys above.
 
 **Every other row of the key is removed.**
 
@@ -274,22 +280,44 @@ twin, keep today's path exactly.
   - A key not admitted is **deferred**. Its rows are emitted unchanged: the
     native row as it is, and the live rows still as fallbacks. They do not
     go to the transcript batch, whose de-twin would drop the carrier.
-  - Deferred keys are counted. A rewrite that deferred any key does not
-    record its new data-file count as the re-settle baseline. LLP 0027 point
-    4's gate then sees a changed count and sweeps again on the next tick,
-    rather than waiting for new data. A large backlog converges over several
-    ticks.
+  - Deferred keys are counted, and wait for the next whole-generation
+    rewrite.
 
 **What does not change.** The transcript match, and its de-twin of non-tool
 rows ("the native twin wins"), are unchanged. By the same reading of the
 code, a text row that carried usage may be lost by that de-twin too. That is
 not measured, and it is out of scope here.
 
-**Both arrival orders converge.** Whichever copy committed first, the
-generation then holds both, and the next re-settle merges them.
+**When the merge runs: LLP 0310 (Accepted) #in-place-by-default.** Both
+passes belong to the whole-generation rewrite, and routine compaction of a
+source table merges in place instead.
 
-**Pairs on different dates are reached.** Mechanism 3 is covered locally,
-because the rewrite spans the whole source table.
+- The rewrite runs on a `hasResettle` tick: the table grew since the last
+  baseline, holds pending fallbacks, and compaction is not otherwise due
+  (`maintenance.js`, the dueness gate).
+- It also runs under `hyp query maintain --force`.
+- It also runs when a due tick's victim files hold a fallback the
+  transcript hook can upgrade right then (`victimFallbacksSettleable`). The
+  key-matched rows are exactly the ones the transcript cannot upgrade, so
+  they do not trigger this escape. LLP 0310 requires such rows to merge in
+  place, and an in-place tick also moves the baseline.
+
+This doc does not widen that escape. LLP 0310 measured an unmatchable
+fallback forcing a whole-generation rewrite on every growth tick. Letting
+key-matched rows force it would need its own bound, and that is not
+designed here.
+
+**How the local path converges.** Whichever copy committed first, the
+generation holds both, and the next whole-generation rewrite merges them.
+That covers pairs on different dates (mechanism 3) too, because the rewrite
+spans the whole source table.
+
+- On a machine whose Claude table keeps growing, that rewrite comes with
+  the next `hasResettle` tick.
+- On an idle machine, the pair stays until new data flushes or an operator
+  runs `hyp query maintain --force`.
+- Until then the local count shows two rows. The settle-miss and merge
+  counters report how many keys are waiting.
 
 **Not reached:** a pair whose two rows have different `client_name` (one
 `claude`, one `claude-desktop`). Those rows live in two source tables. Such
@@ -342,16 +370,31 @@ cannot skip):
    touched: `session_summaries_daily` (`part_count`, `message_count`) and
    `usage_rollup_daily`.
    - `usage_rollup_daily.message_count` counts distinct `message_id`s of
-     assistant rows per (org, date) (hypaware-server LLP 0683 #rows). A
-     merged call pair has two (the 16-hex hash and the uuid), and the
-     survivor has one. So that day's count drops by one per merged call
-     pair. Results are user rows and do not count.
-   - When the copies were on two dates (mechanism 3), both dates change.
-   - Days already rolled up keep the old count until rebuilt. The usage
-     rollup already has a per-(org, date) rebuild (`/v1/admin/usage-rollup/rebuild`,
-     runbook `docs/runbooks/usage-rollup-rebuild.md`). The pass triggers the
-     same rebuild for each touched date, and the session summaries'
-     re-derivation likewise.
+     assistant rows per (org, date) (hypaware-server LLP 0683 #rows;
+     `usage-rollup.js`, `count(DISTINCT CASE WHEN role = 'assistant' THEN
+     message_id END)`).
+   - A fallback `message_id` hashes a whole projected message
+     (`computeMessageId`: the thread scope, the role and the canonical
+     content). An OTEL body row is one block, so it has its own id. A
+     proxy-lane fallback message shares one id across all its blocks.
+   - So a day's count drops by **the number of distinct fallback
+     `message_id`s that no assistant row of that day keeps after the
+     merge**, not by one per pair. The survivor's native uuid is already
+     counted, because the native row existed. Result rows are user rows and
+     never count.
+   - When the copies were on two dates (mechanism 3), each date is computed
+     separately.
+   - Days already rolled up keep the old count until rebuilt.
+     - The usage rollup has a per-(org, date) rebuild
+       (`/v1/admin/usage-rollup/rebuild`, runbook
+       `docs/runbooks/usage-rollup-rebuild.md`). Each rebuild is one
+       `GROUP BY` over that day's archive rows, pruned by date bounds, plus
+       the cache tier from the day's earliest received day to today. That
+       cache-tier part is bounded by cache retention.
+     - `session_summaries_daily` replaces one (org, date) partition per
+       rebuild, idempotently.
+   - Both rebuilds run once per touched date, never per pair: the pass
+     batches them per date after its pairs for that date are done.
 4. **Deletes scoped to the partition's files.** The purge's position-delete
    helper (`deleteMatchingRowsAtUrl`) scans every live data file of the
    table unless it is given `files`. The pass groups keys by archive
@@ -383,8 +426,9 @@ Also for the rewrite:
 - **Token sums** per column are unchanged, except for the counted keys where
   more than one row carried usage. Each of those lowers the sum by exactly
   the discarded copies' counts, which the pass records.
-- **`message_count`** in `usage_rollup_daily` falls by the merged call pairs
-  dated that day, once the day is rebuilt.
+- **`message_count`** in `usage_rollup_daily` falls, once the day is
+  rebuilt, by the distinct fallback `message_id`s that no assistant row of
+  that day keeps, which the pass records.
 - **The report's two orgs** for 2026-11-16 to 2026-11-22 read 0 outside
   ambiguous keys after the pass.
 
@@ -466,9 +510,17 @@ regenerating a report does.
 
 **Rewrite.** The pass deletes the copies and appends the survivor.
 
-- What it gives: every hosted reader is right with no filter: SQL, MCP,
-  reports, the Ask chat, the usage and session pages, and search.
-- Conditions, all four required:
+- What it gives:
+  - Readers that apply Iceberg delete files are right with no filter: SQL
+    through /v1 (`archive/reader.js`), MCP, reports, the Ask chat, and the
+    usage and session pages once their days are rebuilt.
+  - Not every reader applies them. Grep search reads each data file and
+    skips delete files (`grep-search.js`, `content !== 0`), hiding deleted
+    data only through the session-purge fence. The session index builds
+    from the same live-parquet listing (`catalog/session-index-files.js`).
+    Both would still find the deleted copies until archive reclamation
+    rewrites those files. Condition 5 closes that gap.
+- Conditions, all five required:
   1. a per-org dry run that counts the candidate pairs first;
   2. the per-key journal, with append before delete;
   3. the rebuilds of `session_summaries_daily` and `usage_rollup_daily` for
@@ -476,7 +528,16 @@ regenerating a report does.
   4. the restore window stated: deleted rows can be read back from earlier
      snapshots until archive reclamation (hypaware-server LLP 0437
      #archive-reclamation) reaches the table; after that, only an external
-     backup or bucket versioning, where the deployment has one.
+     backup or bucket versioning, where the deployment has one;
+  5. readers that skip delete files are covered, by one of:
+     - the pass enqueues archive reclamation for every table it touched.
+       This ends the restore window in condition 4 at that point.
+     - grep search and the session index apply delete files. This keeps the
+       window, and costs those readers the delete maps.
+- Own-bucket readers: an org can keep its archive in its own S3 bucket
+  (`archive/org-credentials.js`, `storage.roleArn`) and read it with its own
+  tools. Such a reader sees the merge only if it applies Iceberg delete
+  files, or after reclamation.
 - What it costs: stored rows are deleted automatically, without a request.
   Whether the privacy, security and DPA pages need to say so is for the
   legal-page owner.
@@ -490,7 +551,13 @@ the superseded copies using the key index:
 - the Ask chat transcript;
 - the session-summary combine and the usage rollup;
 - grep search;
+- the session index (`catalog/session-index-files.js`);
+- the sync inventory (`catalog/sync-inventory-snapshot.js`);
 - any future reader.
+
+Own-bucket readers: an org that keeps its archive in its own S3 bucket and
+reads it with its own tools always sees both rows. The filter is the
+server's, and their tools do not have it.
 
 What it gives: fully reversible, and nothing is deleted.
 
@@ -506,6 +573,7 @@ What it costs:
 Settled by the orchestrator as leave and count, unless the review showed
 otherwise. Since that answer, the code shows the local rewrite spans every
 date of a source table, so date-split pairs (mechanism 3) are reached
-locally. What is left is pairs split across source tables (`claude` and
-`claude-desktop`), not seen so far, and deferred keys, which converge over
-later ticks.
+locally, on the next whole-generation rewrite (#local, LLP 0310). What is
+left is pairs split across source tables (`claude` and `claude-desktop`),
+not seen so far, and pairs on an idle machine, which wait for new data or
+`--force`.
