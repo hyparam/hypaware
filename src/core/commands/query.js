@@ -585,7 +585,7 @@ export async function runQueryRefresh(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runQueryMaintain(argv, ctx) {
-  const { maintainCache } = await import('../cache/maintenance.js')
+  const { datasetMaintenanceHooks, maintainCache } = await import('../cache/maintenance.js')
   const parsed = parseQueryMaintainArgv(argv)
   if ('error' in parsed) {
     ctx.stderr.write(`hyp query maintain: ${parsed.error}\n`)
@@ -616,13 +616,10 @@ export async function runQueryMaintain(argv, ctx) {
     // @ref LLP 0027#re-settle-sweep: `hyp query maintain` re-settles
     // committed fallback rows too, so a manual sweep also closes the race.
     storage: ctx.storage,
-    getSettleHook: (dataset) => ctx.query.getDataset(dataset)?.resettleBatch,
     // @ref LLP 0311#migration: the manual path runs the same one-time
-    // re-partition the daemon tick would.
-    getDeclaration: (dataset) => ctx.query.getDataset(dataset)?.cachePartitioning,
-    // @ref LLP 0590#old-rows: the manual path runs the same column backfill.
-    getColumnBackfill: (dataset) => ctx.query.getDataset(dataset)?.columnBackfill,
-    getResettlePairs: (dataset) => ctx.query.getDataset(dataset)?.resettlePairs,
+    // re-partition, column backfill and tool-pair merge the daemon tick
+    // would, from the same hooks.
+    ...datasetMaintenanceHooks(ctx.query),
   })
   if (report.dryRun) {
     ctx.stdout.write('[dry-run]\n')

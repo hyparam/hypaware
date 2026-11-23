@@ -269,10 +269,16 @@ twin, keep today's path exactly.
   row count.
 - When the pass ends, it keeps only the keys that have a live row and
   exactly one native `part_id`: the **claimed** keys.
-- Memory during the pass is short strings per native Claude tool row. That
-  is the same order as the native `part_id` set the pass already holds
-  (O(native rows)), not O(pending fallbacks). After the pass it is
-  O(claimed keys).
+- Memory during the pass is one number per keyed row, in one Map: the key
+  is a 53-bit hash of the merge key, and the value packs the row count, a
+  fallback flag and the native `part_id`'s state and 32-bit hash. Measured at
+  500,000 Claude tool rows, that is about 31 MB, where holding the key
+  strings took about 249 MB. It is still O(Claude tool rows in the source
+  table), like the native `part_id` set the pass already holds, not
+  O(pending fallbacks). After the pass it is O(claimed keys).
+- A hash collision can only make a wrong claim. The merge checks every
+  row's key and every native `part_id` itself and declines a mixed set, and
+  a declined key is written back unchanged.
 
 **Pass 2, the full-row rewrite.**
 
@@ -283,7 +289,9 @@ twin, keep today's path exactly.
 - Identity and usage therefore come from the held rows themselves: no third
   pass, and no transcript.
 - Held bytes are bounded by `compact_batch_bytes`, the cap LLP 0301 already
-  applies to the fallback batch.
+  applies to the fallback batch. The two caps are separate, so the pass's
+  peak is up to twice `compact_batch_bytes`: held keys plus one fallback
+  batch.
   - The cap is checked before a new key is admitted. A key already admitted
     completes, which mirrors LLP 0301's single-row exception.
   - A key not admitted is **deferred**. Its rows are emitted unchanged: the
@@ -485,9 +493,10 @@ server's archive output changes under the rewrite option.
 
 - **Flush:** one counter increment per unresolved live row. No new reads.
 - **Maintenance, pass 1:** five more plain columns in the narrow projection.
-  It holds short key strings per native Claude tool row, the same order as
-  the native `part_id` set it already holds, then O(claimed keys).
-- **Maintenance, pass 2:** held rows bounded by `compact_batch_bytes`.
+  It holds one number per Claude tool row (about 31 MB at 500,000 rows,
+  measured), then O(claimed keys).
+- **Maintenance, pass 2:** held rows bounded by `compact_batch_bytes`, beside
+  the fallback batch's own cap, so up to twice that at peak.
   Nothing grows with uptime. A table with no qualifying live rows pays only
   the wider narrow projection.
 - **Queries:** no added work on either path under rewrite. Under hide,

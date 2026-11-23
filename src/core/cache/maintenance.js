@@ -45,7 +45,7 @@ import { createRecordRedactor } from '../sinks/redaction.js'
  *   SettleContext,
  *   StreamingTableAppend,
  * } from '../../../src/core/cache/types.js'
- * @import { ColumnSpec, DatasetColumnBackfill, DatasetResettlePairs } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, DatasetColumnBackfill, DatasetRegistration, DatasetResettlePairs } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../../src/core/iceberg/types.js'
  * @import { PartitionSpec, Resolver, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
@@ -1714,7 +1714,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
       }
       if (pairs && claimed) {
         const key = pairs.key(row)
-        const expected = key === undefined ? undefined : claimed.get(key)
+        const expected = key === undefined ? undefined : claimed.get(pairKeyHash(key))
         if (key !== undefined && expected !== undefined) {
           await holdPairRow(key, expected, row)
           continue
@@ -2452,9 +2452,9 @@ function filesRemovedBeforeFailure(err) {
  *
  * With a dataset's key-matched merge, the same pass also counts each key's
  * rows and native `part_id`s, and returns the **claimed** keys: those with a
- * fallback row and exactly one native `part_id`, each mapped to its row
- * count. During the pass this holds a short key per keyed row; after it,
- * only the claimed keys.
+ * fallback row and exactly one native `part_id`, each mapped (by the key's
+ * hash) to its row count. During the pass this holds one number per keyed
+ * row ({@link createPairKeyIndex}); after it, only the claimed keys.
  *
  * @ref LLP 0301#bounded-resettle [implements]: a narrow identity pass makes
  * later fallback batches independent of scan order.
@@ -2462,43 +2462,129 @@ function filesRemovedBeforeFailure(err) {
  * @param {string} tableDir
  * @param {TableMetadata | undefined} metadata
  * @param {DatasetResettlePairs | undefined} pairs
- * @returns {Promise<{ partIds: Set<string>, claimed?: Map<string, number>, ambiguous: number }>}
+ * @returns {Promise<{ partIds: Set<string>, claimed?: Map<number, number>, ambiguous: number }>}
  */
 async function scanNativeIdentity(tableDir, metadata, pairs) {
   const partIds = new Set()
-  /** @type {Map<string, string | null>} native part_id per key; null once a second one appears */
-  const nativeByKey = new Map()
-  /** @type {Map<string, number>} */
-  const rowsByKey = new Map()
-  /** @type {Set<string>} */
-  const liveKeys = new Set()
+  const index = pairs ? createPairKeyIndex() : null
   const columns = ['attributes', 'part_id', 'message_id', 'part_index', ...(pairs?.columns ?? [])]
   for await (const row of scanRowsFromTable(tableDir, [...new Set(columns)], metadata ? { metadata } : undefined)) {
     const live = isGatewayFallbackRow(row)
     const partId = live ? undefined : rowPartId(row)
     const key = pairs?.key(row)
-    if (key !== undefined) {
-      rowsByKey.set(key, (rowsByKey.get(key) ?? 0) + 1)
-      if (live) {
-        liveKeys.add(key)
-      } else {
-        const prior = nativeByKey.get(key)
-        if (prior === undefined) nativeByKey.set(key, partId ?? null)
-        else if (prior !== partId) nativeByKey.set(key, null)
-      }
-    }
+    if (index && key !== undefined) index.observe(key, live, partId)
     if (partId !== undefined) partIds.add(partId)
   }
-  if (!pairs) return { partIds, ambiguous: 0 }
-  /** @type {Map<string, number>} */
-  const claimed = new Map()
-  let ambiguous = 0
-  for (const key of liveKeys) {
-    const native = nativeByKey.get(key)
-    if (native === null) ambiguous++
-    else if (native !== undefined) claimed.set(key, /** @type {number} */ (rowsByKey.get(key)))
-  }
+  if (!index) return { partIds, ambiguous: 0 }
+  const { claimed, ambiguous } = index.claimed()
   return { partIds, claimed, ambiguous }
+}
+
+/**
+ * Pass 1's per-key state, held as one number per key in one Map, so its
+ * memory is a fixed few dozen bytes per keyed row rather than a copy of the
+ * key string and two map entries (LLP 0301#bounded-resettle: retain short
+ * identities, never row-sized data; the cache's whole history passes here).
+ *
+ * The Map's key is a 53-bit hash of the merge key. Its value packs the key's
+ * row count (up to 255; more marks the key unclaimable), whether it has a
+ * fallback row, and its native `part_id` state: none, one (with a 32-bit hash
+ * of that `part_id`), or more than one. A hash collision can only make a
+ * wrong claim. The dataset's merge checks every row's key and every native
+ * `part_id` itself and declines a mixed set, and a declined key is written
+ * back unchanged, so a collision costs nothing but a held key.
+ *
+ * Exported for the test that pins its size class.
+ *
+ * @ref LLP 0620#local [implements]: pass 1 records the merge keys in bounded memory
+ * @returns {{ observe(key: string, live: boolean, partId: string | undefined): void, claimed(): { claimed: Map<number, number>, ambiguous: number }, entries: Map<number, number> }}
+ */
+export function createPairKeyIndex() {
+  /** @type {Map<number, number>} */
+  const entries = new Map()
+  return {
+    entries,
+    observe(key, live, partId) {
+      const id = pairKeyHash(key)
+      const prior = entries.get(id)
+      const state = prior === undefined ? { rows: 0, live: false, native: NATIVE_NONE, partHash: 0 } : unpackPairState(prior)
+      state.rows = Math.min(state.rows + 1, PAIR_ROWS_OVERFLOW)
+      if (live) {
+        state.live = true
+      } else {
+        const partHash = partId === undefined ? 0 : hash32(partId, FNV_OFFSET)
+        if (state.native === NATIVE_NONE) {
+          state.native = NATIVE_ONE
+          state.partHash = partHash
+        } else if (state.native === NATIVE_ONE && state.partHash !== partHash) {
+          state.native = NATIVE_MANY
+        }
+      }
+      entries.set(id, packPairState(state))
+    },
+    claimed() {
+      /** @type {Map<number, number>} */
+      const claimed = new Map()
+      let ambiguous = 0
+      for (const [id, packed] of entries) {
+        const state = unpackPairState(packed)
+        if (!state.live) continue
+        if (state.native === NATIVE_MANY) ambiguous++
+        else if (state.native === NATIVE_ONE && state.rows < PAIR_ROWS_OVERFLOW) claimed.set(id, state.rows)
+      }
+      return { claimed, ambiguous }
+    },
+  }
+}
+
+const NATIVE_NONE = 0
+const NATIVE_ONE = 1
+const NATIVE_MANY = 2
+const PAIR_ROWS_OVERFLOW = 255
+const TWO_32 = 2 ** 32
+const FNV_OFFSET = 0x811c9dc5
+const FNV_OFFSET_ALT = 0x050c5d1f
+
+/**
+ * Pack a key's state into one safe integer: the native `part_id` hash in
+ * the low 32 bits, then two bits of native state, one live bit and eight
+ * bits of row count (43 bits in all).
+ *
+ * @param {{ rows: number, live: boolean, native: number, partHash: number }} state
+ */
+function packPairState(state) {
+  return state.partHash + TWO_32 * (state.native + 4 * ((state.live ? 1 : 0) + 2 * state.rows))
+}
+
+/** @param {number} packed */
+function unpackPairState(packed) {
+  const high = Math.floor(packed / TWO_32)
+  return { rows: Math.floor(high / 8), live: (Math.floor(high / 4) & 1) === 1, native: high & 3, partHash: packed - high * TWO_32 }
+}
+
+/**
+ * A 53-bit hash of a merge key: two independent 32-bit FNV-1a hashes, 21
+ * bits of one and all 32 of the other.
+ *
+ * @param {string} key
+ */
+export function pairKeyHash(key) {
+  return (hash32(key, FNV_OFFSET_ALT) & 0x1fffff) * TWO_32 + hash32(key, FNV_OFFSET)
+}
+
+/**
+ * FNV-1a over the string's UTF-16 code units, unsigned 32-bit.
+ *
+ * @param {string} text
+ * @param {number} offset
+ */
+function hash32(text, offset) {
+  let hash = offset
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return hash >>> 0
 }
 
 /**
@@ -2537,6 +2623,28 @@ function recordPairStats(stats) {
     claimed: stats.claimed, merged: stats.merged, deferred: stats.deferred,
     ambiguous: stats.ambiguous, discarded_usage: stats.discardedUsage,
   })
+}
+
+/**
+ * The per-dataset hooks a maintenance run takes from the dataset registry.
+ * One place, so the daemon tick and `hyp query maintain` cannot wire
+ * different sets.
+ *
+ * - `getSettleHook`: the re-settle hook (LLP 0027#re-settle-sweep).
+ * - `getDeclaration`: the one-time re-partition (LLP 0311#migration).
+ * - `getColumnBackfill`: new columns into old partitions (LLP 0590#old-rows).
+ * - `getResettlePairs`: the key-matched merge (LLP 0620#local).
+ *
+ * @param {{ getDataset(dataset: string): DatasetRegistration | undefined }} query
+ * @returns {Pick<MaintenanceOptions, 'getSettleHook' | 'getDeclaration' | 'getColumnBackfill' | 'getResettlePairs'>}
+ */
+export function datasetMaintenanceHooks(query) {
+  return {
+    getSettleHook: (dataset) => query.getDataset(dataset)?.resettleBatch,
+    getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
+    getColumnBackfill: (dataset) => query.getDataset(dataset)?.columnBackfill,
+    getResettlePairs: (dataset) => query.getDataset(dataset)?.resettlePairs,
+  }
 }
 
 /**

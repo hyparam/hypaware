@@ -140,7 +140,9 @@ adopt it now as a **backstop**, not a replacement for the flush-time pass.
    end-of-scan the buffer is upgraded, and an **upgraded** row whose native
    `part_id` now collides with one already emitted from this partition (its
    native twin) is dropped: the native twin wins. A row whose identity did not
-   change is never dropped.
+   change is never dropped. (A Claude tool row whose key LLP 0620 #local
+   claims takes that path instead: its native row is held and replaced by a
+   survivor under the same identity.)
 4. **Force the rewrite when needed, but only on new data.** A partition
    holding any `identity_source = 'gateway_fallback'` row is rewritten even
    when file-count heuristics say compaction isn't due, so a split pair in a

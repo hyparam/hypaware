@@ -1015,7 +1015,7 @@ export async function runDaemon(opts = {}) {
   const maintenanceCfg = boot.config?.query?.cache?.maintenance
   const maintenanceEnabled = maintenanceCfg?.enabled !== false
   if (maintenanceEnabled) {
-    const { maintainCache, normalizeMaintenanceConfig } = await import('../cache/maintenance.js')
+    const { datasetMaintenanceHooks, maintainCache, normalizeMaintenanceConfig } = await import('../cache/maintenance.js')
     const { createRetentionEnforcer } = await import('../cache/retention.js')
     const mCfg = normalizeMaintenanceConfig(maintenanceCfg)
     const intervalMs = mCfg.interval_minutes * 60 * 1000
@@ -1076,14 +1076,10 @@ export async function runDaemon(opts = {}) {
             // compaction can re-settle committed fallback rows split from
             // their uuid twin.
             storage: boot.runtime.storage,
-            getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
-            // @ref LLP 0311#migration: let the tick detect and run the
-            // one-time re-partition when a dataset's declaration demoted
-            // partition columns to sortOnly.
-            getDeclaration: (dataset) => boot.runtime.query.getDataset(dataset)?.cachePartitioning,
-            // @ref LLP 0590#old-rows: fill new columns into partitions written before them.
-            getColumnBackfill: (dataset) => boot.runtime.query.getDataset(dataset)?.columnBackfill,
-            getResettlePairs: (dataset) => boot.runtime.query.getDataset(dataset)?.resettlePairs,
+            // @ref LLP 0311#migration: the same hooks `hyp query maintain`
+            // passes: re-settle, re-partition, column backfill and the
+            // tool-pair merge.
+            ...datasetMaintenanceHooks(boot.runtime.query),
           })
           // @ref LLP 0228#status-file-is-the-surface [implements]: the tick
           // stops discarding the report. A partition this walk deliberately

@@ -6,7 +6,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { maintainCache } from '../../src/core/cache/maintenance.js'
+import { createPairKeyIndex, datasetMaintenanceHooks, maintainCache, pairKeyHash } from '../../src/core/cache/maintenance.js'
+import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 import { readCursorSync } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayDatasetRegistration, DATASET_NAME, PARTITION_LABEL } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
@@ -22,6 +23,8 @@ import { createClaudeSettlementEnricher } from '../../hypaware-core/plugins-work
  * @ref LLP 0620#local [tests]: pass 1 claims the key; pass 2 holds, merges or defers
  * @ref LLP 0620#survivor [tests]: native identity, the carrier's usage, the live lane
  * @ref LLP 0027#re-settle-sweep [tests]: a second pass is a no-op; an unclaimed row is never dropped
+ *
+ * @import { LogRecord } from '../../src/core/observability/types.js'
  */
 
 const SESSION = '0f3c2a8e-5b1d-4c7e-9a20-6d4e8f1b2c3a'
@@ -197,6 +200,82 @@ async function pendingFallbacks(gw) {
   return total
 }
 
+/**
+ * Write the transcript lines for native tool calls, so the transcript path
+ * could settle (and de-twin) a fallback that reached it.
+ *
+ * @param {{ homeDir: string }} env
+ * @param {Array<{ toolId: string, uuid: string }>} calls
+ */
+async function writeTranscript(env, calls) {
+  const dir = path.join(env.homeDir, '.claude', 'projects', 'repo')
+  await fs.mkdir(dir, { recursive: true })
+  const lines = calls.map(({ toolId, uuid }) => JSON.stringify({
+    sessionId: SESSION, uuid, parentUuid: null, type: 'assistant', requestId: `req_${toolId}`,
+    message: { id: `msg_${toolId}`, role: 'assistant', content: [{ type: 'tool_use', id: toolId, name: 'Bash', input: { command: 'ls -la' } }] },
+    timestamp: '2026-11-20T10:00:00.500Z',
+  }))
+  await fs.writeFile(path.join(dir, `${SESSION}.jsonl`), lines.join('\n') + '\n')
+}
+
+/**
+ * Capture the log records a test's maintenance runs emit.
+ *
+ * @param {import('node:test').TestContext} t
+ */
+function captureLogs(t) {
+  /** @type {LogRecord[]} */
+  const records = []
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (batch) => { records.push(...batch) } }],
+  })
+  logs.setGlobalLoggerProvider(provider)
+  t.after(() => provider.shutdown())
+  return {
+    async pairStats() {
+      await provider.forceFlush()
+      return records.filter((record) => record.body === 'cache.resettle_pairs').map((record) => record.attributes ?? {})
+    },
+  }
+}
+
+test('pass 1 holds one number per key, and claims only a key with a fallback and one native part_id', () => {
+  const index = createPairKeyIndex()
+  index.observe('s\0call-a\0tool_call', true, undefined)
+  index.observe('s\0call-a\0tool_call', false, 'uuid-a#0')
+  index.observe('s\0call-b\0tool_call', true, undefined)
+  index.observe('s\0call-b\0tool_call', false, 'uuid-b#0')
+  index.observe('s\0call-b\0tool_call', false, 'uuid-fork#0')
+  index.observe('s\0call-c\0tool_call', false, 'uuid-c#0')
+  index.observe('s\0call-d\0tool_call', true, undefined)
+  index.observe('s\0call-e\0tool_call', true, undefined)
+  index.observe('s\0call-e\0tool_call', false, 'uuid-e#0')
+  index.observe('s\0call-e\0tool_call', false, 'uuid-e#0')
+  assert.equal(index.entries.size, 5, 'one entry per key')
+  for (const [id, packed] of index.entries) {
+    assert.ok(Number.isSafeInteger(id) && id >= 0, 'the key is a safe integer, not the key string')
+    assert.ok(Number.isSafeInteger(packed) && packed >= 0, 'the state is one safe integer')
+  }
+  const { claimed, ambiguous } = index.claimed()
+  assert.deepEqual([...claimed.entries()].sort(), [
+    [pairKeyHash('s\0call-a\0tool_call'), 2],
+    [pairKeyHash('s\0call-e\0tool_call'), 3],
+  ].sort(), 'claimed keys map to their row count; the same native part_id twice is one native')
+  assert.equal(ambiguous, 1, 'two native part_ids make a key ambiguous')
+  assert.equal(pairKeyHash('s\0call-a\0tool_call'), pairKeyHash('s\0call-a\0tool_call'))
+})
+
+test('the daemon tick and the CLI take the merge from the same hooks', () => {
+  const registration = aiGatewayDatasetRegistration(createGatewayState())
+  const hooks = datasetMaintenanceHooks({ getDataset: (dataset) => dataset === DATASET_NAME ? registration : undefined })
+  assert.equal(hooks.getResettlePairs?.(DATASET_NAME), registration.resettlePairs)
+  assert.equal(hooks.getSettleHook?.(DATASET_NAME), registration.resettleBatch)
+  assert.equal(hooks.getColumnBackfill?.(DATASET_NAME), registration.columnBackfill)
+  assert.equal(hooks.getDeclaration?.(DATASET_NAME), registration.cachePartitioning)
+  assert.equal(hooks.getResettlePairs?.('other'), undefined)
+})
+
 test('live first: the pair merges into one row with native identity and the response\'s usage', async () => {
   const env = await stageEnv()
   try {
@@ -278,7 +357,8 @@ test('copies on two dates merge in one rewrite, onto the earliest copy\'s date',
   }
 })
 
-test('an ambiguous key and an unpaired fallback are left as they are', async () => {
+test('an ambiguous key and an unpaired fallback are left as they are', async (t) => {
+  const captured = captureLogs(t)
   const env = await stageEnv()
   try {
     const gw = buildGateway(env)
@@ -294,12 +374,17 @@ test('an ambiguous key and an unpaired fallback are left as they are', async () 
     const after = await readToolRows(gw)
     assert.equal(after.length, 4, 'nothing merges and nothing is dropped')
     assert.equal(await pendingFallbacks(gw), 2)
+    const stats = await captured.pairStats()
+    assert.equal(stats.length, 1)
+    assert.deepEqual({ claimed: stats[0].claimed, merged: stats[0].merged, deferred: stats[0].deferred, ambiguous: stats[0].ambiguous },
+      { claimed: 0, merged: 0, deferred: 0, ambiguous: 1 })
   } finally {
     await env.cleanup()
   }
 })
 
-test('a key past the held-bytes cap is deferred unchanged and merges on the next rewrite', async () => {
+test('a key past the held-bytes cap is deferred unchanged, kept from the transcript de-twin, and merges on the next rewrite', async (t) => {
+  const captured = captureLogs(t)
   const env = await stageEnv()
   try {
     const gw = buildGateway(env)
@@ -311,11 +396,19 @@ test('a key past the held-bytes cap is deferred unchanged and merges on the next
       nativeCall('toolu_cap_a', 'a1a1a1a1-0000-4000-8000-000000000006'),
       nativeCall('toolu_cap_b', 'b1b1b1b1-0000-4000-8000-000000000007'),
     ])
+    // The transcript is on disk now, so a deferred key's fallback that
+    // reached the transcript batch would be upgraded and de-twinned, and its
+    // usage dropped with it.
+    await writeTranscript(env, [
+      { toolId: 'toolu_cap_a', uuid: 'a1a1a1a1-0000-4000-8000-000000000006' },
+      { toolId: 'toolu_cap_b', uuid: 'b1b1b1b1-0000-4000-8000-000000000007' },
+    ])
     // A cap of one byte admits one key at a time: whichever key starts
     // second while the first is still held is deferred.
     await maintain(gw, { config: { compact_batch_bytes: 1 } })
     const once = await readToolRows(gw)
     assert.equal(once.length, 3, 'one key merged, the other was deferred')
+    assert.equal(once.reduce((sum, row) => sum + Number(row.output_tokens ?? 0), 0), 68, 'the deferred key kept its usage')
     const remaining = once.length - 2
     assert.equal(await pendingFallbacks(gw), remaining, 'a deferred key keeps its fallback, counted exactly')
 
@@ -324,6 +417,11 @@ test('a key past the held-bytes cap is deferred unchanged and merges on the next
     assert.equal(twice.length, 2, 'the deferred key merges on the next rewrite')
     assert.equal(await pendingFallbacks(gw), 0)
     for (const row of twice) assert.equal(Number(row.output_tokens), 34, 'each merged call keeps its usage')
+    const stats = await captured.pairStats()
+    assert.deepEqual(stats.map((s) => ({ claimed: s.claimed, merged: s.merged, deferred: s.deferred, ambiguous: s.ambiguous })), [
+      { claimed: 2, merged: 1, deferred: 1, ambiguous: 0 },
+      { claimed: 1, merged: 1, deferred: 0, ambiguous: 0 },
+    ])
   } finally {
     await env.cleanup()
   }
