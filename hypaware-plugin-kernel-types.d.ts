@@ -1786,6 +1786,14 @@ export interface DatasetRegistration {
    */
   resettleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
   /**
+   * Optional: rows the re-settle rewrite may merge by a key of their own,
+   * without the transcript (LLP 0620 #local). Maintenance reads `columns` in
+   * its narrow first pass, claims each key that has a fallback row and
+   * exactly one native `part_id`, and replaces that key's rows with what
+   * `merge` returns. Both functions must be pure.
+   */
+  resettlePairs?: DatasetResettlePairs
+  /**
    * Optional columns that cache maintenance fills into rows committed before
    * the columns existed (LLP 0590#old-rows). A partition whose table was
    * created without any of `columns` is due for one whole-generation rewrite,
@@ -1810,6 +1818,16 @@ export interface DatasetColumnBackfillPass {
   observe(row: Record<string, unknown>): void
   /** Returns the row to write, with the backfilled columns set. Called once per written row. */
   apply(row: Record<string, unknown>): Record<string, unknown>
+}
+
+/** A dataset's key-matched merge for the re-settle rewrite (LLP 0620 #local). */
+export interface DatasetResettlePairs {
+  /** The plain columns `key` reads, added to the narrow first pass. */
+  columns: string[]
+  /** The key two copies of one record share, or undefined for a row that takes no part. */
+  key(row: Record<string, unknown>): string | undefined
+  /** Merge every row of one key; `merged` returns the one row the key keeps. */
+  merge(rows: Record<string, unknown>[]): { status: 'merged' | 'ambiguous' | 'no_pair', survivor?: Record<string, unknown>, discardedUsage: Record<string, unknown>[] }
 }
 
 export interface DatasetSettleContext {

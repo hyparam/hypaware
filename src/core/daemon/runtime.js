@@ -1083,6 +1083,7 @@ export async function runDaemon(opts = {}) {
             getDeclaration: (dataset) => boot.runtime.query.getDataset(dataset)?.cachePartitioning,
             // @ref LLP 0590#old-rows: fill new columns into partitions written before them.
             getColumnBackfill: (dataset) => boot.runtime.query.getDataset(dataset)?.columnBackfill,
+            getResettlePairs: (dataset) => boot.runtime.query.getDataset(dataset)?.resettlePairs,
           })
           // @ref LLP 0228#status-file-is-the-surface [implements]: the tick
           // stops discarding the report. A partition this walk deliberately

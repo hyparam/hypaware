@@ -622,6 +622,7 @@ export async function runQueryMaintain(argv, ctx) {
     getDeclaration: (dataset) => ctx.query.getDataset(dataset)?.cachePartitioning,
     // @ref LLP 0590#old-rows: the manual path runs the same column backfill.
     getColumnBackfill: (dataset) => ctx.query.getDataset(dataset)?.columnBackfill,
+    getResettlePairs: (dataset) => ctx.query.getDataset(dataset)?.resettlePairs,
   })
   if (report.dryRun) {
     ctx.stdout.write('[dry-run]\n')
