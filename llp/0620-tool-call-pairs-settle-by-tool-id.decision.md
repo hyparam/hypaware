@@ -383,7 +383,9 @@ cannot skip):
      counted, because the native row existed. Result rows are user rows and
      never count.
    - When the copies were on two dates (mechanism 3), each date is computed
-     separately.
+     separately. The survivor takes the earliest copy's date, so the native
+     uuid can move to the other day: the native row's day loses it, and the
+     earliest copy's day gains it. This also happens across midnight.
    - Days already rolled up keep the old count until rebuilt.
      - The usage rollup has a per-(org, date) rebuild
        (`/v1/admin/usage-rollup/rebuild`, runbook
@@ -514,12 +516,15 @@ regenerating a report does.
   - Readers that apply Iceberg delete files are right with no filter: SQL
     through /v1 (`archive/reader.js`), MCP, reports, the Ask chat, and the
     usage and session pages once their days are rebuilt.
-  - Not every reader applies them. Grep search reads each data file and
-    skips delete files (`grep-search.js`, `content !== 0`), hiding deleted
-    data only through the session-purge fence. The session index builds
-    from the same live-parquet listing (`catalog/session-index-files.js`).
-    Both would still find the deleted copies until archive reclamation
-    rewrites those files. Condition 5 closes that gap.
+  - Queries pruned by the session index are right too. The index only
+    decides which row groups are read, and the rows come through
+    `catalog/ranged-source.js`, which applies position and equality deletes
+    (hypaware-server LLP 0553 #pruning).
+  - Grep search is the exception. It reads each data file and skips delete
+    files (`grep-search.js`, `content !== 0`), hiding deleted data only
+    through the session-purge fence. It would still return the deleted
+    copies until archive reclamation rewrites those files. Condition 5
+    closes that gap.
 - Conditions, all five required:
   1. a per-org dry run that counts the candidate pairs first;
   2. the per-key journal, with append before delete;
@@ -529,11 +534,11 @@ regenerating a report does.
      snapshots until archive reclamation (hypaware-server LLP 0437
      #archive-reclamation) reaches the table; after that, only an external
      backup or bucket versioning, where the deployment has one;
-  5. readers that skip delete files are covered, by one of:
+  5. grep search stops returning the deleted copies, by one of:
      - the pass enqueues archive reclamation for every table it touched.
        This ends the restore window in condition 4 at that point.
-     - grep search and the session index apply delete files. This keeps the
-       window, and costs those readers the delete maps.
+     - grep search applies delete files. This keeps the window, and costs
+       grep search the delete maps.
 - Own-bucket readers: an org can keep its archive in its own S3 bucket
   (`archive/org-credentials.js`, `storage.roleArn`) and read it with its own
   tools. Such a reader sees the merge only if it applies Iceberg delete
@@ -551,7 +556,8 @@ the superseded copies using the key index:
 - the Ask chat transcript;
 - the session-summary combine and the usage rollup;
 - grep search;
-- the session index (`catalog/session-index-files.js`);
+- queries pruned by the session index (the filter applies to the rows they
+  read; the index itself only prunes);
 - the sync inventory (`catalog/sync-inventory-snapshot.js`);
 - any future reader.
 
