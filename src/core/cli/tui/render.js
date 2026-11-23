@@ -85,16 +85,16 @@ function frameLines(state, opts) {
 }
 
 const DEFAULT_HINT = {
-  multiselect: 'space toggle · a all · enter confirm · esc cancel',
-  select:      'up/down · enter pick · esc cancel',
+  multiselect: 'Space to toggle · a to select all · Enter to confirm · Esc to cancel',
+  select:      'Enter to confirm · Esc to cancel',
   text:        'enter confirm · esc cancel',
 }
 
 // An allowBack prompt (LLP 0191) tells the truth about what escape does
 // there: it steps back one screen instead of cancelling.
 const DEFAULT_HINT_BACK = {
-  multiselect: 'space toggle · a all · enter confirm · esc back',
-  select:      'up/down · enter pick · esc back',
+  multiselect: 'Space to toggle · a to select all · Enter to confirm · Esc to go back',
+  select:      'Enter to confirm · Esc to go back',
   text:        'enter confirm · esc back',
 }
 
@@ -110,17 +110,19 @@ function defaultHint(state) {
 }
 
 /**
+ * Laid out like a select (chevron pointer, key help under the rows) so a
+ * wizard that mixes the two kinds reads as one set of screens.
+ *
  * @param {MultiselectState} state
  * @param {RenderOpts} opts
  * @returns {string[]}
  */
 function renderMultiselect(state, opts) {
   const lines = chromeLines(state, opts)
-  lines.push(paint(state.hint ?? defaultHint(state), ANSI.dim, opts.color))
-  lines.push('')
+  if (lines.length > 0) lines.push('')
   state.options.forEach((o, i) => {
     const cursor = i === state.cursor
-    const pointer = cursor ? '>' : ' '
+    const pointer = cursor ? '\u276f' : ' '
     const box = o.checked ? '[x]' : '[ ]'
     const row = `${pointer} ${box} ${o.label}`
     if (o.disabled) {
@@ -140,15 +142,17 @@ function renderMultiselect(state, opts) {
   })
   // The Submit row (cursor === options.length) makes finishing visible
   // instead of relying on people knowing enter confirms from anywhere.
-  // Bracketed so it reads as a button, not another checkbox row; bold
-  // cyan under the cursor, plain otherwise (dim would read as locked).
+  // Bracketed so it reads as a button, not another checkbox row; cyan
+  // under the cursor, plain otherwise (dim would read as locked).
   const onSubmit = state.cursor === state.options.length
-  const submitRow = `${onSubmit ? '>' : ' '} [ Submit ]`
+  const submitRow = `${onSubmit ? '\u276f' : ' '} [ Submit ]`
   lines.push('')
-  lines.push(onSubmit ? paint(submitRow, `${ANSI.bold}${ANSI.cyan}`, opts.color) : submitRow)
+  lines.push(onSubmit ? paint(submitRow, ANSI.cyan, opts.color) : submitRow)
   if (state.error) {
     lines.push(paint(state.error, ANSI.red, opts.color))
   }
+  lines.push('')
+  lines.push(paint(state.hint ?? defaultHint(state), ANSI.dim, opts.color))
   return lines
 }
 
@@ -156,10 +160,12 @@ function renderMultiselect(state, opts) {
  * A select's rows carry no marker column: the cursor *is* the selection
  * (unlike multiselect, where `[x]` records state the cursor doesn't), so
  * a radio glyph beside the pointer would only invite people to toggle
- * rows they cannot. Weight does the work instead - the row you are on is
- * bold cyan, the rest dim - which reads as one live choice among options
- * rather than a paragraph of indented lines. Dim is unambiguous here:
- * unlike multiselect it has no locked-row meaning to collide with.
+ * rows they cannot. Colour and the pointer do the work instead: the row
+ * you are on is cyan behind a chevron, the rest are plain text at full
+ * strength, so every option is as readable as the one under the cursor.
+ *
+ * The key help sits under the options, not above them: the question and
+ * its choices are what get read, and the keys are a footnote to them.
  *
  * @param {SelectState} state
  * @param {RenderOpts} opts
@@ -167,25 +173,25 @@ function renderMultiselect(state, opts) {
  */
 function renderSelect(state, opts) {
   const lines = chromeLines(state, opts)
-  lines.push(paint(state.hint ?? defaultHint(state), ANSI.dim, opts.color))
-  lines.push('')
+  if (lines.length > 0) lines.push('')
+  const foot = ['', paint(state.hint ?? defaultHint(state), ANSI.dim, opts.color)]
   const blocks = state.options.map((o, i) => {
     const cursor = i === state.cursor
-    const pointer = cursor ? '>' : ' '
-    const row = `${pointer} ${o.label}`
-    const block = [cursor ? paint(row, `${ANSI.bold}${ANSI.cyan}`, opts.color) : paint(row, ANSI.dim, opts.color)]
+    const block = [cursor ? paint(`\u276f ${o.label}`, ANSI.cyan, opts.color) : `  ${o.label}`]
     if (o.summary && o.summary !== o.label) {
       block.push(paint(`    ${o.summary}`, ANSI.dim, opts.color))
     }
     return block
   })
-  const [start, end] = selectWindow(state, lines, blocks, opts)
+  // The footer is charged with the head: both are rows the window cannot use.
+  const [start, end] = selectWindow(state, [...lines, ...foot], blocks, opts)
   for (let i = start; i < end; i++) lines.push(...blocks[i])
   if (start > 0 || end < blocks.length) {
     // A window that hid rows says so: a picker that renders some of its
     // options without saying so lies about how many there are.
     lines.push(paint(`  showing ${start + 1}-${end} of ${blocks.length}`, ANSI.dim, opts.color))
   }
+  lines.push(...foot)
   return lines
 }
 
@@ -216,7 +222,7 @@ function renderSelect(state, opts) {
  * @ref LLP 0414#listing-is-the-picker [constrained-by]: the picker offers one row per listed report, so its height is the server's to set
  *
  * @param {SelectState} state
- * @param {string[]} head
+ * @param {string[]} head - every frame row that is not an option: chrome above, key help below
  * @param {string[][]} blocks
  * @param {RenderOpts} opts
  * @returns {[number, number]} half-open range of block indices to draw
