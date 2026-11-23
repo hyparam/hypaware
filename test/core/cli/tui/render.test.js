@@ -270,7 +270,7 @@ test('render: hint override replaces default hint line', () => {
   }
   const out = render(state, { color: false })
   assert.match(out, /CUSTOM HINT/)
-  assert.doesNotMatch(out, /space toggle/)
+  assert.doesNotMatch(out, /Space to toggle/)
 })
 
 // Context lines (LLP 0190): the wizard's defaults gates list what they are
