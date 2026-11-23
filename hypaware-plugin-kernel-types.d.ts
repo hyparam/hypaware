@@ -1814,6 +1814,13 @@ export interface DatasetColumnBackfillPass {
 
 export interface DatasetSettleContext {
   storage: QueryStorageService
+  /**
+   * Set only by the flush path. An enricher calls it once per row whose
+   * identity it could not settle, naming why. Probes and the maintenance
+   * re-settle leave it unset, so the hook stays free of side effects there
+   * (LLP 0312 #settle-purity, LLP 0620 #why-the-lookup-misses).
+   */
+  onSettleMiss?: (reason: string) => void
 }
 
 export interface DatasetSchema {
