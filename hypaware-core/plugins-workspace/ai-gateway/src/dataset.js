@@ -13,7 +13,7 @@ import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 /**
  * @import { AiGatewayProjectedExchange, AiGatewaySettlementEnricher, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetColumnBackfill, DatasetColumnBackfillPass, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
- * @import { GatewayState } from './types.js'
+ * @import { ClaudeToolPairMerge, GatewayState } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
@@ -347,10 +347,16 @@ function createSettleBatch(state) {
     // late-resolved `.hypignore` ignore), not only upgrade its identity - the
     // filtered batch is what gets committed, so the dropped row never reaches a
     // durable partition or a sink.
-    const settled = await upgradeFallbackRows(rows, state, ctx, {
+    /** @type {Map<string, number>} */
+    const misses = new Map()
+    const settled = await upgradeFallbackRows(rows, state, {
+      ...ctx,
+      onSettleMiss: (reason) => { misses.set(reason, (misses.get(reason) ?? 0) + 1) },
+    }, {
       select: (row) => plan.selected.has(row),
       allowDrop: true,
     })
+    if (misses.size > 0) logSettleMisses(misses)
     // A fallback->native upgrade can twin any committed row, so a
     // fallback-carrying batch dedupes whole. A pure cwd-enrich/drop pass
     // creates no new twins; such a batch, like the no-plan case, dedupes only
@@ -360,6 +366,29 @@ function createSettleBatch(state) {
       : await dedupeSweepRows(settled, ctx)
     return withUsageColumns(await retainClaudeUsageCarriers(fresh, ctx.storage))
   }
+}
+
+/**
+ * One event per flush that left rows unsettled, with a count per reason the
+ * enricher gave. Only the flush reports: a speculative probe or a maintenance
+ * re-settle passes no callback, so the same row is never counted twice.
+ *
+ * @ref LLP 0620#why-the-lookup-misses [implements]: name why a fallback row
+ *   kept its provisional identity, so a field report carries its own cause
+ * @param {Map<string, number>} misses
+ */
+function logSettleMisses(misses) {
+  /** @type {Record<string, number>} */
+  const counts = {}
+  let total = 0
+  for (const [reason, count] of misses) {
+    counts[`miss_${reason}`] = count
+    total += count
+  }
+  getLogger('plugin.ai-gateway').info('ai_gateway.settle_miss', {
+    [Attr.COMPONENT]: 'ai-gateway', [Attr.OPERATION]: 'settle_identity',
+    status: 'miss', miss_count: total, ...counts,
+  })
 }
 
 /** The token columns, named exactly as their `attributes.usage` keys. */
@@ -415,6 +444,200 @@ function rowUsage(row) {
   if (row.provider_subtype === 'session_usage') return undefined
   const attrs = typeof row.attributes === 'string' ? safeParseJson(row.attributes) : row.attributes
   return isPlainObject(attrs) && isPlainObject(attrs.usage) ? attrs.usage : undefined
+}
+
+/**
+ * The key two copies of one Claude tool call or result share, or undefined
+ * for a row that does not take part. Exported for the server, whose ingest
+ * index and merge pass key on the same identity (prefixed by the org).
+ *
+ * @ref LLP 0620#tool-identity [implements]: session, tool call id and part
+ *   kind; a call and its result never share a key
+ * @param {Record<string, unknown>} row
+ * @returns {string | undefined}
+ */
+export function claudeToolPairKey(row) {
+  if (row.client_name !== 'claude' && row.client_name !== 'claude-desktop') return undefined
+  if (row.provider !== 'anthropic') return undefined
+  if (row.part_type !== 'tool_call' && row.part_type !== 'tool_result') return undefined
+  const session = stringValue(row.session_id)
+  const toolCallId = stringValue(row.tool_call_id)
+  if (!session || !toolCallId) return undefined
+  return `${session}\0${toolCallId}\0${row.part_type}`
+}
+
+/** Identity columns the survivor always takes from the native row. */
+const NATIVE_IDENTITY_COLUMNS = Object.freeze([
+  'message_id', 'provider_uuid', 'part_id', 'part_index', 'message_index', 'previous_message_id',
+  'parent_uuid', 'logical_parent_uuid', 'source_tool_assistant_uuid', 'agent_id', 'is_sidechain', 'raw_frame',
+])
+
+/**
+ * Columns the survivor takes from the native row when it has a value, as
+ * flush settlement does from a transcript line (`assignTranscriptIdentity`).
+ */
+const NATIVE_WHEN_SET_COLUMNS = Object.freeze([
+  'request_id', 'prompt_id', 'provider_type', 'provider_subtype', 'entrypoint', 'user_type', 'permission_mode',
+  'parent_thread_id', 'attachment_type', 'hook_event', 'is_compact_summary', 'compact_metadata',
+])
+
+/** The call's content and time, which come from its earliest copy. */
+const CONTENT_COLUMNS = Object.freeze([
+  'content_text', 'tool_name', 'tool_args', 'tool_result_for', 'caller_type', 'thinking_signature', 'is_error',
+  'message_created_at', 'date',
+])
+
+/**
+ * Merge the rows of one Claude tool key into the row the key keeps. Pure: it
+ * reads the rows it is given and returns a new object, so a caller decides
+ * what to delete and what to write.
+ *
+ * - `no_pair`: no live (fallback) row, or no native row.
+ * - `ambiguous`: more than one native `part_id`; nothing merges.
+ * - `merged`: `survivor` replaces every row given.
+ *
+ * The survivor is what flush settlement writes when its transcript lookup
+ * hits: native identity on the live row. Content and time come from the
+ * earliest copy, so a replay (stamped with its later request time) never
+ * replaces the original. Usage and the token columns move together, copied
+ * as stored on one carrier and never re-derived, so column sums only change
+ * where more than one row carried usage; those copies come back in
+ * `discardedUsage` for the caller to count.
+ *
+ * @ref LLP 0620#unambiguous [implements]: exactly one native part_id, any number of live rows
+ * @ref LLP 0620#survivor [implements]: identity from the native row, content from the earliest copy, usage once
+ * @param {Record<string, unknown>[]} rows every row of one key, from one org
+ * @returns {ClaudeToolPairMerge}
+ */
+export function mergeClaudeToolPair(rows) {
+  /** @type {Record<string, unknown>[]} */
+  const live = []
+  /** @type {Record<string, unknown> | undefined} */
+  let native
+  for (const row of rows) {
+    if (isFallbackRow(row)) {
+      live.push(row)
+    } else if (!native) {
+      native = row
+    } else if (partIdKey(row) !== partIdKey(native)) {
+      return { status: 'ambiguous', discardedUsage: [] }
+    }
+  }
+  if (!native || live.length === 0) return { status: 'no_pair', discardedUsage: [] }
+
+  const earliestLive = earliestRow(live, live)
+  const contentRow = earliestRow([native, ...live], live)
+
+  /** @type {Record<string, unknown>} */
+  const survivor = {}
+  for (const name of new Set([...Object.keys(native), ...Object.keys(earliestLive)])) {
+    survivor[name] = earliestLive[name] ?? native[name]
+  }
+  for (const name of NATIVE_IDENTITY_COLUMNS) survivor[name] = native[name]
+  for (const name of NATIVE_WHEN_SET_COLUMNS) {
+    if (native[name] !== undefined && native[name] !== null) survivor[name] = native[name]
+  }
+  for (const name of CONTENT_COLUMNS) survivor[name] = contentRow[name]
+
+  // One carrier: the earliest live row's copy when a live row carried usage,
+  // else the earliest native one. The token columns travel with it as stored.
+  const carriers = [native, ...live].filter((row) => rowUsage(row))
+  const liveCarriers = carriers.filter((row) => row !== native)
+  const carrier = liveCarriers.length > 0
+    ? earliestRow(liveCarriers, liveCarriers)
+    : carriers.length > 0 ? native : undefined
+  for (const name of USAGE_COLUMN_NAMES) survivor[name] = carrier ? carrier[name] ?? null : null
+  survivor.attributes = mergedAttributes(native, earliestLive, carrier)
+
+  return {
+    status: 'merged',
+    survivor,
+    discardedUsage: carriers.filter((row) => row !== carrier).map((row) => /** @type {Record<string, unknown>} */ (rowUsage(row))),
+  }
+}
+
+/**
+ * The earliest row by `message_created_at`; a tie goes to a preferred row,
+ * then to the smaller `part_id`, so every caller picks the same one.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @param {Record<string, unknown>[]} preferred
+ */
+function earliestRow(rows, preferred) {
+  let best = rows[0]
+  for (const row of rows.slice(1)) {
+    const order = compareCreatedAt(row, best)
+    if (order < 0) { best = row; continue }
+    if (order > 0) continue
+    const rowPreferred = preferred.includes(row)
+    const bestPreferred = preferred.includes(best)
+    if (rowPreferred !== bestPreferred) {
+      if (rowPreferred) best = row
+      continue
+    }
+    if (String(row.part_id ?? '') < String(best.part_id ?? '')) best = row
+  }
+  return best
+}
+
+/**
+ * @param {Record<string, unknown>} a
+ * @param {Record<string, unknown>} b
+ */
+function compareCreatedAt(a, b) {
+  const ta = createdAtMs(a.message_created_at)
+  const tb = createdAtMs(b.message_created_at)
+  if (ta === tb) return 0
+  if (ta === undefined) return 1
+  if (tb === undefined) return -1
+  return ta < tb ? -1 : 1
+}
+
+/** @param {unknown} value */
+function createdAtMs(value) {
+  const ms = value instanceof Date ? value.getTime() : typeof value === 'string' || typeof value === 'number' ? new Date(value).getTime() : NaN
+  return Number.isFinite(ms) ? ms : undefined
+}
+
+/**
+ * The survivor's attributes: the native row's, overlaid by the live row's
+ * (one level deep), without the fallback marker and match key, and with the
+ * carrier's usage or none. Kept in the live row's stored form.
+ *
+ * @param {Record<string, unknown>} native
+ * @param {Record<string, unknown>} live
+ * @param {Record<string, unknown> | undefined} carrier
+ */
+function mergedAttributes(native, live, carrier) {
+  const nativeAttrs = parseAttributes(native.attributes)
+  const liveAttrs = parseAttributes(live.attributes)
+  /** @type {Record<string, unknown>} */
+  const merged = { ...nativeAttrs }
+  for (const [key, value] of Object.entries(liveAttrs)) {
+    const prior = merged[key]
+    merged[key] = isPlainObject(prior) && isPlainObject(value) ? { ...prior, ...value } : value
+  }
+  if (isPlainObject(merged.gateway)) {
+    const { identity_source: _marker, ...gateway } = merged.gateway
+    merged.gateway = gateway
+  }
+  if (isPlainObject(merged.claude)) {
+    const { match_key: _key, ...claude } = merged.claude
+    merged.claude = claude
+  }
+  delete merged.usage
+  const usage = carrier ? rowUsage(carrier) : undefined
+  if (usage) merged.usage = usage
+  return typeof live.attributes === 'string' ? JSON.stringify(merged) : merged
+}
+
+/**
+ * @param {unknown} attributes
+ * @returns {Record<string, unknown>}
+ */
+function parseAttributes(attributes) {
+  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
+  return isPlainObject(parsed) ? parsed : {}
 }
 
 /**

@@ -126,10 +126,13 @@ treats such a key as ambiguous and leaves it alone (#unambiguous).
 - their part kind and role (mechanism 5).
 
 That read needs server data access, so it is an operator's, and it is not
-blocking. The client also gains a settle-miss counter by reason (no
-transcript entries, no line for the tool id, a multi-block line, a kind
-neither arm takes), readable in the maintenance report. The next field
-report then names its own cause.
+blocking. The client also counts settle misses by reason (no transcript
+entries, no line for the tool id, a multi-block line, a kind neither arm
+takes). Each flush that left rows unsettled logs one `ai_gateway.settle_miss`
+event with a count per reason. Only the flush reports: the enricher hears of
+it through an optional `onSettleMiss` on the settle context, which probes
+and the maintenance re-settle leave unset, so the hook stays pure (LLP 0312
+#settle-purity). The next field report then names its own cause.
 
 **The design below does not depend on which mechanism it is.** It
 reconciles where the two rows meet, whatever kept them apart.
@@ -316,8 +319,8 @@ spans the whole source table.
   the next `hasResettle` tick.
 - On an idle machine, the pair stays until new data flushes or an operator
   runs `hyp query maintain --force`.
-- Until then the local count shows two rows. The settle-miss and merge
-  counters report how many keys are waiting.
+- Until then the local count shows two rows. PR B's merge counts (claimed,
+  deferred and ambiguous keys) say how many are waiting.
 
 **Not reached:** a pair whose two rows have different `client_name` (one
 `claude`, one `claude-desktop`). Those rows live in two source tables. Such
