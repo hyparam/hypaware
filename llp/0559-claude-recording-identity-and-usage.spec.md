@@ -6,6 +6,9 @@
 **Author:** Phil / Codex
 **Date:** 2026-10-26
 **Related:** LLP 0026, LLP 0027, LLP 0035, LLP 0252, LLP 0254, LLP 0389, LLP 0390
+**Extended-by:** [LLP 0620](./0620-tool-call-pairs-settle-by-tool-id.decision.md#survivor)
+(#usage-carrier: a maintenance rewrite that merges a Claude tool call's copies
+moves committed usage onto the survivor; append-only recovery still cannot)
 
 ## Evidence
 

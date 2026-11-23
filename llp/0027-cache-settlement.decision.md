@@ -12,7 +12,10 @@ of observable side effects and idempotent); [LLP 0319](./0319-resettle-scan-fail
 (#re-settle-sweep: the seeding scan that could not read its table is stamped on
 the cursor and retried on a cooldown, so the unknown answer costs one scan per
 window instead of one per tick); LLP 0359 (#bounded-dedupe: scheduled
-backfill probes only candidate identities and isolates in-run state by token)
+backfill probes only candidate identities and isolates in-run state by token); [LLP 0620](./0620-tool-call-pairs-settle-by-tool-id.decision.md#local)
+(#re-settle-sweep: a Claude tool row with a unique native twin, matched by
+session, tool call id and part kind, merges into one survivor that keeps the
+carrier's usage, instead of "the native twin wins")
 
 ## Summary
 
