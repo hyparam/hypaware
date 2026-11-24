@@ -16,6 +16,7 @@ import path from 'node:path'
 
 import { asyncRow, selectVector } from 'squirreling'
 import { executeQuerySql } from '../../src/core/query/sql.js'
+import { renderLocalOnlyNotice } from '../../src/core/query/verb.js'
 import { withLocalOnlyVisibility } from '../../src/core/query/visibility.js'
 import { appendRowsToTable, dataSourceForTable, deleteMatchingRows } from '../../src/core/cache/iceberg/store.js'
 import { unionSources } from '../../src/core/query/union-source.js'
@@ -872,4 +873,16 @@ test('graph provenance: native batches pass visible vectors through, keep consta
   assert.equal(structural.rows.length, 12)
   assert.equal(decoded.get('0:source_cwds'), undefined, 'a structure-only read never reads provenance')
   assert.ok(requests[0].filter, 'a structure-only WHERE still reaches the source')
+})
+
+// @ref LLP 0616#notice [tests]: an ignored folder outranks a synced caller too, and the notice says so
+test('graph provenance: a row from an ignored folder is hidden by its folder and the notice names both classes', async () => {
+  const rows = [{ node_id: 'n-ig', node_type: 'Tool', label: 'ignored-label', source_cwds: '["/w/ig"]' }]
+  const out = await run({ rows, extras: GRAPH_EXTRAS, sql: 'SELECT node_id, label FROM t', callerCwd: '/w/full' })
+  assert.deepEqual(out.rows, [{ node_id: 'n-ig', label: null }])
+  assert.equal(out.localOnly.suppressedRows, 1)
+  assert.equal(out.localOnly.unprovenancedRows, 0, 'its provenance is recorded')
+  const notice = renderLocalOnlyNotice(out.localOnly)
+  assert.match(notice, /on 1 row\(s\) drawn from a local-only or ignored folder/)
+  assert.doesNotMatch(notice, /no recorded provenance/)
 })

@@ -91,7 +91,7 @@ export const querySqlVerb = {
  *
  * @param {LocalOnlyVisibilityReport | undefined} localOnly
  * @returns {string}
- * @ref LLP 0616#notice [implements]: suppression splits into hidden by a local-only folder and no recorded provenance, the latter naming the refresh
+ * @ref LLP 0616#notice [implements]: suppression splits into hidden by a local-only or ignored folder and no recorded provenance, the latter naming the refresh
  */
 export function renderLocalOnlyNotice(localOnly) {
   if (!localOnly) return ''
@@ -103,7 +103,7 @@ export function renderLocalOnlyNotice(localOnly) {
   }
   const folderHidden = localOnly.suppressedRows - localOnly.unprovenancedRows
   if (folderHidden > 0) {
-    out += `local-only: suppressed content columns on ${folderHidden} row(s) drawn from a local-only folder ` +
+    out += `local-only: suppressed content columns on ${folderHidden} row(s) drawn from a local-only or ignored folder ` +
       `(rerun with --include-local-only to include them)\n`
   }
   if (localOnly.unprovenancedRows > 0) {

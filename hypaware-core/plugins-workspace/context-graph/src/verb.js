@@ -153,12 +153,12 @@ export const graphNeighborsVerb = {
 
 /**
  * Stderr note when the LLP 0105 filter hid graph content from this caller.
- * Suppression is split: rows a local-only folder contributed to need no
+ * Suppression is split: rows a local-only or ignored folder contributed to need no
  * action, while rows with no recorded provenance can be re-derived.
  *
  * @param {LocalOnlyVisibilityReport | undefined} localOnly
  * @returns {string}
- * @ref LLP 0616#notice [implements]: hidden by a local-only folder versus no recorded provenance, the latter naming the refresh
+ * @ref LLP 0616#notice [implements]: hidden by a local-only or ignored folder versus no recorded provenance, the latter naming the refresh
  */
 function localOnlyNotice(localOnly) {
   if (!localOnly || (localOnly.withheldRows === 0 && localOnly.suppressedRows === 0)) return ''
@@ -166,7 +166,7 @@ function localOnlyNotice(localOnly) {
   if (localOnly.withheldRows > 0) parts.push(`withheld ${localOnly.withheldRows} row(s)`)
   const folderHidden = localOnly.suppressedRows - localOnly.unprovenancedRows
   if (folderHidden > 0) {
-    parts.push(`suppressed content (labels/keys) on ${folderHidden} row(s) drawn from a local-only folder`)
+    parts.push(`suppressed content (labels/keys) on ${folderHidden} row(s) drawn from a local-only or ignored folder`)
   }
   if (localOnly.unprovenancedRows > 0) {
     parts.push(`suppressed content (labels/keys) on ${localOnly.unprovenancedRows} row(s) with no recorded provenance` +

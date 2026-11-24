@@ -151,7 +151,7 @@ test('projected rows show names until a contributing folder turns local-only, an
     assert.ok(!JSON.stringify(after.rows).includes(dirs.private), 'no column names the local-only folder')
     assert.equal(after.localOnly.unprovenancedRows, 0, 'every hidden row has recorded provenance')
     assert.ok(after.localOnly.suppressedRows >= 4)
-    assert.match(renderLocalOnlyNotice(after.localOnly), /row\(s\) drawn from a local-only folder/)
+    assert.match(renderLocalOnlyNotice(after.localOnly), /row\(s\) drawn from a local-only or ignored folder/)
     assert.doesNotMatch(renderLocalOnlyNotice(after.localOnly), /no recorded provenance/)
 
     const privateEdges = (await sql(EDGES)).rows.filter((r) => r.src_id === kit.nodeId('Session', 'sess-private'))
@@ -289,7 +289,7 @@ test('pre-change rows stay hidden, and a refresh re-derives only those whose sou
     assert.equal(before.localOnly.unprovenancedRows, before.rows.length, 'and is counted as having no recorded provenance')
     assert.equal(before.localOnly.suppressedRows, before.rows.length)
     assert.match(renderLocalOnlyNotice(before.localOnly), /no recorded provenance \(for graph rows, `hyp graph project --refresh`/)
-    assert.doesNotMatch(renderLocalOnlyNotice(before.localOnly), /drawn from a local-only folder/)
+    assert.doesNotMatch(renderLocalOnlyNotice(before.localOnly), /drawn from a local-only or ignored folder/)
     const withhold = records.find((r) => r.body === 'usage_policy.query_withhold')
     assert.ok(withhold, 'the withhold is logged')
     assert.equal(withhold.attributes.unprovenanced_row_count, before.localOnly.unprovenancedRows)
@@ -387,10 +387,10 @@ test('native graph scans agree with the row path over a projected cache', async 
 test('the graph notice splits folder-hidden rows from rows with no recorded provenance', () => {
   const failed = /** @type {any} */ ({ ok: false, error: 'no node matches "x"', localOnly: { callerClass: 'full', filtered: true, withheldRows: 0, suppressedRows: 5, unprovenancedRows: 2 } })
   const stderr = graphNeighborsVerb.render(failed, /** @type {any} */ ({ json: false, format: 'json', maxCell: 1000, maxBytes: 100000 })).stderr ?? ''
-  assert.match(stderr, /3 row\(s\) drawn from a local-only folder/)
+  assert.match(stderr, /3 row\(s\) drawn from a local-only or ignored folder/)
   assert.match(stderr, /2 row\(s\) with no recorded provenance \(`hyp graph project --refresh` re-derives/)
   const folderOnly = renderLocalOnlyNotice({ callerClass: 'full', filtered: true, withheldRows: 0, suppressedRows: 3, unprovenancedRows: 0 })
-  assert.match(folderOnly, /3 row\(s\) drawn from a local-only folder/)
+  assert.match(folderOnly, /3 row\(s\) drawn from a local-only or ignored folder/)
   assert.doesNotMatch(folderOnly, /--refresh/)
 })
 
