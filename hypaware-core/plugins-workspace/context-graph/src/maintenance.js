@@ -544,9 +544,7 @@ export async function refreshGraphRows({ storage, query, config, dataset, rows, 
           if ((key === 'props' || key === 'source_keys') && typeof value === 'string') {
             try { value = JSON.parse(value) } catch { return false }
           }
-          // A column absent from an older data file reads as undefined, never a change from null.
           return isDeepStrictEqual(value, fresh[key])
-            || (value == null && fresh[key] == null)
             || (key === 'first_seen' && firstSeenTime(value) === firstSeenTime(fresh[key]))
         })
         // @ref LLP 0616#old-rows [implements]: only a full re-derive from current sources replaces source_cwds; ids no source still names are never visited
