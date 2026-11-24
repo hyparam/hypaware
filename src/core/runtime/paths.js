@@ -455,6 +455,17 @@ export function statusFilePath(stateRoot) {
 }
 
 /**
+ * The entry point: which copy of the CLI owns this machine (LLP 0621).
+ * Machine state written by an installer's `hyp entrypoint claim`, read by
+ * bin/hypaware.js before anything else.
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function entrypointStatePath(stateRoot) {
+  return path.join(stateRoot, 'entrypoint.json')
+}
+
+/**
  * The self-update check record (last check, latest version, boot failures).
  * @param {string} stateRoot
  * @returns {string}

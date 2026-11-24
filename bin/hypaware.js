@@ -17,6 +17,7 @@ const invocationStarted = 0
 import { ANSI, colorizeStderr, paint } from '../src/core/cli/style.js'
 import { useColor } from '../src/core/cli/stdio.js'
 import { flushStream } from '../src/core/cli/flush-streams.js'
+import { handoffTarget, runHandoff } from '../src/core/runtime/entrypoint.js'
 
 const argv = process.argv.slice(2)
 
@@ -26,6 +27,15 @@ const argv = process.argv.slice(2)
 if ((process.env.CURSOR_VERSION || process.env.GROK_HOOK_EVENT) && argv[0] === 'claude-hook' &&
     (argv[1] === 'session-context' || argv[1] === 'classify-cwd') &&
     !argv.includes('--help') && !argv.includes('-h')) process.exit(0)
+
+// When another copy owns this machine, run the command there and nothing
+// here: no updater, no dispatch, no product-telemetry record (the owner
+// counts the invocation it runs).
+// @ref LLP 0621#front-door [implements]: the hand-off precedes every lane that writes the service, the hooks, or the package
+{
+  const target = handoffTarget(argv, process.env)
+  if (target) process.exit(runHandoff(target, argv, process.env))
+}
 
 const stderr = colorizeStderr(process.stderr, process.env)
 const color = useColor(process.stderr, process.env)

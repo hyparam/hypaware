@@ -24,6 +24,7 @@ import { discoverInstalledPlugins } from '../../runtime/installed.js'
 import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { isEphemeralRecordedBinPath } from '../../cli/global_install.js'
+import { liveEntrypoint, sameBin } from '../../runtime/entrypoint.js'
 import { getAtDottedPath, isPlainObject } from '../../util/json_util.js'
 import { clientHookMarkerPath, resolveClientSettingsPath } from '../client_settings_path.js'
 import {
@@ -255,6 +256,39 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
 }
 
 /**
+ * Whether the marker's managed hooks run a CLI other than the entry point,
+ * the copy that owns this machine. After a native app takes over from an npm
+ * install the hooks still name the npm copy, and nothing else reads that as
+ * stale: the npm copy is durable, so the ephemeral check above passes it.
+ * Reading it as stale makes the next attach rewrite the hooks with the
+ * owner's path. With no live entry point set there is no owner to compare
+ * against, and this is false.
+ *
+ * @ref LLP 0621#hooks [implements]: hooks naming a copy other than the entry point are stale
+ * @param {Record<string, unknown>} markerObj
+ * @param {NodeJS.ProcessEnv | undefined} env
+ * @returns {boolean}
+ */
+function markerRecordsNonOwnerHookBin(markerObj, env) {
+  const managed = markerObj.managed
+  if (!isPlainObject(managed)) return false
+  const entries = managed.hook_entries
+  if (!Array.isArray(entries)) return false
+  const owner = liveEntrypoint(env ?? process.env)
+  if (!owner) return false
+  /** @type {Set<string>} */
+  const asked = new Set()
+  for (const entry of entries) {
+    if (!isPlainObject(entry)) continue
+    const bin = hookCommandBin(entry.command)
+    if (bin === undefined || !path.isAbsolute(bin) || asked.has(bin)) continue
+    asked.add(bin)
+    if (!sameBin(bin, owner.bin)) return true
+  }
+  return false
+}
+
+/**
  * The CLI path a recorded hook command runs, in the two forms the adapter
  * shell quoting produces: bare when the path holds only safe characters,
  * single-quoted (an embedded quote written `'\''`) otherwise. Anything else,
@@ -378,7 +412,8 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
         ...(descriptor.name === 'claude' &&
           (markerHasRetiredHookField(markerObj) ||
             markerObj.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA ||
-            markerRecordsEphemeralHookBin(markerObj, env))
+            markerRecordsEphemeralHookBin(markerObj, env) ||
+            markerRecordsNonOwnerHookBin(markerObj, env))
           ? { markerFormatStale: true }
           : {}),
       }

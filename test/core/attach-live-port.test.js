@@ -686,3 +686,98 @@ test('attach does NOT trust a dead daemon status.json (liveness gate) (#277 Gap 
     assert.match(stderr.text(), /cannot resolve the gateway endpoint/)
   })
 })
+
+/**
+ * Seed a durable npm-global-shaped CLI under `home` and return its bin path.
+ *
+ * @param {string} home
+ * @param {string} root
+ * @returns {string}
+ */
+function seedDurableBin(home, root) {
+  const globalRoot = path.join(home, root, 'lib', 'node_modules', 'hypaware')
+  mkdirSync(path.join(globalRoot, 'bin'), { recursive: true })
+  writeFileSync(path.join(globalRoot, 'package.json'), '{}\n')
+  const bin = path.join(globalRoot, 'bin', 'hypaware.js')
+  writeFileSync(bin, '')
+  return bin
+}
+
+/**
+ * @param {string} home
+ * @param {string} bin
+ */
+function seedClaudeMarker(home, bin) {
+  mkdirSync(path.join(home, '.claude'), { recursive: true })
+  writeFileSync(
+    path.join(home, '.claude', 'settings.json'),
+    JSON.stringify({
+      _hypaware: {
+        version: '2.0.0',
+        port: 55555,
+        mode: 'otel',
+        settings_schema: 4,
+        managed: {
+          env: {},
+          hook_entries: [
+            { event: 'SessionStart', command: `${bin} claude-hook session-context --state-file /s` },
+            { event: 'SessionStart', command: `${bin} claude-hook classify-cwd` },
+          ],
+        },
+      },
+    })
+  )
+}
+
+/**
+ * @param {string} home
+ * @param {string} bin
+ */
+function seedEntrypoint(home, bin) {
+  const dir = path.join(home, '.hyp', 'hypaware')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(path.join(dir, 'entrypoint.json'), JSON.stringify({ version: 1, bin }))
+}
+
+// @ref LLP 0621#hooks [tests]: hooks naming a copy other than the entry point re-attach
+test('a durable hook command that is not the entry point is drift, so attach rewrites it', async () => {
+  await withTempHome(async (home) => {
+    // The Iru takeover: the npm copy wrote the hooks, then the app claimed
+    // the machine. The npm path is durable, so only the entry point says it
+    // is the wrong one.
+    const npmBin = seedDurableBin(home, 'usr/local')
+    const appBin = seedDurableBin(home, 'Applications/HypAware.app/Contents/Resources')
+    seedClaudeMarker(home, npmBin)
+    seedEntrypoint(home, appBin)
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx } = makeCtx({ home, attachCalls })
+
+    const code = await runAttach(['claude'], ctx)
+
+    assert.equal(code, 0)
+    assert.equal(attachCalls.length, 1, 'hooks on a non-owner copy must re-attach, not no-op')
+  })
+})
+
+test('hooks already on the entry point stay a no-op, and a dead entry point is ignored', async () => {
+  await withTempHome(async (home) => {
+    const appBin = seedDurableBin(home, 'Applications/HypAware.app/Contents/Resources')
+    seedClaudeMarker(home, appBin)
+    seedEntrypoint(home, appBin)
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const first = makeCtx({ home, attachCalls })
+    assert.equal(await runAttach(['claude'], first.ctx), 0)
+    assert.deepEqual(attachCalls, [], 'hooks on the owner are current')
+    assert.match(first.stdout.text(), /already attached/)
+
+    // Point the entry point at a copy that is gone: no owner, no drift.
+    seedEntrypoint(home, path.join(home, 'gone', 'bin', 'hypaware.js'))
+    const second = makeCtx({ home, attachCalls })
+    assert.equal(await runAttach(['claude'], second.ctx), 0)
+    assert.deepEqual(attachCalls, [], 'a dead entry point makes nothing stale')
+  })
+})

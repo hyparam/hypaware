@@ -47,6 +47,20 @@ export const CORE_COMMAND_ARGS = {
     usage: 'hyp update',
     schema: { type: 'object', properties: {} },
   },
+  'entrypoint': {
+    usage: 'hyp entrypoint [show|claim|release] [--node <path>] [--owner <label>] [--force] [--json]',
+    schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['show', 'claim', 'release'] },
+        node: { type: 'string' },
+        owner: { type: 'string' },
+        force: { type: 'boolean', default: false },
+        json: { type: 'boolean', default: false },
+      },
+      positional: ['action'],
+    },
+  },
   'status': {
     usage: 'hyp status [--verbose] [--json]',
     schema: { type: 'object', properties: { json: { type: 'boolean', default: false }, verbose: { type: 'boolean', default: false } } },

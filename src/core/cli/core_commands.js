@@ -38,6 +38,7 @@ import {
 import { runAsk } from '../commands/ask.js'
 import { runUsage } from '../commands/usage.js'
 import { runUpdate } from '../commands/update.js'
+import { runEntrypoint } from '../commands/entrypoint.js'
 import { runMcp } from '../commands/mcp.js'
 import { runSmoke, runVersion } from '../commands/misc.js'
 import { runSinkMaintain } from '../commands/sink.js'
@@ -1164,6 +1165,18 @@ function buildCoreCommands(registry) {
       usage: coreUsage('update'),
       help: 'Checks the npm registry, installs a newer release with npm install -g,\nand restarts the installed daemon so the running code matches.',
       run: runUpdate,
+    },
+    {
+      name: 'entrypoint',
+      category: 'additional',
+      audience: 'operator',
+      bootProfile: 'none',
+      summary: 'Show or set which copy of hyp owns this machine',
+      usage: coreUsage('entrypoint'),
+      // Installer-facing: an app or MDM package claims through it, people rarely type it.
+      hidden: true,
+      help: 'An installer that bundles its own copy (the native app, an MDM package)\nruns `claim` through it; every other copy then hands its commands there.\n`release` clears it (only from the owner, or with --force).',
+      run: runEntrypoint,
     },
     {
       // @ref LLP 0613#decision [implements]: with `dev` gone as a group, the hidden smoke runner is top-level and `dev smoke` its alias
