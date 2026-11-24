@@ -536,6 +536,10 @@ images, client assets, subdirectories, and symlinks are rejected before any
 upload. The remote renders the HTML; there is no local render step in the
 publish path. The remote identifies repeat uploads by content hash. `--org`
 applies only to an operator credential that can name an organization.
+On HypAware Cloud, a published report notifies the organization's members: by
+email, or, where the organization has connected Slack, by a post to its Slack
+channel instead of email by default. Each member's own email setting still
+applies.
 
 ```sh
 hyp report publish hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
