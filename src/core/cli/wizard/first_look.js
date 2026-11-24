@@ -131,7 +131,7 @@ const FIRST_LOOK_BUDGET_MS = OVERVIEW_TIME_BUDGET_MS + 3000
  * @param {number} ms
  * @returns {Promise<T | null>}
  */
-async function withDeadline(promise, ms) {
+export async function withDeadline(promise, ms) {
   /** @type {NodeJS.Timeout | undefined} */
   let timer
   try {

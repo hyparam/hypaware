@@ -54,11 +54,18 @@ hyp ask "which sessions touched the auth module"
 hyp ask            # suggest a skill based on your recent sessions
 ```
 
+See what your AI usage went into, by task, with a few suggestions to pick from:
+
+```sh
+hyp usage          # in the chat
+hyp usage --page   # as an HTML page
+```
+
 Or ask from inside any session. Install the HypAware skills and your client
 looks up past sessions itself whenever a question calls for it:
 
 ```sh
-hyp client skills install
+hyp skills install
 ```
 
 Search and query directly, without an AI client:
@@ -159,7 +166,7 @@ destination. You control what is recorded, per folder:
 hyp privacy ignore              # never record sessions in this repo
 hyp privacy set . local-only    # record, but never send to HypAware Cloud
 hyp session ignore              # stop recording the current session
-hyp privacy purge --session ID  # delete what was already recorded
+hyp purge --session ID  # delete what was already recorded
 ```
 
 See [what HypAware records and how to control it](./docs/PRIVACY.md).

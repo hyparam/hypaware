@@ -21,6 +21,7 @@ import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.
 import {
   contentItemKinds,
   compactedMessageFromPayload,
+  compactionUsageMessage,
   compactionSummaryFromMessage,
   copyNumberAlias,
   firstString,
@@ -32,7 +33,7 @@ import {
   setIfString,
   stampUsageOnLastAssistant,
   textBlocksFromContent,
-  toolResultBlockFromPayload,
+  toolResultMessageFromPayload,
   toolUseBlockFromPayload,
 } from './response-items.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
@@ -858,7 +859,8 @@ async function* parseRolloutFile(filePath, window, ctx) {
         lastAssistant = -1
       } else {
         const message = projectedMessageFromItem(item)
-        if (message?.message_id) hasNative = true
+        // A compaction usage row's id is a response id, not a recovered message id.
+        if (message?.message_id && message.provider_type !== 'compaction') hasNative = true
         if (message?.role === 'assistant' && !message.is_compact_summary && hasTextOrToolUse(message)) lastAssistant = index
       }
     }
@@ -890,6 +892,10 @@ async function* parseRolloutFile(filePath, window, ctx) {
     async function* selectedItems(counts) {
       /** @type {string | undefined} */
       let activeTurn
+      // The last response's recorded usage, one slot: Codex writes it just
+      // before the checkpoint that names the same response id.
+      /** @type {{ responseId: string, usageAttributes: JsonObject } | undefined} */
+      let lastResponseUsage
       for await (const { row, index, bytes } of rolloutRecords(file, size, ctx.signal)) {
         const payload = isPlainObject(row.payload) ? row.payload : undefined
         if (!payload) continue
@@ -900,7 +906,12 @@ async function* parseRolloutFile(filePath, window, ctx) {
         } else if (row.type === 'compacted') {
           // Drop the potentially large replacement snapshot here. Keep even an
           // opaque checkpoint as a usage boundary for the carrier pass.
-          item = { payload: { type: 'compacted' }, projectedMessage: compactedMessageFromPayload(payload), timestampMs: timestampToMs(row.timestamp) }
+          item = { payload: { type: 'compacted' }, projectedMessage: compactedMessageFromPayload(payload) ?? compactionUsageFromCheckpoint(payload, lastResponseUsage), timestampMs: timestampToMs(row.timestamp) }
+          lastResponseUsage = undefined
+        } else if (row.type === 'token_usage_record') {
+          const responseId = stringValue(payload.response_id)
+          const usageAttributes = codexUsageAttributes(payload.usage)
+          lastResponseUsage = responseId && usageAttributes ? { responseId, usageAttributes } : undefined
         } else if (row.type === 'event_msg') {
           if (payload.type === 'task_started') activeTurn = stringValue(payload.turn_id)
           if (payload.type === 'item_completed' && isPlainObject(payload.item)) {
@@ -1150,7 +1161,7 @@ function projectedExchangeFromSession(args) {
     }
     const message = projectedMessageFromItem(item)
     if (!message) continue
-    if (message.message_id) nativeIdCount += 1
+    if (message.message_id && message.provider_type !== 'compaction') nativeIdCount += 1
     if (args.messageOffset !== undefined) message.message_index = args.messageOffset + messages.length
     messages.push(message)
   }
@@ -1261,11 +1272,9 @@ function projectedMessageFromItem(item) {
     break
   }
   case 'function_call_output':
-  case 'custom_tool_call_output': {
-    const block = toolResultBlockFromPayload(payload)
-    message = block ? { role: 'tool', content: [block] } : undefined
+  case 'custom_tool_call_output':
+    message = toolResultMessageFromPayload(payload)
     break
-  }
   case 'reasoning':
     message = reasoningMessageFromPayload(payload)
     break
@@ -1304,6 +1313,26 @@ function messageItemToProjected(payload) {
 // ---------------------------------------------------------------------
 // Usage extraction
 // ---------------------------------------------------------------------
+
+/**
+ * The usage row of a remote compaction, from its opaque checkpoint and the
+ * `token_usage_record` Codex wrote for the same response just before it. A
+ * normal response's record is never consumed: its `token_count` carries it.
+ * A local checkpoint has plaintext and is handled by its summary instead.
+ *
+ * @ref LLP 0619#backfill [implements]: matched by `compaction_response_id`,
+ *   so the row and the live one share an id, and a checkpoint with no record
+ *   (async compaction, Codex before 2026-08-31) stays short
+ *
+ * @param {Record<string, unknown>} payload
+ * @param {{ responseId: string, usageAttributes: JsonObject } | undefined} recorded
+ * @returns {AiGatewayProjectedMessage | undefined}
+ */
+function compactionUsageFromCheckpoint(payload, recorded) {
+  const responseId = stringValue(payload.compaction_response_id)
+  if (!recorded || !responseId || recorded.responseId !== responseId) return undefined
+  return compactionUsageMessage(responseId, recorded.usageAttributes)
+}
 
 /**
  * Pull a turn's normalized token usage from a `token_count` event_msg

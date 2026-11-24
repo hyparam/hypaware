@@ -534,5 +534,5 @@ test('runtime: a select longer than the terminal never draws past its last row',
     assert.ok(cursorUpCount(frame) <= 24, 'rewind stays inside the terminal')
   }
   // The frame that drew the cursor's final row is the one the user sees.
-  assert.ok(frames[frames.length - 1].includes('> rec-03'), 'the picked row is on screen')
+  assert.ok(frames[frames.length - 1].includes('\u276f rec-03'), 'the picked row is on screen')
 })

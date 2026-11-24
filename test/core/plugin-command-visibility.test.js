@@ -9,8 +9,6 @@ import path from 'node:path'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { validateManifest } from '../../src/core/manifest.js'
-import { activate as activateClaudeAccount } from '../../hypaware-core/plugins-workspace/claude-account/src/index.js'
-import { activate as activateClaudeDesktop } from '../../hypaware-core/plugins-workspace/claude-desktop/src/index.js'
 import { activate as activateClaude } from '../../hypaware-core/plugins-workspace/claude/src/index.js'
 import { activate as activateCodex } from '../../hypaware-core/plugins-workspace/codex/src/index.js'
 
@@ -79,11 +77,7 @@ async function collectRegisteredCommands(activate) {
     agents: { register() {} },
     initPresets: { register() {} },
     query: { registerDataset() {} },
-    requireCapability: (/** @type {string} */ name) => (
-      name === 'hypaware.anthropic-credential'
-        ? { mode: 'org_key', helperCommandArgs: ['claude-account', 'credential'] }
-        : gateway
-    ),
+    requireCapability: () => gateway,
   }))
   return registered
 }
@@ -177,51 +171,6 @@ test('manifest command hidden must be a boolean', () => {
   assert.equal(cosmetic.ok, true, 'a malformed help field must stay a doctor finding, not a plugin outage')
 })
 
-test('the credential helper contract is an internal mechanism in manifest and registry alike', async () => {
-  const manifest = readPluginManifest('claude-account')
-  const declared = manifest.contributes.commands.find((/** @type {any} */ c) => c.name === 'claude-account credential')
-  assert.ok(declared, 'the helper contract stays declared so a dispatch miss can still name its plugin')
-  assert.equal(declared.hidden, true, 'the helper contract must be marked hidden in the manifest')
-
-  const registered = await collectRegisteredCommands(activateClaudeAccount)
-  const credential = registered.get('claude-account credential')
-  assert.ok(credential, 'the helper contract stays dispatchable: the Desktop wrapper execs it')
-  assert.equal(credential.hidden, true, 'the helper contract must be hidden in the runtime registry too')
-
-  // Public claude-account surfaces stay visible.
-  for (const name of [
-    'client claude-account login',
-    'client claude-account logout',
-    'client claude-account status',
-  ]) {
-    assert.notEqual(registered.get(name)?.hidden, true, `${name} is a public surface`)
-  }
-})
-
-test('every claude-desktop and claude-account command declares the same visibility in manifest and registry', async () => {
-  for (const [dirName, activate] of /** @type {[string, any][]} */ ([
-    ['claude-account', activateClaudeAccount],
-    ['claude-desktop', activateClaudeDesktop],
-  ])) {
-    const manifest = readPluginManifest(dirName)
-    const registered = await collectRegisteredCommands(activate)
-    for (const declared of manifest.contributes.commands) {
-      const cmd = registered.get(declared.name)
-      assert.ok(cmd, `${declared.name}: declared but never registered`)
-      assert.equal(
-        cmd.hidden === true,
-        declared.hidden === true,
-        `${declared.name}: manifest and registry disagree on visibility`
-      )
-    }
-    assert.equal(
-      registered.size,
-      manifest.contributes.commands.length,
-      `${dirName}: a registered command is declared in no manifest, so a dispatch miss cannot name its plugin`
-    )
-  }
-})
-
 // The direction the manifest -> registry walk above cannot see. These
 // three registered `hidden: true` while appearing in no manifest at all,
 // which is exactly the hide-by-omission LLP 0268#not-deletion rejects:
@@ -250,79 +199,3 @@ test('the client hook commands are declared internal mechanisms, not omitted one
   }
 })
 
-test('public diagnostics carry long help', async () => {
-  const desktop = await collectRegisteredCommands(activateClaudeDesktop)
-  const account = await collectRegisteredCommands(activateClaudeAccount)
-  for (const cmd of [
-    desktop.get('client claude-desktop status'),
-    account.get('client claude-account status'),
-  ]) {
-    assert.ok(cmd, 'diagnostic command missing')
-    assert.equal(typeof cmd.help, 'string', `${cmd.name}: a visible diagnostic needs long help`)
-    assert.ok(cmd.help.length > 0, `${cmd.name}: long help must not be empty`)
-  }
-
-  // `claude-account status` resolves no credential: runStatus reads the
-  // stored record and returns 0 for any present one, expired or not. So
-  // its help cannot sell a nonzero exit for an unresolvable credential,
-  // nor a gate before `claude-desktop install`, and it has to say which
-  // presence a 0 does report (#2459).
-  const accountStatus = account.get('client claude-account status')
-  assert.doesNotMatch(
-    accountStatus.help,
-    /no credential resolves|doubles as a check/,
-    'claude-account status must not claim a nonzero exit for an unresolvable credential: runStatus never resolves one',
-  )
-  assert.match(
-    accountStatus.help,
-    /presence, not resolvability/,
-    'claude-account status help must say a stored token exits 0 even past its recorded expiry',
-  )
-})
-
-test('group help hides the credential helper but keeps the public claude-account surfaces', async () => {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-group-hidden-'))
-  await fs.writeFile(
-    path.join(hypHome, 'hypaware-config.json'),
-    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/claude-account' }] })
-  )
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-
-  const code = await dispatch(['client', 'claude-account', '--help'], {
-    stdout,
-    stderr,
-    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
-  })
-
-  assert.equal(code, 0)
-  const out = stdout.text()
-  assert.match(out, /^\s+login\s/m)
-  assert.match(out, /^\s+logout\s/m)
-  assert.match(out, /^\s+status\s/m)
-  // The word appears in the status summary, so match the subcommand column only.
-  assert.doesNotMatch(out, /^\s+credential\s/m, 'group help must not advertise the helper contract')
-})
-
-test('the hidden credential helper still dispatches', async () => {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hidden-dispatch-'))
-  await fs.writeFile(
-    path.join(hypHome, 'hypaware-config.json'),
-    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/claude-account' }] })
-  )
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-
-  const code = await dispatch(['claude-account', 'credential'], {
-    stdout,
-    stderr,
-    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
-  })
-
-  // Hiding is a help filter, not a deregistration: the wrapper Desktop execs
-  // must still reach the command body. Signed out, the body reports it (1),
-  // which is not the dispatcher's unknown/unavailable exit (2).
-  assert.equal(code, 1)
-  assert.match(stderr.text(), /^claude-account credential: /)
-  assert.equal(stderr.text().includes('unknown command'), false)
-})

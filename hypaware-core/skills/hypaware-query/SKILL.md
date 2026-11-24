@@ -12,7 +12,7 @@ HypAware supports three ways to query recorded activity. Choose the narrowest on
 | --- | --- | --- |
 | **Search (`grep`)** | Mentions of an error, file, PR, or topic | `hyp query grep "<text>" --from YYYY-MM-DD --to YYYY-MM-DD --limit 20 --format json` |
 | **SQL (`sql`)** | Filter messages, read conversations, count events, and measure usage | `hyp query sql "<SELECT>" --format json` |
-| **Graph (`graph`)** | Relationships among sessions, repositories, people, skills, and programs | `hyp query graph neighbors <ToolName> --type Tool --direction in --json` |
+| **Graph (`graph`)** | Relationships among sessions, repositories, people, skills, and programs | `hyp query graph <ToolName> --type Tool --direction in --json` |
 
 Grep finds case-insensitive substrings in message text and identifying fields, not `tool_args`, `attributes`, or `raw_frame`; use SQL for those. Read [search.md](search.md) for other fields, filters, and coverage notices. Start SQL with `ai_gateway_messages` for conversations and tool calls/results. Before graph queries, read [graph.md](graph.md) for local projection and traversal. Links are leads, not proof; never hand-edit the derived graph.
 

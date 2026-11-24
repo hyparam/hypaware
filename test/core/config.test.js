@@ -439,7 +439,7 @@ test('buildPluginCatalog extracts client descriptors from manifests', async () =
   const codex = catalog.clientDescriptors.get('codex')
   assert.equal(codex?.plugin, '@hypaware/codex')
   assert.equal(codex?.skillDir, '.codex/skills')
-  assert.equal(codex?.agentDir, undefined)
+  assert.equal(codex?.agentDir, '.codex/agents')
   assert.equal(codex?.attachProbe?.format, 'toml')
   assert.equal(codex?.requiredUpstreams, undefined)
 })

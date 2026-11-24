@@ -38,7 +38,7 @@ import {
  * question the user did name is never asked. The first keypress lifts the
  * deadline, so it only ever ends a run nobody is answering.
  *
- * `hyp report generate` and `hyp report fix` put the same picker on the
+ * `hyp report generate` and `hyp fix` put the same picker on the
  * same gate, so they take this deadline and its notice rather than a second
  * pair of their own.
  */
@@ -113,7 +113,7 @@ export function armPickDeadline(stdin, controller, deadlineMs) {
  * current directory, which is the shape a user reaches for once they know
  * what they want: `hyp ask "which sessions touched the auth module"`.
  *
- * `deps` are the prompt and launcher seams `hyp report fix` already
+ * `deps` are the prompt and launcher seams `hyp fix` already
  * carries, so a test can reach the multi-client branch with no terminal to
  * drive.
  *
@@ -148,7 +148,7 @@ export async function runAsk(argv, ctx, deps = {}) {
     const launcher = canPrompt ? await pickLauncher(launchers, ctx, deps) : launchers[0]
     // Cancelling is "not now", not a failure, but it still has to be said:
     // a run that exits 0 printing nothing reads as a client that started and
-    // vanished. Same sentence `hyp report fix` uses on the same cancel.
+    // vanished. Same sentence `hyp fix` uses on the same cancel.
     if (!launcher) {
       ctx.stdout.write('Nothing started.\n')
       return 0
@@ -325,7 +325,7 @@ const FRIENDLY_LAUNCHLESS_LABELS = {
 /**
  * Which client answers a named question, asked on a terminal.
  *
- * The screen is the same one `hyp report fix` puts up, under a deadline
+ * The screen is the same one `hyp fix` puts up, under a deadline
  * the picker itself has no reason to carry: a run nobody is at must still
  * end. An expired deadline is not a cancel - the person did not decline
  * anything - so it falls through to the pick a run that cannot prompt
@@ -337,7 +337,7 @@ const FRIENDLY_LAUNCHLESS_LABELS = {
  * @param {{ select?: RunWizardFirstAskOptions['select'], pickDeadlineMs?: number }} deps
  * @returns {Promise<FirstAskLauncher | undefined>}
  */
-async function pickLauncher(launchers, ctx, deps) {
+export async function pickLauncher(launchers, ctx, deps) {
   if (launchers.length < 2) return launchers[0]
   const controller = new AbortController()
   const disarm = armPickDeadline(ctx.stdin, controller, deps.pickDeadlineMs)
@@ -521,7 +521,7 @@ export async function askableClients(ctx, { collectStatus = collectHypAwareStatu
  * alternatives, so the sentence stays one line however many adapters
  * declare a `launch` block.
  *
- * Used by `hyp report fix` and `hyp report generate`, which launch through
+ * Used by `hyp fix` and `hyp report generate`, which launch through
  * the same seams. `hyp ask` words its own refusal (`writeNoLauncher`),
  * which names an attach only when a CLI is on PATH to attach.
  *

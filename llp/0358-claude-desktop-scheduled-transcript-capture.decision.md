@@ -8,6 +8,7 @@
 **Related:** LLP 0012, LLP 0041 (#consent-gating: the automatic-import opt-out the schedule honors), LLP 0115, LLP 0133, LLP 0140, LLP 0170, LLP 0224 (#repair-surface: the incomplete-setup prompt this retires for Desktop), LLP 0229 (#diagnostic-is-out-of-scope: the exception this closes), LLP 0297
 **Extended-by:** LLP 0359 (scheduled passes are serialized, retention-bounded,
 and skip unchanged transcript bodies with candidate-scoped cache dedupe)
+**Extended-by:** LLP 0612 (the optional profile and install commands this decision kept are removed)
 
 > Claude Desktop capture no longer depends on attaching its inference path.
 > Selecting Desktop enables the Claude transcript reader, and the daemon

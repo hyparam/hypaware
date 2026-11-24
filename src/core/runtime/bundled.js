@@ -73,8 +73,7 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * capabilities (which no default-activated plugin provides) and spends on
  * model calls, so it too activates only via explicit config.
  *
- * `@hypaware/claude-account` remains excluded because it holds a real
- * credential. `@hypaware/claude-desktop` remains explicit because naming it
+ * `@hypaware/claude-desktop` remains explicit because naming it
  * is the consent gate that lets the scheduled Claude reader import Desktop's
  * local transcript trees (LLP 0358); selecting its picker row names it.
  *
@@ -95,7 +94,6 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/completion-anthropic',
   '@hypaware/completion-openai',
   '@hypaware/context-graph-enrich',
-  '@hypaware/claude-account',
   '@hypaware/claude-desktop',
   '@hypaware/github',
   // @ref LLP 0592#scope [implements]: Linear API capture requires explicit activation and configured teams.

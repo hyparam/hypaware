@@ -1,11 +1,12 @@
 # LLP 0133: Solo Desktop setup writes the managed plist via an inline sudo prompt
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Onboarding, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-07-22
 **Related:** LLP 0114, LLP 0115, LLP 0116, LLP 0117, LLP 0128, LLP 0131
+**Superseded-by:** LLP 0612 (the managed-profile route and its credential plugin are removed)
 
 > Spawned by [LLP 0128](./0128-install-experience-overhaul.rfc.md) on
 > acceptance. Also carries the live-test corrections to

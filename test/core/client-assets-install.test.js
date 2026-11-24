@@ -280,8 +280,8 @@ test('hyp skills install skips a client with no directory for that asset kind', 
   const { kernel, registry } = agentsKernelAndRegistry()
   kernel.agents.register({
     name: 'test-analyst',
-    plugin: /** @type {any} */ ('@hypaware/codex'),
-    clients: ['codex'],
+    plugin: /** @type {any} */ ('@hypaware/cursor'),
+    clients: ['cursor'],
     sourceFile,
   })
 
@@ -296,11 +296,11 @@ test('hyp skills install skips a client with no directory for that asset kind', 
   })
 
   assert.equal(code, 0)
-  // Codex has skills but no subagent concept, so this is a silent skip, not a
+  // Cursor declares a skill_dir but no agent_dir, so this is a silent skip, not a
   // warning the user could act on.
   assert.equal(stderr.text(), '')
   assert.match(stdout.text(), /\(nothing to install\)/)
-  await assert.rejects(fs.access(path.join(home, '.codex', 'agents')))
+  await assert.rejects(fs.access(path.join(home, '.cursor', 'agents')))
 })
 
 test('hyp skills install warns when a contribution names an unknown client', async () => {
@@ -357,6 +357,35 @@ test('hyp skills install respects --client filtering', async () => {
   assert.equal(code, 0)
   assert.match(stdout.text(), /\(nothing to install\)/)
   await assert.rejects(fs.access(path.join(home, '.claude', 'agents', 'test-analyst.md')))
+})
+
+// @ref LLP 0611#decision [tests]: the client is a positional, equal to --client
+test('hyp skills install takes the client as a positional', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-assets-'))
+  const sourceFile = path.join(home, 'src-agent.md')
+  await fs.writeFile(sourceFile, 'body\n', 'utf8')
+  const target = path.join(home, '.claude', 'agents', 'test-analyst.md')
+
+  for (const [client, installed] of /** @type {[string, boolean][]} */ ([['codex', false], ['claude', true]])) {
+    const { kernel, registry } = agentsKernelAndRegistry()
+    kernel.agents.register({
+      name: 'test-analyst',
+      plugin: /** @type {any} */ ('@hypaware/claude'),
+      clients: ['claude'],
+      sourceFile,
+    })
+    const stdout = makeBuf()
+    const code = await dispatch(['skills', 'install', client], {
+      stdout,
+      stderr: makeBuf(),
+      env: { ...process.env, HOME: home },
+      registry,
+      kernel,
+    })
+    assert.equal(code, 0)
+    if (installed) await fs.access(target)
+    else await assert.rejects(fs.access(target))
+  }
 })
 
 test('bundled @hypaware/claude manifest declares the hypaware-analyst agent', async () => {

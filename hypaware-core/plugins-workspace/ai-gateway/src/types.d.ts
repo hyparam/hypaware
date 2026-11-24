@@ -460,3 +460,13 @@ export interface ConnectFrontDoor {
   /** Detach the handler and destroy every socket it owns. */
   close(): void
 }
+
+/** What `mergeClaudeToolPair` decided for the rows of one Claude tool key (LLP 0620). */
+export interface ClaudeToolPairMerge {
+  /** `merged`: `survivor` replaces every row; `ambiguous`: two native part_ids, nothing merges; `no_pair`: nothing to merge. */
+  status: 'merged' | 'ambiguous' | 'no_pair'
+  /** The one row the key keeps. Set only when `status` is `merged`. */
+  survivor?: Record<string, unknown>
+  /** The usage of each other row that carried it, which the survivor does not keep. */
+  discardedUsage: Record<string, unknown>[]
+}

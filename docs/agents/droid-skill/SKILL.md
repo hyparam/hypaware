@@ -17,8 +17,8 @@ recommendations its reports make.
   `set_recommendation_status`, and the history reads such as `query_sql`,
   `grep_search`, `graph_neighbors` and `session_evidence`.
 - **`hyp`, when installed** and no MCP server is configured: `hyp query` for
-  history, and `hyp report list --recommendations`, `hyp report get <id>` and
-  `hyp report mark` for recommendations, each with `--remote <target>`.
+  history, and `hyp recommendation list`, `hyp recommendation get <id>` and
+  `hyp recommendation mark` for recommendations, each with `--remote <target>`.
 - **Neither:** say HypAware is not available here. Do not guess at the history.
 
 Never print or log the token.
@@ -61,9 +61,9 @@ If step 2 finds it does not apply, leave it unmarked and report why.
 If the tool list has no `set_recommendation_status`, you cannot mark from
 here. Tell the person the recommendation id, the state you propose (`applied`
 or `dismissed`), a reason, and links to the change; they mark it with
-`hyp report mark` or the dashboard.
+`hyp recommendation mark` or the dashboard.
 
 On the `hyp` route, mark with
-`hyp report mark <id> applied --reason "..." --link <url> --remote <target>`.
+`hyp recommendation mark <id> applied --reason "..." --link <url> --remote <target>`.
 If `hyp` asks for `hyp remote login`, stop and give the same hand-off instead
 of logging in.

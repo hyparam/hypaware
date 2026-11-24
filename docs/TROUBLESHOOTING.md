@@ -402,7 +402,7 @@ hyp cache maintain ai_gateway_messages --dry-run
 Check [retention and storage paths](CONFIGURATION.md) to distinguish the query
 cache, exported files, retry state, and logs. Cache retention does not reclaim
 exported copies. Inspect a maintenance dry run before applying it, and use
-`hyp privacy purge` only when you intend to delete recorded data.
+`hyp purge` only when you intend to delete recorded data.
 
 ## A query or graph projection refuses for memory
 

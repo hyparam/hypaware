@@ -15,6 +15,12 @@ integration.
 Prompts, responses, tool calls, and token counts from Codex's session files, with
 the working directory of each session. Codex does not report cost.
 
+A remote compaction call's tokens are recorded on a row of their own: a
+`role = 'system'` status row with `provider_subtype = 'compaction.usage'` and
+no text. Sum its token columns with the rest. The import finds these calls
+only in session files from Codex versions that record them, and not for
+background or incomplete compactions.
+
 ## Set it up
 
 `hyp setup` offers Codex when it finds `~/.codex/config.toml`. To add it later:
@@ -26,8 +32,8 @@ hyp client status codex
 ```
 
 Attach covers both the CLI and the desktop app, installs HypAware's skills in
-`~/.codex/skills`, and adds a hook that records each session's working
-directory.
+`~/.codex/skills` and its `hypaware-analyst` agent in `~/.codex/agents`, and
+adds a hook that records each session's working directory.
 
 ## Import existing history
 
@@ -127,7 +133,7 @@ new messages. Backups remain private under
 
 Each backup is a full, unmasked copy of the repaired chats and of Codex's
 state database, private to your user account. HypAware never deletes it:
-not after a successful repair or restore, and not on `hyp privacy purge`, detach, or
+not after a successful repair or restore, and not on `hyp purge`, detach, or
 daemon uninstall. HypAware does not capture or export it. A chat you later
 delete in Codex, or purge from HypAware, stays in the backup until you delete
 the folder. Deleting it is safe once every repair has finished and you no

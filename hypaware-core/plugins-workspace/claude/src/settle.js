@@ -99,10 +99,13 @@ export function createClaudeSettlementEnricher(opts) {
     wants: wantsProvenance,
     /**
      * @param {Record<string, unknown>[]} rows
-     * @param {DatasetSettleContext} _ctx
+     * @param {DatasetSettleContext} ctx
      * @returns {Promise<Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>>}
      */
-    async settle(rows, _ctx) {
+    async settle(rows, ctx) {
+      // Set only by the flush path (LLP 0312 #settle-purity): a probe or a
+      // maintenance re-settle reports nothing.
+      const onMiss = ctx?.onSettleMiss
       if (!Array.isArray(rows) || rows.length === 0) return rows
 
       // Group rows by session so each session's transcript is loaded and
@@ -142,6 +145,7 @@ export function createClaudeSettlementEnricher(opts) {
         // settlement for the session (that would re-open the #258 hole).
         /** @type {ReturnType<typeof indexTranscriptEntries> | undefined} */
         let index
+        let transcriptUnreadable = false
         // Resolve the transcript only for a group that actually reads the
         // index, i.e. one holding a match_key row. `planSettleSelection` also
         // admits match_key-less rows, among them pure null-cwd rows (the
@@ -171,6 +175,7 @@ export function createClaudeSettlementEnricher(opts) {
             index = indexTranscriptEntries(entries)
           } catch {
             index = undefined
+            transcriptUnreadable = true
           }
         }
 
@@ -237,6 +242,8 @@ export function createClaudeSettlementEnricher(opts) {
                   const previous = index.previousUuid(match.provider_uuid)
                   row.previous_message_id = previous ? [previous] : []
                 }
+              } else if (onMiss) {
+                onMiss(settleMissReason(row, index, eventText))
               }
             } else if (wantsProvenance(row)) {
               // 1b. Provenance late-stamp for an OTEL prompt row. The row was
@@ -253,6 +260,10 @@ export function createClaudeSettlementEnricher(opts) {
               const line = index.byUuid.get(/** @type {string} */ (stringValue(row.provider_uuid)))
               if (line && line.role === 'user') row = stampProvenance(row, line)
             }
+          }
+
+          if (!index && onMiss && readMatchKey(row.attributes)) {
+            onMiss(transcriptUnreadable ? 'transcript_unreadable' : 'no_transcript')
           }
 
           // 2. Sidechain provenance late-stamp. After the upgrade: that rebuilds
@@ -508,6 +519,36 @@ function fillIfEmpty(obj, key, value) {
  */
 function hashCwd(cwd) {
   return createHash('sha256').update(cwd).digest('hex').slice(0, 16)
+}
+
+/**
+ * Why a fallback row kept its provisional identity, for the flush's miss
+ * count. Mirrors the lookups above in the order they ran, so the reason names
+ * the first one that failed.
+ *
+ * @ref LLP 0620#why-the-lookup-misses [implements]: one reason per mechanism the code admits
+ * @param {Record<string, unknown>} row
+ * @param {ReturnType<typeof indexTranscriptEntries>} index
+ * @param {boolean} eventText
+ * @returns {string}
+ */
+function settleMissReason(row, index, eventText) {
+  if (index.ordered.length === 0) return 'no_transcript'
+  if (eventText) return 'text_unconfirmed'
+  // `findOtelToolMatch` looks up no tool id for any other lane (the proxy
+  // lane's rows go straight to the content key), so no tool reason applies.
+  if (row.conversation_source !== 'claude_code') return 'content_no_match'
+  const id = stringValue(row.tool_call_id)
+  if (!id || (row.part_type !== 'tool_call' && row.part_type !== 'tool_result')) return 'content_no_match'
+  const entry = row.role === 'assistant' && row.part_type === 'tool_call'
+    ? index.byToolCallId.get(id)
+    : row.role === 'user' && row.part_type === 'tool_result'
+      ? index.byToolUseId.get(id)
+      : null
+  if (entry === null) return 'tool_kind_unmatched'
+  if (!entry) return 'tool_id_not_in_transcript'
+  if (!Array.isArray(entry.content) || entry.content.length !== 1) return 'tool_line_multi_block'
+  return 'tool_line_no_uuid'
 }
 
 /**

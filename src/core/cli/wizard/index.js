@@ -18,6 +18,7 @@
  * } from '../../../../src/core/cli/wizard/types.js'
  * @import { FolderAskMode } from '../../../../src/core/usage-policy/types.js'
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { OverviewQueryRunner } from '../../../../src/core/query/types.js'
  */
 
 import { Attr, getLogger, withSpan } from '../../observability/index.js'
@@ -46,7 +47,7 @@ import { ensureDurableBin } from '../global_install.js'
 import { platformIsSupported, setupUnsupportedNote } from '../../daemon/platform.js'
 import { friendlyClientLabel } from '../../commands/ask.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { anyClientLaunchable, recordedAskClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
+import { anyClientLaunchable, recordedAskClientLaunchable, runWizardSuggestSkill, usageSessionsRecorded } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -996,10 +997,13 @@ async function runGuardedInitWizard(opts, guard) {
   // a change here.
   /** @type {FirstLookResult | undefined} */
   let firstLookResult
+  /** @type {OverviewQueryRunner | undefined} */
+  let firstLookRunner
   if (firstLookRan) {
     const notices = firstLookNoticeSink(opts.stderr)
+    firstLookRunner = opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices)
     firstLookResult = await runWizardFirstLook({
-      runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices),
+      runner: firstLookRunner,
       stdout: opts.stdout,
       color: useColor(opts.stdout, opts.env),
       ...(opts.firstLookBudgetMs !== undefined ? { budgetMs: opts.firstLookBudgetMs } : {}),
@@ -1121,20 +1125,26 @@ async function runGuardedInitWizard(opts, guard) {
   }
 
   // The closing offer comes last, after whichever of the narration and the
-  // sync step this path ran: suggest a new skill? A
-  // yes runs `hyp ask`, which starts the client in its own folder under
+  // sync step this path ran: the usage-by-task view. A yes runs
+  // `hyp usage`, which starts the client in its own folder under
   // `HYP_HOME`, never in the directory `hyp init` was run from; that is
-  // what lets setup make the offer instead of printing a question to type.
-  // @ref LLP 0398#setup-offer [implements]: setup offers to run the ask; a yes runs it as a child on this terminal
+  // what lets setup make the offer instead of printing a command to type.
+  // @ref LLP 0398#setup-offer-usage [implements]: setup offers `hyp usage`; a yes runs it as a child on this terminal
   /** @type {WizardSuggestSkillResult | undefined} */
   let suggestSkill
   if (interactive && !cancelled && opts.finale?.dryRun !== true && (await guard.checkpoint())) {
+    const hasRows = firstLookHadRows(firstLookResult)
+    // The first look counts every client; the view charts only Claude Code
+    // and Codex, so rows from other clients alone do not earn the offer.
+    // After a first look that ran out of time, no second query is tried.
+    const usageRows = hasRows === true && firstLookResult?.shown === true ? await usageSessionsRecorded(firstLookRunner) : undefined
     suggestSkill = await runWizardSuggestSkill({
       stdout: opts.stdout,
       stderr: opts.stderr,
       env: opts.env,
       interactive: true,
-      hasRows: firstLookHadRows(firstLookResult),
+      hasRows,
+      ...(usageRows !== undefined ? { usageRows } : {}),
       ...(opts.stdin ? { stdin: opts.stdin } : {}),
       ...(opts.suggestSkill ?? {}),
       launchable: opts.suggestSkill?.launchable ?? await anyClientLaunchable(opts.env),
@@ -1383,7 +1393,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
  * (issue #417). Each clause is something the installed skill does today:
  * it lists the recorded folders, marks a folder `local-only` (never
  * forwarded) or `ignore` (not recorded) only after a yes on that folder,
- * and offers `hyp privacy purge` as its own confirmed step. The team
+ * and offers `hyp purge` as its own confirmed step. The team
  * clause is said only to a machine that joined, since a local install has
  * nowhere a folder syncs to. A run that installed no copy of the skill is
  * pointed at `hyp privacy` instead of a skill it does not have.

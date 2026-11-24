@@ -52,7 +52,7 @@ export interface PromptChrome {
   /**
    * Opt-in back-navigation (LLP 0191): escape settles the prompt as
    * `backed` (the runtime throws `PromptBackRequestedError`) instead of
-   * cancelling, and the default hint reads `esc back`. Ctrl+C cancels
+   * cancelling, and the default hint reads `Esc to go back`. Ctrl+C cancels
    * regardless. Only the wizard's step prompts set this; everywhere else
    * escape keeps meaning cancel.
    */

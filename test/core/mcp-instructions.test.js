@@ -17,7 +17,7 @@ const PHASE_1_TOOLS = Object.freeze([
 ])
 const HAND_OFF = 'You cannot mark recommendations from here. When you have acted on one, tell the person '
   + 'the recommendation id, the state you propose (applied or dismissed), a reason, and links to the change, '
-  + 'such as the pull request. The person marks it with hyp report mark or the dashboard.'
+  + 'such as the pull request. The person marks it with hyp recommendation mark or the dashboard.'
 
 test('rule 5: with set_recommendation_status visible, marking applied is expected, with reason and link, no approval', () => {
   for (const transport of /** @type {const} */ (['stdio', 'http'])) {
@@ -73,10 +73,10 @@ test('initialize over createMcpServer with report-publish renders rule 5; withou
   assert.doesNotMatch(reading, /expected last step/)
 })
 
-test('rule 6 over stdio: the CLI line names hyp report get and hyp report mark', () => {
+test('rule 6 over stdio: the CLI line names hyp recommendation get and hyp recommendation mark', () => {
   const text = buildInstructions(['query_sql', 'grep_search', 'graph_neighbors'], 'stdio')
-  assert.ok(text.includes('hyp report get <id>'))
-  assert.ok(text.includes('hyp report mark <id> applied --reason ... --link ...'))
+  assert.ok(text.includes('hyp recommendation get <id>'))
+  assert.ok(text.includes('hyp recommendation mark <id> applied --reason ... --link ...'))
   assert.match(text, /on this machine with the person's session/)
   assert.ok(!text.includes('You cannot mark'))
   assert.match(text, /when the user names a recommendation id/)
@@ -86,8 +86,8 @@ test('rule 6 on http with a read tool and no mark: the hand-off, verbatim, and n
   for (const visible of [['list_recommendations'], ['get_recommendation'], ['list_recommendations', 'get_recommendation']]) {
     const text = buildInstructions(['query_sql', ...visible], 'http')
     assert.ok(text.includes(HAND_OFF))
-    assert.ok(!text.includes('hyp report mark <id>'))
-    assert.ok(!text.includes('hyp report get'))
+    assert.ok(!text.includes('hyp recommendation mark <id>'))
+    assert.ok(!text.includes('hyp recommendation get'))
     assert.doesNotMatch(text, /expected last step/)
     // Rule 8 never tells an agent that cannot mark to mark.
     assert.doesNotMatch(text, /mark both|Do not mark/)

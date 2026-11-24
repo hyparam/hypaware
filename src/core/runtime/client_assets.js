@@ -219,16 +219,16 @@ export function planClientAssets(options) {
         continue
       }
       const assetDir = asset.kind === 'skill' ? descriptor.skillDir : descriptor.agentDir
-      // A client with no directory for this kind is not an error: Codex has
-      // skills but no subagent concept, so an agent contribution naming it
-      // simply has nowhere to land. Silence beats a warning the user cannot act
+      // A client with no directory for this kind is not an error: a client
+      // with skills but no subagent concept gives an agent contribution
+      // nowhere to land. Silence beats a warning the user cannot act
       // on and would see on every attach.
       if (!assetDir) continue
 
       const baseDir = path.join(homeDir, assetDir)
       const dest = asset.kind === 'skill'
         ? path.join(baseDir, asset.name)
-        : path.join(baseDir, `${asset.name}.md`)
+        : path.join(baseDir, `${asset.name}${path.extname(asset.source) || '.md'}`)
       // Defense in depth: registration rejects traversal names, but the asset
       // directory comes from a plugin manifest, so re-check containment.
       if (!isWithinDir(dest, baseDir)) {

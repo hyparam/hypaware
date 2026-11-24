@@ -21,7 +21,7 @@ jobs:
   describe:
     if: github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -35,6 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HYP_PR_CONTEXT_TOKEN: ${{ secrets.HYP_PR_CONTEXT_TOKEN }}
+          HYP_PR_CONTEXT_RECORDING_TOKEN: ${{ secrets.HYP_PR_CONTEXT_RECORDING_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.HYP_PR_CONTEXT_MODEL }}
         run: node .github/hypaware-pr-context/describe.mjs

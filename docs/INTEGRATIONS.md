@@ -69,6 +69,12 @@ HypAware 1.42.0. It includes setup, session startup, and upload after replies.
 | --- | --- | --- | --- | --- | --- |
 | [CI and headless deployment](integrations/ci-and-headless.md) | Supported | CI runners, containers, and servers | The collector runs without a browser or service manager on factory hosts, containers, and CI runners such as GitHub Actions, and records the agents the job runs | No | `hyp join --no-daemon` |
 
+## Model gateways
+
+| Integration | Status | Runs on | How HypAware records it | Backfill | Setup |
+| --- | --- | --- | --- | --- | --- |
+| [OpenRouter Broadcast](integrations/openrouter.md) | Supported | OpenRouter's cloud | OpenRouter sends model requests and usage to your HypAware server | No | HypScope > Service accounts > Connect OpenRouter |
+
 ## Local models
 
 | Integration | Status | Runs on | How HypAware records it | Backfill | Setup id |

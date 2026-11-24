@@ -250,6 +250,49 @@ test('unionSources row fallback preserves counts with an empty prepared projecti
   assert.deepEqual(rows, [{ n: 3 }])
 })
 
+// @ref LLP 0617#name-alignment [tests]: an evolved archive table lists columns in another order and types JSON as string where the cache says unknown
+test('unionSources keeps prepared batches across reordered columns and unknown versus known types', async () => {
+  /** @type {ScanRequest[]} */
+  const seenA = []
+  /** @type {ScanRequest[]} */
+  const seenB = []
+  /** @type {Field[]} */
+  const cacheFields = [
+    { id: 1, name: 'k', dataType: { type: 'string' }, nullable: false },
+    { id: 2, name: 'args', dataType: { type: 'unknown' }, nullable: true },
+    { id: 3, name: 'n', dataType: { type: 'number' }, nullable: false },
+  ]
+  /** @type {Field[]} */
+  const archiveFields = [
+    { id: 1, name: 'k', dataType: { type: 'string' }, nullable: false },
+    { id: 2, name: 'n', dataType: { type: 'number' }, nullable: true },
+    { id: 3, name: 'args', dataType: { type: 'string' }, nullable: true },
+  ]
+  const union = unionSources([
+    preparedSource(cacheFields, [{ k: 'a', args: { cmd: 'x' }, n: 1 }], seenA),
+    preparedSource(archiveFields, [{ k: 'b', n: 2, args: '{"cmd":"y"}' }], seenB),
+  ])
+
+  assert.equal(typeof union.prepareScan, 'function')
+  assert.deepEqual(union.schema?.fields.map((field) => [field.name, field.dataType.type, field.nullable]), [
+    ['k', 'string', false],
+    ['args', 'unknown', true],
+    ['n', 'number', true],
+  ])
+  const rows = await collect(executeSql({ tables: { t: union }, query: 'SELECT k, n FROM t ORDER BY k' }))
+  assert.deepEqual(rows, [{ k: 'a', n: 1 }, { k: 'b', n: 2 }])
+  assert.deepEqual(seenA[0].columns.map((demand) => demand.field).sort(), [1, 3])
+  assert.deepEqual(seenB[0].columns.map((demand) => demand.field).sort(), [1, 2], 'n is remapped to the archive id by name')
+})
+
+test('unionSources declines prepared batches when two known types conflict', () => {
+  const union = unionSources([
+    preparedSource([{ id: 1, name: 'v', dataType: { type: 'string' }, nullable: false }], [{ v: 'a' }], []),
+    preparedSource([{ id: 1, name: 'v', dataType: { type: 'number' }, nullable: false }], [{ v: 1 }], []),
+  ])
+  assert.equal(union.prepareScan, undefined)
+})
+
 test('unionSources treats equivalent data types as compatible regardless of object key order', () => {
   /** @type {Field[]} */
   const fieldsA = [{

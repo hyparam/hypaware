@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-11-12
 **Related:** LLP 0414, LLP 0461
+**Extended-by:** LLP 0614 (the standalone record is listed, read, and deleted through `hyp recommendation`; the `report` forms here remain accepted)
 
 > The server can now hold a recommendation that belongs to no report
 > (hypaware-server LLP 0705, a Draft in

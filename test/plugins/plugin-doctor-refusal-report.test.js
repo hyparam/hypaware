@@ -110,7 +110,7 @@ function doctorStdout(rootDir, extraArgs, probeFile) {
   delete env.OTEL_EXPORTER_OTLP_ENDPOINT
   delete env.DEV_RUN_ID
   if (probeFile !== undefined) env[PROBE_ENV] = probeFile
-  const out = spawnSync(process.execPath, [BIN, 'dev', 'plugin', 'doctor', rootDir, ...extraArgs], {
+  const out = spawnSync(process.execPath, [BIN, 'plugin', 'doctor', rootDir, ...extraArgs], {
     env,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -318,5 +318,5 @@ test('the bundled set refuses nothing, so its reports are the ones it had', asyn
   }
   assert.ok(dirs.length >= 20, `only ${dirs.length} bundled plugins`)
   assert.ok(commands >= 30, `only ${commands} bundled commands survived the snapshot`)
-  assert.ok(aliases >= 15, `only ${aliases} bundled aliases survived the snapshot`)
+  assert.ok(aliases >= 10, `only ${aliases} bundled aliases survived the snapshot`)
 })

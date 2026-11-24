@@ -14,7 +14,6 @@ import { CONFIG_BASENAME } from '../../src/core/config/schema.js'
 import { pluginScopedConfig } from '../../src/core/config/plugin_scope.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
-import { resolveGatewayBaseUrl } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 
 // `CommandRunContext.config` was the whole effective config, so contributing a
 // command (or a verb, whose `operation` receives the same object through
@@ -525,12 +524,10 @@ test('the capability edge is directed: the provider does not read its requirer\'
   }
 })
 
-// Binds the shipped cross-plugin reader to the slice without a darwin boot:
-// `@hypaware/claude-desktop`'s real manifest and real `resolveGatewayBaseUrl`
-// over the slice `dispatch()` would hand its commands. Fails at the pre-fix
-// head: the scoped config lost the gateway's `listen`, so the profile pointed
-// at the fixed default and the LLP 0115 ephemeral refusal was unreachable.
-test('claude-desktop resolves the gateway pinned listen through its slice, and still refuses an ephemeral one', async () => {
+// Binds a shipped manifest edge to the slice: `@hypaware/claude-desktop`
+// requires the gateway capability, so its slice keeps the gateway's section
+// and nothing its manifest declares no edge to.
+test('claude-desktop keeps the gateway section through its slice, and no other', async () => {
   const workspace = path.join(import.meta.dirname, '..', '..', 'hypaware-core', 'plugins-workspace')
   /** @param {string} dir */
   const manifestOf = async (dir) =>
@@ -541,33 +538,25 @@ test('claude-desktop resolves the gateway pinned listen through its slice, and s
     { name: gateway.name, version: gateway.version, manifest: gateway, rootDir: path.join(workspace, 'ai-gateway') },
     { name: desktop.name, version: desktop.version, manifest: desktop, rootDir: path.join(workspace, 'claude-desktop') },
   ]
-  /** @param {string} listen */
-  const configWith = (listen) => ({
+  const config = {
     version: 2,
     plugins: [
-      { name: gateway.name, config: { listen } },
+      { name: gateway.name, config: { listen: '127.0.0.1:9911' } },
       { name: desktop.name },
       { name: OWNER, config: { api_key: OWNER_API_KEY } },
     ],
-  })
+  }
 
-  const scoped = pluginScopedConfig(/** @type {any} */ (configWith('127.0.0.1:9911')), desktop.name, /** @type {any} */ (activePlugins))
-  assert.equal(
-    resolveGatewayBaseUrl({ hypConfig: scoped, sectionConfig: {} }),
-    'http://127.0.0.1:9911',
-    'the Desktop profile lost the operator\'s pinned gateway listen'
+  const scoped = pluginScopedConfig(/** @type {any} */ (config), desktop.name, /** @type {any} */ (activePlugins))
+  assert.deepEqual(
+    scoped.plugins?.find((p) => p.name === gateway.name)?.config,
+    { listen: '127.0.0.1:9911' },
+    'the slice lost the section of the capability provider the manifest requires'
   )
   assert.equal(
     scoped.plugins?.find((p) => p.name === OWNER)?.config,
     undefined,
     'the widening kept a section claude-desktop\'s manifest declares no edge to'
-  )
-
-  const ephemeral = pluginScopedConfig(/** @type {any} */ (configWith('127.0.0.1:0')), desktop.name, /** @type {any} */ (activePlugins))
-  assert.throws(
-    () => resolveGatewayBaseUrl({ hypConfig: ephemeral, sectionConfig: {} }),
-    /ephemeral/,
-    'the LLP 0115 ephemeral-listen refusal became unreachable through the slice'
   )
 })
 

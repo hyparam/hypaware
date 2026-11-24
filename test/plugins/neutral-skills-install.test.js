@@ -88,9 +88,8 @@ test('client skills install places every shared skill file under each client ski
     // The reference files, not only each SKILL.md, are what a client reads on demand.
     for (const rel of [
       'hypaware-query/reports.md',
-      'hypaware-report/references/analyst-task.md',
+      'hypaware-report/SKILL.md',
       'hypaware-query/sql.md',
-      'hypaware-report/references/report-contract.md',
     ]) {
       await fs.access(path.join(base, rel))
     }
@@ -111,7 +110,7 @@ test('client-specific privacy instructions are reachable only through explicit c
 
 test('the shared reports reference offers the MCP status tool only when the connected MCP lists it', async () => {
   const text = (await fs.readFile(path.join(SHARED_SKILLS_DIR, 'hypaware-query/reports.md'), 'utf8')).replace(/\s+/g, ' ')
-  assert.match(text, /`hyp report mark`/)
+  assert.match(text, /`hyp recommendation mark`/)
   const sentences = text.split(/(?<=\.)\s/).filter((s) => s.includes('`set_recommendation_status`'))
   assert.ok(sentences.length > 0, 'reports.md must name set_recommendation_status')
   for (const sentence of sentences) {

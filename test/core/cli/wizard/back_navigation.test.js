@@ -94,9 +94,9 @@ test('reduce: ctrl+c cancels even on an allowBack prompt', () => {
 })
 
 test('render: the default hint tells the truth about escape', () => {
-  assert.match(render(selectState(), { color: false }), /esc cancel/)
-  assert.match(render(selectState({ allowBack: true }), { color: false }), /esc back/)
-  assert.match(render(multiselectState({ allowBack: true }), { color: false }), /esc back/)
+  assert.match(render(selectState(), { color: false }), /Esc to cancel/)
+  assert.match(render(selectState({ allowBack: true }), { color: false }), /Esc to go back/)
+  assert.match(render(multiselectState({ allowBack: true }), { color: false }), /Esc to go back/)
   // An explicit hint still wins.
   assert.match(render(selectState({ allowBack: true, hint: 'custom' }), { color: false }), /custom/)
 })

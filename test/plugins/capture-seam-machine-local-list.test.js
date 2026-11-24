@@ -308,6 +308,7 @@ async function codexProjectorViaActivate(env) {
     backfills: { register() {} },
     commands: { register() {} },
     skills: { register() {} },
+    agents: { register() {} },
   })
   await activateCodex(ctx)
   assert.ok(projector, 'codex activate() registered an exchange projector')

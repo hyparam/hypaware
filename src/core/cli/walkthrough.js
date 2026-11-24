@@ -2403,8 +2403,7 @@ export async function loadPickerCatalog() {
  * that says a plugin activates only if someone asked for it by name. The
  * excluded set is not a display preference: `@hypaware/embedder-openai` is
  * out because enabling an API-backed embedder is the opt-in that lets
- * captured text leave the machine, and `@hypaware/claude-account` because it
- * holds a real credential. A one-line manifest edit on any of them would
+ * captured text leave the machine. A one-line manifest edit on any of them would
  * otherwise compose it into every gateway config.
  *
  * The filter reads `V1_EXCLUDED_FROM_DEFAULT` itself rather than a list of

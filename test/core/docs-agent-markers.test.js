@@ -59,11 +59,11 @@ test('no docs page says an operation has no MCP path', async () => {
   }
 })
 
-// @ref LLP 0494#docs-paths [tests]: hyp report list gets its own prompt in Reports
-test('Reports has an agent marker for hyp report list', () => {
+// @ref LLP 0494#docs-paths [tests]: the recommendation listing gets its own prompt in Reports
+test('Reports has an agent marker for hyp recommendation list', () => {
   const text = readFileSync(path.join(DOCS_DIR, 'REPORTS.md'), 'utf8')
   const block = /<!-- agent: ([^\n]*?) -->\n```sh\n([\s\S]*?)```/g
-  const listing = [...text.matchAll(block)].filter(([, , sh]) => sh.startsWith('hyp report list'))
-  assert.equal(listing.length, 1, 'REPORTS.md needs one agent marker above a block that is hyp report list')
+  const listing = [...text.matchAll(block)].filter(([, , sh]) => sh.startsWith('hyp recommendation list'))
+  assert.equal(listing.length, 1, 'REPORTS.md needs one agent marker above a block that is hyp recommendation list')
   assert.match(listing[0][1], /\blist_recommendations\b/)
 })

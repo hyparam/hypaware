@@ -284,6 +284,11 @@ test('actual split processing SIGHUP keeps resumed fresh capture and recording g
     // The replacement's first status write can land before its verification
     // control route serves, so wait for the route itself (#2862).
     await waitFor(async () => (await requestOllamaVerification({ endpoint: f.root, runId: f.status.runId, deadline: Date.now() + 1000 })).reason === 'ready')
+    // The route reads the gateway's live transport, but verify first reads the
+    // status file, which the gateway rewrites only on its once-a-second
+    // refresh. A refresh inside the reload leaves capture_ready false there
+    // for up to a second after the route is ready, so wait for that file too.
+    await waitFor(() => ollamaCaptureFromSnapshot(null, readStatusFile(f.state), readPidFile(f.state)).processorReady)
     const result = await verify()
     assert.equal(result.code, 0, result.error + result.output)
     assert.equal(JSON.parse(result.output).status, 'persisted')
