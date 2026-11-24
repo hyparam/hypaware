@@ -1900,7 +1900,7 @@ test('graph rows that record their source folders still never leave through cent
   })
   for (const registration of Object.values(registrations)) {
     assert.ok(registration.localOnlyContentColumns?.includes('source_cwds'), `${registration.name} declares source_cwds as content`)
-    assert.equal(sink.datasetDisposition(registration), 'skips', `${registration.name} is quoted as staying local`)
+    assert.equal(sink.datasetDisposition?.(registration), 'skips', `${registration.name} is quoted as staying local`)
   }
 
   const result = await sink.exportBatch(/** @type {any} */ ({

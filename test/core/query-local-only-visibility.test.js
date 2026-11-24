@@ -695,7 +695,9 @@ test('graph provenance: the forced source_cwds never reaches a projection that d
 })
 
 test('graph provenance: a WHERE over content matches visible rows and never a suppressed one', async () => {
-  for (const [label, expected] of [['lo-label', []], ['mixed-label', []], ['old-label', []], ['full-label', [{ node_id: 'n1-full' }]]]) {
+  /** @type {[string, { node_id: string }[]][]} */
+  const cases = [['lo-label', []], ['mixed-label', []], ['old-label', []], ['full-label', [{ node_id: 'n1-full' }]]]
+  for (const [label, expected] of cases) {
     const out = await run({
       source: memorySource(GRAPH_ROWS, { whereMatcher: (r) => r.label === label }),
       extras: GRAPH_EXTRAS,
