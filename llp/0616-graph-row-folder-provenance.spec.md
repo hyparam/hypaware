@@ -42,8 +42,10 @@ rows on the next query.
 
 Three states:
 
-- **`null`: unknown.** Rows written before this change, and any row with a
-  contribution whose provenance cannot be stated (below). Suppressed, as today.
+- **`null`: unknown.** Rows written before this change (on an upgraded
+  install, also rows appended before its first refresh, #old-rows), and any
+  row with a contribution whose provenance cannot be stated (below).
+  Suppressed, as today.
 - **`[]`: folderless.** Every contribution came from a source whose rows any
   caller can already read raw. Visible.
 - **A list.** Visible to a caller only when no listed folder's class outranks
@@ -108,12 +110,33 @@ folder from a row that keeps content derived from it.
 
 ## Rows written before this change {#old-rows}
 
-Old rows read the new column as null ([LLP 0029 #in-place-evolution](./0029-additive-cache-schema-evolution.decision.md#in-place-evolution))
-and stay suppressed. Nothing rewrites them automatically: LLP 0428 #refresh
-rules out version-triggered mutation.
+The graph tables carry no cache partition declaration, so
+[LLP 0029 #in-place-evolution](./0029-additive-cache-schema-evolution.decision.md#in-place-evolution)
+does not apply to them: an append never adds the new column to an existing
+graph table. A fresh install creates both tables with `source_cwds`. On an
+install upgraded from an earlier version, the existing graph tables keep
+their old schema:
+
+- Old rows have no `source_cwds` and stay suppressed.
+- A default projection appends new rows without `source_cwds` too, because
+  the table has no such column to write. They read as unknown and stay
+  suppressed, like the old rows.
+- A query that names `source_cwds` explicitly fails as an unknown column,
+  because the column does not exist in that table yet.
+
+So on an upgraded install no graph name shows until the first
+`hyp graph project --refresh`. The suppression notice names that command.
+This is the safe direction: every row stays suppressed until its
+provenance is written, and nothing becomes visible by accident. Nothing
+runs the refresh automatically: LLP 0428 #refresh rules out
+version-triggered mutation.
 
 `hyp graph project --refresh` re-derives matching rows of the same projector
-from current sources, and a re-derived row gets its true `source_cwds`.
+from current sources, and a re-derived row gets its true `source_cwds`. It
+rewrites each table generation that holds a re-derived row under the new
+schema, so after it every append to that table carries the column. A table
+none of whose rows can be re-derived keeps its old schema until a later
+refresh re-derives a row in it.
 
 A row whose source messages are gone is not re-derived, and stays null for
 good. That covers rows whose messages retention deleted, and rows whose
@@ -167,7 +190,8 @@ wrapper is skipped.
 
 The suppression notice splits its count in two:
 
-- rows hidden because a contributing folder is `local-only` (no action);
+- rows hidden because a contributing folder is `local-only` or ignored, that
+  is, its class outranks the caller (no action);
 - rows with no recorded provenance, naming `hyp graph project --refresh` as
   the way to re-derive them.
 
@@ -194,16 +218,21 @@ server imports now writes the column.
 
 ## Schema change {#schema}
 
-One nullable column per graph table, added through LLP 0029 additive
-evolution. No config key and no new dataset. The partition label
-(`graph_v1`) and the partition declaration are unchanged.
+One nullable column per graph table. A fresh install creates the tables
+with it; an upgraded install gets it at the first
+`hyp graph project --refresh` (#old-rows), not through LLP 0029 additive
+evolution, which applies only to tables with a cache partition
+declaration. No config key and no new dataset. The partition label
+(`graph_v1`) is unchanged, and the graph tables still have no partition
+declaration.
 
 [LLP 0430](./0430-manual-acceptance-procedures-are-retired.decision.md)
 retired the written `durable_cache_upgrade` procedure. The repair runs the
 check it described as a recorded step instead: the last release and the
 candidate in one disposable `HYP_HOME`, with graph row counts before and
-after, old rows reading null and suppressed, new and refreshed rows carrying
-`source_cwds`, and a refresh failure leaving rows as they were.
+after, old rows and rows a default projection adds before the refresh
+staying suppressed, refreshed rows carrying `source_cwds`, and a refresh
+failure leaving rows as they were.
 
 ## Cost {#cost}
 
@@ -214,6 +243,8 @@ after, old rows reading null and suppressed, new and refreshed rows carrying
   encoding keeps repeated values small.
 - **Read:** one extra column per batch when content is demanded, and one
   memo hit per row. No new index, cache or runtime dependency.
+- **Upgrade:** the first refresh rewrites each graph table generation that
+  holds a re-derived row, as any refresh does. No other rewrite is added.
 
 ## Tests {#tests}
 
@@ -223,8 +254,11 @@ after, old rows reading null and suppressed, new and refreshed rows carrying
    and `source_cwds` does not leak the folder.
 3. A mixed node (a `local-only` and a syncing folder) stays suppressed for the
    syncing caller.
-4. Old rows (null `source_cwds`) stay suppressed; after `--refresh` the
-   re-derived rows read correctly and the others stay suppressed.
+4. On an upgraded install, old rows and the rows a later default projection
+   adds stay suppressed and are counted as having no recorded provenance,
+   with the notice naming `--refresh`; after one `--refresh`, old rows whose
+   sources are present and the new rows carry `source_cwds` and show, and
+   rows whose sources are gone stay suppressed.
 5. `--include-local-only` output is unchanged.
 6. An unknown contribution (an `enrichment_committed`-derived row, a rule
    without `cwd`) stays suppressed, and absorbs on merge.
