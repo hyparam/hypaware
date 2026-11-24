@@ -15,7 +15,7 @@ import {
 } from 'icebird'
 import { fetchAvroRecords } from 'icebird/src/fetch.js'
 
-import { Attr, getActiveSpan, getMeter, withSpan } from '../observability/index.js'
+import { Attr, getActiveSpan, getLogger, getMeter, withSpan } from '../observability/index.js'
 import { MAINTENANCE_DEFAULTS } from './maintenance_defaults.js'
 import { isGatewayFallbackRow } from './gateway_fallback.js'
 import { inferColumnType } from './migrate.js'
@@ -45,7 +45,7 @@ import { createRecordRedactor } from '../sinks/redaction.js'
  *   SettleContext,
  *   StreamingTableAppend,
  * } from '../../../src/core/cache/types.js'
- * @import { ColumnSpec, DatasetColumnBackfill } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, DatasetColumnBackfill, DatasetRegistration, DatasetResettlePairs } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../../src/core/iceberg/types.js'
  * @import { PartitionSpec, Resolver, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
@@ -1568,7 +1568,20 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   // @ref LLP 0301#bounded-resettle [implements]: retain identity keys across
   // the generation, never the full fallback rows.
   const scanOpts = tableInfo?.metadata ? { metadata: tableInfo.metadata } : undefined
-  const emittedPartIds = settle ? await scanNativePartIds(oldDir, tableInfo?.metadata) : null
+  const identity = settle
+    ? await scanNativeIdentity(oldDir, tableInfo?.metadata, usablePairs(settle.pairs, schemaColumns))
+    : null
+  const emittedPartIds = identity ? identity.partIds : null
+  // @ref LLP 0620#local [implements]: a claimed key's rows are held and merged
+  // in this pass, within the same byte cap as the fallback batch
+  const claimed = identity?.claimed
+  const pairs = claimed && claimed.size > 0 ? settle?.pairs : undefined
+  /** @type {Map<string, { rows: Record<string, unknown>[], bytes: number }>} */
+  const held = new Map()
+  let heldBytes = 0
+  /** @type {Set<string>} */
+  const deferredKeys = new Set()
+  const pairStats = { claimed: claimed?.size ?? 0, ambiguous: identity?.ambiguous ?? 0, merged: 0, deferred: 0, discardedUsage: 0 }
   // @ref LLP 0590#dedupe [implements]: a narrow first scan shows the backfill
   // every row before any is written, so the row it counts in each group does
   // not depend on scan order.
@@ -1619,6 +1632,57 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
     return true
   }
 
+  // A row emitted as it is: a fallback that stays one is tallied, as the
+  // settle path tallies its leftovers.
+  const emitAsIs = async (/** @type {Record<string, unknown>} */ row) => {
+    if (await emit(row) && isGatewayFallbackRow(row)) remainingFallbacks++
+  }
+
+  // Merge a complete key, or hand its rows back unchanged when the merge
+  // declines. Either way the key's held bytes are released.
+  const releaseKey = async (/** @type {string} */ key, /** @type {boolean} */ complete) => {
+    const entry = held.get(key)
+    if (!entry) return
+    held.delete(key)
+    heldBytes -= entry.bytes
+    const outcome = complete && pairs ? pairs.merge(entry.rows) : undefined
+    if (outcome?.status === 'merged' && outcome.survivor) {
+      pairStats.merged++
+      pairStats.discardedUsage += outcome.discardedUsage.length
+      await emitAsIs(outcome.survivor)
+      return
+    }
+    for (const row of entry.rows) await emitAsIs(row)
+  }
+
+  // Hold a claimed key's row until the key is complete. A key is admitted
+  // only while the held bytes stay under the cap (one key may cross it, as
+  // one fallback row may); a key that is not admitted is deferred, and its
+  // rows are written unchanged, never into the transcript batch, whose
+  // de-twin would drop the carrier. A deferred key waits for the next rewrite.
+  const holdPairRow = async (/** @type {string} */ key, /** @type {number} */ expected, /** @type {Record<string, unknown>} */ row) => {
+    if (deferredKeys.has(key)) {
+      await emitAsIs(row)
+      return
+    }
+    const rowBytes = estimateRowBytes(row)
+    let entry = held.get(key)
+    if (!entry) {
+      if (held.size > 0 && heldBytes + rowBytes > maxBatchBytes) {
+        deferredKeys.add(key)
+        pairStats.deferred++
+        await emitAsIs(row)
+        return
+      }
+      entry = { rows: [], bytes: 0 }
+      held.set(key, entry)
+    }
+    entry.rows.push(row)
+    entry.bytes += rowBytes
+    heldBytes += rowBytes
+    if (entry.rows.length >= expected) await releaseKey(key, true)
+  }
+
   const flushFallbackBatch = async () => {
     if (!settle || !emittedPartIds || fallbackBatch.length === 0) return
     const pending = fallbackBatch
@@ -1648,6 +1712,14 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
           nullable: true,
         })), backfill)
       }
+      if (pairs && claimed) {
+        const key = pairs.key(row)
+        const expected = key === undefined ? undefined : claimed.get(pairKeyHash(key))
+        if (key !== undefined && expected !== undefined) {
+          await holdPairRow(key, expected, row)
+          continue
+        }
+      }
       // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
       // The narrow first pass already found native twins that appear later in
       // scan order, so this pass only needs to retain one bounded settle batch.
@@ -1673,6 +1745,10 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
     }
 
     await flushFallbackBatch()
+    // A key whose rows did not all arrive (the scan disagreed with the narrow
+    // pass) is written back unchanged rather than merged on partial evidence.
+    for (const key of [...held.keys()]) await releaseKey(key, false)
+    if (pairStats.claimed > 0 || pairStats.ambiguous > 0) recordPairStats(pairStats)
 
     await flushBatch()
     streamed = sink.current ? await sink.current.close() : null
@@ -2374,24 +2450,201 @@ function filesRemovedBeforeFailure(err) {
  * corresponding gateway rows retained their large content and attributes
  * columns and made daemon compaction heap-sized.
  *
+ * With a dataset's key-matched merge, the same pass also counts each key's
+ * rows and native `part_id`s, and returns the **claimed** keys: those with a
+ * fallback row and exactly one native `part_id`, each mapped (by the key's
+ * hash) to its row count. During the pass this holds one number per keyed
+ * row ({@link createPairKeyIndex}); after it, only the claimed keys.
+ *
  * @ref LLP 0301#bounded-resettle [implements]: a narrow identity pass makes
  * later fallback batches independent of scan order.
+ * @ref LLP 0620#local [implements]: pass 1 also records the merge keys
  * @param {string} tableDir
  * @param {TableMetadata | undefined} metadata
- * @returns {Promise<Set<string>>}
+ * @param {DatasetResettlePairs | undefined} pairs
+ * @returns {Promise<{ partIds: Set<string>, claimed?: Map<number, number>, ambiguous: number }>}
  */
-async function scanNativePartIds(tableDir, metadata) {
+async function scanNativeIdentity(tableDir, metadata, pairs) {
   const partIds = new Set()
-  for await (const row of scanRowsFromTable(
-    tableDir,
-    ['attributes', 'part_id', 'message_id', 'part_index'],
-    metadata ? { metadata } : undefined
-  )) {
-    if (isGatewayFallbackRow(row)) continue
-    const key = rowPartId(row)
-    if (key !== undefined) partIds.add(key)
+  const index = pairs ? createPairKeyIndex() : null
+  const columns = ['attributes', 'part_id', 'message_id', 'part_index', ...(pairs?.columns ?? [])]
+  for await (const row of scanRowsFromTable(tableDir, [...new Set(columns)], metadata ? { metadata } : undefined)) {
+    const live = isGatewayFallbackRow(row)
+    const partId = live ? undefined : rowPartId(row)
+    const key = pairs?.key(row)
+    if (index && key !== undefined) index.observe(key, live, partId)
+    if (partId !== undefined) partIds.add(partId)
   }
-  return partIds
+  if (!index) return { partIds, ambiguous: 0 }
+  const { claimed, ambiguous } = index.claimed()
+  return { partIds, claimed, ambiguous }
+}
+
+/**
+ * Pass 1's per-key state, held as one number per key in one Map, so its
+ * memory is a fixed few dozen bytes per keyed row rather than a copy of the
+ * key string and two map entries (LLP 0301#bounded-resettle: retain short
+ * identities, never row-sized data; the cache's whole history passes here).
+ *
+ * The Map's key is a 53-bit hash of the merge key. Its value packs the key's
+ * row count (up to 255; more marks the key unclaimable), whether it has a
+ * fallback row, and its native `part_id` state: none, one (with a 32-bit hash
+ * of that `part_id`), or more than one. A hash collision can only make a
+ * wrong claim. The dataset's merge checks every row's key and every native
+ * `part_id` itself and declines a mixed set, and a declined key is written
+ * back unchanged, so a collision costs nothing but a held key.
+ *
+ * Exported for the test that pins its size class.
+ *
+ * @ref LLP 0620#local [implements]: pass 1 records the merge keys in bounded memory
+ * @returns {{ observe(key: string, live: boolean, partId: string | undefined): void, claimed(): { claimed: Map<number, number>, ambiguous: number }, entries: Map<number, number> }}
+ */
+export function createPairKeyIndex() {
+  /** @type {Map<number, number>} */
+  const entries = new Map()
+  return {
+    entries,
+    observe(key, live, partId) {
+      const id = pairKeyHash(key)
+      const prior = entries.get(id)
+      const state = prior === undefined ? { rows: 0, live: false, native: NATIVE_NONE, partHash: 0 } : unpackPairState(prior)
+      state.rows = Math.min(state.rows + 1, PAIR_ROWS_OVERFLOW)
+      if (live) {
+        state.live = true
+      } else {
+        const partHash = partId === undefined ? 0 : hash32(partId, FNV_OFFSET)
+        if (state.native === NATIVE_NONE) {
+          state.native = NATIVE_ONE
+          state.partHash = partHash
+        } else if (state.native === NATIVE_ONE && state.partHash !== partHash) {
+          state.native = NATIVE_MANY
+        }
+      }
+      entries.set(id, packPairState(state))
+    },
+    claimed() {
+      /** @type {Map<number, number>} */
+      const claimed = new Map()
+      let ambiguous = 0
+      for (const [id, packed] of entries) {
+        const state = unpackPairState(packed)
+        if (!state.live) continue
+        if (state.native === NATIVE_MANY) ambiguous++
+        else if (state.native === NATIVE_ONE && state.rows < PAIR_ROWS_OVERFLOW) claimed.set(id, state.rows)
+      }
+      return { claimed, ambiguous }
+    },
+  }
+}
+
+const NATIVE_NONE = 0
+const NATIVE_ONE = 1
+const NATIVE_MANY = 2
+const PAIR_ROWS_OVERFLOW = 255
+const TWO_32 = 2 ** 32
+const FNV_OFFSET = 0x811c9dc5
+const FNV_OFFSET_ALT = 0x050c5d1f
+
+/**
+ * Pack a key's state into one safe integer: the native `part_id` hash in
+ * the low 32 bits, then two bits of native state, one live bit and eight
+ * bits of row count (43 bits in all).
+ *
+ * @param {{ rows: number, live: boolean, native: number, partHash: number }} state
+ */
+function packPairState(state) {
+  return state.partHash + TWO_32 * (state.native + 4 * ((state.live ? 1 : 0) + 2 * state.rows))
+}
+
+/** @param {number} packed */
+function unpackPairState(packed) {
+  const high = Math.floor(packed / TWO_32)
+  return { rows: Math.floor(high / 8), live: (Math.floor(high / 4) & 1) === 1, native: high & 3, partHash: packed - high * TWO_32 }
+}
+
+/**
+ * A 53-bit hash of a merge key: two independent 32-bit FNV-1a hashes, 21
+ * bits of one and all 32 of the other.
+ *
+ * @param {string} key
+ */
+export function pairKeyHash(key) {
+  return (hash32(key, FNV_OFFSET_ALT) & 0x1fffff) * TWO_32 + hash32(key, FNV_OFFSET)
+}
+
+/**
+ * FNV-1a over the string's UTF-16 code units, unsigned 32-bit.
+ *
+ * @param {string} text
+ * @param {number} offset
+ */
+function hash32(text, offset) {
+  let hash = offset
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return hash >>> 0
+}
+
+/**
+ * A dataset's merge, when the table carries every column its key reads. A
+ * generation written before one of them existed takes no key merge this
+ * rewrite; its fallbacks keep today's transcript path.
+ *
+ * @param {DatasetResettlePairs | undefined} pairs
+ * @param {ColumnSpec[] | null | undefined} schemaColumns
+ * @returns {DatasetResettlePairs | undefined}
+ */
+function usablePairs(pairs, schemaColumns) {
+  if (!pairs) return undefined
+  if (!Array.isArray(schemaColumns)) return undefined
+  const present = new Set(schemaColumns.map((column) => column.name))
+  return pairs.columns.every((name) => present.has(name)) ? pairs : undefined
+}
+
+/**
+ * Report one rewrite's key-matched merges on the active span and in the log:
+ * how many keys were claimed, merged and deferred, how many were ambiguous,
+ * and how many extra usage copies the merges discarded.
+ *
+ * @ref LLP 0620#local [implements]: the counts say how many pairs wait
+ * @param {{ claimed: number, ambiguous: number, merged: number, deferred: number, discardedUsage: number }} stats
+ */
+function recordPairStats(stats) {
+  const span = getActiveSpan()
+  span?.setAttribute('resettle_pairs_claimed', stats.claimed)
+  span?.setAttribute('resettle_pairs_merged', stats.merged)
+  span?.setAttribute('resettle_pairs_deferred', stats.deferred)
+  span?.setAttribute('resettle_pairs_ambiguous', stats.ambiguous)
+  span?.setAttribute('resettle_pairs_discarded_usage', stats.discardedUsage)
+  getLogger('cache.maintenance').info('cache.resettle_pairs', {
+    [Attr.COMPONENT]: 'cache', [Attr.OPERATION]: 'resettle_pairs', status: 'ok',
+    claimed: stats.claimed, merged: stats.merged, deferred: stats.deferred,
+    ambiguous: stats.ambiguous, discarded_usage: stats.discardedUsage,
+  })
+}
+
+/**
+ * The per-dataset hooks a maintenance run takes from the dataset registry.
+ * One place, so the daemon tick and `hyp query maintain` cannot wire
+ * different sets.
+ *
+ * - `getSettleHook`: the re-settle hook (LLP 0027#re-settle-sweep).
+ * - `getDeclaration`: the one-time re-partition (LLP 0311#migration).
+ * - `getColumnBackfill`: new columns into old partitions (LLP 0590#old-rows).
+ * - `getResettlePairs`: the key-matched merge (LLP 0620#local).
+ *
+ * @param {{ getDataset(dataset: string): DatasetRegistration | undefined }} query
+ * @returns {Pick<MaintenanceOptions, 'getSettleHook' | 'getDeclaration' | 'getColumnBackfill' | 'getResettlePairs'>}
+ */
+export function datasetMaintenanceHooks(query) {
+  return {
+    getSettleHook: (dataset) => query.getDataset(dataset)?.resettleBatch,
+    getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
+    getColumnBackfill: (dataset) => query.getDataset(dataset)?.columnBackfill,
+    getResettlePairs: (dataset) => query.getDataset(dataset)?.resettlePairs,
+  }
 }
 
 /**
@@ -2411,7 +2664,8 @@ function resolveSettleContext(opts, dataset) {
   const storage = opts.storage
   const settle = opts.getSettleHook?.(dataset)
   if (!storage || typeof settle !== 'function') return null
-  return { settle, storage }
+  const pairs = opts.getResettlePairs?.(dataset)
+  return pairs ? { settle, storage, pairs } : { settle, storage }
 }
 
 /**

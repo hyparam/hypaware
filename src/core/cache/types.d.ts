@@ -1,4 +1,4 @@
-import type { ColumnSpec, DatasetColumnBackfill, QueryScope, QueryStorageService, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ColumnSpec, DatasetColumnBackfill, DatasetResettlePairs, QueryScope, QueryStorageService, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ParquetWriter } from 'hyparquet-writer'
 import type { Writer } from 'hyparquet-writer/src/types.js'
 import type { PartitionSpec } from 'icebird/src/types.js'
@@ -319,6 +319,11 @@ export interface MaintenanceOptions {
    */
   getSettleHook?: (dataset: string) => DatasetSettleHook | undefined
   /**
+   * Resolve a dataset's key-matched merge for the re-settle rewrite, if any
+   * (LLP 0620 #local). Used only when `getSettleHook` also resolves.
+   */
+  getResettlePairs?: (dataset: string) => DatasetResettlePairs | undefined
+  /**
    * Resolve a dataset's current `cachePartitioning` declaration, so the
    * tick can detect a table whose recorded partition spec still carries a
    * column the declaration has demoted to sortOnly, and run the one-time
@@ -360,6 +365,7 @@ export type DatasetSettleHook = (
 export interface SettleContext {
   settle: DatasetSettleHook
   storage: QueryStorageService
+  pairs?: DatasetResettlePairs
 }
 
 export interface MaintenancePartitionReport {

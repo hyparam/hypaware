@@ -11,7 +11,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
 import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewaySettlementEnricher, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetColumnBackfill, DatasetColumnBackfillPass, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewaySettlementEnricher, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetColumnBackfill, DatasetColumnBackfillPass, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetResettlePairs, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { ClaudeToolPairMerge, GatewayState } from './types.js'
  */
@@ -304,6 +304,9 @@ export function aiGatewayDatasetRegistration(state) {
     createDataSource,
     settleBatch: createSettleBatch(state),
     resettleBatch: createResettleBatch(state),
+    // @ref LLP 0620#local [implements]: the re-settle rewrite merges a Claude
+    // tool call both lanes stored, by its key, without the transcript
+    resettlePairs: CLAUDE_TOOL_PAIRS,
     columnBackfill: USAGE_COLUMN_BACKFILL,
   }
 }
@@ -465,6 +468,18 @@ export function claudeToolPairKey(row) {
   if (!session || !toolCallId) return undefined
   return `${session}\0${toolCallId}\0${row.part_type}`
 }
+
+/**
+ * The re-settle rewrite's key-matched merge for Claude tool rows: the columns
+ * `claudeToolPairKey` reads, the key, and the merge.
+ *
+ * @type {DatasetResettlePairs}
+ */
+const CLAUDE_TOOL_PAIRS = Object.freeze({
+  columns: ['client_name', 'provider', 'session_id', 'tool_call_id', 'part_type'],
+  key: claudeToolPairKey,
+  merge: mergeClaudeToolPair,
+})
 
 /** Identity columns the survivor always takes from the native row. */
 const NATIVE_IDENTITY_COLUMNS = Object.freeze([
