@@ -12,7 +12,7 @@ import path from 'node:path'
 import os from 'node:os'
 import test from 'node:test'
 
-import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
+import { appendRowsToSourceTable, discoverCachePartitions, tryReadCursorSync } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { executeQuerySql } from '../../src/core/query/sql.js'
 import { renderLocalOnlyNotice } from '../../src/core/query/verb.js'
@@ -22,7 +22,7 @@ import { writeLocalOnlyDirs } from '../../src/core/usage-policy/local_only.js'
 import { aiGatewayDatasetRegistration, AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 import * as kit from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
-import { graphDatasetRegistration } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
+import { EDGE_COLUMNS, graphDatasetRegistration, graphTablePath } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
 import { mergeRow, projectGraph } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
 import { graphNeighborsVerb } from '../../hypaware-core/plugins-workspace/context-graph/src/verb.js'
 import { enrichDatasetRegistration, enrichTablePath, COMMITTED_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/datasets.js'
@@ -404,4 +404,53 @@ test('Skill rows from the gateway raw-SQL surfaces record their folder', async (
     const synced = byKey((await sql(NODES)).rows)
     assert.equal(synced['Skill:review'].label, 'review', 'visible to a syncing caller')
   }, { partitions: { claude: [marker] } })
+})
+
+// @ref LLP 0616#merge [tests]: incremental evidence unions with the committed source_cwds; a committed unknown stays unknown
+test('incremental skill evidence unions source_cwds with the committed row and never replaces it', async () => {
+  const read = message('sess-skill', 'shared', {
+    role: 'assistant', part_type: 'tool_call', client_name: 'codex', content_text: null,
+    tool_name: 'exec_command', tool_args: { cmd: 'cat /home/test/.codex/skills/review/SKILL.md' },
+  })
+  for (const committed of [null, '["/elsewhere"]']) {
+    await fixture(async ({ dirs, registry, storage, sql }) => {
+      const gateway = contract()
+      const rule = gateway.rules.find((r) => r.type === 'ran' && r.where?.in?.tool_name?.includes('exec_command'))
+      const fresh = /** @type {Record<string, any>} */ (rule?.toRows?.({ ...read, cwd: dirs.shared })[0])
+      // A committed edge from an earlier projection, missing this scan's evidence.
+      await storage.appendRows(graphTablePath(storage, 'edge'), [...EDGE_COLUMNS], [{ ...fresh, props: { dispatch_tool: true }, source_cwds: committed }])
+      await projectGraph({ query: registry, storage, contracts: [gateway] })
+      const rows = (await sql(`SELECT props, source_cwds FROM edge WHERE edge_id = '${fresh.edge_id}'`, { includeLocalOnly: true })).rows
+      assert.equal(rows.length, 1)
+      const props = typeof rows[0].props === 'string' ? JSON.parse(rows[0].props) : rows[0].props
+      assert.deepEqual(props, { dispatch_tool: true, dispatch_file_read: true }, 'the incremental update ran')
+      const expected = committed === null ? null : JSON.stringify(['/elsewhere', dirs.shared].sort())
+      assert.equal(rows[0].source_cwds ?? null, expected, `committed ${committed}`)
+      // Settled evidence is current: the next projection rewrites nothing.
+      const parts = await discoverCachePartitions(storage.cacheRoot, { datasets: ['edge'] })
+      const generations = () => parts.map((part) => tryReadCursorSync(part.path)?.tableDir)
+      const before = generations()
+      await projectGraph({ query: registry, storage, contracts: [gateway] })
+      assert.deepEqual(generations(), before, 'an unchanged row is not rewritten on every tick')
+    }, { partitions: { claude: [read] } })
+  }
+})
+
+// @ref LLP 0616#contribution [tests]: a cwd dataset's shared scan reads cwd even when no declarative rule lists it
+test('a declarative rule that never lists cwd still records the folder of its source rows', async () => {
+  const builders = kit.makeRowBuilders({ sourceDataset: 'ai_gateway_messages', projector: 'probe.t0', projectorVersion: 1 })
+  /** @type {Contract} */
+  const models = {
+    name: 'probe-models', plugin: '@test/probe', sourceDataset: 'ai_gateway_messages', projector: 'probe.t0', projectorVersion: 1,
+    rules: [{
+      kind: 'node', type: 'Model', columns: ['model', 'message_created_at'],
+      toRow: (r) => r.model ? builders.buildNode({ type: 'Model', key: String(r.model), label: String(r.model), firstSeen: r.message_created_at, sourceKeys: { model: r.model } }) : null,
+    }],
+  }
+  await fixture(async ({ dirs, registry, storage, sql }) => {
+    await projectGraph({ query: registry, storage, contracts: [models] })
+    const open = byKey((await sql(NODES, { includeLocalOnly: true })).rows)
+    assert.equal(open['Model:model-shared'].source_cwds, JSON.stringify([dirs.shared]))
+    assert.equal(open['Model:model-both'].source_cwds, JSON.stringify([dirs.private, dirs.shared].sort()))
+  })
 })
