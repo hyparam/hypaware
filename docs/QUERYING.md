@@ -317,7 +317,8 @@ rejects `--include-local-only`.
 ## Follow relationships in the activity graph
 
 When `@hypaware/context-graph` is active, project local recordings before
-walking relationships:
+walking relationships. Graph names, labels and properties show from a syncing
+folder, except for rows built from a `local-only` or ignored folder.
 
 <!-- agent: Use HypAware's activity graph to show which sessions touched src/app.js, two hops in. Over MCP, use graph_neighbors. -->
 ```sh
@@ -326,6 +327,12 @@ hyp query graph src/app.js --type File --direction in --depth 2 --limit 25
 ```
 
 Over MCP, use `graph_neighbors`.
+
+After upgrading from an earlier release, run `hyp graph project --refresh`
+once. Until then every graph name, label and property stays blank, and the
+notice on stderr says so; a plain `hyp graph project`, or the daemon's
+scheduled projection, does not fix it. After the refresh, rows whose
+recordings have since been deleted (by retention or a purge) stay blank.
 
 Replace the example file with one from your recorded work. A seed can be a node
 ID, natural key, or label. An ambiguous seed needs a type or exact ID. A file can

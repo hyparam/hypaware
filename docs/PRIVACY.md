@@ -213,8 +213,11 @@ not yours, so local markings and `.hypignore` never classify them either;
 `hyp session ignore` and export settings still apply.
 
 > **Caution:** **A session is classed by its own directory, not by what it reads.**
-> Local SQL and search normally hide local-only rows from a caller that can
-> sync. If you explicitly include them with `--include-local-only` or copy
+> Local SQL, search and the activity graph normally hide local-only rows from a
+> caller that can sync. A graph node or edge is judged by the folders it was
+> built from: it is hidden if any of them is `local-only` or ignored, and a
+> graph row with no record of its folders stays hidden too. If you explicitly
+> include them with `--include-local-only` or copy
 > private content into another session, that session follows its own directory's
 > class. A report-generating conversation in a `sync` folder can therefore sync
 > the private excerpts it quotes. `hyp report generate` uses the directory you
