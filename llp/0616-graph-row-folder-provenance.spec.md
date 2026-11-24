@@ -113,13 +113,17 @@ and stay suppressed. Nothing rewrites them automatically: LLP 0428 #refresh
 rules out version-triggered mutation.
 
 `hyp graph project --refresh` re-derives matching rows of the same projector
-from current sources, and a re-derived row gets its true `source_cwds`. A row
-whose source rows were retained away is not re-derived and stays null. That
-is the safe failure: a row only becomes visible when its full provenance is
-read again.
+from current sources, and a re-derived row gets its true `source_cwds`.
 
-**Open for review:** whether that is enough, or whether the notice below
-should be the only prompt. Two alternatives were set aside:
+A row whose source messages are gone is not re-derived, and stays null for
+good. That covers rows whose messages retention deleted, and rows whose
+messages a purge removed. It fails closed: the row keeps its structure and
+stays suppressed, and only `--include-local-only` (or a caller at `ignore`)
+reads its content. A row becomes visible only when its full provenance is
+read again. On a machine that already holds a large graph, much of that graph
+can stay nameless after a refresh, and the notice below says so.
+
+Two alternatives were set aside:
 
 1. An automatic refresh on upgrade. It is the version-triggered mutation LLP
    0428 refuses, and it rewrites a large table without the user asking.
@@ -176,10 +180,17 @@ sink keeps withholding them ([LLP 0305 #eligibility](./0305-open-dataset-central
 This change affects only the local read path. It does not make graph rows
 exportable.
 
-hypaware-server reuses the graph code with org-scoped partitions. The new
-column reaches it, so the server suite runs against the client change before
-it lands, and that run checks how server-side graph rows read with the
-column present.
+hypaware-server builds its own graph per organization from the messages it
+holds, with the same projector, so its graph files carry `source_cwds` too,
+filled from the folders those messages record. The server declares its
+graph columns as a fixed list, so `/v1` SQL and the dashboard show nothing of
+the column until the server adds it to that list. Graph rows there have no
+member row rule, so an added column would be read by every member.
+
+Whether the server shows the column, strips it on write, or leaves it unread
+is an open server decision, not part of this change. This change runs the
+server suite against the client before it lands, because the projector the
+server imports now writes the column.
 
 ## Schema change {#schema}
 
