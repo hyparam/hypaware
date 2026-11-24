@@ -98,7 +98,7 @@ const OWNED = [
   'config-control', 'usage-policy', 'product-telemetry', 'session-ignores', 'sync-check',
   'run', 'processing', 'logs', 'sinks', 'tls', 'spool', 'dev-telemetry', 'cache', 'hypaware', '.hyp', 'ask',
   'client-assets.json', 'remote-credentials.json', 'self-update.json', 'status.json', 'hypaware.pid',
-  'daemon.log', 'state.json', 'seed.json', 'client-actions.json', 'hypaware-config.json', 'entrypoint.json',
+  'daemon.log', 'state.json', 'seed.json', 'client-actions.json', 'hypaware-config.json',
 ]
 const ROOT_IDENTS = ['stateRoot', 'stateDir', 'hypHome', 'controlDir', 'processingRoot', 'cacheRoot']
 const SCAN = new RegExp(

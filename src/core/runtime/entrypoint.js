@@ -5,13 +5,14 @@
 // A machine can carry more than one HypAware: an npm global, an npx cache, a
 // dev checkout, and the copy a native app bundles. Each writes the service
 // unit and the client hooks with its own path, so two copies take the daemon
-// and the hooks back and forth. The entry point is a small state file naming
-// the one copy that owns them. Every other copy hands its command to that one,
-// so the service, the hooks, and the updater are only ever written by the
-// owner.
+// and the hooks back and forth. The local config's `entrypoint` key names the
+// one copy that owns them. Every other copy hands its command to that one, so
+// the service, the hooks, and the updater are only ever written by the owner.
 //
 // This module is imported statically by bin/hypaware.js ahead of every other
-// kernel module, so it stays on node built-ins and runtime/paths.js.
+// kernel module, so it stays on node built-ins and runtime/paths.js, and reads
+// the key with a bare JSON parse rather than the config loader (the same
+// reasoning as the self-update lane's `auto_update` read, LLP 0309).
 //
 // @ref LLP 0621#decision: one pointer, read at the front door; the owner does the work
 
@@ -21,7 +22,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { entrypointStatePath, hypHomeFromEnv, stateRootOf } from './paths.js'
+import { hypHomeFromEnv, localConfigPath } from './paths.js'
 
 /**
  * @import { EntrypointRecord } from '../../../src/core/runtime/types.js'
@@ -40,68 +41,70 @@ const LOCAL_COMMANDS = new Set(['entrypoint'])
 export const SELF_BIN_PATH = fileURLToPath(new URL('../../../bin/hypaware.js', import.meta.url))
 
 /**
- * `<HYP_HOME>/hypaware/entrypoint.json`.
+ * The local config file the entry point is read from: `--config <path>` when
+ * the invocation names one (the service unit always does), else `HYP_CONFIG`,
+ * else `<HYP_HOME>/hypaware-config.json`. The same order `resolveConfigPath`
+ * uses, without importing boot.
  *
  * @param {NodeJS.ProcessEnv} [env]
+ * @param {string[]} [argv]
  * @returns {string}
  */
-export function entrypointPath(env = process.env) {
-  return entrypointStatePath(stateRootOf(hypHomeFromEnv(env)))
+export function entrypointConfigPath(env = process.env, argv = []) {
+  const explicit = configFlag(argv)
+  if (explicit) return path.resolve(explicit)
+  if (env.HYP_CONFIG) return path.resolve(env.HYP_CONFIG)
+  return localConfigPath(hypHomeFromEnv(env))
 }
 
 /**
- * The recorded entry point, or `undefined` when none is set or the file is
- * unreadable or malformed. A broken pointer never blocks a command.
+ * @param {string[]} argv
+ * @returns {string | undefined}
+ */
+function configFlag(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token.startsWith('--config=')) return token.slice('--config='.length)
+    if (token !== '--config') continue
+    const next = argv[i + 1]
+    if (next !== undefined && !next.startsWith('--')) return next
+  }
+  return undefined
+}
+
+/**
+ * The `entrypoint` value as the config holds it, or `undefined` when it is
+ * absent or not a usable shape. Shared by the front-door read and the schema.
  *
- * @param {NodeJS.ProcessEnv} [env]
+ * @param {unknown} value
  * @returns {EntrypointRecord | undefined}
  */
-export function readEntrypoint(env = process.env) {
-  let text
-  try {
-    text = fs.readFileSync(entrypointPath(env), 'utf8')
-  } catch {
-    return undefined
-  }
-  try {
-    const value = JSON.parse(text)
-    if (!value || typeof value !== 'object' || typeof value.bin !== 'string' || !path.isAbsolute(value.bin)) return undefined
-    /** @type {EntrypointRecord} */
-    const record = { bin: value.bin }
-    if (typeof value.node === 'string' && path.isAbsolute(value.node)) record.node = value.node
-    if (typeof value.owner === 'string' && value.owner) record.owner = value.owner
-    return record
-  } catch {
-    return undefined
-  }
+export function parseEntrypoint(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const v = /** @type {Record<string, unknown>} */ (value)
+  if (typeof v.bin !== 'string' || !path.isAbsolute(v.bin)) return undefined
+  /** @type {EntrypointRecord} */
+  const record = { bin: v.bin }
+  if (typeof v.node === 'string' && path.isAbsolute(v.node)) record.node = v.node
+  if (typeof v.owner === 'string' && v.owner) record.owner = v.owner
+  return record
 }
 
 /**
- * Record `record` as the entry point, atomically (write then rename).
- *
- * @param {EntrypointRecord} record
- * @param {NodeJS.ProcessEnv} [env]
- */
-export function writeEntrypoint(record, env = process.env) {
-  const file = entrypointPath(env)
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.tmp`
-  fs.writeFileSync(tmp, JSON.stringify({ version: 1, ...record }, null, 2) + '\n')
-  fs.renameSync(tmp, file)
-}
-
-/**
- * Remove the entry point. Returns whether a file was removed.
+ * The entry point recorded in the local config, or `undefined` when none is
+ * set or the file is missing, unreadable, or malformed. A broken config never
+ * blocks a command here; the loader reports it as it always has.
  *
  * @param {NodeJS.ProcessEnv} [env]
- * @returns {boolean}
+ * @param {string[]} [argv]
+ * @returns {EntrypointRecord | undefined}
  */
-export function clearEntrypoint(env = process.env) {
+export function readEntrypoint(env = process.env, argv = []) {
   try {
-    fs.unlinkSync(entrypointPath(env))
-    return true
+    const raw = JSON.parse(fs.readFileSync(entrypointConfigPath(env, argv), 'utf8'))
+    return raw && typeof raw === 'object' ? parseEntrypoint(raw.entrypoint) : undefined
   } catch {
-    return false
+    return undefined
   }
 }
 
@@ -129,10 +132,11 @@ export function sameBin(a, b) {
  * next behaves as it would with none set.
  *
  * @param {NodeJS.ProcessEnv} [env]
+ * @param {string[]} [argv]
  * @returns {EntrypointRecord | undefined}
  */
-export function liveEntrypoint(env = process.env) {
-  const record = readEntrypoint(env)
+export function liveEntrypoint(env = process.env, argv = []) {
+  const record = readEntrypoint(env, argv)
   if (!record) return undefined
   try {
     if (!fs.statSync(record.bin).isFile()) return undefined
@@ -154,7 +158,7 @@ export function liveEntrypoint(env = process.env) {
 export function handoffTarget(argv, env = process.env, selfBin = SELF_BIN_PATH) {
   if (env[HANDOFF_ENV] === '1' || env[NO_HANDOFF_ENV] === '1') return undefined
   if (argv[0] !== undefined && LOCAL_COMMANDS.has(argv[0])) return undefined
-  const record = liveEntrypoint(env)
+  const record = liveEntrypoint(env, argv)
   if (!record || sameBin(record.bin, selfBin)) return undefined
   return record
 }

@@ -414,7 +414,7 @@ export interface ClientAssetLedgerRecord {
 }
 
 /**
- * `<HYP_HOME>/hypaware/entrypoint.json`: the copy of the CLI that owns this
+ * The local config's `entrypoint` key: the copy of the CLI that owns this
  * machine. `bin` is its `bin/hypaware.js`; `node` the runtime to start it with
  * when it is not the invoking one (a native app's bundled node); `owner` a
  * label for messages, such as `HypAware.app`.

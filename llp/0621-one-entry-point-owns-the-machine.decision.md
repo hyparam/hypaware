@@ -8,8 +8,8 @@
 **Related:** LLP 0309 (kernel auto-update), LLP 0405 (the unversioned global CLI install), LLP 0541 (the updater runs its own npm install), LLP 0380 (an installed copy yields to the bundled one: the same posture applied to plugins)
 
 > A machine can carry more than one copy of the CLI, and each writes the
-> service and the client hooks with its own path. A small state file,
-> `<HYP_HOME>/hypaware/entrypoint.json`, names the copy that owns the machine.
+> service and the client hooks with its own path. One key in the local config,
+> `entrypoint`, names the copy that owns the machine.
 > Every other copy hands its command to that one before doing anything else,
 > so the service, the hooks, and the package are only ever written by the
 > owner.
@@ -35,12 +35,28 @@ update) would leave every future command to remember the rule.
 
 ## Decision {#decision}
 
-One pointer, read at the front door. `entrypoint.json` records `bin` (the
+One pointer, read at the front door. The local config
+(`hypaware-config.json`) gets a top-level `entrypoint` key holding `bin` (the
 owning copy's `bin/hypaware.js`), optionally `node` (the runtime to start it
-with, for an app that bundles one) and `owner` (a label for messages). It is
-machine state beside `run/self-update.json`, not user config: an installer
-writes it, central config has no reason to override it, and reading it must
-not need the config codec.
+with, for an app that bundles one) and `owner` (a label for messages).
+
+### The config key {#config-key}
+
+It lives in the config rather than a state file of its own, so there is one
+file to look at for how this machine is set up.
+
+- **Read without the loader.** The front door parses the file with a bare
+  `JSON.parse` and takes the one key, as the self-update lane already does for
+  `auto_update` (LLP 0309#config-key). It follows the same path order as
+  `resolveConfigPath`: `--config`, then `HYP_CONFIG`, then
+  `<HYP_HOME>/hypaware-config.json`. A config that is missing or will not
+  parse reads as no entry point; the loader still reports it.
+- **Local only.** It names a path on one machine, so the merge takes it from
+  the local layer and ignores a central value, as it does for `query`.
+- **Written by merge.** `claim` and `release` read the file, set or drop the
+  one key, and write it back atomically with an mtime check, leaving every
+  other key alone. A command that rewrites the whole config (an attended
+  `hyp setup`) can drop it; the installer claims again on its next pass.
 
 ### The front door {#front-door}
 
@@ -54,13 +70,14 @@ per-command rule.
 
 - **Dead pointer.** When `bin` no longer exists (the app was deleted without
   its uninstaller, an nvm switch moved the npm prefix), the pointer reads as
-  unset and the invoked copy runs as it would with none. It is not deleted on
+  unset and the invoked copy runs as it would with none. It is not removed on
   read; the next `claim` replaces it.
 - **No loops.** The child gets `HYP_ENTRYPOINT_HANDOFF=1` and runs whatever
   the pointer says.
 - **Developer escape.** `HYP_NO_HANDOFF=1` runs the invoked copy.
-- **Cost.** One `readFileSync` of a missing or tiny file per invocation,
-  hooks included. The module uses node built-ins only.
+- **Cost.** One `readFileSync` and `JSON.parse` of the local config per
+  invocation, hooks included. The config is small, and the module uses node
+  built-ins and `runtime/paths.js` only.
 
 ### Claiming {#claim}
 

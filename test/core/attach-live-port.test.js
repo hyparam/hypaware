@@ -734,9 +734,9 @@ function seedClaudeMarker(home, bin) {
  * @param {string} bin
  */
 function seedEntrypoint(home, bin) {
-  const dir = path.join(home, '.hyp', 'hypaware')
+  const dir = path.join(home, '.hyp')
   mkdirSync(dir, { recursive: true })
-  writeFileSync(path.join(dir, 'entrypoint.json'), JSON.stringify({ version: 1, bin }))
+  writeFileSync(path.join(dir, 'hypaware-config.json'), JSON.stringify({ version: 2, entrypoint: { bin } }))
 }
 
 // @ref LLP 0621#hooks [tests]: hooks naming a copy other than the entry point re-attach

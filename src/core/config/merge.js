@@ -93,6 +93,9 @@ export function mergeConfigLayers(central, local) {
   if (central.auto_update !== undefined) effective.auto_update = central.auto_update
   else if (local?.auto_update !== undefined) effective.auto_update = local.auto_update
 
+  // @ref LLP 0621#config-key: local-only, it names a path on this machine; a central value is ignored
+  if (local?.entrypoint !== undefined) effective.entrypoint = local.entrypoint
+
   // @ref LLP 0578#org-owned [implements]: only the org turns the review hold off, so a local value never counts here
   if (central.first_sync_hold !== undefined) effective.first_sync_hold = central.first_sync_hold
 
@@ -158,6 +161,7 @@ export function resolveLayeredConfig({ central, local, validate }) {
   if (Object.keys(central.disambiguate ?? {}).length > 0) current.disambiguate = { ...central.disambiguate }
   if (base.effective.query !== undefined) current.query = base.effective.query
   if (base.effective.auto_update !== undefined) current.auto_update = base.effective.auto_update
+  if (base.effective.entrypoint !== undefined) current.entrypoint = base.effective.entrypoint
   if (base.effective.first_sync_hold !== undefined) current.first_sync_hold = base.effective.first_sync_hold
   if (base.effective.redaction !== undefined) current.redaction = base.effective.redaction
 
@@ -229,6 +233,7 @@ function cloneShallow(cfg) {
   if (cfg.disambiguate) out.disambiguate = { ...cfg.disambiguate }
   if (cfg.query !== undefined) out.query = cfg.query
   if (cfg.auto_update !== undefined) out.auto_update = cfg.auto_update
+  if (cfg.entrypoint !== undefined) out.entrypoint = cfg.entrypoint
   if (cfg.first_sync_hold !== undefined) out.first_sync_hold = cfg.first_sync_hold
   if (cfg.redaction !== undefined) out.redaction = cfg.redaction
   return out

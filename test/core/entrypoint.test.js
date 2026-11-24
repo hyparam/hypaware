@@ -13,12 +13,9 @@ import {
   HANDOFF_ENV,
   NO_HANDOFF_ENV,
   SELF_BIN_PATH,
-  entrypointPath,
   handoffTarget,
   liveEntrypoint,
   readEntrypoint,
-  runHandoff,
-  writeEntrypoint,
 } from '../../src/core/runtime/entrypoint.js'
 
 const BIN = fileURLToPath(new URL('../../bin/hypaware.js', import.meta.url))
@@ -53,21 +50,52 @@ process.exit(${code})
   return { bin, out }
 }
 
+/**
+ * Write the local config with `entrypoint` set (or absent), plus a key the
+ * claim and release must leave alone.
+ *
+ * @param {string} home
+ * @param {unknown} [entrypoint]
+ */
+function writeConfig(home, entrypoint) {
+  mkdirSync(home, { recursive: true })
+  writeFileSync(configPath(home), JSON.stringify({ version: 2, auto_update: false, ...(entrypoint === undefined ? {} : { entrypoint }) }))
+}
+
+/** @param {string} home */
+function configPath(home) {
+  return path.join(home, 'hypaware-config.json')
+}
+
 /** @param {string} home */
 function envFor(home) {
   return { ...process.env, HYP_HOME: home, [HANDOFF_ENV]: '', [NO_HANDOFF_ENV]: '' }
 }
 
-test('no file, a malformed file, or a relative bin reads as no entry point', async () => {
+test('no config, a malformed config, no key, or a relative bin reads as no entry point', async () => {
   await withTemp((home) => {
     const env = envFor(home)
     assert.equal(readEntrypoint(env), undefined)
-    mkdirSync(path.dirname(entrypointPath(env)), { recursive: true })
-    writeFileSync(entrypointPath(env), '{not json')
+    writeFileSync(configPath(home), '{not json')
     assert.equal(readEntrypoint(env), undefined)
-    writeFileSync(entrypointPath(env), JSON.stringify({ bin: 'relative/hypaware.js' }))
+    writeConfig(home)
+    assert.equal(readEntrypoint(env), undefined)
+    writeConfig(home, { bin: 'relative/hypaware.js' })
     assert.equal(readEntrypoint(env), undefined)
     assert.equal(handoffTarget(['status'], env), undefined)
+  })
+})
+
+test('the entry point is read from the config the invocation names', async () => {
+  await withTemp((home) => {
+    const env = envFor(home)
+    const { bin } = fakeOwner(home, 0)
+    const other = path.join(home, 'other-config.json')
+    writeFileSync(other, JSON.stringify({ version: 2, entrypoint: { bin } }))
+    assert.equal(readEntrypoint(env), undefined)
+    assert.deepEqual(readEntrypoint(env, ['daemon', 'run', '--config', other]), { bin })
+    assert.deepEqual(readEntrypoint(env, [`--config=${other}`]), { bin })
+    assert.deepEqual(readEntrypoint({ ...env, HYP_CONFIG: other }), { bin })
   })
 })
 
@@ -77,7 +105,7 @@ test('hand off only to a live entry point that is not this copy', async () => {
     const env = envFor(home)
     const { bin } = fakeOwner(home, 0)
 
-    writeEntrypoint({ bin }, env)
+    writeConfig(home, { bin })
     assert.deepEqual(handoffTarget(['status'], env), { bin })
 
     // The guards: the child of a hand-off, the developer escape, and the
@@ -87,15 +115,15 @@ test('hand off only to a live entry point that is not this copy', async () => {
     assert.equal(handoffTarget(['entrypoint', 'claim'], env), undefined)
 
     // This copy, directly or through a symlink.
-    writeEntrypoint({ bin: SELF_BIN_PATH }, env)
+    writeConfig(home, { bin: SELF_BIN_PATH })
     assert.equal(handoffTarget(['status'], env), undefined)
     const link = path.join(home, 'hyp-link.js')
     symlinkSync(SELF_BIN_PATH, link)
-    writeEntrypoint({ bin: link }, env)
+    writeConfig(home, { bin: link })
     assert.equal(handoffTarget(['status'], env), undefined)
 
     // Dead: the copy it names is gone.
-    writeEntrypoint({ bin: path.join(home, 'gone', 'bin', 'hypaware.js') }, env)
+    writeConfig(home, { bin: path.join(home, 'gone', 'bin', 'hypaware.js') })
     assert.equal(liveEntrypoint(env), undefined)
     assert.equal(handoffTarget(['status'], env), undefined)
   })
@@ -120,7 +148,7 @@ test('the CLI hands a command to the entry point and runs nothing itself', async
   await withTemp((home) => {
     const env = envFor(home)
     const { bin, out } = fakeOwner(home, 3)
-    writeEntrypoint({ bin, node: process.execPath, owner: 'Test.app' }, env)
+    writeConfig(home, { bin, node: process.execPath, owner: 'Test.app' })
 
     const result = spawnSync(process.execPath, [BIN, 'daemon', 'run'], { env, input: '' })
     assert.equal(result.status, 3)
@@ -143,7 +171,7 @@ test('hyp entrypoint claim, show, and release', async () => {
 
     // Another copy owns it: claim still runs here (never handed off).
     const { bin, out } = fakeOwner(home, 0)
-    writeEntrypoint({ bin }, env)
+    writeConfig(home, { bin })
     r = hyp(['release'])
     assert.equal(r.status, 1)
     assert.match(r.stderr, /--force/)
@@ -158,8 +186,34 @@ test('hyp entrypoint claim, show, and release', async () => {
     r = hyp(['--json'])
     assert.equal(JSON.parse(r.stdout).is_self, true)
 
+    const afterClaim = JSON.parse(readFileSync(configPath(home), 'utf8'))
+    assert.equal(afterClaim.auto_update, false, 'claim keeps the rest of the config')
+
     r = hyp(['release'])
     assert.equal(r.status, 0, r.stderr)
     assert.equal(readEntrypoint(env), undefined)
+    const afterRelease = JSON.parse(readFileSync(configPath(home), 'utf8'))
+    assert.deepEqual(afterRelease, { version: 2, auto_update: false }, 'release removes only the key')
   })
+})
+
+// @ref LLP 0621#config-key [tests]: the key validates, and only the local layer sets it
+test('the config schema accepts entrypoint, rejects a bad one, and the merge keeps it local', async () => {
+  const { parseConfigShape } = await import('../../src/core/config/schema.js')
+  const { mergeConfigLayers } = await import('../../src/core/config/merge.js')
+
+  const good = parseConfigShape({ version: 2, entrypoint: { bin: '/app/bin/hypaware.js', node: '/app/node', owner: 'HypAware.app' } })
+  assert.equal(good.ok, true)
+  if (good.ok) assert.deepEqual(good.config.entrypoint, { bin: '/app/bin/hypaware.js', node: '/app/node', owner: 'HypAware.app' })
+
+  const bad = parseConfigShape({ version: 2, entrypoint: { bin: 'relative.js' } })
+  assert.equal(bad.ok, false)
+  if (!bad.ok) assert.deepEqual(bad.errors.map((e) => e.pointer), ['/entrypoint'])
+
+  const local = { version: 2, entrypoint: { bin: '/app/bin/hypaware.js' } }
+  const central = { version: 2, entrypoint: { bin: '/org/bin/hypaware.js' }, auto_update: true }
+  const merged = mergeConfigLayers(/** @type {any} */ (central), /** @type {any} */ (local))
+  assert.deepEqual(merged.effective.entrypoint, { bin: '/app/bin/hypaware.js' })
+  const centralOnly = mergeConfigLayers(/** @type {any} */ (central), /** @type {any} */ ({ version: 2 }))
+  assert.equal(centralOnly.effective.entrypoint, undefined, 'a central entry point is ignored')
 })

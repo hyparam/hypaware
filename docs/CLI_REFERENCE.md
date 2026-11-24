@@ -2479,8 +2479,8 @@ See [updating and recovery](CLI.md#update-hypaware).
 hyp entrypoint [show|claim|release] [--node <path>] [--owner <label>] [--force] [--json]
 ```
 
-Shows or sets which copy of `hyp` owns this machine, recorded in
-`<HYP_HOME>/hypaware/entrypoint.json`. When it names another copy that still
+Shows or sets which copy of `hyp` owns this machine, recorded as the
+`entrypoint` key in the local config. When it names another copy that still
 exists, every command run from this copy runs there instead, so the service,
 the client hooks, and updates come from one place. An installer that bundles
 its own copy (the native app, an MDM package) runs `claim` through that copy;
