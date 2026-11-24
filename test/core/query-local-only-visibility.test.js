@@ -256,6 +256,7 @@ test('suppression: unprovenanced rows in a content-declaring dataset expose stru
     { node_id: 'n-2', label: null },
   ])
   assert.equal(out.localOnly.suppressedRows, 2)
+  assert.equal(out.localOnly.unprovenancedRows, 2, 'a dataset that records no provenance counts every suppressed row as unprovenanced')
   assert.equal(out.localOnly.withheldRows, 0)
 })
 
