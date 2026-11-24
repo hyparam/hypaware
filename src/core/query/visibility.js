@@ -7,7 +7,7 @@ import { CLASS_RANK, createUsagePolicyResolver } from '../usage-policy/matcher.j
 import { localOnlyListPath } from '../usage-policy/local_only.js'
 
 /**
- * @import { AsyncRow, PrepareScan, RelationSchema } from 'squirreling'
+ * @import { AsyncBatch, AsyncRow, ColumnVector, PrepareScan, RelationSchema, RowSelection, SqlPrimitive } from 'squirreling'
  * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { UsageClass, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
@@ -16,6 +16,46 @@ import { localOnlyListPath } from '../usage-policy/local_only.js'
 
 /** The top of the restrictiveness lattice: a caller this class sees every row. */
 const MAX_CLASS_RANK = Math.max(...Object.values(CLASS_RANK))
+
+/**
+ * The column a derived dataset declares among its content columns to record
+ * the folders that contributed to each row: a sorted JSON array of paths,
+ * `[]` for folderless, or null for unknown (LLP 0616 #column).
+ */
+export const PROVENANCE_COLUMN = 'source_cwds'
+
+/** Provenance verdicts: content passes, a folder outranks the caller, or no recorded provenance. */
+const VISIBLE = 0
+const HIDDEN = 1
+const UNKNOWN = 2
+
+/**
+ * The most distinct `source_cwds` strings one query remembers a verdict for.
+ * Most rows hold a single folder, so real graphs stay far below it; past it a
+ * value is classified afresh each time (still through the per-folder memo).
+ */
+const PROVENANCE_MEMO_LIMIT = 65_536
+
+/**
+ * Decode a stored `source_cwds` value into its folders, or null when the
+ * provenance is unknown: null, absent, or anything but a JSON array of
+ * strings. Unreadable reads as unknown, so a damaged value fails closed.
+ *
+ * @param {unknown} value
+ * @returns {string[] | null}
+ */
+export function parseSourceCwds(value) {
+  if (typeof value !== 'string') return null
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed) || !parsed.every((folder) => typeof folder === 'string')) return null
+  return parsed
+}
 
 /**
  * Build the resolver the query seam consults when the caller supplied none:
@@ -113,6 +153,11 @@ export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
  *   provenance) keep their structural columns but have those content-bearing
  *   columns SUPPRESSED to null (counted in `report.suppressedRows`), because
  *   an unprovenanced row cannot prove it is safe for this caller;
+ * - in such a dataset that also declares the `source_cwds` provenance column
+ *   among its content columns (the graph tables), the row's recorded folders
+ *   decide instead: content passes when none outranks the caller, and is
+ *   suppressed (and also counted in `report.unprovenancedRows` when the
+ *   value is null or unreadable) otherwise;
  * - rows without a `cwd` value in a plain `cwd`-bearing dataset pass through
  *   whole: the export seam forwards exactly those rows, so they are already
  *   `full`-class by construction and hiding them here would claim a privacy
@@ -149,6 +194,8 @@ export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
  * - schema-aligned sources without cwd suppress content as constant null
  *   vectors. Content demands keep WHERE residual, evaluated after suppression;
  *   structural columns retain lazy native reads and existing selections.
+ *   With `source_cwds` declared, content demands read it once per batch and
+ *   mask only the suppressed rows (see `prepareProvenanceScan`).
  *
  * @ref LLP 0105 [implements]: the one shared filter at the query read path; caller class >= row class on the lattice, never per-command
  * @ref LLP 0105#graph-provenance [implements]: rows lacking per-row cwd provenance get their declared content-bearing columns suppressed, never surfaced
@@ -182,6 +229,27 @@ export function withLocalOnlyVisibility(source, opts) {
     return verdict
   }
   const declaredContent = opts.contentColumns.filter((c) => source.columns.includes(c))
+  // A content-declaring dataset whose rows record their folders: content is
+  // judged per row from those folders instead of suppressed outright.
+  const hasProvenance = !hasCwd && declaredContent.includes(PROVENANCE_COLUMN)
+  // Most rows hold one folder, so distinct values stay near the folder count.
+  /** @type {Map<string, number>} */
+  const verdictByProvenance = new Map()
+  /**
+   * @param {unknown} value a row's `source_cwds`
+   * @returns {number} VISIBLE, HIDDEN or UNKNOWN
+   * @ref LLP 0616#read [implements]: null suppresses; else the highest folder rank against the caller's, memoized per distinct string
+   */
+  function provenanceVerdict(value) {
+    if (typeof value !== 'string') return UNKNOWN
+    let verdict = verdictByProvenance.get(value)
+    if (verdict === undefined) {
+      const folders = parseSourceCwds(value)
+      verdict = folders === null ? UNKNOWN : folders.some(withheld) ? HIDDEN : VISIBLE
+      if (verdictByProvenance.size < PROVENANCE_MEMO_LIMIT) verdictByProvenance.set(value, verdict)
+    }
+    return verdict
+  }
 
   /** @type {ScannableDataSource} */
   const guarded = {
@@ -193,9 +261,11 @@ export function withLocalOnlyVisibility(source, opts) {
       const forceCwd = hasCwd && requested !== undefined && !requested.includes('cwd')
       const toSuppress = declaredContent.filter((c) => scannedColumns.includes(c))
       const suppression = toSuppress.length > 0
+      // @ref LLP 0616#read [implements]: content demanded forces source_cwds into the scan, as cwd is forced; stripped when not asked for
+      const forceProvenance = hasProvenance && suppression && requested !== undefined && !requested.includes(PROVENANCE_COLUMN)
       const inner = source.scan({
         ...(options ?? {}),
-        columns: forceCwd ? [...requested, 'cwd'] : requested,
+        columns: forceCwd ? [...requested, 'cwd'] : forceProvenance ? [...requested, PROVENANCE_COLUMN] : requested,
         limit: undefined,
         offset: undefined,
         ...(suppression ? { where: undefined } : {}),
@@ -219,12 +289,25 @@ export function withLocalOnlyVisibility(source, opts) {
               continue
             }
             const passed = forceCwd ? withoutColumn(row, 'cwd') : row
-            if (suppression) {
-              report.suppressedRows += 1
-              yield suppressColumns(passed, toSuppress)
-            } else {
+            if (!suppression) {
               yield passed
+              continue
             }
+            if (hasProvenance) {
+              const verdict = provenanceVerdict(await readCell(row, PROVENANCE_COLUMN))
+              const out = forceProvenance ? withoutColumn(row, PROVENANCE_COLUMN) : row
+              if (verdict === VISIBLE) {
+                yield out
+                continue
+              }
+              report.suppressedRows += 1
+              if (verdict === UNKNOWN) report.unprovenancedRows += 1
+              yield suppressColumns(out, toSuppress)
+              continue
+            }
+            report.suppressedRows += 1
+            report.unprovenancedRows += 1
+            yield suppressColumns(passed, toSuppress)
           }
         },
       }
@@ -241,7 +324,9 @@ export function withLocalOnlyVisibility(source, opts) {
       guarded.prepareScan = prepareVisibleScan(source.prepareScan.bind(source), schema, { withheld, report })
     } else if (!hasCwd && declaredContent.length > 0) {
       guarded.schema = { fields: schema.fields.map(field => declaredContent.includes(field.name) ? { ...field, nullable: true } : field) }
-      guarded.prepareScan = prepareSuppressedScan(source.prepareScan.bind(source), guarded.schema, declaredContent, report)
+      guarded.prepareScan = hasProvenance
+        ? prepareProvenanceScan(source.prepareScan.bind(source), guarded.schema, declaredContent, { provenanceVerdict, report })
+        : prepareSuppressedScan(source.prepareScan.bind(source), guarded.schema, declaredContent, report)
     }
   }
   // A row-path wrapper keeps the column types (suppressed content may be
@@ -284,7 +369,11 @@ function prepareSuppressedScan(prepareScan, schema, contentColumns, report) {
       async *batches({ signal } = {}) {
         for await (const batch of inner.batches({ signal })) {
           signal?.throwIfAborted()
-          if (demandedContent) report.suppressedRows += selectedRowCount(batch.selection)
+          if (demandedContent) {
+            const count = selectedRowCount(batch.selection)
+            report.suppressedRows += count
+            report.unprovenancedRows += count
+          }
           yield {
             selection: batch.selection,
             columns: batch.columns.map((column, columnIndex) => {
@@ -297,6 +386,151 @@ function prepareSuppressedScan(prepareScan, schema, contentColumns, report) {
       },
     }
   }
+}
+
+/**
+ * Content suppression judged per row from the recorded folders. A scan that
+ * demands no content column is the plain suppressed scan, which then
+ * suppresses nothing. One that does reads `source_cwds` once per batch (forced
+ * into the scan, stripped from the output when not requested) and builds a
+ * mask over the batch's base rows: a batch with no suppressed row passes its
+ * vectors through unchanged, a fully suppressed batch gets constant nulls, and
+ * a mixed batch masks each content column lazily, reading only its visible
+ * rows. Every other LLP 0431 rule holds: the WHERE stays residual, a top-k
+ * over content or ahead of that WHERE is not forwarded, and range hints and
+ * exact counts never cross.
+ *
+ * @param {PrepareScan} prepareScan
+ * @param {RelationSchema} schema
+ * @param {string[]} contentColumns
+ * @param {{ provenanceVerdict: (value: unknown) => number, report: LocalOnlyVisibilityReport }} opts
+ * @returns {PrepareScan}
+ * @ref LLP 0616#read [implements]: the native batch path reads the provenance vector once per batch and masks only what it must
+ */
+function prepareProvenanceScan(prepareScan, schema, contentColumns, { provenanceVerdict, report }) {
+  const suppressedScan = prepareSuppressedScan(prepareScan, schema, contentColumns, report)
+  const provenanceField = /** @type {NonNullable<ReturnType<typeof schema.fields.find>>} */ (schema.fields.find((field) => field.name === PROVENANCE_COLUMN))
+  /** @param {number} id */
+  const isContent = (id) => schema.fields.some((field) => field.id === id && contentColumns.includes(field.name))
+  return (request) => {
+    if (!request.columns.some((demand) => isContent(demand.field))) return suppressedScan(request)
+    const ordersByContent = request.topK?.orderBy.some((term) => isContent(term.field))
+    const columns = request.columns.map((demand) => demand.field === provenanceField.id
+      ? { ...demand, mode: /** @type {const} */ ('required'), phase: 0 }
+      : demand)
+    if (!columns.some((demand) => demand.field === provenanceField.id)) {
+      columns.push({ field: provenanceField.id, phase: 0, purpose: 'filter', mode: 'required' })
+    }
+    const inner = prepareScan({
+      ...request,
+      columns,
+      filter: undefined,
+      limit: undefined,
+      offset: undefined,
+      topK: ordersByContent || request.filter !== undefined ? undefined : request.topK,
+    })
+    const requestedFields = request.columns.map((demand) => {
+      const field = schema.fields.find((field) => field.id === demand.field)
+      if (!field) throw new Error(`Visibility scan requested unknown field id ${demand.field}`)
+      return field
+    })
+    const indexOf = (/** @type {string} */ name) => {
+      const index = inner.schema.fields.findIndex((field) => field.name === name)
+      if (index < 0) throw new Error(`Visibility scan missing field ${name}`)
+      return index
+    }
+    const provenanceIndex = indexOf(PROVENANCE_COLUMN)
+    const outputIndices = requestedFields.map((field) => indexOf(field.name))
+    const suppressed = requestedFields.map((field) => contentColumns.includes(field.name))
+    return {
+      schema: { fields: requestedFields },
+      residual: { filter: request.filter, limit: request.limit, offset: request.offset },
+      properties: inner.properties.maxRows === undefined ? {} : { maxRows: inner.properties.maxRows },
+      async *batches({ signal } = {}) {
+        for await (const batch of inner.batches({ signal })) {
+          signal?.throwIfAborted()
+          const provenance = await readBatchColumn({ batch, columnIndex: provenanceIndex, signal })
+          const count = selectedRowCount(batch.selection)
+          let hidden = 0
+          let unknown = 0
+          /** @type {Uint8Array | undefined} */
+          let masked
+          for (let i = 0; i < count; i++) {
+            if (i % 4096 === 0) signal?.throwIfAborted()
+            const verdict = provenanceVerdict(valueAt(provenance, i))
+            if (verdict === VISIBLE) continue
+            hidden++
+            if (verdict === UNKNOWN) unknown++
+            masked ??= new Uint8Array(batch.selection.length)
+            masked[baseRowAt(batch.selection, i)] = 1
+          }
+          report.suppressedRows += hidden
+          report.unprovenancedRows += unknown
+          const mask = masked
+          yield {
+            selection: batch.selection,
+            columns: outputIndices.map((columnIndex, output) => {
+              if (suppressed[output] && hidden > 0) {
+                if (hidden === count || !mask) return { type: 'constant', value: null, length: batch.selection.length }
+                return { read: ({ selection, signal }) => readMasked(batch, columnIndex, selection, mask, signal) }
+              }
+              const column = batch.columns[columnIndex]
+              if (!('read' in column)) return column
+              // Keep the original batch and its read cache: deferred readers
+              // may address sibling columns or physical row ordinals.
+              return { read: ({ selection, signal }) => readBatchColumn({ batch, columnIndex, selection, signal }) }
+            }),
+          }
+        }
+      },
+    }
+  }
+}
+
+/**
+ * Read one content column through a row mask: masked rows read null and are
+ * never decoded; only the visible rows of `selection` are read.
+ *
+ * @param {AsyncBatch} batch
+ * @param {number} columnIndex
+ * @param {RowSelection} selection over the batch's base rows
+ * @param {Uint8Array} masked 1 at each suppressed base row
+ * @param {AbortSignal | undefined} signal
+ * @returns {Promise<ColumnVector>}
+ */
+async function readMasked(batch, columnIndex, selection, masked, signal) {
+  const count = selectedRowCount(selection)
+  const visible = new Uint32Array(count)
+  let kept = 0
+  for (let i = 0; i < count; i++) {
+    const base = baseRowAt(selection, i)
+    if (!masked[base]) visible[kept++] = base
+  }
+  /** @type {SqlPrimitive[]} */
+  const values = new Array(count).fill(null)
+  if (kept > 0) {
+    const vector = await readBatchColumn({
+      batch, columnIndex, signal,
+      selection: { type: 'indices', indices: visible.subarray(0, kept), length: selection.length },
+    })
+    for (let i = 0, j = 0; i < count; i++) {
+      if (!masked[baseRowAt(selection, i)]) values[i] = valueAt(vector, j++)
+    }
+  }
+  return { type: 'values', values, length: count }
+}
+
+/**
+ * The base-domain row a selection's `index`th selected row addresses.
+ *
+ * @param {RowSelection} selection
+ * @param {number} index
+ * @returns {number}
+ */
+function baseRowAt(selection, index) {
+  if (selection.type === 'all') return index
+  if (selection.type === 'range') return selection.start + index
+  return selection.indices[index]
 }
 
 /**

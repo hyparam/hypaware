@@ -87,8 +87,14 @@ export interface LocalOnlyVisibilityReport {
   filtered: boolean
   /** Rows dropped because their cwd's class outranks the caller's. */
   withheldRows: number
-  /** Unprovenanced rows whose declared content columns were nulled. */
+  /** Rows whose declared content columns were nulled, for any reason. */
   suppressedRows: number
+  /**
+   * Of `suppressedRows`, those with no recorded provenance (a null
+   * `source_cwds`, or a dataset that records none). The rest were hidden
+   * because a contributing folder outranks the caller (LLP 0616 #notice).
+   */
+  unprovenancedRows: number
 }
 
 export interface ExecuteSqlResult {

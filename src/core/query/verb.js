@@ -84,11 +84,14 @@ export const querySqlVerb = {
 
 /**
  * Stderr lines for the LLP 0105 visibility report: one when rows were
- * withheld, one when unprovenanced rows had content columns suppressed.
- * Empty when nothing was hidden (the quiet default).
+ * withheld, one when rows had content columns suppressed because a folder
+ * that contributed to them outranks the caller, and one when rows with no
+ * recorded provenance had them suppressed. Empty when nothing was hidden
+ * (the quiet default).
  *
  * @param {LocalOnlyVisibilityReport | undefined} localOnly
  * @returns {string}
+ * @ref LLP 0616#notice [implements]: suppression splits into hidden by a local-only folder and no recorded provenance, the latter naming the refresh
  */
 export function renderLocalOnlyNotice(localOnly) {
   if (!localOnly) return ''
@@ -98,9 +101,15 @@ export function renderLocalOnlyNotice(localOnly) {
       `${localOnly.callerClass === 'unknown' ? 'unknown-context' : localOnly.callerClass} caller ` +
       `(rerun with --include-local-only to include them; a captured session's transcript would then carry their content)\n`
   }
-  if (localOnly.suppressedRows > 0) {
-    out += `local-only: suppressed content columns on ${localOnly.suppressedRows} row(s) without ` +
-      `per-row provenance (rerun with --include-local-only to include them)\n`
+  const folderHidden = localOnly.suppressedRows - localOnly.unprovenancedRows
+  if (folderHidden > 0) {
+    out += `local-only: suppressed content columns on ${folderHidden} row(s) drawn from a local-only folder ` +
+      `(rerun with --include-local-only to include them)\n`
+  }
+  if (localOnly.unprovenancedRows > 0) {
+    out += `local-only: suppressed content columns on ${localOnly.unprovenancedRows} row(s) with no recorded ` +
+      `provenance (for graph rows, \`hyp graph project --refresh\` re-derives those whose sources are still ` +
+      `recorded; rerun with --include-local-only to include them)\n`
   }
   return out
 }

@@ -411,7 +411,7 @@ test('native visibility agrees with row visibility across SQL shapes and caller 
 test('native visibility drops an entirely withheld batch and propagates policy failures and aborts', async () => {
   const source = nativeSource(ROWS.slice(2), { type: 'all', length: 2 })
   assert.deepEqual((await run({ source, sql: 'SELECT COUNT(*) AS n FROM t' })).rows, [{ n: 0 }])
-  const report = { callerClass: /** @type {const} */ ('unknown'), filtered: true, withheldRows: 0, suppressedRows: 0 }
+  const report = { callerClass: /** @type {const} */ ('unknown'), filtered: true, withheldRows: 0, suppressedRows: 0, unprovenancedRows: 0 }
   const guarded = withLocalOnlyVisibility(source, {
     resolver: { resolve() { throw new Error('policy unavailable') }, isIgnored() { return false } },
     callerRank: 0, report, contentColumns: [],
@@ -626,4 +626,248 @@ test('a top-k hint cannot prune ahead of a WHERE kept from the source for suppre
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
+})
+
+// --- LLP 0616: graph rows carry their source folders ---
+
+/** Graph-shaped rows: one per provenance state the read path must judge. */
+const GRAPH_ROWS = [
+  { node_id: 'n1-full', node_type: 'Tool', label: 'full-label', source_cwds: '["/w/full"]' },
+  { node_id: 'n2-none', node_type: 'Tool', label: 'folderless-label', source_cwds: '[]' },
+  { node_id: 'n3-lo', node_type: 'Tool', label: 'lo-label', source_cwds: '["/w/lo"]' },
+  { node_id: 'n4-mixed', node_type: 'Tool', label: 'mixed-label', source_cwds: '["/w/full","/w/lo"]' },
+  { node_id: 'n5-old', node_type: 'Tool', label: 'old-label', source_cwds: null },
+  { node_id: 'n6-bad', node_type: 'Tool', label: 'bad-label', source_cwds: '{"not":"a list"}' },
+]
+const GRAPH_EXTRAS = { localOnlyContentColumns: ['label', 'source_cwds'] }
+
+// @ref LLP 0616#read [tests]: visible only when no recorded folder outranks the caller; null and unreadable fail closed; the column never names a hidden folder
+test('graph provenance: content shows only where every recorded folder is visible to the caller', async () => {
+  const sql = 'SELECT node_id, label, source_cwds FROM t ORDER BY node_id'
+  const synced = await run({ rows: GRAPH_ROWS, extras: GRAPH_EXTRAS, sql, callerCwd: '/w/full' })
+  assert.deepEqual(synced.rows, [
+    { node_id: 'n1-full', label: 'full-label', source_cwds: '["/w/full"]' },
+    { node_id: 'n2-none', label: 'folderless-label', source_cwds: '[]' },
+    { node_id: 'n3-lo', label: null, source_cwds: null },
+    { node_id: 'n4-mixed', label: null, source_cwds: null },
+    { node_id: 'n5-old', label: null, source_cwds: null },
+    { node_id: 'n6-bad', label: null, source_cwds: null },
+  ])
+  assert.ok(!JSON.stringify(synced.rows).includes('/w/lo'), 'source_cwds never names a local-only folder to a syncing caller')
+  assert.equal(synced.localOnly.suppressedRows, 4)
+  assert.equal(synced.localOnly.unprovenancedRows, 2, 'the null and the unreadable value')
+  assert.equal(synced.localOnly.withheldRows, 0, 'suppression is not withholding: every row keeps its structure')
+
+  const unknown = await run({ rows: GRAPH_ROWS, extras: GRAPH_EXTRAS, sql, callerCwd: null })
+  assert.deepEqual(unknown.rows, synced.rows, 'an unknown caller fails closed at the full rank')
+
+  const local = await run({ rows: GRAPH_ROWS, extras: GRAPH_EXTRAS, sql, callerCwd: '/w/lo' })
+  assert.deepEqual(local.rows.map((r) => r.label), ['full-label', 'folderless-label', 'lo-label', 'mixed-label', null, null])
+  assert.equal(local.rows[3].source_cwds, '["/w/full","/w/lo"]')
+  assert.equal(local.localOnly.suppressedRows, 2)
+  assert.equal(local.localOnly.unprovenancedRows, 2)
+
+  // A caller at ignore, or one passing --include-local-only, skips the wrapper.
+  for (const opts of [{ callerCwd: '/w/ig' }, { callerCwd: '/w/full', includeLocalOnly: true }]) {
+    const open = await run({ rows: GRAPH_ROWS, extras: GRAPH_EXTRAS, sql, ...opts })
+    assert.deepEqual(open.rows, GRAPH_ROWS.map(({ node_id, label, source_cwds }) => ({ node_id, label, source_cwds })))
+    assert.equal(open.localOnly.filtered, false)
+    assert.equal(open.localOnly.suppressedRows, 0)
+    assert.equal(open.localOnly.unprovenancedRows, 0)
+  }
+})
+
+test('graph provenance: the forced source_cwds never reaches a projection that did not ask for it', async () => {
+  /** @type {(string[] | undefined)[]} */
+  const scanned = []
+  const inner = /** @type {ScannableDataSource} */ (memorySource(GRAPH_ROWS))
+  const source = { ...inner, scan: /** @type {ScannableDataSource['scan']} */ ((options) => { scanned.push(options?.columns); return inner.scan(options) }) }
+  const out = await run({ source, extras: GRAPH_EXTRAS, sql: 'SELECT node_id, label FROM t ORDER BY node_id', callerCwd: '/w/full' })
+  assert.deepEqual(out.rows.map((r) => r.label), ['full-label', 'folderless-label', null, null, null, null])
+  assert.ok(out.rows.every((r) => !('source_cwds' in r)), 'stripped back off the yielded row')
+  assert.ok(scanned.some((columns) => columns?.includes('source_cwds')), 'forced into the scan when content is demanded')
+
+  scanned.length = 0
+  const structural = await run({ source, extras: GRAPH_EXTRAS, sql: 'SELECT node_id FROM t ORDER BY node_id', callerCwd: '/w/full' })
+  assert.equal(structural.rows.length, GRAPH_ROWS.length)
+  assert.ok(scanned.every((columns) => !columns?.includes('source_cwds')), 'a structure-only read does not pay for it')
+  assert.equal(structural.localOnly.suppressedRows, 0)
+})
+
+test('graph provenance: a WHERE over content matches visible rows and never a suppressed one', async () => {
+  for (const [label, expected] of [['lo-label', []], ['mixed-label', []], ['old-label', []], ['full-label', [{ node_id: 'n1-full' }]]]) {
+    const out = await run({
+      source: memorySource(GRAPH_ROWS, { whereMatcher: (r) => r.label === label }),
+      extras: GRAPH_EXTRAS,
+      sql: `SELECT node_id FROM t WHERE label = '${label}'`,
+      callerCwd: '/w/full',
+    })
+    assert.deepEqual(out.rows, expected, label)
+  }
+})
+
+// @ref LLP 0616#column [tests]: folders are classified at read time, so a folder marked local-only after projection hides its rows on the next query
+test('graph provenance: a folder reclassified after the row was written hides it on the next query', async () => {
+  /** @type {Record<string, 'ignore' | 'local-only' | 'full'>} */
+  const classes = {}
+  const query = () => executeQuerySql({
+    query: "SELECT label FROM t WHERE node_id = 'n3-lo'",
+    registry: registryFor(memorySource(GRAPH_ROWS), GRAPH_EXTRAS),
+    storage: /** @type {any} */ ({}),
+    refresh: 'never',
+    usagePolicyResolver: fakeResolver(classes),
+    callerCwd: '/w/full',
+  })
+  assert.deepEqual((await query()).rows, [{ label: 'lo-label' }], 'visible while its folder syncs')
+  classes['/w/lo'] = 'local-only'
+  assert.deepEqual((await query()).rows, [{ label: null }], 'hidden once its folder is local-only')
+})
+
+test('graph provenance: each folder resolves once per query, however many rows and strings name it', async () => {
+  const rows = []
+  for (let i = 0; i < 200; i++) {
+    const source_cwds = ['["/w/full"]', '["/w/lo"]', '["/w/full","/w/lo"]', '[]'][i % 4]
+    rows.push({ node_id: `n${i}`, node_type: 'Tool', label: `l${i}`, source_cwds })
+  }
+  /** @type {string[]} */
+  const calls = []
+  const inner = fakeResolver(CLASSES)
+  const out = await executeQuerySql({
+    query: 'SELECT COUNT(label) AS named FROM t',
+    registry: registryFor(memorySource(rows), GRAPH_EXTRAS),
+    storage: /** @type {any} */ ({}),
+    refresh: 'never',
+    usagePolicyResolver: { ...inner, resolve(cwd) { calls.push(cwd); return inner.resolve(cwd) } },
+    callerCwd: '/w/full',
+  })
+  assert.equal(Number(out.rows[0].named), 100)
+  assert.deepEqual(calls.sort(), ['/w/full', '/w/full', '/w/lo'], 'the caller, then each distinct folder once')
+})
+
+/**
+ * A native graph source over several batches. Each content reader records the
+ * base rows it decoded, so a test can prove masked rows were never read.
+ *
+ * @param {{ rows: Record<string, SqlPrimitive>[], selection: RowSelection }[]} batches
+ * @param {Map<string, number[]>} decoded `${batch}:${column}` -> decoded base rows
+ * @param {(request: any) => void} [onRequest]
+ * @returns {ScannableDataSource}
+ */
+function nativeGraphSource(batches, decoded, onRequest) {
+  const columns = ['node_id', 'node_type', 'label', 'source_cwds']
+  const fields = columns.map((name, index) => ({ id: index + 20, name, nullable: true, dataType: /** @type {const} */ ({ type: 'string' }) }))
+  return {
+    columns,
+    schema: { fields },
+    scan() { throw new Error('provenance visibility must stay on native batches') },
+    prepareScan(request) {
+      onRequest?.(request)
+      assert.equal(request.limit, undefined)
+      assert.equal(request.offset, undefined)
+      const requested = request.columns.map((demand) => /** @type {typeof fields[number]} */ (fields.find((field) => field.id === demand.field)))
+      return {
+        schema: { fields: requested },
+        residual: { filter: request.filter },
+        properties: {},
+        async *batches() {
+          for (const [index, { rows, selection }] of batches.entries()) {
+            /** @type {AsyncBatch} */
+            const batch = {
+              selection,
+              columns: requested.map((field) => ({
+                read({ batch: input, selection: selected }) {
+                  assert.equal(input, batch, 'deferred readers retain their original input')
+                  const key = `${index}:${field.name}`
+                  const seen = decoded.get(key) ?? []
+                  for (let i = 0; i < selected.length; i++) {
+                    if (selected.type === 'all' || (selected.type === 'range' ? i >= selected.start && i < selected.end : selected.indices.includes(i))) seen.push(i)
+                  }
+                  decoded.set(key, seen)
+                  const values = rows.map((row) => row[field.name])
+                  return selectVector({ type: 'values', values, length: rows.length }, selected)
+                },
+              })),
+            }
+            yield batch
+          }
+        },
+      }
+    },
+  }
+}
+
+/** Visible, fully suppressed and mixed batches, as a synced caller judges them. */
+const GRAPH_BATCHES = [
+  { rows: [GRAPH_ROWS[0], GRAPH_ROWS[1]], selection: /** @type {RowSelection} */ ({ type: 'all', length: 2 }) },
+  { rows: [GRAPH_ROWS[2], GRAPH_ROWS[3], GRAPH_ROWS[4]], selection: /** @type {RowSelection} */ ({ type: 'all', length: 3 }) },
+  { rows: GRAPH_ROWS, selection: /** @type {RowSelection} */ ({ type: 'indices', indices: new Uint32Array([0, 2, 4, 5]), length: GRAPH_ROWS.length }) },
+  { rows: GRAPH_ROWS, selection: /** @type {RowSelection} */ ({ type: 'range', start: 1, end: 4, length: GRAPH_ROWS.length }) },
+]
+
+/** @param {{ rows: Record<string, SqlPrimitive>[], selection: RowSelection }[]} batches */
+function selectedRows(batches) {
+  return batches.flatMap(({ rows, selection }) => selection.type === 'all' ? rows
+    : selection.type === 'range' ? rows.slice(selection.start, selection.end)
+      : [...selection.indices].map((i) => rows[i]))
+}
+
+// @ref LLP 0616#read [tests]: the native batch path and the row path agree on provenance verdicts, counts and SQL semantics
+test('graph provenance: native batches agree with the row path across SQL shapes and caller classes', async () => {
+  const queries = [
+    'SELECT node_id, label FROM t ORDER BY node_id',
+    'SELECT node_id, label, source_cwds FROM t ORDER BY node_id',
+    'SELECT * FROM t ORDER BY node_id',
+    'SELECT node_id FROM t ORDER BY node_id',
+    "SELECT node_id FROM t WHERE label = 'full-label'",
+    "SELECT node_id FROM t WHERE label = 'lo-label'",
+    'SELECT node_id FROM t WHERE label IS NULL ORDER BY node_id',
+    "SELECT node_id FROM t WHERE source_cwds = '[\"/w/lo\"]'",
+    'SELECT COUNT(*) AS n, COUNT(label) AS named FROM t',
+    'SELECT label, COUNT(*) AS n FROM t GROUP BY label ORDER BY label',
+    'SELECT node_id, label FROM t ORDER BY label, node_id LIMIT 3',
+    "SELECT node_id, label FROM t WHERE node_type = 'Tool' ORDER BY node_id LIMIT 2 OFFSET 1",
+  ]
+  for (const callerCwd of [null, '/w/full', '/w/lo']) {
+    for (const sql of queries) {
+      const native = await run({ source: nativeGraphSource(GRAPH_BATCHES, new Map()), extras: GRAPH_EXTRAS, sql, callerCwd })
+      const legacy = await run({ rows: selectedRows(GRAPH_BATCHES), extras: GRAPH_EXTRAS, sql, callerCwd })
+      assert.deepEqual(native.rows, legacy.rows, `${callerCwd}: ${sql}`)
+      assert.deepEqual(
+        [native.localOnly.suppressedRows, native.localOnly.unprovenancedRows],
+        [legacy.localOnly.suppressedRows, legacy.localOnly.unprovenancedRows],
+        `counts ${callerCwd}: ${sql}`
+      )
+    }
+  }
+})
+
+test('graph provenance: native batches pass visible vectors through, keep constant nulls, and never decode masked rows', async () => {
+  /** @type {Map<string, number[]>} */
+  const decoded = new Map()
+  /** @type {any[]} */
+  const requests = []
+  const source = nativeGraphSource(GRAPH_BATCHES, decoded, (request) => requests.push(request))
+  const out = await run({ source, extras: GRAPH_EXTRAS, sql: "SELECT node_id, label FROM t WHERE node_type = 'Tool'", callerCwd: '/w/full' })
+  assert.deepEqual(out.rows.map((r) => r.label), [
+    'full-label', 'folderless-label', // all visible
+    null, null, null, // all suppressed
+    'full-label', null, null, null, // mixed: n1, n3, n5, n6
+    'folderless-label', null, null, // mixed: n2, n3, n4
+  ])
+  assert.ok(out.rows.every((r) => !('source_cwds' in r)), 'the forced provenance column is not output')
+  assert.equal(requests[0].filter, undefined, 'a WHERE stays residual when content is demanded')
+  assert.ok(requests[0].columns.some((/** @type {any} */ demand) => demand.field === 23 && demand.mode === 'required'), 'source_cwds forced into the scan')
+  assert.deepEqual(decoded.get('0:label'), [0, 1], 'a visible batch reads its content as is')
+  assert.equal(decoded.get('1:label'), undefined, 'a fully suppressed batch never decodes content')
+  assert.deepEqual(decoded.get('2:label'), [0], 'a mixed batch decodes only its visible rows')
+  assert.deepEqual(decoded.get('3:label'), [1])
+  assert.equal(out.localOnly.suppressedRows, 8)
+  assert.equal(out.localOnly.unprovenancedRows, 3)
+
+  decoded.clear()
+  requests.length = 0
+  const structural = await run({ source, extras: GRAPH_EXTRAS, sql: "SELECT node_id FROM t WHERE node_type = 'Tool'", callerCwd: '/w/full' })
+  assert.equal(structural.rows.length, 12)
+  assert.equal(decoded.get('0:source_cwds'), undefined, 'a structure-only read never reads provenance')
+  assert.ok(requests[0].filter, 'a structure-only WHERE still reaches the source')
 })

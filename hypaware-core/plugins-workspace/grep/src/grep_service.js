@@ -111,7 +111,7 @@ export async function executeGrepSearch(args) {
   const accept = (row) => !purges.has(row) && chainPred(row) && dayPred(row) && matcher.rowTest(row)
 
   /** @type {LocalOnlyVisibilityReport} */
-  const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
+  const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0, unprovenancedRows: 0 }
   /** @type {((row: Record<string, unknown>) => boolean) | null} */
   let withheld = null
   if (args.includeLocalOnly !== true) {

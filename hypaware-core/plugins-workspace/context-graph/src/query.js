@@ -78,7 +78,7 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       throw refusal
     }
     /** @type {LocalOnlyVisibilityReport} */
-    const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
+    const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0, unprovenancedRows: 0 }
     const outOfTime = 'graph traversal exceeded its thirty-second time budget; reduce depth or narrow --edge-type'
     const checkTime = () => {
       // A warm in-memory source can keep the event loop busy beyond a timer's
@@ -117,6 +117,7 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       localOnly.filtered ||= result.localOnly.filtered
       localOnly.withheldRows += result.localOnly.withheldRows
       localOnly.suppressedRows += result.localOnly.suppressedRows
+      localOnly.unprovenancedRows += result.localOnly.unprovenancedRows
       counts[dataset] += result.rows.length
       if (counts[dataset] > 100_000) refuse('graph traversal exceeds the 100000-row read budget for its neighborhood; reduce depth or narrow --edge-type')
       // Budget retained payload across queries as well as the SQL engine's
