@@ -214,9 +214,11 @@ export function createAiGatewayGraphContract(kit) {
       // Raw SQL on purpose: the prefix filter prunes `content_text` (the
       // table's largest column) server-side, keeping it out of the shared
       // scan's materialization. `attributes` rides for the contract
-      // rowFilter (registry-enforced).
+      // rowFilter (registry-enforced). Every raw rule here selects `cwd` so
+      // its rows record their folder; without it they read as unknown.
       // @ref LLP 0096#decision [constrained-by]: heavy-column prefix guards stay pushed down
-      sql: `SELECT attributes, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE 'Base directory for this skill: %'`,
+      // @ref LLP 0616#contribution [implements]: a raw-SQL rule opts in to folder provenance by selecting cwd
+      sql: `SELECT attributes, cwd, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE 'Base directory for this skill: %'`,
       toRow(r) {
         const key = skillFromMarker(r.content_text)
         if (!key) return null
@@ -229,7 +231,7 @@ export function createAiGatewayGraphContract(kit) {
       kind: 'node',
       type: 'Skill',
       // Raw SQL on purpose, same pushdown rationale as the marker surface.
-      sql: `SELECT attributes, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE '<command-name>%'`,
+      sql: `SELECT attributes, cwd, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE '<command-name>%'`,
       toRow(r) {
         const key = skillFromSlash(r.content_text)
         if (!key) return null
@@ -408,9 +410,11 @@ export function createAiGatewayGraphContract(kit) {
       // Raw SQL on purpose: the prefix filter prunes `content_text` (the
       // table's largest column) server-side, keeping it out of the shared
       // scan's materialization. `attributes` rides for the contract
-      // rowFilter (registry-enforced).
+      // rowFilter (registry-enforced). Every raw rule here selects `cwd` so
+      // its rows record their folder; without it they read as unknown.
       // @ref LLP 0096#decision [constrained-by]: heavy-column prefix guards stay pushed down
-      sql: `SELECT attributes, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE 'Base directory for this skill: %'`,
+      // @ref LLP 0616#contribution [implements]: a raw-SQL rule opts in to folder provenance by selecting cwd
+      sql: `SELECT attributes, cwd, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE 'Base directory for this skill: %'`,
       toRow(r) {
         const session = str(r.session_id)
         const skill = skillFromMarker(r.content_text)
@@ -424,7 +428,7 @@ export function createAiGatewayGraphContract(kit) {
       kind: 'edge',
       type: 'ran',
       // Raw SQL on purpose, same pushdown rationale as the marker surface.
-      sql: `SELECT attributes, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE '<command-name>%'`,
+      sql: `SELECT attributes, cwd, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE '<command-name>%'`,
       toRow(r) {
         const session = str(r.session_id)
         const skill = skillFromSlash(r.content_text)

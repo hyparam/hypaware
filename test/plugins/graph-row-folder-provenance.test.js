@@ -393,3 +393,15 @@ test('the graph notice splits folder-hidden rows from rows with no recorded prov
   assert.match(folderOnly, /3 row\(s\) drawn from a local-only folder/)
   assert.doesNotMatch(folderOnly, /--refresh/)
 })
+
+// @ref LLP 0616#contribution [tests]: the gateway's raw-SQL skill rules select cwd, so the Skill rows they mint record their folder
+test('Skill rows from the gateway raw-SQL surfaces record their folder', async () => {
+  const marker = message('sess-skill', 'shared', { content_text: 'Base directory for this skill: /home/u/.claude/skills/review' })
+  await fixture(async ({ dirs, registry, storage, sql }) => {
+    await projectGraph({ query: registry, storage, contracts: [contract()] })
+    const open = byKey((await sql(NODES, { includeLocalOnly: true })).rows)
+    assert.equal(open['Skill:review'].source_cwds, JSON.stringify([dirs.shared]))
+    const synced = byKey((await sql(NODES)).rows)
+    assert.equal(synced['Skill:review'].label, 'review', 'visible to a syncing caller')
+  }, { partitions: { claude: [marker] } })
+})
