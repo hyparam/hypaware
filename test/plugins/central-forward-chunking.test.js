@@ -8,6 +8,7 @@ import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 
 import { createForwardSink, initializeOpenDatasetRollouts, openDatasetsWithoutPartitions } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { graphDatasetRegistration } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
 import { createHeldDatasetStore, readHeldDatasets } from '../../src/core/sinks/held_datasets.js'
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 import { readRequestBody } from '../helpers/request_body.js'
@@ -1885,4 +1886,31 @@ test('close() stops a resumed export on its saved-receipt prefix without a water
   assert.equal(resumed.calls.length, 0)
   assert.equal(resumed.watermarks.record?.continuation.seq, '20000')
   assert.deepEqual(await fsp.readdir(receiptsDir), [])
+})
+
+// @ref LLP 0616#export [tests]: recording folders on graph rows changes only the local read path; sync still withholds the graph, source_cwds included
+test('graph rows that record their source folders still never leave through central forwarding', async () => {
+  const registrations = { node: graphDatasetRegistration('node'), edge: graphDatasetRegistration('edge') }
+  const { sink, calls, log } = buildSink({
+    count: 3,
+    query: { getDataset: (/** @type {string} */ name) => registrations[/** @type {'node' | 'edge'} */ (name)] },
+    // Rows as the projection now writes them: a visible label beside the
+    // folder that contributed it, which is itself a local path.
+    rowFactory: (i) => ({ node_id: `n-${i}`, node_type: 'Tool', natural_key: 'Bash', label: 'Bash', source_cwds: '["/w/private"]' }),
+  })
+  for (const registration of Object.values(registrations)) {
+    assert.ok(registration.localOnlyContentColumns?.includes('source_cwds'), `${registration.name} declares source_cwds as content`)
+    assert.equal(sink.datasetDisposition(registration), 'skips', `${registration.name} is quoted as staying local`)
+  }
+
+  const result = await sink.exportBatch(/** @type {any} */ ({
+    partitions: [{ dataset: 'node', tablePath: TABLE }, { dataset: 'edge', tablePath: TABLE }],
+  }), /** @type {any} */ ({}))
+
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 0)
+  assert.equal(result.retryPartitions, undefined)
+  assert.equal(calls.length, 0, 'neither announced nor ingested, so no folder path is sent')
+  const withheld = log.rows.filter((r) => r.message === 'central.forward.dataset_withheld')
+  assert.deepEqual(withheld.map((r) => r.fields.hyp_dataset).sort(), ['edge', 'node'])
 })

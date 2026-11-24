@@ -341,7 +341,15 @@ export async function rewritePartition({ partitionDir, idCol, dropIds, extraRows
     const schema = currentSchema(metadata)
     // Use the table's own schema so kernel-internal columns
     // (e.g. _hyp_cache_row_id) survive the rewrite.
-    if (schema) columns = columnsFromIcebergSchema(schema)
+    if (schema) {
+      columns = columnsFromIcebergSchema(schema)
+      // A generation written before a nullable column existed lacks it; carry
+      // it over, or a refreshed row would lose its true value on the rewrite.
+      // @ref LLP 0616#old-rows [implements]: a re-derived row keeps its source_cwds even in a pre-change table
+      for (const column of fallbackColumns) {
+        if (column.nullable && !columns.some((c) => c.name === column.name)) columns.push(column)
+      }
+    }
     existingSpec = currentPartitionSpec(metadata)
   } catch {
     // Fall back to the declared dataset columns.
@@ -525,6 +533,7 @@ export async function refreshGraphRows({ storage, query, config, dataset, rows, 
             if (typeof merged[key] === 'string') merged[key] = JSON.parse(merged[key])
           }
           // Copies awaiting compaction are all dropped below, so fold each into one row.
+          // @ref LLP 0616#merge [implements]: kept content keeps its folders; source_cwds unions with the committed value, unknown absorbs
           mergeRow(merged, folded.get(id) ?? fresh)
           folded.set(id, merged)
           fresh = merged
@@ -535,9 +544,12 @@ export async function refreshGraphRows({ storage, query, config, dataset, rows, 
           if ((key === 'props' || key === 'source_keys') && typeof value === 'string') {
             try { value = JSON.parse(value) } catch { return false }
           }
+          // A column absent from an older data file reads as undefined, never a change from null.
           return isDeepStrictEqual(value, fresh[key])
+            || (value == null && fresh[key] == null)
             || (key === 'first_seen' && firstSeenTime(value) === firstSeenTime(fresh[key]))
         })
+        // @ref LLP 0616#old-rows [implements]: only a full re-derive from current sources replaces source_cwds; ids no source still names are never visited
         if (!same || replacements.has(id)) replacements.set(id, { ...existing, ...fresh })
       }
       for (const id of foreign) {

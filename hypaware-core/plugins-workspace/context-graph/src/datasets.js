@@ -37,6 +37,8 @@ export const NODE_COLUMNS = Object.freeze([
   { name: 'source_keys',       type: 'JSON',      nullable: true  },
   { name: 'projector',         type: 'STRING',    nullable: false },
   { name: 'projector_version', type: 'INT32',     nullable: false },
+  // @ref LLP 0616#column [implements]: the folders that contributed, as a sorted JSON array string; null means unknown
+  { name: 'source_cwds',       type: 'STRING',    nullable: true  },
 ])
 
 /** @type {ReadonlyArray<ColumnSpec>} */
@@ -53,6 +55,7 @@ export const EDGE_COLUMNS = Object.freeze([
   { name: 'source_keys',       type: 'JSON',      nullable: true  },
   { name: 'projector',         type: 'STRING',    nullable: false },
   { name: 'projector_version', type: 'INT32',     nullable: false },
+  { name: 'source_cwds',       type: 'STRING',    nullable: true  },
 ])
 
 const COLUMNS = { node: NODE_COLUMNS, edge: EDGE_COLUMNS }
@@ -60,21 +63,21 @@ const COLUMNS = { node: NODE_COLUMNS, edge: EDGE_COLUMNS }
 /**
  * Content-bearing columns per graph dataset, for the LLP 0105 query
  * visibility filter. Graph rows aggregate across sessions and carry no
- * per-row `cwd` provenance (the inline provenance is dataset+keys, not a
- * directory), so the shared filter cannot judge a row's own class. This
- * resolves LLP 0105 #graph-provenance on the suppression side: a caller
- * whose context may not see local-only content gets these columns nulled
- * while the structural columns (content-addressed ids and types) keep the
- * graph walkable; propagating per-row provenance through the projection's
- * merge remains open as the higher-fidelity follow-up. Keys, labels, and
- * props can carry session-derived text and paths; `source_keys` carries the
- * originating row keys.
+ * per-row `cwd`; instead each row records the folders that contributed to it
+ * in `source_cwds`. The shared filter classifies those folders at read time:
+ * a caller whose context may not see one of them, or any caller reading a row
+ * whose provenance is unknown (null), gets these columns nulled while the
+ * structural columns (content-addressed ids and types) keep the graph
+ * walkable. Keys, labels, and props can carry session-derived text and
+ * paths; `source_keys` carries the originating row keys; `source_cwds` is
+ * itself folder paths.
  *
- * @ref LLP 0105#graph-provenance [implements]: unprovenanced graph rows expose structure, never content, to restricted callers
+ * @ref LLP 0105#graph-provenance [implements]: graph rows expose structure, never content, to callers their folders outrank
+ * @ref LLP 0616#column [implements]: source_cwds is declared content, so it never names a local-only folder to a syncing caller
  */
 const CONTENT_COLUMNS = {
-  node: ['natural_key', 'label', 'props', 'source_keys'],
-  edge: ['props', 'source_keys'],
+  node: ['natural_key', 'label', 'props', 'source_keys', 'source_cwds'],
+  edge: ['props', 'source_keys', 'source_cwds'],
 }
 
 // Stable callbacks let maintenance distinguish this unscoped read union from
