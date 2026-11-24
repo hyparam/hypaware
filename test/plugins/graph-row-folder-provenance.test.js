@@ -314,22 +314,43 @@ test('pre-change rows stay hidden, and a refresh re-derives only those whose sou
   }, { partitions })
 })
 
-// LLP 0616 #old-rows reads old rows' new column as null through LLP 0029
-// in-place evolution, but that evolution runs only for tables with a cache
-// partition declaration, and the graph tables have none. Until that is
-// decided, a default projection into a graph table written before the change
-// drops source_cwds (rows stay suppressed, fail closed) until a --refresh.
-test('rows projected after the upgrade into an existing graph table carry source_cwds', { todo: 'graph tables are not evolved in place (no partition declaration); reported, not decided here' }, async () => {
+// @ref LLP 0616#old-rows [tests]: 4. on an upgraded install a default projection's new rows stay suppressed until one refresh, after which old and new rows carry source_cwds
+test('on an upgraded install new rows stay suppressed until one refresh, then every row carries source_cwds', async () => {
   const partitions = { keep: [message('sess-keep', 'shared', { model: 'model-keep' })] }
   await fixture(async ({ dirs, cacheRoot, registry, storage, sql }) => {
+    const columns = [...AI_GATEWAY_SCHEMA_COLUMNS.filter((c) => Object.hasOwn(MESSAGES[0], c.name))]
+    /** @param {string} session @param {string} model */
+    const capture = (session, model) => appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=keep'], columns,
+      [{ ...message(session, 'shared', { model }), cwd: dirs.shared }])
     await projectGraph({ query: registry, storage: preChangeWriter(storage), contracts: [contract()] })
-    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=keep'],
-      [...AI_GATEWAY_SCHEMA_COLUMNS.filter((c) => Object.hasOwn(MESSAGES[0], c.name))],
-      [{ ...message('sess-new', 'shared', { model: 'model-new' }), cwd: dirs.shared }])
+    // The upgrade: the new code projects a new session into the old tables.
+    await capture('sess-new', 'model-new')
+    const first = await projectGraph({ query: registry, storage, contracts: [contract()] })
+    assert.ok(first.nodesWritten > 0, 'the default projection wrote the new rows')
+
+    const before = await sql(NODES.replace(', source_cwds', ''))
+    /** @param {Record<string, unknown>[]} rows @param {string} type @param {string} key */
+    const find = (rows, type, key) => rows.find((r) => r.node_id === kit.nodeId(type, key))
+    assert.equal(find(before.rows, 'Session', 'sess-new')?.natural_key, null, 'the new row has no column to write and stays suppressed')
+    assert.equal(find(before.rows, 'Session', 'sess-keep')?.natural_key, null)
+    assert.equal(before.localOnly.unprovenancedRows, before.rows.length, 'every row counts as having no recorded provenance')
+    assert.match(renderLocalOnlyNotice(before.localOnly), /`hyp graph project --refresh`/)
+    await assert.rejects(sql(NODES), /source_cwds/, 'naming the column fails until the table has it')
+
+    await projectGraph({ query: registry, storage, contracts: [contract()], refresh: true })
+    // After the refresh every append carries the column.
+    await capture('sess-later', 'model-later')
     await projectGraph({ query: registry, storage, contracts: [contract()] })
-    const stored = byKey((await sql(NODES, { includeLocalOnly: true })).rows)
-    assert.equal(stored['Session:sess-keep'].source_cwds ?? null, null, 'an old row reads the new column as null')
-    assert.equal(stored['Session:sess-new'].source_cwds, JSON.stringify([dirs.shared]))
+
+    const open = (await sql(NODES, { includeLocalOnly: true })).rows
+    for (const session of ['sess-keep', 'sess-new', 'sess-later']) {
+      assert.equal(find(open, 'Session', session)?.source_cwds, JSON.stringify([dirs.shared]), session)
+    }
+    const after = await sql(NODES)
+    for (const session of ['sess-keep', 'sess-new', 'sess-later']) {
+      assert.equal(find(after.rows, 'Session', session)?.natural_key, session, `${session} shows after the refresh`)
+    }
+    assert.equal(after.localOnly.suppressedRows, 0)
   }, { partitions })
 })
 
