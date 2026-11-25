@@ -38,7 +38,7 @@
       {
         "name": "codex",
         "label": "Codex",
-        "summary": "Records your Codex CLI and Desktop chats. Setup edits Codex's config, adds query skills and opens a local port.",
+        "summary": "Records your Codex CLI and Desktop chats. Setup adds query skills and opens a local port.",
         "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
           "plugin": { "name": "@hypaware/codex", "config": {} },

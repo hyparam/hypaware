@@ -13,11 +13,13 @@
 
 ## Decision {#decision}
 
-<a id="one-line"></a>Each picker row summary is one or two short sentences:
-what the row records, plus the local side effects setup causes (edits a
-client's settings, adds a hook, plugin file or skills, opens a local port).
-Implementation limits, routing details, missing fields, retention, and
-migrations stay out of the row; they belong in docs and command output.
+<a id="one-line"></a>Each picker row summary is one or two short sentences
+that say what the row records. A row may name a setup step the user must
+act on (reload an editor, restart a gateway) or a notable change, but it
+does not have to list every change setup makes; brevity wins over
+completeness. Implementation limits, routing details, missing fields,
+retention, migrations, and the full list of setup changes belong in docs
+and command output, not the row.
 
 <a id="no-history"></a>Rows do not mention history import. Nearly every
 recording row imports past sessions, so stating it on some rows and not

@@ -29,7 +29,7 @@
       {
         "name": "cursor",
         "label": "Cursor",
-        "summary": "Records your Cursor editor and CLI chats, including file contents and command output its tools see. Setup adds Cursor hooks and query skills and opens a local port.",
+        "summary": "Records your Cursor editor and CLI chats, including file contents and command output its tools see.",
         "detect": {
           "settings_file": ".cursor/hooks.json"
         },
