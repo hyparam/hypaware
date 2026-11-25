@@ -20,6 +20,8 @@ It installs capture before Claude launches and adds cloud lifecycle hooks.
   are recorded.
 - The working directory and repository of each session, from Claude Code hooks.
 - Transcript recovery from `~/.claude/projects` every five minutes.
+- OpenClaw sessions that use OpenClaw's `claude-cli` backend. They run
+  through Claude Code, so they are recorded here as Claude Code sessions.
 
 ## Requirements
 

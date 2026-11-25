@@ -9,6 +9,7 @@
 **Extended-by:** LLP 0407 (#dropped: the picker rows say it in plain words without claude-cli or the sweep interval)
 **Spawned:** LLP 0168 (override replaces steering), LLP 0169 (attach surface returns), LLP 0170 (scheduled sweep), LLP 0171 (requirements spec), accepted 2026-07-31
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
+**Extended-by:** LLP 0627 (#no-history: the Claude row no longer names the OpenClaw case, and the OpenClaw row no longer states two tiers)
 
 > Proposal: replace the OpenClaw steering plugin with two lanes that need
 > nothing installed on the OpenClaw side. **Lane A (live wire)**:

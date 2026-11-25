@@ -9,6 +9,7 @@
 **Extended-by:** LLP 0407 (#dropped: R12 is satisfied by plain wording)
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 **Extended-by:** LLP 0441 (R14, carried over at #carried-over: the settlement enricher no longer resolves or applies cwd against a row that is already native and already carries one)
+**Extended-by:** LLP 0627 (#no-history: R12 is relaxed; the picker rows no longer carry the OpenClaw case or the two tiers)
 
 > Requirements for implementing LLP 0168 (config override), LLP 0169
 > (attach surface), and LLP 0170 (scheduled sweep), replacing the dead

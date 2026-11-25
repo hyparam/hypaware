@@ -5,7 +5,7 @@
 **Systems:** Onboarding, Plugins
 **Author:** Kenny / Claude
 **Date:** 2026-11-25
-**Related:** LLP 0407 (#plain-words: extended here to every picker row), LLP 0358 (#claude-code-consequences: relaxed here), LLP 0391 (#decision: relaxed here)
+**Related:** LLP 0407 (#plain-words: extended here to every picker row), LLP 0358 (#claude-code-consequences: relaxed here), LLP 0391 (#decision: relaxed here), LLP 0167 (#onboarding: relaxed here), LLP 0171 (R12: relaxed here)
 
 > Setup picker summaries had grown into paragraphs of caveats. A row now
 > says what it records and what setup changes on the machine, and nothing
@@ -29,5 +29,9 @@ requirements are relaxed to match:
   the history import.
 - LLP 0391 #decision: the OpenClaw row no longer states that its import
   recurs on a schedule.
+- LLP 0167 #onboarding and LLP 0171 R12: the Claude row no longer names the
+  OpenClaw case (an OpenClaw `claude-cli` backend is recorded as Claude Code),
+  and the OpenClaw row no longer states its two capture tiers. Both are said
+  in docs/integrations/claude-code.md and docs/integrations/openclaw.md.
 
 The `backfill.on_join` opt-out and the attach enable prompts are unchanged.
