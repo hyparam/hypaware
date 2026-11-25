@@ -40,6 +40,7 @@ specific command. To query your recordings from an MCP client instead, see
 | [MCP](MCP.md) | Connect an MCP client to your recordings, locally with `hyp mcp serve` or remotely with an agent token | `mcp` |
 | [MCP reference](MCP_REFERENCE.md) | The MCP tools and prompts HypAware defines, with their CLI equivalents; tools only HypAware Cloud registers are not listed | `mcp` |
 | [Reports](REPORTS.md) | Generate, review, and publish reports | `report` |
+| [Notifications](NOTIFICATIONS.md) | Which emails HypAware Cloud sends about reports, hosts and members, who gets them, and how to turn them off | Dashboard only |
 | [Cloud and teams](TEAM_SETUP.md) | Enrollment, sync, and remote access | `remote`, `join`, `leave`, `sync` |
 | [Privacy controls](PRIVACY.md) | What is recorded, sharing controls, session exclusions, deletion, and product telemetry | `privacy`, `session`, `telemetry` |
 | [Configuration and storage](CONFIGURATION.md) | Configuration files, retention, cache, exports, and plugins | `config`, `cache`, `sink`, `plugin` |
