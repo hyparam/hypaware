@@ -1,6 +1,7 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
+import path from 'node:path'
 
 import { atomicWriteJson, readFileIfExists } from '../util/fs_atomic.js'
 import { usagePolicyPath } from '../runtime/paths.js'
@@ -70,6 +71,49 @@ export function folderAskPath(stateDir) {
 }
 
 /**
+ * The folder-ask preference that sits beside a machine-local list file. The
+ * usage-policy resolver is handed the list's path and nothing else, and both
+ * stores live in one directory ({@link usagePolicyPath}), so the sibling is
+ * how it finds the mode without every caller threading a second path.
+ *
+ * @ref LLP 0622#one-place [implements]: the resolver finds the mode from the list path it already holds
+ * @param {string} listPath `localOnlyListPath(stateDir)`
+ * @returns {string}
+ */
+export function folderAskPathBeside(listPath) {
+  return path.join(path.dirname(listPath), path.basename(usagePolicyPath('.', 'folder-ask')))
+}
+
+/**
+ * Whether a present preference file's bytes put the collecting rule in force
+ * (LLP 0622), for the resolver's synchronous read. Never throws.
+ *
+ * - `sync`: no.
+ * - `ask` stamped `enforced`: yes. Every `ask` this version writes is stamped.
+ * - `ask` with no stamp: no. That file was written by a version where `ask`
+ *   was only a question, and its folders are still collected until the keep
+ *   step has run and stamped it (LLP 0626).
+ * - bytes that do not parse to a known mode: yes, the direction that collects
+ *   less.
+ *
+ * @ref LLP 0622#fail-safe [implements]: an unreadable preference means not collected, never collected by accident
+ * @ref LLP 0626#stamp [implements]: an unstamped `ask` keeps its old meaning until it is adopted
+ * @param {string} raw
+ * @returns {boolean}
+ */
+export function folderAskEnforcedFromRaw(raw) {
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return true
+  }
+  const mode = parseFileShape(parsed)
+  if (mode === null) return true
+  return mode === 'ask' && parsed.enforced === true
+}
+
+/**
  * Read the machine-local folder-ask preference. A missing file returns
  * {@link DEFAULT_FOLDER_ASK_MODE} (`'sync'`); a present-but-unparseable file
  * throws {@link FolderAskUnreadableError} rather than resolving to either
@@ -80,6 +124,19 @@ export function folderAskPath(stateDir) {
  * @returns {Promise<FolderAskMode>}
  */
 export async function readFolderAskMode({ stateDir, fs = fsp }) {
+  return (await readFolderAskState({ stateDir, fs })).mode
+}
+
+/**
+ * Read the preference with its stamp: the mode, and whether the collecting
+ * rule is in force for it (always false for `sync`). Same failure contract as
+ * {@link readFolderAskMode}: absent is the default, unparseable throws.
+ *
+ * @ref LLP 0626#stamp [implements]: callers that must tell an adopted `ask` from one an older version wrote read the stamp here
+ * @param {{ stateDir: string, fs?: typeof fsp }} opts
+ * @returns {Promise<{ mode: FolderAskMode, enforced: boolean }>}
+ */
+export async function readFolderAskState({ stateDir, fs = fsp }) {
   const filePath = folderAskPath(stateDir)
   let raw
   try {
@@ -87,7 +144,7 @@ export async function readFolderAskMode({ stateDir, fs = fsp }) {
   } catch (err) {
     throw new FolderAskUnreadableError(filePath, { cause: err })
   }
-  if (raw === null) return DEFAULT_FOLDER_ASK_MODE
+  if (raw === null) return { mode: DEFAULT_FOLDER_ASK_MODE, enforced: false }
 
   let parsed
   try {
@@ -97,7 +154,23 @@ export async function readFolderAskMode({ stateDir, fs = fsp }) {
   }
   const mode = parseFileShape(parsed)
   if (mode === null) throw new FolderAskUnreadableError(filePath)
-  return mode
+  return { mode, enforced: mode === 'ask' && parsed.enforced === true }
+}
+
+/**
+ * {@link readFolderAskState} that never throws. An unreadable *present* file
+ * reads as an enforced `ask`, which is what the resolver does with the same
+ * bytes, so every reader agrees about a corrupt preference.
+ *
+ * @param {{ stateDir: string, fs?: typeof fsp }} opts
+ * @returns {Promise<{ mode: FolderAskMode, enforced: boolean }>}
+ */
+export async function readFolderAskStateSafe({ stateDir, fs }) {
+  try {
+    return await readFolderAskState({ stateDir, ...(fs ? { fs } : {}) })
+  } catch {
+    return { mode: 'ask', enforced: true }
+  }
 }
 
 /**
@@ -110,7 +183,12 @@ export async function readFolderAskMode({ stateDir, fs = fsp }) {
 export async function writeFolderAskMode({ stateDir, mode, fs }) {
   if (!isFolderAskMode(mode)) throw new Error(`writeFolderAskMode: unknown mode ${String(mode)}`)
   const filePath = folderAskPath(stateDir)
-  await atomicWriteJson(filePath, { version: FOLDER_ASK_VERSION, mode }, fs ? { fs } : undefined)
+  // Every `ask` this version writes is the collecting rule, and says so. The
+  // version stays 1 and the stamp is one extra key, so an older build still
+  // reads the file (it ignores the key and keeps asking).
+  // @ref LLP 0626#stamp [implements]: an `ask` written here is stamped; only a file an older version wrote lacks it
+  const payload = mode === 'ask' ? { version: FOLDER_ASK_VERSION, mode, enforced: true } : { version: FOLDER_ASK_VERSION, mode }
+  await atomicWriteJson(filePath, payload, fs ? { fs } : undefined)
   return mode
 }
 

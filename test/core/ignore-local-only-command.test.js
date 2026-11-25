@@ -16,6 +16,7 @@ import {
   readLocalOnlyEntries,
   writeLocalOnlyDirs,
 } from '../../src/core/usage-policy/local_only.js'
+import { runPolicySet } from '../../src/core/commands/policy.js'
 
 /**
  * @import { CommandRegistration, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -391,6 +392,129 @@ test('hyp privacy show scopes the residual count to the entry the gate used, not
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'local-only')
     assert.equal(parsed.residualCachedRows, 2, 'both rows under the governing entry are counted')
+  })
+})
+
+/* --------------------- the folder ask as a collection rule --------------------- */
+
+test('hyp privacy folders ask keeps the folders already recorded and leaves new ones waiting', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const recorded = path.join(root, 'recorded')
+    const fresh = path.join(root, 'fresh')
+    mkdirSync(recorded, { recursive: true })
+    mkdirSync(fresh, { recursive: true })
+    const { query, storage } = makeAiGatewayCache([
+      { cwd: recorded, repo_root: recorded },
+      { cwd: recorded, repo_root: recorded },
+      { cwd: path.join(recorded, 'src'), repo_root: recorded },
+    ])
+
+    // LLP 0623 #rule: one entry for the tree, however many rows and subfolders it has.
+    const res = await run('privacy folders', ['ask', '--json'], { cwd: root, hypHome, query, storage })
+    assert.equal(res.code, 0, res.stderr)
+    assert.equal(JSON.parse(res.stdout).marked, 1)
+    assert.deepEqual(await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) }), [{ dir: recorded, class: 'full' }])
+
+    const kept = JSON.parse((await run('privacy show', ['--json'], { cwd: path.join(recorded, 'src'), hypHome, query, storage })).stdout)
+    assert.equal(kept.class, 'full')
+    assert.equal(kept.source, 'machine-local')
+
+    // LLP 0622 #rule: a folder the machine has not seen is not collected, and
+    // #copy: `show` says that is because nobody answered, with no purge hint.
+    const waiting = await run('privacy show', [], { cwd: fresh, hypHome, query, storage })
+    assert.match(waiting.stdout, /class: ignore \(not yet classified, so not collected/)
+    assert.match(waiting.stdout, /source: none/)
+    assert.match(waiting.stdout, /^ignored: no, waiting for an answer \(not collected until then\)$/m)
+    assert.doesNotMatch(waiting.stdout, /hyp purge/)
+  })
+})
+
+/**
+ * Run `privacy set` with a recording stand-in for the history import, so a
+ * test never starts a real background process.
+ *
+ * @param {string[]} argv
+ * @param {{ cwd: string, hypHome: string }} opts
+ */
+async function setWithImportSpy(argv, opts) {
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  /** @type {string[]} */
+  const imports = []
+  const ctx = /** @type {any} */ ({ stdout, stderr, cwd: opts.cwd, env: { HYP_HOME: opts.hypHome }, config: { version: 2 } })
+  const code = await runPolicySet(argv, ctx, {
+    startFolderImport: ({ folder }) => { imports.push(folder); return true },
+  })
+  return { code, stdout: stdout.text(), stderr: stderr.text(), imports }
+}
+
+test('with the ask on, a first marking of a waiting folder is written, never reported as already ignored', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const fresh = path.join(root, 'fresh')
+    mkdirSync(fresh, { recursive: true })
+    assert.equal((await run('privacy folders', ['ask'], { cwd: root, hypHome })).code, 0)
+
+    // LLP 0622 #still-unmarked: the folder resolves ignore only because it is
+    // waiting. Marking it local-only (a less restrictive class) must take.
+    const res = await setWithImportSpy([fresh, 'local-only'], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /marked .* as local-only/)
+    assert.deepEqual(await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) }), [{ dir: fresh, class: 'local-only' }])
+  })
+})
+
+test('answering a waiting folder sync or local-only starts its history import, once', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    assert.equal((await run('privacy folders', ['ask'], { cwd: root, hypHome })).code, 0)
+    for (const token of ['sync', 'local-only']) {
+      const folder = path.join(root, token)
+      mkdirSync(folder, { recursive: true })
+      // LLP 0624 #rule
+      const first = await setWithImportSpy([folder, token], { cwd: root, hypHome })
+      assert.deepEqual(first.imports, [folder])
+      assert.match(first.stdout, /importing this folder's saved history in the background/)
+      // Answered already: saying it again imports nothing.
+      const again = await setWithImportSpy([folder, token], { cwd: root, hypHome })
+      assert.deepEqual(again.imports, [])
+    }
+  })
+})
+
+test('an ignore answer, a lifted ignore, and the default mode start no import', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    // LLP 0624 #not-these: in the default mode nothing was held back.
+    const plain = path.join(root, 'plain')
+    mkdirSync(plain, { recursive: true })
+    assert.deepEqual((await setWithImportSpy([plain, 'sync'], { cwd: root, hypHome })).imports, [])
+
+    assert.equal((await run('privacy folders', ['ask'], { cwd: root, hypHome })).code, 0)
+
+    // Nothing is collected from an ignored folder, so there is nothing to import.
+    const ignored = path.join(root, 'ignored')
+    mkdirSync(ignored, { recursive: true })
+    const ignoreAnswer = await setWithImportSpy([ignored, 'ignore'], { cwd: root, hypHome })
+    assert.match(ignoreAnswer.stdout, /marked .* as ignore/)
+    assert.deepEqual(ignoreAnswer.imports, [])
+
+    // Lifting that ignore later does not reach back for what it excluded.
+    const lifted = await setWithImportSpy([ignored, 'sync'], { cwd: root, hypHome })
+    assert.match(lifted.stdout, /marked .* as sync/)
+    assert.deepEqual(lifted.imports, [])
+  })
+})
+
+test('an import that cannot start leaves the answer standing and names the manual command', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const fresh = path.join(root, 'fresh')
+    mkdirSync(fresh, { recursive: true })
+    assert.equal((await run('privacy folders', ['ask'], { cwd: root, hypHome })).code, 0)
+
+    const stdout = makeBuf()
+    const ctx = /** @type {any} */ ({ stdout, stderr: makeBuf(), cwd: root, env: { HYP_HOME: hypHome }, config: { version: 2 } })
+    // LLP 0624 #background: the marking is the answer; a failed start does not fail it.
+    assert.equal(await runPolicySet([fresh, 'sync'], ctx, { startFolderImport: () => false }), 0)
+    assert.match(stdout.text(), /could not start the history import; run 'hyp backfill --folder /)
+    assert.deepEqual(await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) }), [{ dir: fresh, class: 'full' }])
   })
 })
 

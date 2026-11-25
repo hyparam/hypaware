@@ -3183,6 +3183,14 @@ export interface BackfillRunContext {
   /** Effective upper bound for record timestamps (ISO string). */
   until?: string
   /**
+   * Absolute folder this run is limited to (`hyp backfill --folder`, LLP
+   * 0624 #scoped). The runner writes only sessions recorded in it or beneath
+   * it. A provider that knows a session's folder before projecting it should
+   * skip other folders' sessions there, which is where the saving is; a
+   * provider that ignores this is still correct, only slower.
+   */
+  folder?: string
+  /**
    * Retention window resolved from CLI flag or
    * `config.query.cache.retentionDays`. Providers should not import
    * records older than this when no explicit `since` was supplied.

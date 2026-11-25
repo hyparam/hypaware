@@ -93,7 +93,7 @@ test('agent guide reuses detection, filters hidden/platform rows and preserves e
   assert.ok(questions.indexOf('ask: What do you want to sync?') < questions.indexOf('After cloud customization, ask about new projects'))
   assert.doesNotMatch(questions, /What do you want to collect and sync\?/)
   assert.ok(questions.includes('skip the customization questions, and proceed to installation'))
-  assert.ok(guide.includes('Ask me the first time'))
+  assert.ok(guide.includes('Ask me first'))
   assert.ok(guide.indexOf('Connect GitHub?') < guide.indexOf('6. Verify the completed setup'))
   assert.ok(guide.indexOf('6. Verify the completed setup') < guide.indexOf('When would you like to upload?'))
   assert.doesNotMatch(guide, /Commands for each question branch|commands in step 5/)

@@ -43,6 +43,8 @@ import {
 } from './pid.js'
 import { DAEMON_STOP_TIMEOUT_MS } from './service_ops.js'
 import { openDaemonLog } from './logs.js'
+import { listRecordedFolders } from '../query/recorded_folders.js'
+import { adoptLegacyFolderAsk } from '../usage-policy/classification.js'
 import { readSourceIdentity, readStatusFile, sourceHealth, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 import { pidFilePath, processingStateRoot, sinkOutboxDir, statusFilePath } from '../runtime/paths.js'
 import {
@@ -750,6 +752,23 @@ export async function runDaemon(opts = {}) {
       requestBookkeeping()
     },
   })
+
+  // ----- Folder-ask upgrade -----
+  // A machine that chose `ask` on an older version had a question, not a
+  // rule. Before this daemon applies the rule, the folders it already records
+  // are marked `sync`, once. Until that lands the resolver leaves the old
+  // preference alone, so a failure here loses nothing: it is logged and the
+  // next start tries again.
+  // @ref LLP 0626#rule [implements]: the keep step runs once at daemon start for a machine already on ask
+  try {
+    const marked = await adoptLegacyFolderAsk({
+      stateDir: stateRoot,
+      recordedFolders: () => listRecordedFolders({ query: boot.runtime.query, storage: boot.runtime.storage, config: boot.config ?? undefined }),
+    })
+    if (marked !== null) fileLog.info('daemon.folder_ask_adopted', { marked_count: marked })
+  } catch {
+    fileLog.warn('daemon.folder_ask_adopt_failed', { error_kind: 'folder_ask_adopt' })
+  }
 
   // ----- Backfill sweep driver -----
   // Rides the sink tick below rather than owning a timer of its own: a

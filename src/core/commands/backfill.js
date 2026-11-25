@@ -1,7 +1,10 @@
 // @ts-check
 
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import fsp from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 
@@ -12,6 +15,8 @@ import { resolveEntrypointOwners } from '../backfill/entrypoint_owner.js'
 import { resolveConfigPath } from '../runtime/boot.js'
 import { readRecordingStateFromDisk } from '../config/client_recording.js'
 import { loadClientDescriptors } from '../daemon/status.js'
+import { isEqualOrDescendant, localOnlyListPath } from '../usage-policy/index.js'
+import { withFileLock } from '../util/file_lock.js'
 
 /**
  * Base partition segment for backfilled writes. `storage.appendRows`
@@ -32,7 +37,7 @@ const MAX_NOTE_LENGTH = 240
  */
 
 /**
- * `hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]`
+ * `hyp backfill [provider...] [--since <iso>] [--until <iso>] [--folder <path>] [--retention-days <n>] [--dry-run] [--json]`
  *
  * Runs one or more registered backfill providers. Default behavior:
  *
@@ -115,17 +120,30 @@ export async function runBackfill(argv, ctx) {
         provider_count: selected.providers.length,
         dry_run: parsed.dryRun,
       })
-      for (const provider of selected.providers) {
-        const result = await runProvider({
-          provider,
-          ctx,
-          devRunId,
-          retentionDays,
-          since: parsed.since,
-          until: parsed.until,
-          dryRun: parsed.dryRun,
-        })
-        results.push(result)
+      const runProviders = async () => {
+        for (const provider of selected.providers) {
+          const result = await runProvider({
+            provider,
+            ctx,
+            devRunId,
+            retentionDays,
+            since: parsed.since,
+            until: parsed.until,
+            // Resolved against the command's cwd, like every other path argument.
+            ...(parsed.folder !== undefined ? { folder: path.resolve(ctx.cwd ?? process.cwd(), parsed.folder) } : {}),
+            dryRun: parsed.dryRun,
+          })
+          results.push(result)
+        }
+      }
+      // A folder-limited import is what an answered folder starts, and several
+      // folders can be answered in a burst. They take turns instead of reading
+      // the same history side by side.
+      // @ref LLP 0624#one-at-a-time [implements]: folder imports queue on one lock; a dead holder's lock breaks after FOLDER_IMPORT_LOCK_STALE_MS
+      if (parsed.folder !== undefined) {
+        await withFileLock(folderImportLockPath(ctx.env), runProviders, { staleMs: FOLDER_IMPORT_LOCK_STALE_MS })
+      } else {
+        await runProviders()
       }
       log.info('backfill.finish', {
         [Attr.COMPONENT]: 'backfill',
@@ -301,13 +319,14 @@ function markItemFailed(runCtx, result, error, errorKind) {
  *   retentionDays: number | undefined,
  *   since: string | undefined,
  *   until: string | undefined,
+ *   folder?: string,
  *   dryRun: boolean,
  *   sweep?: boolean,
  * }} args
  * @returns {Promise<BackfillProviderResult>}
  */
 async function runProvider(args) {
-  const { provider, ctx, devRunId, retentionDays, since, until, dryRun, sweep } = args
+  const { provider, ctx, devRunId, retentionDays, since, until, dryRun, sweep, folder } = args
   /** @type {BackfillProviderResult} */
   const result = {
     provider: provider.name,
@@ -375,6 +394,7 @@ async function runProvider(args) {
         retentionDays,
         since,
         until,
+        folder,
         dryRun,
         sweep,
         log,
@@ -456,6 +476,11 @@ async function runProvider(args) {
           })
           failingStep = 'provider_run_failed'
           if (!Array.isArray(rows) || (rows.length === 0 && !yielded.reconcile)) {
+            result.rows_skipped += 1
+            continue
+          }
+          // @ref LLP 0624#scoped [implements]: a folder-limited import writes only sessions recorded in that folder, whichever provider yielded them
+          if (folder !== undefined && !rowsInFolder(rows, folder)) {
             result.rows_skipped += 1
             continue
           }
@@ -738,12 +763,85 @@ function handleEvent(args) {
 }
 
 /**
+ * How long a folder import may hold its turn before a waiting one treats the
+ * holder as dead. Long enough for a large history; the lock is a courtesy
+ * between imports, not a correctness guard (cache writes are already safe
+ * across processes), so a rare overlap after this costs only duplicate work.
+ */
+const FOLDER_IMPORT_LOCK_STALE_MS = 30 * 60_000
+
+/**
+ * The lock folder-limited imports queue on, beside the machine-local list
+ * whose markings start them.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
+function folderImportLockPath(env) {
+  return `${localOnlyListPath(readObservabilityEnv(env).stateDir)}.folder-import.lock`
+}
+
+/**
+ * Start `hyp backfill --folder <folder>` in its own process and return at
+ * once. The caller is a command that just recorded an answer, often run by
+ * an agent in the middle of a chat, so it must not wait on an import that
+ * can take minutes. Detached and unreferenced: the import outlives the
+ * command that started it, and its failure is its own (logged by that run),
+ * never the answer's.
+ *
+ * @ref LLP 0624#background [implements]: the import runs in its own process and never blocks the answer
+ * @param {{ folder: string, env: NodeJS.ProcessEnv, spawnImpl?: typeof spawn }} args
+ * @returns {boolean} false when the process could not be started at all
+ */
+export function startFolderImport({ folder, env, spawnImpl = spawn }) {
+  const binPath = fileURLToPath(new URL('../../../bin/hypaware.js', import.meta.url))
+  try {
+    const child = spawnImpl(process.execPath, [binPath, 'backfill', '--folder', folder], {
+      detached: true,
+      stdio: 'ignore',
+      env,
+    })
+    // A spawn failure arrives as an 'error' event, not a throw; unheard it
+    // would crash the command that only wanted to record an answer.
+    child.on('error', () => {})
+    child.unref()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether a materialized session belongs to a folder-limited run: at least
+ * one of its rows was recorded in the folder or beneath it. The session is
+ * taken or left whole, never split, so a snapshot reconcile still sees every
+ * row it replaces. A session with no recorded folder cannot be shown to
+ * belong, so it is left.
+ *
+ * One pass over the rows with an early exit on the first match. The compare
+ * is segment-aware and purely lexical: no filesystem call per row.
+ *
+ * @ref LLP 0624#scoped [implements]: the runner-level limit, so no provider can write outside the folder
+ * @param {ReadonlyArray<Record<string, unknown>>} rows
+ * @param {string} folder absolute, already resolved
+ * @returns {boolean}
+ */
+function rowsInFolder(rows, folder) {
+  for (const row of rows) {
+    const cwd = row.cwd
+    if (typeof cwd === 'string' && cwd !== '' && isEqualOrDescendant(path.resolve(cwd), folder)) return true
+  }
+  return false
+}
+
+/**
  * @param {{
  *   env: NodeJS.ProcessEnv,
  *   storage: CommandRunContext['storage'],
  *   retentionDays?: number,
  *   since?: string,
  *   until?: string,
+ *   folder?: string,
  *   dryRun: boolean,
  *   sweep?: boolean,
  *   log: PluginLogger,
@@ -761,6 +859,7 @@ function buildRunContext(args) {
     cacheRoot: args.storage.cacheRoot,
     ...(args.since !== undefined ? { since: args.since } : {}),
     ...(args.until !== undefined ? { until: args.until } : {}),
+    ...(args.folder !== undefined ? { folder: args.folder } : {}),
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
     ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
     ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
@@ -990,6 +1089,7 @@ export function resolveRetentionDays(args) {
  *  - Positional provider names (any order, before/after flags).
  *  - `--since <iso>` / `--since=<iso>`
  *  - `--until <iso>` / `--until=<iso>`
+ *  - `--folder <path>` / `--folder=<path>`: only sessions recorded in that folder or beneath it
  *  - `--retention-days <n>` / `--retention-days=<n>`
  *  - `--dry-run`
  *  - `--json`
@@ -999,6 +1099,7 @@ export function resolveRetentionDays(args) {
  *   providers: string[],
  *   since?: string,
  *   until?: string,
+ *   folder?: string,
  *   retentionDays?: number,
  *   dryRun: boolean,
  *   json: boolean,
@@ -1012,6 +1113,7 @@ export function parseRunArgv(argv) {
       providers: { type: 'array', greedy: true },
       since: { type: 'string' },
       until: { type: 'string' },
+      folder: { type: 'string' },
       'retention-days': { type: 'number', minimum: 0 },
       'dry-run': { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
@@ -1019,10 +1121,10 @@ export function parseRunArgv(argv) {
     positional: ['providers'],
   }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) {
-    return { error: 'usage: hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]' }
+    return { error: 'usage: hyp backfill [provider...] [--since <iso>] [--until <iso>] [--folder <path>] [--retention-days <n>] [--dry-run] [--json]' }
   }
   if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ providers?: string[], since?: string, until?: string, 'retention-days'?: number, 'dry-run': boolean, json: boolean }} */ (parsed.params)
+  const p = /** @type {{ providers?: string[], since?: string, until?: string, folder?: string, 'retention-days'?: number, 'dry-run': boolean, json: boolean }} */ (parsed.params)
 
   /** @type {number | undefined} */
   let sinceMs
@@ -1046,8 +1148,11 @@ export function parseRunArgv(argv) {
     return { error: `--since must be before or equal to --until (got ${p.since} > ${p.until})` }
   }
 
-  /** @type {{ providers: string[], since?: string, until?: string, retentionDays?: number, dryRun: boolean, json: boolean }} */
+  if (p.folder !== undefined && p.folder === '') return { error: '--folder expects a path' }
+
+  /** @type {{ providers: string[], since?: string, until?: string, folder?: string, retentionDays?: number, dryRun: boolean, json: boolean }} */
   const result = { providers: p.providers ?? [], dryRun: p['dry-run'], json: p.json }
+  if (p.folder !== undefined) result.folder = p.folder
   if (p.since !== undefined) result.since = p.since
   if (p.until !== undefined) result.until = p.until
   if (p['retention-days'] !== undefined) result.retentionDays = p['retention-days']

@@ -45,9 +45,11 @@ privacy review. Verify the command receipt and report failures accurately.
   same folder. In Claude or Codex, read the matching Step 1 reference below
   for client-specific receipt checks before claiming success.
 - Decide what happens in new folders - by default they sync with no
-  question; `hyp privacy folders ask` asks once per new folder instead, and
-  `hyp privacy folders sync` returns to the default. It gates the question
-  only, never an existing class.
+  question; `hyp privacy folders ask` collects nothing from a new folder
+  until it is marked (Claude Code asks once; elsewhere use
+  `hyp privacy set <path> sync|local-only|ignore`), and
+  `hyp privacy folders sync` returns to the default. It never changes an
+  existing class.
 
 ## Scope honesty (say this up front)
 
@@ -319,4 +321,4 @@ the chat as fully removed or safe to sync.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Close with counts of chats and folders reviewed, confirmed exclusions, purges performed and their local/remote outcomes, declined or deferred choices, and any unreviewed content. Name what can still sync, including old rows from ignored chats whose purge was declined. Re-check `hyp status` for the actual deadline or active sync state; do not release the hold yourself.
 - Re-running the review should preserve existing choices. Previously chosen folder `sync` does not exempt its chats from review; already-ignored sessions can still have cached history needing a separately confirmed purge.
-- New folders the user has not marked sync without asking (the default). If they want to be asked once per new folder instead, `hyp privacy folders ask` turns that on and `hyp privacy folders sync` turns it back off. It moves the question only - every directory marked here keeps its class either way.
+- New folders the user has not marked sync without asking (the default). If they want new folders to wait for an answer instead, `hyp privacy folders ask` turns that on (nothing is collected from an unmarked folder until it is marked) and `hyp privacy folders sync` turns it back off. Every directory marked here keeps its class either way.

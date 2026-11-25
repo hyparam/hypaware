@@ -66,7 +66,7 @@ HypAware · Needs attention
   Daemon     Running
   Storage    37 MB · 90-day retention
   Sharing    Organization sync configured
-  new folders:     sync without asking (`hyp privacy folders ask` to be asked instead)
+  new folders:     sync without asking (`hyp privacy folders ask` to collect nothing from a new folder until you answer)
 
   Clients                 Status                           Data
   claude                  Telemetry may be interrupted     Sync

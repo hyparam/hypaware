@@ -19,13 +19,14 @@ import {
   readFolderAskMode,
   readLocalOnlyEntries,
   writeClientSyncEntries,
-  writeFolderAskMode,
 } from '../usage-policy/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { syncDestinationName } from '../remote/builtin_remotes.js'
 import { centralLayerUnreadable, centralSinkOrigins } from '../remote/gateway_seed.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
+import { switchFolderAskMode } from '../usage-policy/classification.js'
+import { listRecordedFolders } from '../query/recorded_folders.js'
 import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
 /**
@@ -231,9 +232,10 @@ function parsePolicyListArgs(argv) {
  * @ref LLP 0103#cli [constrained-by]: the store, resolver, and class lattice are unchanged; only the verb spelling is new
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ startFolderImport?: (args: { folder: string, env: NodeJS.ProcessEnv }) => boolean }} [deps] test seam for the import an answer starts (LLP 0624)
  * @returns {Promise<number>}
  */
-export async function runPolicySet(argv, ctx) {
+export async function runPolicySet(argv, ctx, deps = {}) {
   const parsed = parsePolicySetArgs(argv)
   if (parsed.error) {
     ctx.stderr.write(`error: ${parsed.error}\n`)
@@ -242,7 +244,10 @@ export async function runPolicySet(argv, ctx) {
   const targetDir = path.resolve(ctx.cwd ?? process.cwd(), /** @type {string} */ (parsed.path))
   const targetClass = TOKEN_TO_CLASS[/** @type {(typeof CLASS_TOKENS)[number]} */ (parsed.token)]
   try {
-    return await runMarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-set', vocabulary: PUBLIC_VOCABULARY })
+    return await runMarkMachineLocal({
+      targetDir, ctx, targetClass, component: 'cmd-policy-set', vocabulary: PUBLIC_VOCABULARY,
+      ...(deps.startFolderImport ? { startFolderImport: deps.startFolderImport } : {}),
+    })
   } catch (err) {
     if (!(err instanceof LocalOnlyListUnreadableError)) throw err
     return reportUnreadableStore(ctx, err)
@@ -643,8 +648,9 @@ export async function prepareSetupPrivacy(ctx, choices) {
       ctx.stdout.write('Client-sharing preferences saved. Changes apply to future rows; exported rows are not recalled and retained history is not uploaded.\n')
     }
     if (choices.newFolders !== undefined) {
-      await writeFolderAskMode({ stateDir, mode: choices.newFolders })
+      const { marked } = await switchFolderAskMode({ stateDir, mode: choices.newFolders, recordedFolders: () => listRecordedFolders(ctx) })
       ctx.stdout.write(`New folders: ${choices.newFolders}. Existing folder classifications are unchanged.\n`)
+      if (choices.newFolders === 'ask') ctx.stdout.write(`${FOLDER_ASK_ON_NOTE}\n${NO_FOLDER_NOTE}\n${keptFoldersLine(marked, '')}`)
     }
     return 0
   }, { component: 'wizard' })
@@ -663,8 +669,37 @@ const FOLDER_ASK_STORE_LABEL = 'machine-local new-folder preference'
  * @type {Record<FolderAskMode, string>}
  */
 const FOLDER_ASK_STATE_LINE = {
-  ask: 'ask - a session opened in a new folder asks once how to handle it',
+  // @ref LLP 0622#copy [implements]: the mode is stated as its consequence, which is now what is collected
+  ask: 'ask - nothing is collected from a new folder until you say how to handle it',
   sync: 'sync - they sync without asking (the default)',
+}
+
+/**
+ * How to let a waiting folder in, said wherever the ask is turned on. Most
+ * clients never ask, so this command is the way in for them.
+ *
+ * @ref LLP 0622#copy [implements]: turning the ask on names the way to answer for a folder
+ */
+const FOLDER_ASK_ON_NOTE = "answer for a folder with 'hyp privacy set <path> sync|local-only|ignore'"
+
+/**
+ * The half of the mode that has no question and no answer to give.
+ *
+ * @ref LLP 0625#copy [implements]: turning the ask on says that chats with no folder stop being recorded
+ */
+const NO_FOLDER_NOTE = 'chats that record no folder are not recorded while this is on'
+
+/**
+ * What the switch did to the folders this machine already records.
+ *
+ * @ref LLP 0623#said [implements]: the switch prints how many folders it marked and how to review them
+ * @param {number} marked
+ * @param {string} indent
+ * @returns {string} a whole line, or nothing when no folder was marked
+ */
+function keptFoldersLine(marked, indent) {
+  if (marked === 0) return ''
+  return `${indent}${marked} folder${marked === 1 ? '' : 's'} you already record ${marked === 1 ? 'stays' : 'stay'} sync ('hyp privacy list' to review)\n`
 }
 
 /**
@@ -698,14 +733,15 @@ function parsePolicyFoldersArgs(argv) {
  * control afterwards. With no argument it reports the current mode; with
  * `ask` or `sync` it writes one, idempotently.
  *
- * Deliberately narrow: this is a prompt preference, not a policy. `sync`
- * suppresses the *question*, never a classification - `.hypignore` dotfiles,
- * every entry `hyp policy set` wrote, and the export seam behave identically
- * in both modes, so nothing already marked local-only or ignored starts
- * syncing because the ask was turned off.
+ * The mode is a collection rule, not only a prompt preference. With `ask`, a
+ * folder nothing governs is not collected (LLP 0622) and a chat with no
+ * folder is not recorded (LLP 0625). What neither mode touches is an explicit
+ * marking: `.hypignore` dotfiles and every entry `hyp policy set` wrote
+ * resolve the same in both, so nothing already marked local-only or ignored
+ * starts syncing because the ask was turned off.
  *
  * @ref LLP 0200#cli [implements]: the post-onboarding surface over the folder-ask preference, the sibling of `policy client`
- * @ref LLP 0200#suppression [constrained-by]: the mode gates the ask alone; resolved classes and the export seam are untouched
+ * @ref LLP 0622#rule [constrained-by]: `ask` changes how an unmarked folder resolves; explicit markings are untouched in both modes
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -738,18 +774,22 @@ export async function runPolicyFolders(argv, ctx) {
   }
 
   const mode = parsed.mode
+  let marked
   try {
-    await writeFolderAskMode({ stateDir, mode })
+    // @ref LLP 0623#rule [implements]: turning the ask on keeps the folders already recorded
+    ;({ marked } = await switchFolderAskMode({ stateDir, mode, recordedFolders: () => listRecordedFolders(ctx) }))
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
-    ctx.stderr.write(`error: could not write the ${FOLDER_ASK_STORE_LABEL} at '${storePath}' (${detail})\n`)
+    // @ref LLP 0623#fail-closed [implements]: the mode did not change, and the error says so
+    ctx.stderr.write(`error: could not set the ${FOLDER_ASK_STORE_LABEL} at '${storePath}' (${detail}); it is unchanged\n`)
     return 1
   }
   if (parsed.json) {
-    ctx.stdout.write(JSON.stringify({ mode, path: storePath }) + '\n')
+    ctx.stdout.write(JSON.stringify({ mode, path: storePath, ...(mode === 'ask' ? { marked } : {}) }) + '\n')
     return 0
   }
   ctx.stdout.write(`new folders: ${FOLDER_ASK_STATE_LINE[mode]}\n`)
+  if (mode === 'ask') ctx.stdout.write(`  ${FOLDER_ASK_ON_NOTE}\n  ${NO_FOLDER_NOTE}\n${keptFoldersLine(marked, '  ')}`)
   // Say what did *not* change: turning the ask off is the surprising one,
   // and "I stopped being asked" must not read as "everything now syncs".
   ctx.stdout.write(

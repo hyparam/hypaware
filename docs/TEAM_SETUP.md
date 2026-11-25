@@ -46,9 +46,9 @@ to import existing history.
    canceling before setup commits preserves those settings.
    `hyp privacy client` changes them afterward.
 2. **Choose how new folders are handled.** Whether recording in a project
-   you have not worked in before syncs without asking, or asks you the
-   first time. This is a standing preference; `hyp privacy folders`
-   changes it later.
+   you have not worked in before syncs without asking, or collects nothing
+   until you answer for that folder. This is a standing preference;
+   `hyp privacy folders` changes it later.
 
 ### After the questions
 

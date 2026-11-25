@@ -28,7 +28,10 @@ export interface ParseResult {
 // (LLP 0050/0070): the nearest governing `.hypignore`, and, when the
 // resolver was constructed with `localOnlyListPath`, the machine-local
 // `local-only` list (LLP 0071), whichever verdict is more restrictive.
-// `class` is the resolved, implemented class (`full` when nothing governs);
+// `class` is the resolved, implemented class (`full` when nothing governs,
+// or `ignore` when nothing governs and the folder-ask mode is `ask`, LLP
+// 0622: that pairing, `ignore` with a null `governedBy`, is a folder
+// waiting for an answer, which `isUnanswered` tests for);
 // `governedBy` is the absolute path of the governing source (a `.hypignore`
 // file, the `local-only` list file, or null when nothing governs); `declared`
 // is the raw token before fail-safe (`'local-only'` for a list-governed
@@ -46,8 +49,15 @@ export interface UsagePolicyResolver {
   resolve(cwd: string): ResolveResult
   isIgnored(cwd: string): boolean
   /**
+   * The verdict for a chat that carries no folder (LLP 0625): `ignore` while
+   * the folder ask is in force, the implicit `full` otherwise. Optional so a
+   * hand-built test resolver without it behaves as "no ask".
+   */
+  resolveNoFolder?(): ResolveResult
+  /**
    * Cheap stable digest of the resolver's mutable machine-local input (the
-   * LLP 0071/0103 list file), for consumers that must notice a policy change
+   * LLP 0071/0103 list file, and whether the folder ask is in force, LLP
+   * 0622), for consumers that must notice a policy change
    * without re-reading history (LLP 0367 #policy-fingerprint). Optional so a
    * hand-built test resolver without it behaves as a constant policy.
    *
