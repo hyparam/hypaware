@@ -2229,9 +2229,10 @@ async function runFinaleBackfill(args) {
       // providers nor the daemon (re)start that resumes live capture.
       // This matches the attach/restart resilience above.
       // No announce line for a sweep-backed provider: the spinner below
-      // already says an import is running, and the sweep itself was
-      // disclosed where it was enabled.
-      // @ref LLP 0391#decision [implements]: the finale's sweep disclosure is left to the pick, so this loop treats sweep-backed and asked providers alike
+      // already says an import is running. Nothing else announces it: the
+      // pick is the consent, and the picker row no longer states the import.
+      // @ref LLP 0391#decision [implements]: the finale prints no sweep disclosure, so this loop treats sweep-backed and asked providers alike
+      // @ref LLP 0627#no-history [constrained-by]: no picker row states the import, so the pick alone is the consent
       for (const provider of toRun) {
         try {
           // Importing local history reads and writes potentially

@@ -537,14 +537,15 @@ test('a failing provider does not abort the other selected providers', async () 
   assert.match(stderr.text(), /backfill claude failed: claude boom/)
 })
 
-// --- sweep-backed providers (LLP 0180): disclosure instead of a question ---
+// --- sweep-backed providers (LLP 0180): the pick is the consent ---
 // A provider whose contribution declares a daemon sweep imports its history
 // on schedule regardless of any consent answer (LLP 0170), so the finale
 // never asks for it: the question covers only the non-sweep providers, and
-// the sweep-backed one runs its first import unannounced, with the
-// recurring schedule disclosed on the picker row instead (LLP 0391).
-// @ref LLP 0180#decision [tests]: a sweep-backed provider is disclosed and
-// imported rather than asked, and only a cancel takes it down with the rest
+// the sweep-backed one runs its first import unannounced. The picker row no
+// longer states the import either (LLP 0627 #no-history).
+// @ref LLP 0180#decision [tests]: a sweep-backed provider is imported rather
+// than asked, and only a cancel takes it down with the rest
+// @ref LLP 0627#no-history [constrained-by]: no picker row states the import
 // @ref LLP 0391#decision [tests]: the finale states results, not plans, so
 // it prints no announce prose before the sweep-backed import; the spinner
 // label and, when rows land, the import line are the only on-screen evidence
