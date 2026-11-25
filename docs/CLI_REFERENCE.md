@@ -1662,8 +1662,8 @@ Reports or changes whether unclassified folders sync by default, or wait for an
 answer. With `ask`, nothing is collected from a folder you have not marked
 until you mark it with `hyp privacy set`; Claude Code asks once when you open a
 session there. Turning `ask` on marks the folders this host already records as
-`sync`, so they keep being collected. Existing markings and `.hypignore` files
-don't change.
+`sync`, so they keep being collected. With `ask`, a chat that records no folder
+is not recorded. Existing markings and `.hypignore` files don't change.
 
 ```sh
 hyp privacy folders ask

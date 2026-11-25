@@ -82,6 +82,8 @@ export {
   folderAskPath,
   readFolderAskMode,
   readFolderAskModeSafe,
+  readFolderAskState,
+  readFolderAskStateSafe,
   writeFolderAskMode,
   isFolderAskMode,
   DEFAULT_FOLDER_ASK_MODE,

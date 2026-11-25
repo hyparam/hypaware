@@ -28,6 +28,8 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  * @ref LLP 0624#rule [tests]: `hyp privacy set <folder> sync` on a waiting
  *   folder starts a real background import that lands a finished session the
  *   scheduled sweep would have left behind.
+ * @ref LLP 0625#rule [tests]: a chat with no folder is recorded in the default
+ *   mode and not recorded once the ask is on, dropped at the cache commit.
  *
  * Boots `runDaemon` with `@hypaware/ai-gateway` and `@hypaware/claude` against
  * an in-process Anthropic-flavored echo upstream, in three daemon phases:
@@ -101,6 +103,10 @@ export async function run({ harness, expect }) {
     waitingLive: `waiting-live-${harness.devRunId}`,
     waitingSaved: `waiting-saved-${harness.devRunId}`,
     answeredLive: `answered-live-${harness.devRunId}`,
+    // Neither of these ever gets a session-context record, so the projector
+    // has no folder for them: they stand in for a chat with no folder.
+    noFolderBefore: `no-folder-before-${harness.devRunId}`,
+    noFolderAfter: `no-folder-after-${harness.devRunId}`,
   }
 
   /** The env every in-process CLI dispatch runs under. */
@@ -229,12 +235,18 @@ export async function run({ harness, expect }) {
     await step('record_before_ask', async () => {
       const gatewayUrl = await bootDaemon()
       expect.that('gateway: kept-folder exchange returned 200', await exchange(gatewayUrl, sessions.keptBefore), (v) => v === 200)
+      expect.that('gateway: no-folder exchange returned 200', await exchange(gatewayUrl, sessions.noFolderBefore), (v) => v === 200)
       await stopDaemon()
       const rows = await recordedRows()
       expect.that(
         'cache: the kept folder has rows before the ask is turned on',
-        rows,
-        (v) => Array.isArray(v) && v.length > 0 && v.every((r) => r.session_id === sessions.keptBefore && r.cwd === keptCwd),
+        rows.filter((r) => r.session_id === sessions.keptBefore),
+        (v) => v.length > 0 && v.every((r) => r.cwd === keptCwd),
+      )
+      expect.that(
+        'cache: in the default mode a chat with no folder is recorded, with no folder',
+        rows.filter((r) => r.session_id === sessions.noFolderBefore),
+        (v) => v.length > 0 && v.every((r) => !r.cwd),
       )
     })
 
@@ -282,6 +294,7 @@ export async function run({ harness, expect }) {
       const url = await bootDaemon()
       expect.that('gateway: kept-folder exchange still returned 200', await exchange(url, sessions.keptAfter), (v) => v === 200)
       expect.that('gateway: waiting-folder exchange returned 200 (pass-through)', await exchange(url, sessions.waitingLive), (v) => v === 200)
+      expect.that('gateway: no-folder exchange returned 200 with the ask on (pass-through)', await exchange(url, sessions.noFolderAfter), (v) => v === 200)
 
       const rows = await recordedRows()
       expect.that(
@@ -342,6 +355,9 @@ export async function run({ harness, expect }) {
       expect.that('cache: the exchange sent while the folder waited was never collected', bySession(sessions.waitingLive), (v) => v === 0)
       expect.that('cache: the saved session arrived through the import', bySession(sessions.waitingSaved), (v) => v === 2)
       expect.that('cache: the answered folder is collected live', bySession(sessions.answeredLive), (v) => v === 2)
+      // LLP 0625: the chat with no folder is recorded before the ask, never after.
+      expect.that('cache: the no-folder chat from before the ask is still there', bySession(sessions.noFolderBefore), (v) => v === 2)
+      expect.that('cache: with the ask on, the chat with no folder was not recorded', bySession(sessions.noFolderAfter), (v) => v === 0)
     })
 
     // ----- smoke_step: assert_signals -----
@@ -356,6 +372,12 @@ export async function run({ harness, expect }) {
         'logs: the drop names no governor, because nobody marked the folder',
         drops[0]?.attributes?.governed_by,
         (v) => v === undefined || v === null,
+      )
+      const noFolderDrops = logs.filter((/** @type {any} */ l) => l.body === 'usage_policy.no_folder_drop')
+      expect.that(
+        'logs: the no-folder rows were dropped at the cache commit, as a count',
+        noFolderDrops,
+        (v) => v.length >= 1 && v.every((/** @type {any} */ l) => Number(l.attributes?.dropped_count) > 0 && l.attributes?.session_id === undefined),
       )
       expect.that(
         'logs: the answer started a folder import',

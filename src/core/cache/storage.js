@@ -291,6 +291,44 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
   })
   const seqAllocator = createIngestSeqAllocator({ cacheRoot })
   /**
+   * Drop the rows of a chat that carries no folder, while the folder ask is in
+   * force. Called where rows are committed, after any settlement has had its
+   * chance to attach a folder that arrived late, so a row is judged on the
+   * best folder it will ever have.
+   *
+   * Every writer passes through a commit point in this file, so the rule
+   * holds for every client and every future one without each adapter having
+   * to remember that "no folder" is a case. Only a dataset that declares a
+   * `cwd` column is touched: a dataset with no such column does not describe
+   * a chat in a folder, and nothing here can say what it is missing.
+   *
+   * Cost: nothing when the ask is off (one memoized mode read per batch). When
+   * it is on, one pass over the batch, no allocation unless a row is dropped.
+   *
+   * @ref LLP 0625#rule [implements]: with the ask in force, a row with no folder is never committed
+   * @ref LLP 0625#one-place [implements]: enforced at the cache's commit points, not in each adapter
+   * @ref LLP 0625#after-settlement [implements]: judged after the settle hook, so a folder that arrives late still counts
+   * @param {string} dataset
+   * @param {ReadonlyArray<{ name: string }>} columns
+   * @param {Record<string, unknown>[]} rows
+   * @returns {Record<string, unknown>[]} the same array when nothing was dropped
+   */
+  function rowsWithFolder(dataset, columns, rows) {
+    if (rows.length === 0 || usagePolicyResolver?.resolveNoFolder?.().class !== 'ignore') return rows
+    if (!columns.some((column) => column.name === 'cwd')) return rows
+    const kept = rows.filter((row) => typeof row.cwd === 'string' && row.cwd !== '')
+    if (kept.length === rows.length) return rows
+    // Counts only: which dataset and how many. No session id, no content.
+    logger.info('usage_policy.no_folder_drop', {
+      [Attr.COMPONENT]: 'cache',
+      [Attr.OPERATION]: 'usage_policy.no_folder_drop',
+      [Attr.DATASET]: dataset,
+      dropped_count: rows.length - kept.length,
+      status: 'ok',
+    })
+    return kept
+  }
+  /**
    * @param {Record<string, unknown>[]} rows
    * @param {bigint} first
    */
@@ -335,6 +373,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         const settled = await settle(rows, { storage: service })
         if (settled !== rows) rows = recordRows(dataset, columns, settled, new Set(rows)).rows
       }
+      rows = rowsWithFolder(dataset, columns, rows)
       const beforeSecondCheck = rows.length
       rows = survivingRows(rows)
       purgedCount += beforeSecondCheck - rows.length
@@ -890,7 +929,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const recorded = recordRows(dataset, columns, survivingRows(rows))
+          const recorded = recordRows(dataset, columns, rowsWithFolder(dataset, columns, survivingRows(rows)))
           span.setAttribute('redacted_row_count', recorded.redacted)
           const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, recorded.rows, { filterRows: survivingRows })
           span.setAttribute('bytes_written', result.bytesWritten)
@@ -902,7 +941,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
 
     async reconcileRows(dataset, columns, rows, scope) {
       await drainSpoolForReconcile(dataset)
-      return reconcileCacheRows({ cacheRoot, dataset, columns, rows: recordRows(dataset, columns, rows).rows, scope,
+      return reconcileCacheRows({ cacheRoot, dataset, columns, rows: recordRows(dataset, columns, rowsWithFolder(dataset, columns, rows)).rows, scope,
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 
@@ -911,7 +950,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       await drainSpoolForReconcile(dataset)
       return reconcileCacheSnapshots({ cacheRoot, dataset, columns,
         snapshots: snapshots.map(snapshot => {
-          const recorded = recordRows(dataset, columns, snapshot.rows).rows
+          const recorded = recordRows(dataset, columns, rowsWithFolder(dataset, columns, snapshot.rows)).rows
           return recorded === snapshot.rows ? snapshot : { ...snapshot, rows: recorded }
         }),
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })

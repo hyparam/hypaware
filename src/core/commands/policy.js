@@ -26,7 +26,8 @@ import { syncDestinationName } from '../remote/builtin_remotes.js'
 import { centralLayerUnreadable, centralSinkOrigins } from '../remote/gateway_seed.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { switchFolderAskMode } from '../usage-policy/classification.js'
-import { buildAttachPluginCatalog, listRecordedFolders, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
+import { listRecordedFolders } from '../query/recorded_folders.js'
+import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -649,7 +650,7 @@ export async function prepareSetupPrivacy(ctx, choices) {
     if (choices.newFolders !== undefined) {
       const { marked } = await switchFolderAskMode({ stateDir, mode: choices.newFolders, recordedFolders: () => listRecordedFolders(ctx) })
       ctx.stdout.write(`New folders: ${choices.newFolders}. Existing folder classifications are unchanged.\n`)
-      if (choices.newFolders === 'ask') ctx.stdout.write(`${FOLDER_ASK_ON_NOTE}\n${keptFoldersLine(marked, '')}`)
+      if (choices.newFolders === 'ask') ctx.stdout.write(`${FOLDER_ASK_ON_NOTE}\n${NO_FOLDER_NOTE}\n${keptFoldersLine(marked, '')}`)
     }
     return 0
   }, { component: 'wizard' })
@@ -680,6 +681,13 @@ const FOLDER_ASK_STATE_LINE = {
  * @ref LLP 0622#copy [implements]: turning the ask on names the way to answer for a folder
  */
 const FOLDER_ASK_ON_NOTE = "answer for a folder with 'hyp privacy set <path> sync|local-only|ignore'"
+
+/**
+ * The half of the mode that has no question and no answer to give.
+ *
+ * @ref LLP 0625#copy [implements]: turning the ask on says that chats with no folder stop being recorded
+ */
+const NO_FOLDER_NOTE = 'chats that record no folder are not recorded while this is on'
 
 /**
  * What the switch did to the folders this machine already records.
@@ -780,7 +788,7 @@ export async function runPolicyFolders(argv, ctx) {
     return 0
   }
   ctx.stdout.write(`new folders: ${FOLDER_ASK_STATE_LINE[mode]}\n`)
-  if (mode === 'ask') ctx.stdout.write(`  ${FOLDER_ASK_ON_NOTE}\n${keptFoldersLine(marked, '  ')}`)
+  if (mode === 'ask') ctx.stdout.write(`  ${FOLDER_ASK_ON_NOTE}\n  ${NO_FOLDER_NOTE}\n${keptFoldersLine(marked, '  ')}`)
   // Say what did *not* change: turning the ask off is the surprising one,
   // and "I stopped being asked" must not read as "everything now syncs".
   ctx.stdout.write(

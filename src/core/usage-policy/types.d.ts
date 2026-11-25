@@ -49,6 +49,12 @@ export interface UsagePolicyResolver {
   resolve(cwd: string): ResolveResult
   isIgnored(cwd: string): boolean
   /**
+   * The verdict for a chat that carries no folder (LLP 0625): `ignore` while
+   * the folder ask is in force, the implicit `full` otherwise. Optional so a
+   * hand-built test resolver without it behaves as "no ask".
+   */
+  resolveNoFolder?(): ResolveResult
+  /**
    * Cheap stable digest of the resolver's mutable machine-local input (the
    * LLP 0071/0103 list file), for consumers that must notice a policy change
    * without re-reading history (LLP 0367 #policy-fingerprint). Optional so a

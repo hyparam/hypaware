@@ -51,7 +51,7 @@ export const FOLDER_ASK_OPTIONS = [
     value: 'ask',
     // @ref LLP 0622#copy [implements]: the option says what it does to collection, since that is now its effect
     label: 'Ask me first',
-    summary: 'Folders you already record carry on. Nothing is collected from a new folder until you choose sync, local-only, or ignore.',
+    summary: 'Folders you already record carry on. Nothing is collected from a new folder until you choose sync, local-only, or ignore, and chats with no folder are not recorded.',
   },
 ]
 

@@ -711,7 +711,16 @@ export interface HypAwareStatusReport {
    * is the mode with data consequences, so it is exactly the one that must
    * not be silent.
    */
-  usagePolicy: { localOnlyDirCount: number, folderAsk: FolderAskMode } | null
+  usagePolicy: {
+    localOnlyDirCount: number
+    folderAsk: FolderAskMode
+    /**
+     * Present when `folderAsk` is an `ask` an older version wrote and this
+     * version has not adopted yet (LLP 0626): the question is asked, and
+     * folders are still collected, until the daemon next starts.
+     */
+    folderAskPending?: true
+  } | null
   /**
    * The pending first-sync export hold's absolute deadline (epoch ms), read
    * from the machine-local marker (LLP 0101). Null whenever no hold is live:

@@ -9,7 +9,7 @@ import { syncDestinationName } from '../remote/builtin_remotes.js'
 import { readSinkOrigins } from '../remote/gateway_seed.js'
 import { createUsagePolicyResolver, scopeGoverns } from './matcher.js'
 import { localOnlyListPath, readLocalOnlyEntries, writeLocalOnlyEntries } from './local_only.js'
-import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe, writeFolderAskMode } from './folder_ask.js'
+import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe, readFolderAskStateSafe, writeFolderAskMode } from './folder_ask.js'
 
 /**
  * Session-start classification (LLP 0106): on a machine that forwards, an
@@ -323,7 +323,10 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
  */
 export async function switchFolderAskMode({ stateDir, mode, recordedFolders, homeDir = os.homedir() }) {
   let marked = 0
-  if (mode === 'ask' && (await readFolderAskModeSafe({ stateDir })) === 'sync') {
+  // "Not already the collecting rule" is the transition: from `sync`, and from
+  // an `ask` an older version wrote, where folders were still collected.
+  // @ref LLP 0626#rule [implements]: an unstamped `ask` gets the keep step exactly as a switch from `sync` does
+  if (mode === 'ask' && !(await readFolderAskStateSafe({ stateDir })).enforced) {
     const keep = foldersToKeep(await recordedFolders(), { listPath: localOnlyListPath(stateDir), homeDir })
     if (keep.length > 0) {
       const entries = await readLocalOnlyEntries({ stateDir })
@@ -381,4 +384,29 @@ function foldersToKeep(folders, { listPath, homeDir }) {
     if (!covered) kept.add(dir)
   }
   return [...kept]
+}
+
+/**
+ * Bring an `ask` that an older version wrote under this version's rule,
+ * once. Older versions offered `ask` as a question only: folders nobody
+ * answered for were still collected. Enforcing the rule on such a machine
+ * with no warning would stop collection in all of them. So the keep step
+ * runs first (those folders become `sync`, which is how they behaved), and
+ * only then is the preference stamped. Until that happens the resolver
+ * leaves an unstamped `ask` alone, so nothing is lost in between.
+ *
+ * A no-op, returning `null`, for `sync`, for an `ask` already stamped, and
+ * for a preference that cannot be read (that one already collects nothing,
+ * and there is no older behavior to preserve from bytes nobody can parse).
+ *
+ * @ref LLP 0626#rule [implements]: the one-time keep step for a machine already on ask
+ * @ref LLP 0626#once [implements]: the stamp is the done record, so a second run changes nothing
+ * @param {{ stateDir: string, recordedFolders: () => Promise<ReadonlyArray<unknown>>, homeDir?: string }} args
+ * @returns {Promise<number | null>} folders marked, or `null` when there was nothing to adopt
+ */
+export async function adoptLegacyFolderAsk({ stateDir, recordedFolders, homeDir }) {
+  const state = await readFolderAskStateSafe({ stateDir })
+  if (state.mode !== 'ask' || state.enforced) return null
+  const { marked } = await switchFolderAskMode({ stateDir, mode: 'ask', recordedFolders, ...(homeDir ? { homeDir } : {}) })
+  return marked
 }

@@ -193,8 +193,15 @@ hyp privacy set <path> sync          # or local-only, or ignore
 
 Answering `sync` or `local-only` also imports that folder's saved history in
 the background, so sessions from before your answer are not lost. Sources
-that keep no history on disk cannot be caught up. A chat that records no
-folder is not covered by `ask` and is recorded as before.
+that keep no history on disk cannot be caught up.
+
+A chat that records no folder is not recorded at all while `ask` is on. That
+covers raw API traffic through the proxy, Ollama, and any session whose folder
+HypAware could not work out. There is no question for these and no per-folder
+answer to give: to record them again, run `hyp privacy folders sync`. If your
+`ask` setting dates from an older version, where it was only a question, the
+daemon marks the folders you already record as `sync` the first time it starts
+on this version, so they keep being collected.
 
 Turning `ask` on keeps the folders this host already records: each is
 marked `sync` at that moment, and `hyp privacy list` shows them. Your home

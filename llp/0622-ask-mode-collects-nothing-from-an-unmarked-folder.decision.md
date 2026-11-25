@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-11-24
 **Extends:** LLP 0200 (#store: what `ask` means for a folder nobody has marked; #default and the `sync` mode are untouched)
+**Extended-by:** [LLP 0625](./0625-ask-mode-does-not-record-a-chat-with-no-folder.decision.md) (#folder-only: with the ask in force, a chat with no folder is not recorded); [LLP 0626](./0626-an-older-ask-is-adopted-once.decision.md) (the rule applies only to a stamped `ask`, so one set on an older version is adopted first)
 **Related:** LLP 0049 (#classes: the implicit `full` default this narrows), LLP 0050 (capture-seam enforcement in the adapters), LLP 0070 (#enforce: the export seam), LLP 0103 (the explicit `full` entry that records a "sync" answer), LLP 0104 (`hyp purge`), LLP 0105 (the query seam), LLP 0106 (the session-start question), LLP 0510 (the question's forwarding gate), LLP 0623 (what happens to folders already recorded when the ask is turned on), LLP 0624 (a "sync" answer imports the folder's history at once)
 
 > Extends [LLP 0200](./0200-folder-ask-is-a-preference.decision.md).
@@ -105,8 +106,9 @@ from a new folder until it is marked. The question's line "it would sync by
 default" is wrong under this rule and is replaced.
 
 <a id="folder-only"></a>**Scope: folders only.** A row that carries no
-folder is outside this rule and is recorded as it is today. That case is
-left for a later decision.
+folder is outside this rule. That case is settled by
+[LLP 0625](./0625-ask-mode-does-not-record-a-chat-with-no-folder.decision.md):
+with the ask in force, such a row is not recorded.
 
 <a id="forwarding"></a>**No special case for a machine that forwards
 nowhere.** The rule follows the stored mode, because the resolver reads
@@ -145,7 +147,7 @@ command say so. This edge is accepted, not designed for.
 1. **Seeing the folders that are waiting.** A list of folders seen but not
    collected would close the silent gap in clients that do not ask. It needs
    new state, so it is not part of this decision.
-2. **Chats with no folder.** Deferred, see #folder-only.
+2. **Chats with no folder.** Settled by LLP 0625, see #folder-only.
 
 ## References
 

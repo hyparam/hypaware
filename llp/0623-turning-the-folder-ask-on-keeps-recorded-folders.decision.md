@@ -5,6 +5,7 @@
 **Systems:** Usage-Policy, Onboarding, CLI
 **Author:** Phil / Claude
 **Date:** 2026-11-24
+**Extended-by:** [LLP 0626](./0626-an-older-ask-is-adopted-once.decision.md) (#only-on-transition: an `ask` an older version wrote counts as a transition too, and the daemon makes it once at start)
 **Related:** LLP 0622 (the rule this softens at the moment of switching), LLP 0200 (the folder-ask preference and its two writers), LLP 0103 (the explicit `full` entry), LLP 0070 (#enforce: the export seam), LLP 0100 (the enrollment privacy review)
 
 > When a machine switches from `sync` to `ask`, the folders it has already

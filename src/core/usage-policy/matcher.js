@@ -9,7 +9,7 @@ import { getLogger } from '../observability/logger.js'
 
 import { canonicalSpellings } from './canonical.js'
 import { createVolumeCaseProbe, foldPath, hashPath, sameDirectoryOnDisk } from './fold.js'
-import { folderAskModeFromRaw, folderAskPathBeside } from './folder_ask.js'
+import { folderAskEnforcedFromRaw, folderAskPathBeside } from './folder_ask.js'
 import { parseHypignore } from './format.js'
 import { LocalOnlyListUnreadableError } from './local_only.js'
 
@@ -46,6 +46,13 @@ export const CLASS_RANK = { ignore: 2, 'local-only': 1, full: 0 }
  * @type {ResolveResult}
  */
 const UNANSWERED = Object.freeze({ class: 'ignore', governedBy: null, declared: null })
+
+/**
+ * The implicit default: nothing governs, and the ask is not in force.
+ *
+ * @type {ResolveResult}
+ */
+const IMPLICIT_FULL = Object.freeze({ class: 'full', governedBy: null, declared: null })
 
 /**
  * True for a folder that is waiting for an answer: uncollected because the
@@ -235,7 +242,7 @@ export function createUsagePolicyResolver({
     if (!folderAskFile) return false
     let on
     try {
-      on = existsSync(folderAskFile) && folderAskModeFromRaw(String(readFileSync(folderAskFile, 'utf8'))) === 'ask'
+      on = existsSync(folderAskFile) && folderAskEnforcedFromRaw(String(readFileSync(folderAskFile, 'utf8')))
     } catch {
       on = true
     }
@@ -517,7 +524,20 @@ export function createUsagePolicyResolver({
     }
   }
 
-  return { resolve, isIgnored, fingerprint }
+  /**
+   * The verdict for a chat that carries no folder at all. There is nothing to
+   * walk or match, so the answer is the mode alone: not collected while the
+   * ask is in force, the implicit default otherwise. Same memo and the same
+   * window as {@link resolve}, so a caller may ask once per batch for free.
+   *
+   * @ref LLP 0625#rule [implements]: with the ask in force, no folder resolves like a folder nobody has answered for
+   * @returns {ResolveResult}
+   */
+  function resolveNoFolder() {
+    return askOn(now()) ? UNANSWERED : IMPLICIT_FULL
+  }
+
+  return { resolve, isIgnored, fingerprint, resolveNoFolder }
 }
 
 /**

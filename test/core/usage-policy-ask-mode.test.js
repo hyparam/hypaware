@@ -12,11 +12,12 @@ import {
   isUnanswered,
   localOnlyListPath,
   readFolderAskMode,
+  readFolderAskState,
   readLocalOnlyEntries,
   writeFolderAskMode,
   writeLocalOnlyEntries,
 } from '../../src/core/usage-policy/index.js'
-import { switchFolderAskMode } from '../../src/core/usage-policy/classification.js'
+import { adoptLegacyFolderAsk, switchFolderAskMode } from '../../src/core/usage-policy/classification.js'
 
 // LLP 0622: with the folder-ask mode on `ask`, a folder nothing governs is not
 // collected. These pin the rule at the one place it lives, the shared
@@ -318,6 +319,123 @@ test('a failed listing leaves the mode unchanged', async () => {
       /cache unreadable/,
     )
     assert.equal(await readFolderAskMode({ stateDir: m.stateDir }), 'sync')
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
+// LLP 0626: a machine that chose ask on an older version had a question, not
+// a rule. Its preference file carries no stamp.
+
+/**
+ * Write the preference the way an older version did: `ask`, no stamp.
+ * @param {string} stateDir
+ */
+async function writeLegacyAsk(stateDir) {
+  const file = folderAskPath(stateDir)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, JSON.stringify({ version: 1, mode: 'ask' }))
+}
+
+test('an ask this version writes is stamped, and reads back as the rule', async () => {
+  const m = await makeMachine()
+  try {
+    await writeFolderAskMode({ stateDir: m.stateDir, mode: 'ask' })
+    assert.deepEqual(JSON.parse(await fs.readFile(folderAskPath(m.stateDir), 'utf8')), { version: 1, mode: 'ask', enforced: true })
+    assert.deepEqual(await readFolderAskState({ stateDir: m.stateDir }), { mode: 'ask', enforced: true })
+
+    await writeFolderAskMode({ stateDir: m.stateDir, mode: 'sync' })
+    assert.deepEqual(JSON.parse(await fs.readFile(folderAskPath(m.stateDir), 'utf8')), { version: 1, mode: 'sync' })
+    assert.deepEqual(await readFolderAskState({ stateDir: m.stateDir }), { mode: 'sync', enforced: false })
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
+test('an ask an older version wrote still collects, until it is adopted', async () => {
+  const m = await makeMachine()
+  try {
+    await writeLegacyAsk(m.stateDir)
+    // Still an ask to everything that asks the question...
+    assert.equal(await readFolderAskMode({ stateDir: m.stateDir }), 'ask')
+    assert.deepEqual(await readFolderAskState({ stateDir: m.stateDir }), { mode: 'ask', enforced: false })
+    // ...and still collected, exactly as that version behaved.
+    const result = createUsagePolicyResolver({ localOnlyListPath: m.listPath }).resolve(m.project)
+    assert.deepEqual(result, { class: 'full', governedBy: null, declared: null })
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
+test('adopting an older ask keeps its recorded folders, stamps it, and runs once', async () => {
+  const m = await makeMachine()
+  try {
+    await writeLegacyAsk(m.stateDir)
+    let listed = 0
+    const recordedFolders = async () => { listed += 1; return [m.project] }
+    const homeDir = path.join(m.root, 'home')
+
+    assert.equal(await adoptLegacyFolderAsk({ stateDir: m.stateDir, recordedFolders, homeDir }), 1)
+    assert.deepEqual(await readFolderAskState({ stateDir: m.stateDir }), { mode: 'ask', enforced: true })
+
+    const resolver = createUsagePolicyResolver({ localOnlyListPath: m.listPath })
+    // What it already recorded keeps being collected...
+    assert.equal(resolver.resolve(m.project).class, 'full')
+    // ...and from here the rule is in force for anything new.
+    assert.equal(isUnanswered(resolver.resolve(path.join(m.root, 'work', 'brand-new'))), true)
+
+    // The stamp is the done record: a second start does nothing.
+    assert.equal(await adoptLegacyFolderAsk({ stateDir: m.stateDir, recordedFolders, homeDir }), null)
+    assert.equal(listed, 1)
+    assert.equal((await readLocalOnlyEntries({ stateDir: m.stateDir })).length, 1)
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
+test('there is nothing to adopt on sync, on a stamped ask, or on a preference nobody can read', async () => {
+  const m = await makeMachine()
+  try {
+    const recordedFolders = async () => { throw new Error('must not be listed') }
+    assert.equal(await adoptLegacyFolderAsk({ stateDir: m.stateDir, recordedFolders }), null)
+
+    await writeFolderAskMode({ stateDir: m.stateDir, mode: 'ask' })
+    assert.equal(await adoptLegacyFolderAsk({ stateDir: m.stateDir, recordedFolders }), null)
+
+    await fs.writeFile(folderAskPath(m.stateDir), '{ not json')
+    assert.equal(await adoptLegacyFolderAsk({ stateDir: m.stateDir, recordedFolders }), null)
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
+test('a failed adoption leaves the older ask as it was, so nothing stops being collected', async () => {
+  const m = await makeMachine()
+  try {
+    await writeLegacyAsk(m.stateDir)
+    await assert.rejects(
+      adoptLegacyFolderAsk({ stateDir: m.stateDir, recordedFolders: async () => { throw new Error('cache unreadable') } }),
+      /cache unreadable/,
+    )
+    assert.deepEqual(await readFolderAskState({ stateDir: m.stateDir }), { mode: 'ask', enforced: false })
+    assert.equal(createUsagePolicyResolver({ localOnlyListPath: m.listPath }).resolve(m.project).class, 'full')
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
+test('running the switch by hand on an older ask also keeps its recorded folders', async () => {
+  const m = await makeMachine()
+  try {
+    await writeLegacyAsk(m.stateDir)
+    const result = await switchFolderAskMode({
+      stateDir: m.stateDir,
+      mode: 'ask',
+      recordedFolders: async () => [m.project],
+      homeDir: path.join(m.root, 'home'),
+    })
+    assert.deepEqual(result, { mode: 'ask', marked: 1 })
+    assert.deepEqual(await readFolderAskState({ stateDir: m.stateDir }), { mode: 'ask', enforced: true })
   } finally {
     await fs.rm(m.root, { recursive: true, force: true })
   }
