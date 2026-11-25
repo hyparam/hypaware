@@ -35,5 +35,14 @@ requirements are relaxed to match:
   OpenClaw case (an OpenClaw `claude-cli` backend is recorded as Claude Code),
   and the OpenClaw row no longer states its two capture tiers. Both are said
   in docs/integrations/claude-code.md and docs/integrations/openclaw.md.
+- LLP 0180 #decision: the pick is still the consent for a sweep-backed
+  provider's import, but no row states it. The import is what recording a
+  tool means, and `backfill.on_join: false` still withholds it.
+
+<a id="ollama"></a>The Ollama row carries no privacy warning. LLP 0474
+#setup's warning (export sinks, no folder, no history import) stays in
+`hyp ollama setup` output, which may print after the pick. With the folder
+ask on, an Ollama chat has no folder and is not recorded at all
+(LLP 0625).
 
 The `backfill.on_join` opt-out and the attach enable prompts are unchanged.
