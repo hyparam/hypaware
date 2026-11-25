@@ -538,6 +538,10 @@ images, client assets, subdirectories, and symlinks are rejected before any
 upload. The remote renders the HTML; there is no local render step in the
 publish path. The remote identifies repeat uploads by content hash. `--org`
 applies only to an operator credential that can name an organization.
+On HypAware Cloud, a published report notifies the organization's members: by
+email, or, where the organization has connected Slack, by a post to its Slack
+channel instead of email by default. Each member's own email setting still
+applies.
 
 ```sh
 hyp report publish hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
@@ -1330,11 +1334,13 @@ Preview a scan with `hyp backfill <provider> --dry-run`.
 ### `hyp backfill`
 
 ```text
-hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]
+hyp backfill [provider...] [--since <iso>] [--until <iso>] [--folder <path>] [--retention-days <n>] [--dry-run] [--json]
 ```
 
 Scans selected providers, materializes records into live datasets, appends
 rows, and flushes the cache. Provider failures don't stop sibling providers.
+`--folder <path>` limits the import to sessions recorded in that folder or
+beneath it.
 `--dry-run` runs the same full scan and projection and writes no row, so it
 reports what an import would take at nearly the cost of one: only
 materialization, the row write, and the cache flush are skipped.
@@ -1654,8 +1660,12 @@ hyp privacy client codex local-only
 hyp privacy folders [ask|sync] [--json]
 ```
 
-Reports or changes whether unclassified folders sync by default or prompt once
-for classification. Existing markings and `.hypignore` files don't change.
+Reports or changes whether unclassified folders sync by default, or wait for an
+answer. With `ask`, nothing is collected from a folder you have not marked
+until you mark it with `hyp privacy set`; Claude Code asks once when you open a
+session there. Turning `ask` on marks the folders this host already records as
+`sync`, so they keep being collected. With `ask`, a chat that records no folder
+is not recorded. Existing markings and `.hypignore` files don't change.
 
 ```sh
 hyp privacy folders ask

@@ -4,7 +4,8 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
-import { readFolderAskModeSafe, writeFolderAskMode } from '../../usage-policy/index.js'
+import { readFolderAskModeSafe } from '../../usage-policy/index.js'
+import { switchFolderAskMode } from '../../usage-policy/classification.js'
 import { joinNames } from './express.js'
 
 /**
@@ -48,8 +49,9 @@ export const FOLDER_ASK_OPTIONS = [
   },
   {
     value: 'ask',
-    label: 'Ask me the first time',
-    summary: 'Choose sync, local-only, or ignore the first time you use a new folder.',
+    // @ref LLP 0622#copy [implements]: the option says what it does to collection, since that is now its effect
+    label: 'Ask me first',
+    summary: 'Folders you already record carry on. Nothing is collected from a new folder until you choose sync, local-only, or ignore, and chats with no folder are not recorded.',
   },
 ]
 
@@ -150,7 +152,7 @@ export async function runWizardFolderAsk(opts) {
  */
 async function recordAnswer(mode, { stateDir, before, opts }) {
   try {
-    await writeFolderAskMode({ stateDir, mode })
+    await switchFolderAskMode({ stateDir, mode, recordedFolders: opts.recordedFolders ?? noRecordedFolders })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     // The statement names the mode that actually stands, `before`, and the
@@ -185,7 +187,7 @@ async function recordAnswer(mode, { stateDir, before, opts }) {
  * @param {FolderAskMode} mode
  */
 function stateFolderMode(opts, mode) {
-  const now = mode === 'sync' ? 'New folders sync automatically' : 'New folders ask first'
+  const now = mode === 'sync' ? 'New folders sync automatically' : "New folders wait for your answer: nothing is collected from one until you mark it. Claude Code asks when you open a session there; otherwise run 'hyp privacy set <path> sync|local-only|ignore'."
   const undo = mode === 'sync' ? 'hyp privacy folders ask' : 'hyp privacy folders sync'
   const said = opts.statement ?? opts.stdout
   said.write(`✓ ${now} (change with \`${undo}\`)\n`)
@@ -196,12 +198,12 @@ function stateFolderMode(opts, mode) {
  * statement. A failed write warns and leaves the previous mode standing,
  * as the lane's own write does.
  *
- * @param {{ env: NodeJS.ProcessEnv, stderr: RunWizardFolderAskOptions['stderr'], mode: FolderAskMode }} opts
+ * @param {{ env: NodeJS.ProcessEnv, stderr: RunWizardFolderAskOptions['stderr'], mode: FolderAskMode, recordedFolders?: RunWizardFolderAskOptions['recordedFolders'] }} opts
  */
-export async function commitWizardFolderAsk({ env, stderr, mode }) {
+export async function commitWizardFolderAsk({ env, stderr, mode, recordedFolders }) {
   const stateDir = readObservabilityEnv(env).stateDir
   try {
-    await writeFolderAskMode({ stateDir, mode })
+    await switchFolderAskMode({ stateDir, mode, recordedFolders: recordedFolders ?? noRecordedFolders })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     try {
@@ -210,6 +212,16 @@ export async function commitWizardFolderAsk({ env, stderr, mode }) {
       // best-effort: stderr might be closed during cleanup
     }
   }
+}
+
+/**
+ * The lister for a caller that has no cache to read (a test, or a run before
+ * anything was recorded): there is nothing to keep.
+ *
+ * @returns {Promise<string[]>}
+ */
+async function noRecordedFolders() {
+  return []
 }
 
 /**

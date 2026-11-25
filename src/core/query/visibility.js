@@ -3,7 +3,7 @@
 import path from 'node:path'
 import { readBatchColumn, selectBatch, selectedRowCount, valueAt } from 'squirreling'
 
-import { CLASS_RANK, createUsagePolicyResolver } from '../usage-policy/matcher.js'
+import { CLASS_RANK, createUsagePolicyResolver, isUnanswered } from '../usage-policy/matcher.js'
 import { localOnlyListPath } from '../usage-policy/local_only.js'
 
 /**
@@ -93,8 +93,15 @@ export function resolveCallerClass(resolver, callerCwd) {
   if (typeof callerCwd !== 'string' || callerCwd.length === 0) {
     return { callerClass: 'unknown', callerRank: CLASS_RANK.full }
   }
-  const callerClass = resolver.resolve(callerCwd).class
-  return { callerClass, callerRank: CLASS_RANK[callerClass] }
+  const verdict = resolver.resolve(callerCwd)
+  // A folder waiting for an answer resolves `ignore`, the top of the lattice,
+  // only because nothing is collected from it yet. It is not a private
+  // context: once it is answered `sync`, its saved transcript is imported
+  // (LLP 0624), and whatever the session read comes along. So it sees what a
+  // caller with no known folder sees, and no more.
+  // @ref LLP 0622#waiting-caller [implements]: a waiting folder queries as an unknown context, so local-only rows stay withheld from it
+  if (isUnanswered(verdict)) return { callerClass: 'unknown', callerRank: CLASS_RANK.full }
+  return { callerClass: verdict.class, callerRank: CLASS_RANK[verdict.class] }
 }
 
 /**

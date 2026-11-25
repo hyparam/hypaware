@@ -1,14 +1,15 @@
 // @ts-check
 
+import os from 'node:os'
 import path from 'node:path'
 
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { syncDestinationName } from '../remote/builtin_remotes.js'
 import { readSinkOrigins } from '../remote/gateway_seed.js'
-import { createUsagePolicyResolver } from './matcher.js'
-import { localOnlyListPath } from './local_only.js'
-import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe } from './folder_ask.js'
+import { createUsagePolicyResolver, scopeGoverns } from './matcher.js'
+import { localOnlyListPath, readLocalOnlyEntries, writeLocalOnlyEntries } from './local_only.js'
+import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe, readFolderAskStateSafe, writeFolderAskMode } from './folder_ask.js'
 
 /**
  * Session-start classification (LLP 0106): on a machine that forwards, an
@@ -58,7 +59,10 @@ export const CLASSIFICATION_CHOICES = [
     class: 'full',
     token: 'sync',
     label: 'sync',
-    blurb: (destination) => `this folder's sessions sync to ${destination} (the current default)`,
+    // No "(the current default)": the question is only asked with the ask on,
+    // where the default for an unmarked folder is that nothing is collected.
+    // @ref LLP 0622#copy [implements]: the sync choice no longer calls itself the default
+    blurb: (destination) => `record this folder's sessions and sync them to ${destination}`,
   },
   {
     class: 'local-only',
@@ -111,19 +115,25 @@ export function verbArgvForClass(cls, targetPath) {
  * @ref LLP 0113 [implements]: the copy itself mandates menu presentation, tool-neutral with the Claude tool named, so tool-less clients degrade to prose
  * @ref LLP 0200#escape-hatch [implements]: the prompt names its own off switch, so "stop asking me" is answerable in the session that asked
  * @ref LLP 0510#copy [implements]: a machine forwarding only through its own sink is not told it is enrolled
- * @param {{ cwd: string, origins?: ReadonlyArray<string>, enrolled?: boolean }} args
+ * @param {{ cwd: string, origins?: ReadonlyArray<string>, enrolled?: boolean, enforced?: boolean }} args `enforced` false for an ask an older version wrote, not yet adopted (LLP 0626)
  * @returns {string}
  */
-export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
+export function buildClassificationPrompt({ cwd, origins, enrolled = true, enforced = true }) {
   // The namer's neutral fallback is unreachable here: `evaluateCwdClassification`
   // prompts only when an origin exists.
   const destination = syncDestinationName(origins)
   const lines = [
     enrolled
-      ? 'This machine is enrolled, so by default the AI coding sessions you run here'
-      : 'This machine is set up to forward, so by default the AI coding sessions you run here',
-    `are recorded and forwarded to ${destination}.`,
-    `The folder ${cwd} has not been classified yet, so it would sync by default.`,
+      ? 'This machine is enrolled, so the AI coding sessions you run here'
+      : 'This machine is set up to forward, so the AI coding sessions you run here',
+    `can be recorded and forwarded to ${destination}.`,
+    // @ref LLP 0622#copy [implements]: the question states the rule in force while it is asked, not the default it replaced
+    enforced
+      ? `The folder ${cwd} has not been classified yet, so nothing from it is collected until the user chooses.`
+      // An ask an older version wrote and this one has not adopted yet
+      // (LLP 0626): the question is asked, and the folder is still collected.
+      // @ref LLP 0626#said [implements]: the question does not claim a rule that is not in force yet
+      : `The folder ${cwd} has not been classified yet, so it is still recorded and synced until the user chooses.`,
     '',
     'Before continuing, ask the user how this folder should be handled, then run',
     'the matching command once to record the answer (you will not be asked again',
@@ -163,9 +173,10 @@ export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
  * - already classified: the question was asked and answered once; an explicit
  *   entry (including an explicit `full`/sync) suppresses it (LLP 0106
  *   #interactive, LLP 0103 explicit-full).
- * - non-interactive / headless: proceeds under today's implicit default and
- *   leaves the folder unclassified for the next interactive session to catch;
- *   the hook must never hang or fail such a run (LLP 0106 #interactive).
+ * - non-interactive / headless: no question, and the folder stays
+ *   unclassified for the next interactive session to catch. With the ask in
+ *   force that means it is not collected meanwhile (LLP 0622); the hook must
+ *   never hang or fail such a run (LLP 0106 #interactive).
  * - `askMode: 'sync'` (the default, LLP 0200 #default): new folders sync and
  *   nobody is interrupted. Unclassified folders keep the implicit `full`
  *   default and the hook stays quiet. It is checked right after forwarding
@@ -176,7 +187,7 @@ export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
  *
  * @ref LLP 0106 [implements]: unclassified + interactive + forwarding => ask once, when the ask is on
  * @ref LLP 0510#predicate [implements]: the gate is forwarding in the effective config, not enrollment
- * @ref LLP 0200#suppression [implements]: the mode gates the ask alone, never the resolved class
+ * @ref LLP 0200#store [implements]: the mode decides whether the question is asked; what an unanswered folder resolves to is the resolver's (LLP 0622)
  * @param {{ forwards: boolean, interactive: boolean, governed: boolean, askMode?: FolderAskMode }} state
  * @returns {{ prompt: boolean, reason: 'not-forwarding' | 'ask-disabled' | 'classified' | 'non-interactive' | 'unclassified' }}
  */
@@ -260,8 +271,9 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     const result = resolver.resolve(cwd)
     // `governedBy !== null` means an explicit source (a `.hypignore` dotfile or
     // an explicit machine-local entry, incl. an explicit `full`) governs this
-    // folder: it has been classified. `null` is the implicit `full` default -
-    // "never asked" (LLP 0103 explicit-full, LLP 0106).
+    // folder: it has been classified. `null` is "never asked" (LLP 0103
+    // explicit-full, LLP 0106): the implicit `full` default, or a folder
+    // waiting for an answer while the ask is in force (LLP 0622).
     governed = result.governedBy !== null
   } catch {
     // A corrupt/unreadable machine-local list throws here. Do not prompt on a
@@ -285,7 +297,124 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     askMode,
   }
   if (decision.prompt) {
-    out.promptText = buildClassificationPrompt({ cwd, origins: destinations, enrolled })
+    const { enforced } = await readFolderAskStateSafe({ stateDir })
+    out.promptText = buildClassificationPrompt({ cwd, origins: destinations, enrolled, enforced })
   }
   return out
+}
+
+/**
+ * Set the folder-ask mode. Turning the ask on from `sync` first marks the
+ * folders this machine already records as `sync`, so the switch changes
+ * what happens to *new* folders and nothing the user already works in goes
+ * dark (LLP 0622 #rule would otherwise stop collecting all of them).
+ *
+ * The markings are written before the mode. If either the listing or the
+ * list write fails this throws and the mode is left as it was: a mode
+ * written without the markings is exactly the surprise this exists to
+ * prevent. Markings without the mode are harmless, they say what was
+ * already true.
+ *
+ * Cost is paid once, when a person changes a setting: one resolve per
+ * distinct recorded folder and one list write. Nothing here is on the
+ * capture or export path.
+ *
+ * @ref LLP 0623#rule [implements]: sync -> ask marks every recorded, ungoverned folder as an explicit `full` entry
+ * @ref LLP 0623#only-on-transition [implements]: ask -> ask and anything -> sync write the mode alone
+ * @ref LLP 0623#fail-closed [implements]: a failed listing or list write leaves the mode unchanged
+ * @param {object} args
+ * @param {string} args.stateDir
+ * @param {FolderAskMode} args.mode
+ * @param {() => Promise<ReadonlyArray<unknown>>} args.recordedFolders every folder the cache holds rows for
+ * @param {string} [args.homeDir] injected for tests; defaults to `os.homedir()`
+ * @returns {Promise<{ mode: FolderAskMode, marked: number }>}
+ */
+export async function switchFolderAskMode({ stateDir, mode, recordedFolders, homeDir = os.homedir() }) {
+  let marked = 0
+  // "Not already the collecting rule" is the transition: from `sync`, and from
+  // an `ask` an older version wrote, where folders were still collected.
+  // @ref LLP 0626#rule [implements]: an unstamped `ask` gets the keep step exactly as a switch from `sync` does
+  if (mode === 'ask' && !(await readFolderAskStateSafe({ stateDir })).enforced) {
+    const keep = foldersToKeep(await recordedFolders(), { listPath: localOnlyListPath(stateDir), homeDir })
+    if (keep.length > 0) {
+      const entries = await readLocalOnlyEntries({ stateDir })
+      await writeLocalOnlyEntries({
+        stateDir,
+        entries: [...entries, ...keep.map((dir) => ({ dir, class: /** @type {const} */ ('full') }))],
+      })
+      marked = keep.length
+    }
+  }
+  await writeFolderAskMode({ stateDir, mode })
+  return { mode, marked }
+}
+
+/**
+ * The recorded folders the switch should mark: those nothing governs yet,
+ * with a folder dropped when one of its ancestors is already being marked
+ * (an entry governs everything beneath it, so the child entry adds nothing).
+ *
+ * The home directory and everything above it are never marked. An entry
+ * there would answer "sync" for every folder the user ever creates, which
+ * is the opposite of what turning the ask on means.
+ *
+ * @ref LLP 0623#explicit-wins [implements]: a folder a dotfile or an entry already governs is left alone
+ * @ref LLP 0623#not-home [implements]: home and its ancestors stay unanswered, so the ask still means something
+ * @param {ReadonlyArray<unknown>} folders
+ * @param {{ listPath: string, homeDir: string }} opts
+ * @returns {string[]}
+ */
+function foldersToKeep(folders, { listPath, homeDir }) {
+  const resolver = createUsagePolicyResolver({ localOnlyListPath: listPath })
+  const home = path.resolve(homeDir)
+  /** @type {Set<string>} */
+  const candidates = new Set()
+  for (const folder of folders) {
+    if (typeof folder !== 'string' || !path.isAbsolute(folder)) continue
+    const dir = path.resolve(folder)
+    // Through the resolver's own spelling rules (symlinks, and case on a
+    // volume that folds it), so a home spelled differently in the rows is
+    // still home.
+    if (scopeGoverns(home, dir, { proveAliases: true })) continue
+    if (resolver.resolve(dir).governedBy !== null) continue
+    candidates.add(dir)
+  }
+  // Shortest first, so an ancestor is kept before its descendants are seen.
+  // Each folder then checks only its own ancestor chain: n * depth, not n * n.
+  /** @type {Set<string>} */
+  const kept = new Set()
+  for (const dir of [...candidates].sort((a, b) => a.length - b.length)) {
+    let covered = false
+    for (let up = path.dirname(dir); ; up = path.dirname(up)) {
+      if (kept.has(up)) { covered = true; break }
+      if (path.dirname(up) === up) break
+    }
+    if (!covered) kept.add(dir)
+  }
+  return [...kept]
+}
+
+/**
+ * Bring an `ask` that an older version wrote under this version's rule,
+ * once. Older versions offered `ask` as a question only: folders nobody
+ * answered for were still collected. Enforcing the rule on such a machine
+ * with no warning would stop collection in all of them. So the keep step
+ * runs first (those folders become `sync`, which is how they behaved), and
+ * only then is the preference stamped. Until that happens the resolver
+ * leaves an unstamped `ask` alone, so nothing is lost in between.
+ *
+ * A no-op, returning `null`, for `sync`, for an `ask` already stamped, and
+ * for a preference that cannot be read (that one already collects nothing,
+ * and there is no older behavior to preserve from bytes nobody can parse).
+ *
+ * @ref LLP 0626#rule [implements]: the one-time keep step for a machine already on ask
+ * @ref LLP 0626#once [implements]: the stamp is the done record, so a second run changes nothing
+ * @param {{ stateDir: string, recordedFolders: () => Promise<ReadonlyArray<unknown>>, homeDir?: string }} args
+ * @returns {Promise<number | null>} folders marked, or `null` when there was nothing to adopt
+ */
+export async function adoptLegacyFolderAsk({ stateDir, recordedFolders, homeDir }) {
+  const state = await readFolderAskStateSafe({ stateDir })
+  if (state.mode !== 'ask' || state.enforced) return null
+  const { marked } = await switchFolderAskMode({ stateDir, mode: 'ask', recordedFolders, ...(homeDir ? { homeDir } : {}) })
+  return marked
 }

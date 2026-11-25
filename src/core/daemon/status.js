@@ -34,7 +34,7 @@ import {
   LocalOnlyListUnreadableError,
   optedOutClientSourceIds,
   readClientSyncEntries,
-  readFolderAskModeSafe,
+  readFolderAskStateSafe,
   readLocalOnlyDirs,
 } from '../usage-policy/index.js'
 import { readFirstSyncDeadline, readFirstSyncRelease } from '../usage-policy/first_sync_hold.js'
@@ -1941,13 +1941,15 @@ export async function collectHypAwareStatus(opts = {}) {
   // never throws and reads a corrupt preference as `ask`, the mode that is
   // actually in force when the hook cannot read it either.
   // @ref LLP 0200#cli [implements]: hyp status names a suppressed folder ask alongside the withholding counts
-  const folderAsk = await readFolderAskModeSafe({ stateDir: stateRoot })
+  const folderAskState = await readFolderAskStateSafe({ stateDir: stateRoot })
+  const folderAsk = folderAskState.mode
 
-  /** @type {{ localOnlyDirCount: number, folderAsk: FolderAskMode } | null} */
+  /** @type {{ localOnlyDirCount: number, folderAsk: FolderAskMode, folderAskPending?: true } | null} */
   let usagePolicy = null
   try {
     const localOnlyDirs = await readLocalOnlyDirs({ stateDir: stateRoot })
-    usagePolicy = { localOnlyDirCount: localOnlyDirs.length, folderAsk }
+    // @ref LLP 0626#said [implements]: an ask an older version wrote, not yet adopted, is reported as what it still is
+    usagePolicy = { localOnlyDirCount: localOnlyDirs.length, folderAsk, ...(folderAsk === 'ask' && !folderAskState.enforced ? { folderAskPending: /** @type {const} */ (true) } : {}) }
   } catch (err) {
     const filePath = err instanceof LocalOnlyListUnreadableError
       ? err.filePath

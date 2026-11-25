@@ -123,15 +123,15 @@ const BUILTIN_ORIGIN = 'https://api.hypaware.ai'
 const SELF_HOSTED_ORIGIN = 'https://hyp.acme.dev/'
 
 const EXPECTED_CLASSIFICATION_PROMPT = [
-  'This machine is enrolled, so by default the AI coding sessions you run here',
-  'are recorded and forwarded to HypAware Cloud.',
-  'The folder /work/secret-repo has not been classified yet, so it would sync by default.',
+  'This machine is enrolled, so the AI coding sessions you run here',
+  'can be recorded and forwarded to HypAware Cloud.',
+  'The folder /work/secret-repo has not been classified yet, so nothing from it is collected until the user chooses.',
   '',
   'Before continuing, ask the user how this folder should be handled, then run',
   'the matching command once to record the answer (you will not be asked again',
   'for this folder):',
   '',
-  "  - sync: this folder's sessions sync to HypAware Cloud (the current default)",
+  "  - sync: record this folder's sessions and sync them to HypAware Cloud",
   '      hyp privacy set /work/secret-repo sync',
   '  - local-only: keep sessions on this machine only, never send them to HypAware Cloud',
   '      hyp privacy set /work/secret-repo local-only',
@@ -164,15 +164,15 @@ test('the consent prompt renders exactly the reviewed block (one destination ter
 // use. The whole block is pinned literally for each lane, for the same reason
 // the built-in lane is: any reword of a consent surface gets read by a human.
 const EXPECTED_SELF_HOSTED_CLASSIFICATION_PROMPT = [
-  'This machine is enrolled, so by default the AI coding sessions you run here',
-  'are recorded and forwarded to hyp.acme.dev.',
-  'The folder /work/secret-repo has not been classified yet, so it would sync by default.',
+  'This machine is enrolled, so the AI coding sessions you run here',
+  'can be recorded and forwarded to hyp.acme.dev.',
+  'The folder /work/secret-repo has not been classified yet, so nothing from it is collected until the user chooses.',
   '',
   'Before continuing, ask the user how this folder should be handled, then run',
   'the matching command once to record the answer (you will not be asked again',
   'for this folder):',
   '',
-  "  - sync: this folder's sessions sync to hyp.acme.dev (the current default)",
+  "  - sync: record this folder's sessions and sync them to hyp.acme.dev",
   '      hyp privacy set /work/secret-repo sync',
   '  - local-only: keep sessions on this machine only, never send them to hyp.acme.dev',
   '      hyp privacy set /work/secret-repo local-only',
@@ -210,7 +210,7 @@ test('a self-hosted enrollment is told its own server, never the hosted product 
 // is not (LLP 0063 D4), and `hyp leave` would not clear that sink. The header
 // line is the whole difference; everything after it is the self-hosted block.
 const EXPECTED_SELF_FORWARDING_HEADER =
-  'This machine is set up to forward, so by default the AI coding sessions you run here'
+  'This machine is set up to forward, so the AI coding sessions you run here'
 
 test('a machine forwarding through its own sink is not told it is enrolled (#2248)', () => {
   const prompt = buildClassificationPrompt({
@@ -261,7 +261,7 @@ test('an unresolvable destination degrades to a neutral name, never a blank or a
   const unnameable = [undefined, [], [''], ['not a url'], /** @type {any} */ ([42, null, ['https://sneaky.example']])]
   for (const origins of unnameable) {
     const prompt = buildClassificationPrompt({ cwd: CLASSIFICATION_PROMPT_CWD, origins })
-    assert.match(prompt, /are recorded and forwarded to your HypAware server\.$/m)
+    assert.match(prompt, /can be recorded and forwarded to your HypAware server\.$/m)
     assert.equal(countOccurrences(prompt, 'your HypAware server'), 3)
     assert.equal(/cloud/i.test(prompt), false)
   }

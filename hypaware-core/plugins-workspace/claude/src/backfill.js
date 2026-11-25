@@ -20,7 +20,7 @@ import {
 import { createSessionContextReader, pickLatestMatching } from './session_context.js'
 import { deriveRepoFromCwd } from './git_repo.js'
 import { anthropicMessageAttributes } from './anthropic.js'
-import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import { createUsagePolicyResolver, isEqualOrDescendant } from '../../../../src/core/usage-policy/index.js'
 import {
   AI_GATEWAY_MESSAGES_DATASET,
   errMessage,
@@ -487,6 +487,8 @@ async function* runClaudeBackfill(args) {
         })
         continue
       }
+      // @ref LLP 0624#scoped [implements]: a folder-limited import skips another folder's session before projecting it
+      if (ctx.folder && !(sessionCwd && isEqualOrDescendant(path.resolve(sessionCwd), ctx.folder))) continue
 
       // Claude Desktop writes its sessions into THIS transcript tree, tagged
       // `entrypoint: "claude-desktop"`. Importing them because they happen to

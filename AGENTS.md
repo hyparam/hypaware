@@ -245,6 +245,7 @@ hyp dev smoke client_attach_idempotent
 hyp dev smoke gateway_claude_capture
 hyp dev smoke gateway_codex_capture
 hyp dev smoke claude_telemetry_capture
+hyp dev smoke claude_tool_pair_merge
 hyp dev smoke hypignore_capture_drop
 hyp dev smoke local_only_export_withhold
 hyp dev smoke source_optout_export_withhold

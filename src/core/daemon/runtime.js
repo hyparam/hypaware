@@ -43,6 +43,8 @@ import {
 } from './pid.js'
 import { DAEMON_STOP_TIMEOUT_MS } from './service_ops.js'
 import { openDaemonLog } from './logs.js'
+import { listRecordedFolders } from '../query/recorded_folders.js'
+import { adoptLegacyFolderAsk } from '../usage-policy/classification.js'
 import { readSourceIdentity, readStatusFile, sourceHealth, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 import { pidFilePath, processingStateRoot, sinkOutboxDir, statusFilePath } from '../runtime/paths.js'
 import {
@@ -751,6 +753,23 @@ export async function runDaemon(opts = {}) {
     },
   })
 
+  // ----- Folder-ask upgrade -----
+  // A machine that chose `ask` on an older version had a question, not a
+  // rule. Before this daemon applies the rule, the folders it already records
+  // are marked `sync`, once. Until that lands the resolver leaves the old
+  // preference alone, so a failure here loses nothing: it is logged and the
+  // next start tries again.
+  // @ref LLP 0626#rule [implements]: the keep step runs once at daemon start for a machine already on ask
+  try {
+    const marked = await adoptLegacyFolderAsk({
+      stateDir: stateRoot,
+      recordedFolders: () => listRecordedFolders({ query: boot.runtime.query, storage: boot.runtime.storage, config: boot.config ?? undefined }),
+    })
+    if (marked !== null) fileLog.info('daemon.folder_ask_adopted', { marked_count: marked })
+  } catch {
+    fileLog.warn('daemon.folder_ask_adopt_failed', { error_kind: 'folder_ask_adopt' })
+  }
+
   // ----- Backfill sweep driver -----
   // Rides the sink tick below rather than owning a timer of its own: a
   // contribution's coarsest useful schedule still only needs a due-check once
@@ -1015,7 +1034,7 @@ export async function runDaemon(opts = {}) {
   const maintenanceCfg = boot.config?.query?.cache?.maintenance
   const maintenanceEnabled = maintenanceCfg?.enabled !== false
   if (maintenanceEnabled) {
-    const { maintainCache, normalizeMaintenanceConfig } = await import('../cache/maintenance.js')
+    const { datasetMaintenanceHooks, maintainCache, normalizeMaintenanceConfig } = await import('../cache/maintenance.js')
     const { createRetentionEnforcer } = await import('../cache/retention.js')
     const mCfg = normalizeMaintenanceConfig(maintenanceCfg)
     const intervalMs = mCfg.interval_minutes * 60 * 1000
@@ -1076,13 +1095,10 @@ export async function runDaemon(opts = {}) {
             // compaction can re-settle committed fallback rows split from
             // their uuid twin.
             storage: boot.runtime.storage,
-            getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
-            // @ref LLP 0311#migration: let the tick detect and run the
-            // one-time re-partition when a dataset's declaration demoted
-            // partition columns to sortOnly.
-            getDeclaration: (dataset) => boot.runtime.query.getDataset(dataset)?.cachePartitioning,
-            // @ref LLP 0590#old-rows: fill new columns into partitions written before them.
-            getColumnBackfill: (dataset) => boot.runtime.query.getDataset(dataset)?.columnBackfill,
+            // @ref LLP 0311#migration: the same hooks `hyp query maintain`
+            // passes: re-settle, re-partition, column backfill and the
+            // tool-pair merge.
+            ...datasetMaintenanceHooks(boot.runtime.query),
           })
           // @ref LLP 0228#status-file-is-the-surface [implements]: the tick
           // stops discarding the report. A partition this walk deliberately

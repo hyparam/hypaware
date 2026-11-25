@@ -1,6 +1,6 @@
 {
   "name": "hypaware",
-  "version": "1.55.0",
+  "version": "1.56.0",
   "type": "module",
   "description": "The improvement loop for all your agents.",
   "mcpName": "ai.hypaware/hypaware",
@@ -104,7 +104,7 @@
     "hypvector": "0.2.2"
   },
   "devDependencies": {
-    "@types/node": "26.6.6",
+    "@types/node": "26.6.7",
     "typescript": "7.0.2"
   }
 }

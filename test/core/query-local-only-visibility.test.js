@@ -37,7 +37,9 @@ function fakeResolver(classes) {
   return {
     resolve(cwd) {
       const cls = classes[cwd] ?? 'full'
-      return { class: cls, governedBy: null, declared: null }
+      // A marked folder names its governor. Only the implicit default has
+      // none, and `ignore` with none is a folder waiting for an answer (LLP 0622).
+      return { class: cls, governedBy: cls === 'full' ? null : '/stub/.hypignore', declared: null }
     },
     isIgnored(cwd) {
       return (classes[cwd] ?? 'full') === 'ignore'

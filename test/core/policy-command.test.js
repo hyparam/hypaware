@@ -1080,7 +1080,7 @@ test('hyp policy folders ask buys the per-folder question; folders sync retires 
 
     const on = await run('policy folders', ['ask'], { cwd: root, hypHome })
     assert.equal(on.code, 0, on.stderr)
-    assert.match(on.stdout, /asks once how to handle it/)
+    assert.match(on.stdout, /nothing is collected from a new folder/)
     assert.equal(await readFolderAskMode({ stateDir }), 'ask')
 
     const report = await run('policy folders', [], { cwd: root, hypHome })
@@ -1122,7 +1122,8 @@ test('hyp policy folders --json emits the mode and the store path, both shapes',
     assert.deepEqual(JSON.parse(before.stdout), { mode: 'sync', path: folderAskPath(stateDir) })
 
     const written = await run('policy folders', ['ask', '--json'], { cwd: root, hypHome })
-    assert.deepEqual(JSON.parse(written.stdout), { mode: 'ask', path: folderAskPath(stateDir) })
+    // Turning the ask on reports how many recorded folders it kept (LLP 0623 #said).
+    assert.deepEqual(JSON.parse(written.stdout), { mode: 'ask', path: folderAskPath(stateDir), marked: 0 })
   })
 })
 
