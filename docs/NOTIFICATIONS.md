@@ -46,8 +46,8 @@ back.
 
 - Your choices apply to your email address in every organization you belong
   to.
-- **Report emails** covers both reports and recommendations published on
-  their own.
+- Recommendation email has its own switch, **New recommendations**, apart
+  from report email.
 - Your choice wins over the organization's in both directions. If an admin has
   turned report email off, you can still turn it on for yourself, and the other
   way around.
