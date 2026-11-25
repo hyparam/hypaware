@@ -11,7 +11,7 @@ https://api.hypaware.ai/v1/mcp
 
 There are three ways to connect to it:
 
-- **Sign in from a chat client:** add the server to Claude or ChatGPT and
+- **Sign in from a chat client:** add HypAware to Claude or ChatGPT and
   sign in with your HypAware account. No token, no headers, and no
   `hyp` install. Most people start here.
 - **Agent token:** the client sends a token you mint. Use it for cloud
@@ -51,27 +51,24 @@ The menu paths follow Claude's own guide,
 
 ### ChatGPT
 
-ChatGPT connects to custom MCP servers on the web, on Business, Enterprise
-and Edu plans. On a Business workspace, only an admin or owner can add one.
-On Enterprise and Edu, an admin can let other members add one.
+HypAware is in the ChatGPT plugin directory, so you install it like any
+other plugin.
 
-1. Go to [Plugins](https://chatgpt.com/plugins), select the plus button,
-   then **Add custom MCP server**.
-2. Name it `HypAware`. Under **Connection**, set **Server URL** to
-   `https://api.hypaware.ai/v1/mcp`.
-3. For authentication, choose **OAuth**. HypAware needs no client ID or
-   secret, since ChatGPT registers itself.
-4. Check **I understand and want to continue**, then select **Create as a
-   plugin**.
-5. Install the plugin. When ChatGPT asks, sign in to HypAware and click
+1. Open
+   [HypAware in the plugin directory](https://chatgpt.com/plugins/plugin_asdk_app_6aed261fa6dc81919ff5b271e16d71c7),
+   or go to **Plugins** in the ChatGPT sidebar and search for HypAware.
+2. Select **Install plugin**.
+3. When ChatGPT asks, select **Connect**, sign in to HypAware, and click
    **Allow**.
-6. In a chat, type `@` and pick HypAware.
+4. ChatGPT uses HypAware when a question needs it. To pick it yourself,
+   type `@` and choose HypAware.
 
-ChatGPT asks you to confirm before it marks a recommendation applied or
-dismissed.
+On a Business, Enterprise or Edu workspace, an admin decides which plugins
+members can install. If you can't install HypAware, ask an admin to make it
+available in the Admin console under **Plugins**.
 
 The steps follow OpenAI's guide,
-[Connecting custom MCP servers in ChatGPT](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt).
+[Plugins in ChatGPT](https://help.openai.com/en/articles/20001256-plugins-in-chatgpt).
 
 ### What the connection can do
 
