@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { PassThrough, Readable } from 'node:stream'
+import { PassThrough } from 'node:stream'
 
 import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
