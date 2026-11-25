@@ -119,10 +119,9 @@ for (const row of ['raw-anthropic', 'raw-openai']) {
 // @ref LLP 0358#claude-code-consequences [tests]: a Desktop-only pick also
 // captures Claude Code, and the row must admit it before selection (PR #1231
 // B1, resolved by disclosure: keep the composition, state it plainly).
-test('claude-desktop picker summary discloses the Claude Code capture, history import, and attach', async () => {
+test('claude-desktop picker summary discloses the Claude Code capture and attach', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
   assert.match(summary, /Claude Code chats/i)
-  assert.match(summary, /including past ones/i)
   assert.match(summary, /edits Claude Code's settings/i)
 })
 

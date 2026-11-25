@@ -28,7 +28,7 @@
       {
         "name": "pi",
         "label": "Pi",
-        "summary": "Records Pi conversations and imports recent history. Setup adds the HypAware extension to Pi.",
+        "summary": "Records Pi conversations. Setup adds the HypAware extension to Pi.",
         "detect": {
           "settings_file": ".pi/agent/settings.json"
         },

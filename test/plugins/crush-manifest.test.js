@@ -55,7 +55,7 @@ test('crush contributes a picker row, a config section and a source, and no clie
   assert.deepEqual(manifest.contributes?.picker, [{
     name: 'crush',
     label: 'Crush',
-    summary: 'Records your Crush conversations and imports recent history. Makes no changes to Crush.',
+    summary: 'Records your Crush conversations. Makes no changes to Crush.',
     detect: { settings_file: '.local/share/crush/projects.json' },
     compose: { plugin: { name: '@hypaware/crush' }, requires_gateway: true },
   }])

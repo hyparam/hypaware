@@ -16,7 +16,7 @@
     "picker": [{
       "name": "ollama",
       "label": "Ollama",
-      "summary": "Records Ollama chats from clients you point at HypAware. Opens a local port; no history import.",
+      "summary": "Records Ollama chats from clients you point at HypAware. Opens a local port.",
       "detect": { "settings_file": ".ollama/history" },
       "needs_setup": true,
       "configure_command": "ollama setup",

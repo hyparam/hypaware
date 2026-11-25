@@ -24,7 +24,7 @@
       {
         "name": "claude-desktop",
         "label": "Claude Desktop",
-        "summary": "Records your Claude Desktop and Claude Code chats, including past ones. Setup edits Claude Code's settings and opens a local port.",
+        "summary": "Records your Claude Desktop and Claude Code chats. Setup edits Claude Code's settings and opens a local port.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
         "platforms": ["darwin"],
         "compose": {

@@ -9,6 +9,7 @@
 **Extended-by:** LLP 0359 (scheduled passes are serialized, retention-bounded,
 and skip unchanged transcript bodies with candidate-scoped cache dedupe)
 **Extended-by:** LLP 0612 (the optional profile and install commands this decision kept are removed)
+**Extended-by:** LLP 0627 (#no-history: the Desktop picker row no longer names the Claude Code history import)
 
 > Claude Desktop capture no longer depends on attaching its inference path.
 > Selecting Desktop enables the Claude transcript reader, and the daemon

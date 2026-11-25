@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-09-15
 **Related:** LLP 0063 (#d3), LLP 0100 (R1), LLP 0101 (#no-release), LLP 0167 (#onboarding), LLP 0171 (R12)
+**Extended-by:** LLP 0627 (#one-line: every picker row is one plain line)
 
 > Setup, sign-in, and the closing upload prompt are written for someone
 > who has never heard of HypAware. Plain words win over completeness.
