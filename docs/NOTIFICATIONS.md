@@ -16,6 +16,11 @@ member publishes from the CLI or their coding agent with
 report gets its own email. A report kept private to the member who made it is
 never announced, not even to that member.
 
+**Recommendations.** When a recommendation is published on its own, outside a
+report, every member gets an email. That includes one a member publishes with
+[`hyp recommendation publish`](CLI_REFERENCE.md#hyp-recommendation-publish).
+A recommendation inside a report gets no email of its own.
+
 **Your own hosts and invites.** You get an email when a host you set up first
 connects, when none of your hosts has connected a day after you joined, when
 you haven't signed in and your hosts haven't reported for two weeks, and when
@@ -29,9 +34,9 @@ organization's model usage jumps well above its usual level.
 welcome email, the new-member notice to admins, and the notice to admins when
 something they connected stops working.
 
-Emails name your organization, report titles, host names and counts, and link
-to the dashboard. They never include session content, prompts, responses, or
-report text.
+Emails name your organization, report and recommendation titles, host names
+and counts, and link to the dashboard. They never include session content,
+prompts, responses, or report or recommendation text.
 
 ## Turn your own email on or off
 
@@ -41,6 +46,8 @@ back.
 
 - Your choices apply to your email address in every organization you belong
   to.
+- **Report emails** covers both reports and recommendations published on
+  their own.
 - Your choice wins over the organization's in both directions. If an admin has
   turned report email off, you can still turn it on for yourself, and the other
   way around.
@@ -52,7 +59,8 @@ back.
 Open **Notifications**, then **Org notifications**. Changes apply to everyone
 in the organization.
 
-- **Reports:** turn email for **First report** and **New reports** on or off.
+- **Reports:** turn email for **First report**, **New reports** and **New
+  recommendations** on or off.
   It's on by default. Members who set their own report email keep their
   choice.
 - **Admin alerts:** turn **New host**, **Host stopped reporting** and **Usage
