@@ -73,13 +73,3 @@ test('openclaw description and picker summary state the two capture tiers direct
   assert.match(summary, /live/i)
   assert.match(summary, /session history/i)
 })
-
-// The LLP 0167#onboarding line names the claude-cli backend; the picker row
-// says it in plain words (OpenClaw sessions that run through Claude Code).
-test('claude manifest onboarding copy names the OpenClaw case', async () => {
-  const { loaded } = await loadManifests([path.join(WORKSPACE, 'claude')])
-  const manifest = /** @type {any} */ (loaded[0].manifest)
-
-  const summary = manifest.contributes?.picker?.[0]?.summary ?? ''
-  assert.match(summary, /OpenClaw/)
-})

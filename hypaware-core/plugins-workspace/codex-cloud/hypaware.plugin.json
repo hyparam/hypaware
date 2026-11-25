@@ -53,7 +53,7 @@
       {
         "name": "chatgpt-work",
         "label": "ChatGPT Work (beta)",
-        "summary": "Records Work web and mobile chats together using your existing Codex ChatGPT login.",
+        "summary": "Records your ChatGPT Work chats from web and mobile, using your Codex ChatGPT login.",
         "compose": {
           "plugin": {
             "name": "@hypaware/codex-cloud",

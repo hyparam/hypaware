@@ -16,7 +16,7 @@
     "picker": [{
       "name": "ollama",
       "label": "Ollama",
-      "summary": "Opens a local port; route your next CLI or SDK client explicitly. Records submitted text and omitted-media markers. Configured sinks may export local-model conversations. Cwd/repository are unknown, so directory exclusions cannot protect this lane. No history import or outage replay.",
+      "summary": "Records Ollama chats from clients you point at HypAware. Opens a local port; no history import.",
       "detect": { "settings_file": ".ollama/history" },
       "needs_setup": true,
       "configure_command": "ollama setup",
