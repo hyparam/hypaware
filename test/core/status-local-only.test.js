@@ -158,4 +158,5 @@ test('the new-folder line is enrolled-only, and states either mode', async () =>
   })
   assert.match(askOut.text(), /new folders:\s+not collected until you answer/)
   assert.match(askOut.text(), /hyp privacy folders sync/)
+  assert.match(askOut.text(), /hyp privacy set <path> sync\|local-only\|ignore/)
 })

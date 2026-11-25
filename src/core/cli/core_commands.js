@@ -660,6 +660,7 @@ function buildCoreCommands(registry) {
         '',
         'Folders you already marked keep their class, and .hypignore files are',
         'unaffected, in either setting.',
+        'Chats that record no folder (raw API traffic, OTEL, Ollama) are still recorded either way.',
       ].join('\n'),
       run: runPolicyFolders,
     },

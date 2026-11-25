@@ -15,6 +15,8 @@
  * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { registerSkills } from '../../../skills/index.js'
 import { HERMES_CONFIG_SECTION, validateHermesConfig } from './config.js'
 import { createHermesBackfillProvider } from './backfill.js'
@@ -84,6 +86,8 @@ export async function activate(ctx) {
       stateDbPath: resolveStateDbPath(ctx, homeDir),
       clientName: HERMES_CLIENT_NAME,
       pluginName: PLUGIN_NAME,
+      // @ref LLP 0622#one-place [implements]: the backfill's resolver finds the machine-local list, and the folder-ask mode beside it, like the poll source's
+      localOnlyListPath: localOnlyListPath(readObservabilityEnv(ctx.env).stateDir),
     })
   )
 

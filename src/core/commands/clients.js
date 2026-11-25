@@ -2698,7 +2698,8 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
       ? ' (not yet classified, so not collected: new folders ask first)'
       : (vocabulary.implicitSuffix ?? (() => ''))()
   ctx.stdout.write(`path: ${targetDir}\n`)
-  ctx.stdout.write(`ignored: ${ignored ? 'yes' : 'no'}\n`)
+  // @ref LLP 0622#still-unmarked [implements]: a waiting folder is not ignored by anyone; the text says so (the JSON keeps `ignored`)
+  ctx.stdout.write(`ignored: ${waiting ? 'no, waiting for an answer (not collected until then)' : ignored ? 'yes' : 'no'}\n`)
   ctx.stdout.write(`class: ${vocabulary.className(result.class)}${implicitSuffix}\n`)
   ctx.stdout.write(`source: ${source}\n`)
   ctx.stdout.write(`governed-by: ${result.governedBy ? vocabulary.governor(result.governedBy, listPath) : '(none)'}\n`)

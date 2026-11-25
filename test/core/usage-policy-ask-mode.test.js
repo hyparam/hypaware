@@ -233,6 +233,58 @@ test('the switch never marks the home directory or anything above it', async () 
   }
 })
 
+test('the switch never marks home through a symlinked spelling of it', async () => {
+  const m = await makeMachine()
+  try {
+    const real = path.join(m.root, 'real-home')
+    const link = path.join(m.root, 'link-home')
+    const project = path.join(real, 'project')
+    await fs.mkdir(project, { recursive: true })
+    await fs.symlink(real, link, 'dir')
+    // The rows spell home the real way; HOME names the link.
+    const { marked } = await switchFolderAskMode({
+      stateDir: m.stateDir,
+      mode: 'ask',
+      recordedFolders: async () => [real, project],
+      homeDir: link,
+    })
+    assert.equal(marked, 1)
+    const resolver = createUsagePolicyResolver({ localOnlyListPath: m.listPath })
+    assert.equal(resolver.resolve(project).class, 'full')
+    assert.equal(isUnanswered(resolver.resolve(path.join(real, 'later'))), true)
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
+test('a folder the switch just marked is collected at once, whatever the list memo held', async () => {
+  const m = await makeMachine()
+  try {
+    const marked = path.join(m.root, 'work', 'kept')
+    const other = path.join(m.root, 'work', 'other')
+    await fs.mkdir(marked, { recursive: true })
+    await fs.mkdir(other, { recursive: true })
+    await writeLocalOnlyEntries({ stateDir: m.stateDir, entries: [{ dir: other, class: 'full' }] })
+    let clock = 1_000
+    const resolver = createUsagePolicyResolver({ localOnlyListPath: m.listPath, now: () => clock, ttlMs: 5_000 })
+    // The mode is read at t=1000 and the list again at t=6100, by a folder the
+    // list governs (which needs no mode read).
+    assert.equal(resolver.resolve(m.project).class, 'full')
+    clock = 6_100
+    assert.equal(resolver.resolve(other).class, 'full')
+    // The switch writes its marking, then the mode.
+    await switchFolderAskMode({ stateDir: m.stateDir, mode: 'ask', recordedFolders: async () => [marked], homeDir: path.join(m.root, 'home') })
+    clock = 6_200
+    assert.equal(resolver.resolve(marked).class, 'full')
+    // Once the mode is seen, the marking still holds and an unmarked folder waits.
+    clock = 11_200
+    assert.equal(resolver.resolve(marked).class, 'full')
+    assert.equal(isUnanswered(resolver.resolve(m.project)), true)
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
 test('only the sync to ask transition marks anything', async () => {
   const m = await makeMachine()
   try {

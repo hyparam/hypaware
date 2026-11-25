@@ -188,6 +188,10 @@ export function createUsagePolicyResolver({
     const at = now()
     const cached = cache.get(key)
     if (cached && cached.expiresAt > at) return cached.result
+    // The mode is read before the list: a mode this window sees flip drops
+    // the list memo first, so the markings a switch to `ask` wrote just
+    // before the mode are matched here rather than a list read before them.
+    const ask = askOn(at)
     /** @type {ResolveResult | null} */
     let result = null
     for (const spelling of canonicalSpellings(key, { realpathSync })) {
@@ -198,7 +202,7 @@ export function createUsagePolicyResolver({
     }
     // @ref LLP 0622#rule [implements]: with the ask on, a folder nothing governs is not collected
     // @ref LLP 0622#still-unmarked [implements]: it still names no governor, so the hook asks and purge leaves it alone
-    if (/** @type {ResolveResult} */ (result).governedBy === null && askOn(at)) result = UNANSWERED
+    if (/** @type {ResolveResult} */ (result).governedBy === null && ask) result = UNANSWERED
     cache.set(key, { result: /** @type {ResolveResult} */ (result), expiresAt: at + ttlMs })
     return /** @type {ResolveResult} */ (result)
   }
@@ -235,7 +239,13 @@ export function createUsagePolicyResolver({
     } catch {
       on = true
     }
-    if (askSeen !== null && askSeen !== on) cache.clear()
+    // The list memo goes too: a switch to `ask` writes its markings just
+    // before the mode, and a list read before them would answer those folders
+    // as waiting for the rest of its window.
+    if (askSeen !== null && askSeen !== on) {
+      listCache = null
+      cache.clear()
+    }
     askSeen = on
     return on
   }

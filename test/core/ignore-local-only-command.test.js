@@ -424,6 +424,7 @@ test('hyp privacy folders ask keeps the folders already recorded and leaves new 
     const waiting = await run('privacy show', [], { cwd: fresh, hypHome, query, storage })
     assert.match(waiting.stdout, /class: ignore \(not yet classified, so not collected/)
     assert.match(waiting.stdout, /source: none/)
+    assert.match(waiting.stdout, /^ignored: no, waiting for an answer \(not collected until then\)$/m)
     assert.doesNotMatch(waiting.stdout, /hyp purge/)
   })
 })

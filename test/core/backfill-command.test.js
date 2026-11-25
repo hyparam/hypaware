@@ -248,7 +248,7 @@ test('runBackfill --folder writes a session recorded in the folder or beneath it
   assert.equal(await runBackfill(['tester', '--folder', '/work/app'], ctx), 0)
   assert.deepEqual(appended.map((entry) => entry.rows), [rows])
   // Providers are told the folder too, so they can skip before projecting.
-  assert.equal(runContexts[0].folder, '/work/app')
+  assert.equal(runContexts[0].folder, path.resolve('/work/app'))
 })
 
 test('runBackfill --folder leaves sessions from other folders, lookalike names included', async () => {
@@ -270,7 +270,7 @@ test('runBackfill --folder resolves a relative path against the command cwd', as
   const { ctx, appended, runContexts } = makeCtx({ materializeRows: [{ a: 1, cwd: '/work/app' }] })
   ;/** @type {any} */ (ctx).cwd = '/work'
   assert.equal(await runBackfill(['tester', '--folder', 'app'], ctx), 0)
-  assert.equal(runContexts[0].folder, '/work/app')
+  assert.equal(runContexts[0].folder, path.resolve('/work/app'))
   assert.equal(appended.length, 1)
 })
 

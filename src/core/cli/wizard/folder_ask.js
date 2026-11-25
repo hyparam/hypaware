@@ -51,7 +51,7 @@ export const FOLDER_ASK_OPTIONS = [
     value: 'ask',
     // @ref LLP 0622#copy [implements]: the option says what it does to collection, since that is now its effect
     label: 'Ask me first',
-    summary: 'Nothing is collected from a new folder until you choose sync, local-only, or ignore.',
+    summary: 'Folders you already record carry on. Nothing is collected from a new folder until you choose sync, local-only, or ignore.',
   },
 ]
 
@@ -187,7 +187,7 @@ async function recordAnswer(mode, { stateDir, before, opts }) {
  * @param {FolderAskMode} mode
  */
 function stateFolderMode(opts, mode) {
-  const now = mode === 'sync' ? 'New folders sync automatically' : 'New folders ask first, and nothing is collected from one until you answer'
+  const now = mode === 'sync' ? 'New folders sync automatically' : "New folders wait for your answer: nothing is collected from one until you mark it. Claude Code asks when you open a session there; otherwise run 'hyp privacy set <path> sync|local-only|ignore'."
   const undo = mode === 'sync' ? 'hyp privacy folders ask' : 'hyp privacy folders sync'
   const said = opts.statement ?? opts.stdout
   said.write(`✓ ${now} (change with \`${undo}\`)\n`)

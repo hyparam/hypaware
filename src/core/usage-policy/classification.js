@@ -7,7 +7,7 @@ import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { syncDestinationName } from '../remote/builtin_remotes.js'
 import { readSinkOrigins } from '../remote/gateway_seed.js'
-import { createUsagePolicyResolver } from './matcher.js'
+import { createUsagePolicyResolver, scopeGoverns } from './matcher.js'
 import { localOnlyListPath, readLocalOnlyEntries, writeLocalOnlyEntries } from './local_only.js'
 import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe, writeFolderAskMode } from './folder_ask.js'
 
@@ -361,7 +361,10 @@ function foldersToKeep(folders, { listPath, homeDir }) {
   for (const folder of folders) {
     if (typeof folder !== 'string' || !path.isAbsolute(folder)) continue
     const dir = path.resolve(folder)
-    if (dir === home || home.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep)) continue
+    // Through the resolver's own spelling rules (symlinks, and case on a
+    // volume that folds it), so a home spelled differently in the rows is
+    // still home.
+    if (scopeGoverns(home, dir, { proveAliases: true })) continue
     if (resolver.resolve(dir).governedBy !== null) continue
     candidates.add(dir)
   }
