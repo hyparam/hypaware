@@ -5,7 +5,7 @@
 **Systems:** Usage-Policy, Onboarding, CLI
 **Author:** Phil / Claude
 **Date:** 2026-11-24
-**Extends:** LLP 0200 (#store: what `ask` means for a folder nobody has marked; #default and the `sync` mode are untouched)
+**Extends:** LLP 0200 (#store: what `ask` means for a folder nobody has marked, which also ends #suppression's "never a classification" for an unmarked folder; #default and the `sync` mode are untouched)
 **Extended-by:** [LLP 0625](./0625-ask-mode-does-not-record-a-chat-with-no-folder.decision.md) (#folder-only: with the ask in force, a chat with no folder is not recorded); [LLP 0626](./0626-an-older-ask-is-adopted-once.decision.md) (the rule applies only to a stamped `ask`, so one set on an older version is adopted first)
 **Related:** LLP 0049 (#classes: the implicit `full` default this narrows), LLP 0050 (capture-seam enforcement in the adapters), LLP 0070 (#enforce: the export seam), LLP 0103 (the explicit `full` entry that records a "sync" answer), LLP 0104 (`hyp purge`), LLP 0105 (the query seam), LLP 0106 (the session-start question), LLP 0510 (the question's forwarding gate), LLP 0623 (what happens to folders already recorded when the ask is turned on), LLP 0624 (a "sync" answer imports the folder's history at once)
 
@@ -135,10 +135,15 @@ command say so. This edge is accepted, not designed for.
   each row's folder at export time
   ([LLP 0070 #enforce](./0070-local-only-export-seam.decision.md#enforce)). LLP 0623
   settles this for folders recorded before the ask was turned on.
-- A query run from an unmarked folder resolves as the `ignore` class, the
-  top of the visibility order, so it can see `local-only` rows. This matches
-  [LLP 0105](./0105-query-seam-local-only-visibility.decision.md): that
-  session is not recorded, so nothing it reads can leave through it.
+- <a id="waiting-caller"></a>A query run from a waiting folder is treated
+  as a caller with no known folder
+  ([LLP 0105 #unknown](./0105-query-seam-local-only-visibility.decision.md#unknown)):
+  `local-only` rows stay withheld from it. The resolver's `ignore` would
+  put it at the top of the visibility order, on the reasoning that an
+  unrecorded session cannot carry what it reads anywhere. That reasoning
+  does not hold for a waiting folder, because
+  [LLP 0624](./0624-answering-the-folder-ask-imports-that-folders-history.decision.md)
+  imports the session's saved transcript once the folder is answered.
 - CPU and memory: one extra small file read per resolver, on the same
   5 second cache as the machine-local list. No per-row work is added.
 

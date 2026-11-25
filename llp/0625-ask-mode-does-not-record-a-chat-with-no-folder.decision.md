@@ -69,10 +69,22 @@ dataset's settle hook ([LLP 0027](./0027-cache-settlement.decision.md))
 can attach a folder that arrived after the row was captured. The rule runs
 after the hook, so a folder that arrives late still counts.
 
-<a id="scope"></a>**Only a dataset that declares a `cwd` column is
-touched.** Today that is `ai_gateway_messages` and the Claude telemetry
-events. A dataset with no such column does not describe a chat in a folder,
-and this rule has nothing to say about it.
+<a id="scope"></a>**Only a chat is touched.** The rule looks at a dataset
+that declares a `cwd` column: today `ai_gateway_messages` and the Claude
+telemetry events. A dataset with no such column does not describe a chat in
+a folder, and this rule has nothing to say about it. Within such a dataset,
+a row that names no session is not a chat either and is left alone. The
+only rows like that today are the Claude telemetry counters, which are kept
+on purpose because they hold no content.
+
+<a id="never-deletes"></a>**The rule never deletes a stored row.** Some
+writers do not append: they hand over a snapshot that replaces what is
+stored for a session, and a stored row the snapshot does not carry is
+deleted. Taking the no-folder rows out of such a snapshot would delete the
+ones already stored, so that is never done. A snapshot that holds a row the
+rule refuses is left unreconciled, whole: what is stored stays as it is, and
+nothing new is written from it. An earlier revision of this change filtered
+the snapshot, and a review reproduced the deletion.
 
 <a id="row-level"></a>**The unit is the row.** A row with no folder is not
 committed even when other rows of its session carry one. The storage
@@ -100,7 +112,9 @@ session id or content.
   measured for this decision. See #open-questions.
 - A row spooled before the ask was turned on, and not yet committed, is
   dropped when it is flushed. The mode is read at commit.
-- Rows already committed are untouched. Nothing is deleted.
+- Rows already committed are untouched. Nothing is deleted (#never-deletes).
+  A session recorded before the ask was turned on, and reconciled after,
+  stops being updated and keeps what it had.
 - The history import of LLP 0624 already leaves a session with no folder.
 - CPU and memory: with the ask off, one memoized mode read per committed
   batch. With it on, one pass over the batch and no allocation unless a row

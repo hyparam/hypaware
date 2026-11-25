@@ -733,14 +733,15 @@ function parsePolicyFoldersArgs(argv) {
  * control afterwards. With no argument it reports the current mode; with
  * `ask` or `sync` it writes one, idempotently.
  *
- * Deliberately narrow: this is a prompt preference, not a policy. `sync`
- * suppresses the *question*, never a classification - `.hypignore` dotfiles,
- * every entry `hyp policy set` wrote, and the export seam behave identically
- * in both modes, so nothing already marked local-only or ignored starts
- * syncing because the ask was turned off.
+ * The mode is a collection rule, not only a prompt preference. With `ask`, a
+ * folder nothing governs is not collected (LLP 0622) and a chat with no
+ * folder is not recorded (LLP 0625). What neither mode touches is an explicit
+ * marking: `.hypignore` dotfiles and every entry `hyp policy set` wrote
+ * resolve the same in both, so nothing already marked local-only or ignored
+ * starts syncing because the ask was turned off.
  *
  * @ref LLP 0200#cli [implements]: the post-onboarding surface over the folder-ask preference, the sibling of `policy client`
- * @ref LLP 0200#suppression [constrained-by]: the mode gates the ask alone; resolved classes and the export seam are untouched
+ * @ref LLP 0622#rule [constrained-by]: `ask` changes how an unmarked folder resolves; explicit markings are untouched in both modes
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}

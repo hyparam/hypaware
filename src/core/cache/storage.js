@@ -291,19 +291,78 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
   })
   const seqAllocator = createIngestSeqAllocator({ cacheRoot })
   /**
+   * True for a row of a chat that carries no folder. A row with no session
+   * is not a chat: the one dataset that has such rows keeps them on purpose
+   * because they hold no content (the Claude telemetry counters), so they
+   * are not what the rule is about.
+   *
+   * @ref LLP 0625#scope [implements]: the rule is about chats, so a row with no session is left alone
+   * @param {Record<string, unknown>} row
+   * @param {boolean} hasSessionColumn
+   * @returns {boolean}
+   */
+  function isNoFolderChatRow(row, hasSessionColumn) {
+    if (typeof row.cwd === 'string' && row.cwd !== '') return false
+    return !hasSessionColumn || (typeof row.session_id === 'string' && row.session_id !== '')
+  }
+
+  /**
+   * How many rows of a batch the no-folder rule refuses, or 0 when it does
+   * not apply: the ask is not in force, or the dataset declares no `cwd`
+   * column (it does not describe a chat in a folder, and nothing here can say
+   * what it is missing).
+   *
+   * Cost: nothing when the ask is off (one memoized mode read per batch). When
+   * it is on, one pass over the batch and no allocation.
+   *
+   * @param {ReadonlyArray<{ name: string }>} columns
+   * @param {Record<string, unknown>[]} rows
+   * @returns {{ refused: number, hasSessionColumn: boolean }}
+   */
+  function noFolderRows(columns, rows) {
+    if (rows.length === 0 || usagePolicyResolver?.resolveNoFolder?.().class !== 'ignore') return { refused: 0, hasSessionColumn: false }
+    let hasCwdColumn = false
+    let hasSessionColumn = false
+    for (const column of columns) {
+      if (column.name === 'cwd') hasCwdColumn = true
+      else if (column.name === 'session_id') hasSessionColumn = true
+    }
+    if (!hasCwdColumn) return { refused: 0, hasSessionColumn }
+    let refused = 0
+    for (const row of rows) if (isNoFolderChatRow(row, hasSessionColumn)) refused += 1
+    return { refused, hasSessionColumn }
+  }
+
+  /**
+   * Counts only: which dataset, how many rows, and which commit path. No
+   * session id, no content.
+   *
+   * @ref LLP 0625#observable [implements]: a refusal is logged as a count
+   * @param {string} dataset
+   * @param {number} count
+   * @param {'dropped' | 'snapshot_left_as_stored'} outcome
+   */
+  function noteNoFolder(dataset, count, outcome) {
+    logger.info('usage_policy.no_folder_drop', {
+      [Attr.COMPONENT]: 'cache',
+      [Attr.OPERATION]: 'usage_policy.no_folder_drop',
+      [Attr.DATASET]: dataset,
+      dropped_count: count,
+      outcome,
+      status: 'ok',
+    })
+  }
+
+  /**
    * Drop the rows of a chat that carries no folder, while the folder ask is in
-   * force. Called where rows are committed, after any settlement has had its
-   * chance to attach a folder that arrived late, so a row is judged on the
-   * best folder it will ever have.
+   * force. For the append paths, where a row left out is simply never
+   * written. Called after any settlement has had its chance to attach a
+   * folder that arrived late, so a row is judged on the best folder it will
+   * ever have.
    *
    * Every writer passes through a commit point in this file, so the rule
    * holds for every client and every future one without each adapter having
-   * to remember that "no folder" is a case. Only a dataset that declares a
-   * `cwd` column is touched: a dataset with no such column does not describe
-   * a chat in a folder, and nothing here can say what it is missing.
-   *
-   * Cost: nothing when the ask is off (one memoized mode read per batch). When
-   * it is on, one pass over the batch, no allocation unless a row is dropped.
+   * to remember that "no folder" is a case.
    *
    * @ref LLP 0625#rule [implements]: with the ask in force, a row with no folder is never committed
    * @ref LLP 0625#one-place [implements]: enforced at the cache's commit points, not in each adapter
@@ -314,19 +373,31 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
    * @returns {Record<string, unknown>[]} the same array when nothing was dropped
    */
   function rowsWithFolder(dataset, columns, rows) {
-    if (rows.length === 0 || usagePolicyResolver?.resolveNoFolder?.().class !== 'ignore') return rows
-    if (!columns.some((column) => column.name === 'cwd')) return rows
-    const kept = rows.filter((row) => typeof row.cwd === 'string' && row.cwd !== '')
-    if (kept.length === rows.length) return rows
-    // Counts only: which dataset and how many. No session id, no content.
-    logger.info('usage_policy.no_folder_drop', {
-      [Attr.COMPONENT]: 'cache',
-      [Attr.OPERATION]: 'usage_policy.no_folder_drop',
-      [Attr.DATASET]: dataset,
-      dropped_count: rows.length - kept.length,
-      status: 'ok',
-    })
-    return kept
+    const { refused, hasSessionColumn } = noFolderRows(columns, rows)
+    if (refused === 0) return rows
+    noteNoFolder(dataset, refused, 'dropped')
+    return rows.filter((row) => !isNoFolderChatRow(row, hasSessionColumn))
+  }
+
+  /**
+   * Whether a snapshot may be reconciled. A reconcile replaces what is stored
+   * for its scope: a stored row the snapshot does not carry is deleted. So a
+   * snapshot must never be handed over with rows taken out of it, or the rule
+   * that stops new rows would delete old ones. A snapshot holding a row the
+   * rule refuses is left unreconciled instead, whole: what is stored stays as
+   * it is, and nothing new is written from it.
+   *
+   * @ref LLP 0625#never-deletes [implements]: a snapshot the rule would shrink is not reconciled, so no stored row is deleted
+   * @param {string} dataset
+   * @param {ReadonlyArray<{ name: string }>} columns
+   * @param {Record<string, unknown>[]} rows
+   * @returns {boolean}
+   */
+  function snapshotCommittable(dataset, columns, rows) {
+    const { refused } = noFolderRows(columns, rows)
+    if (refused === 0) return true
+    noteNoFolder(dataset, refused, 'snapshot_left_as_stored')
+    return false
   }
   /**
    * @param {Record<string, unknown>[]} rows
@@ -941,16 +1012,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
 
     async reconcileRows(dataset, columns, rows, scope) {
       await drainSpoolForReconcile(dataset)
-      return reconcileCacheRows({ cacheRoot, dataset, columns, rows: recordRows(dataset, columns, rowsWithFolder(dataset, columns, rows)).rows, scope,
+      if (!snapshotCommittable(dataset, columns, rows)) return 0
+      return reconcileCacheRows({ cacheRoot, dataset, columns, rows: recordRows(dataset, columns, rows).rows, scope,
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 
     async reconcileRowsBatch(dataset, columns, snapshots) {
+      snapshots = snapshots.filter(snapshot => snapshotCommittable(dataset, columns, snapshot.rows))
       if (!snapshots.length) return 0
       await drainSpoolForReconcile(dataset)
       return reconcileCacheSnapshots({ cacheRoot, dataset, columns,
         snapshots: snapshots.map(snapshot => {
-          const recorded = recordRows(dataset, columns, rowsWithFolder(dataset, columns, snapshot.rows)).rows
+          const recorded = recordRows(dataset, columns, snapshot.rows).rows
           return recorded === snapshot.rows ? snapshot : { ...snapshot, rows: recorded }
         }),
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })

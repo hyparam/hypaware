@@ -484,7 +484,8 @@ export function createUsagePolicyResolver({
   /**
    * Cheap stable digest of this resolver's mutable machine-local input: the
    * class-per-entry list file's bytes, hashed so no directory path leaves the
-   * store. Distinct sentinels for "no list configured", "list absent", and
+   * store, suffixed when the folder ask is in force (it changes verdicts as
+   * surely as the list does). Distinct sentinels for "no list configured", "list absent", and
    * "list unreadable" so each transition reads as a change; the unreadable
    * sentinel errs toward firing a revalidation, matching the fail-safe
    * direction of the list readers above. Committable `.hypignore` dotfiles

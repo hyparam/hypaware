@@ -115,10 +115,10 @@ export function verbArgvForClass(cls, targetPath) {
  * @ref LLP 0113 [implements]: the copy itself mandates menu presentation, tool-neutral with the Claude tool named, so tool-less clients degrade to prose
  * @ref LLP 0200#escape-hatch [implements]: the prompt names its own off switch, so "stop asking me" is answerable in the session that asked
  * @ref LLP 0510#copy [implements]: a machine forwarding only through its own sink is not told it is enrolled
- * @param {{ cwd: string, origins?: ReadonlyArray<string>, enrolled?: boolean }} args
+ * @param {{ cwd: string, origins?: ReadonlyArray<string>, enrolled?: boolean, enforced?: boolean }} args `enforced` false for an ask an older version wrote, not yet adopted (LLP 0626)
  * @returns {string}
  */
-export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
+export function buildClassificationPrompt({ cwd, origins, enrolled = true, enforced = true }) {
   // The namer's neutral fallback is unreachable here: `evaluateCwdClassification`
   // prompts only when an origin exists.
   const destination = syncDestinationName(origins)
@@ -128,7 +128,12 @@ export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
       : 'This machine is set up to forward, so the AI coding sessions you run here',
     `can be recorded and forwarded to ${destination}.`,
     // @ref LLP 0622#copy [implements]: the question states the rule in force while it is asked, not the default it replaced
-    `The folder ${cwd} has not been classified yet, so nothing from it is collected until the user chooses.`,
+    enforced
+      ? `The folder ${cwd} has not been classified yet, so nothing from it is collected until the user chooses.`
+      // An ask an older version wrote and this one has not adopted yet
+      // (LLP 0626): the question is asked, and the folder is still collected.
+      // @ref LLP 0626#said [implements]: the question does not claim a rule that is not in force yet
+      : `The folder ${cwd} has not been classified yet, so it is still recorded and synced until the user chooses.`,
     '',
     'Before continuing, ask the user how this folder should be handled, then run',
     'the matching command once to record the answer (you will not be asked again',
@@ -168,9 +173,10 @@ export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
  * - already classified: the question was asked and answered once; an explicit
  *   entry (including an explicit `full`/sync) suppresses it (LLP 0106
  *   #interactive, LLP 0103 explicit-full).
- * - non-interactive / headless: proceeds under today's implicit default and
- *   leaves the folder unclassified for the next interactive session to catch;
- *   the hook must never hang or fail such a run (LLP 0106 #interactive).
+ * - non-interactive / headless: no question, and the folder stays
+ *   unclassified for the next interactive session to catch. With the ask in
+ *   force that means it is not collected meanwhile (LLP 0622); the hook must
+ *   never hang or fail such a run (LLP 0106 #interactive).
  * - `askMode: 'sync'` (the default, LLP 0200 #default): new folders sync and
  *   nobody is interrupted. Unclassified folders keep the implicit `full`
  *   default and the hook stays quiet. It is checked right after forwarding
@@ -181,7 +187,7 @@ export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
  *
  * @ref LLP 0106 [implements]: unclassified + interactive + forwarding => ask once, when the ask is on
  * @ref LLP 0510#predicate [implements]: the gate is forwarding in the effective config, not enrollment
- * @ref LLP 0200#suppression [implements]: the mode gates the ask alone, never the resolved class
+ * @ref LLP 0200#store [implements]: the mode decides whether the question is asked; what an unanswered folder resolves to is the resolver's (LLP 0622)
  * @param {{ forwards: boolean, interactive: boolean, governed: boolean, askMode?: FolderAskMode }} state
  * @returns {{ prompt: boolean, reason: 'not-forwarding' | 'ask-disabled' | 'classified' | 'non-interactive' | 'unclassified' }}
  */
@@ -265,8 +271,9 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     const result = resolver.resolve(cwd)
     // `governedBy !== null` means an explicit source (a `.hypignore` dotfile or
     // an explicit machine-local entry, incl. an explicit `full`) governs this
-    // folder: it has been classified. `null` is the implicit `full` default -
-    // "never asked" (LLP 0103 explicit-full, LLP 0106).
+    // folder: it has been classified. `null` is "never asked" (LLP 0103
+    // explicit-full, LLP 0106): the implicit `full` default, or a folder
+    // waiting for an answer while the ask is in force (LLP 0622).
     governed = result.governedBy !== null
   } catch {
     // A corrupt/unreadable machine-local list throws here. Do not prompt on a
@@ -290,7 +297,8 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     askMode,
   }
   if (decision.prompt) {
-    out.promptText = buildClassificationPrompt({ cwd, origins: destinations, enrolled })
+    const { enforced } = await readFolderAskStateSafe({ stateDir })
+    out.promptText = buildClassificationPrompt({ cwd, origins: destinations, enrolled, enforced })
   }
   return out
 }

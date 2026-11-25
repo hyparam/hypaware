@@ -17,7 +17,10 @@ import {
   writeFolderAskMode,
   writeLocalOnlyEntries,
 } from '../../src/core/usage-policy/index.js'
-import { adoptLegacyFolderAsk, switchFolderAskMode } from '../../src/core/usage-policy/classification.js'
+import { adoptLegacyFolderAsk, buildClassificationPrompt, switchFolderAskMode } from '../../src/core/usage-policy/classification.js'
+import { resolveCallerClass } from '../../src/core/query/visibility.js'
+import { listRecordedFolders } from '../../src/core/query/recorded_folders.js'
+import { CLASS_RANK } from '../../src/core/usage-policy/matcher.js'
 
 // LLP 0622: with the folder-ask mode on `ask`, a folder nothing governs is not
 // collected. These pin the rule at the one place it lives, the shared
@@ -439,4 +442,49 @@ test('running the switch by hand on an older ask also keeps its recorded folders
   } finally {
     await fs.rm(m.root, { recursive: true, force: true })
   }
+})
+
+// LLP 0622 #waiting-caller: a waiting folder is not a private context.
+
+test('a query from a waiting folder is an unknown caller, so local-only rows stay withheld', async () => {
+  const m = await makeMachine()
+  try {
+    await writeFolderAskMode({ stateDir: m.stateDir, mode: 'ask' })
+    const marked = path.join(m.root, 'work', 'marked-ignore')
+    await writeLocalOnlyEntries({ stateDir: m.stateDir, entries: [{ dir: marked, class: 'ignore' }] })
+    const resolver = createUsagePolicyResolver({ localOnlyListPath: m.listPath })
+
+    // Waiting: the resolver says `ignore`, the query seam must not take that
+    // as "top of the lattice". Its transcript can be imported later (LLP 0624).
+    assert.deepEqual(resolveCallerClass(resolver, m.project), { callerClass: 'unknown', callerRank: CLASS_RANK.full })
+    // A folder someone marked ignore is unchanged: it is never imported.
+    assert.deepEqual(resolveCallerClass(resolver, marked), { callerClass: 'ignore', callerRank: CLASS_RANK.ignore })
+  } finally {
+    await fs.rm(m.root, { recursive: true, force: true })
+  }
+})
+
+// LLP 0623 #fail-closed: rows that exist but cannot be listed are a failure.
+
+test('the folder lister tells "never recorded" from "recorded but not loaded"', async () => {
+  const query = /** @type {any} */ ({ getDataset: () => undefined })
+  // Nothing in the cache: an empty answer.
+  const empty = /** @type {any} */ ({ discoverCachePartitions: async () => [] })
+  assert.deepEqual(await listRecordedFolders({ query, storage: empty }), [])
+  // Rows on disk for a dataset this process did not load: not an empty answer.
+  /** @type {unknown} */
+  let asked
+  const holding = /** @type {any} */ ({ discoverCachePartitions: async (/** @type {unknown} */ scope) => { asked = scope; return [{ path: '/cache/x' }] } })
+  await assert.rejects(listRecordedFolders({ query, storage: holding }), /has cached rows but is not registered/)
+  assert.deepEqual(asked, { datasets: ['ai_gateway_messages'] })
+})
+
+// LLP 0626 #said: the question does not claim a rule that is not in force.
+
+test('the question says the folder is still collected while an older ask waits to be adopted', () => {
+  const adopted = buildClassificationPrompt({ cwd: '/work/app', origins: [] })
+  assert.match(adopted, /nothing from it is collected until the user chooses/)
+  const pending = buildClassificationPrompt({ cwd: '/work/app', origins: [], enforced: false })
+  assert.match(pending, /it is still recorded and synced until the user chooses/)
+  assert.doesNotMatch(pending, /nothing from it is collected/)
 })
