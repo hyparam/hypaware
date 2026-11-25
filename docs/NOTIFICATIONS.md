@@ -18,7 +18,8 @@ never announced, not even to that member.
 
 **Your own hosts and invites.** You get an email when a host you set up first
 connects, when none of your hosts has connected a day after you joined, when
-your hosts haven't reported for two weeks, and when someone you invited joins.
+you haven't signed in and your hosts haven't reported for two weeks, and when
+someone you invited joins.
 
 **Admin alerts.** Admins get an email when a new host first reports to the
 organization, when a host that was reporting goes quiet, and when the
