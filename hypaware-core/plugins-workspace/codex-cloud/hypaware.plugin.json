@@ -38,7 +38,7 @@
       {
         "name": "codex-cloud",
         "label": "Codex Cloud (beta)",
-        "summary": "Records hosted Codex coding chats using your existing Codex ChatGPT login.",
+        "summary": "Records your hosted Codex chats, using your Codex ChatGPT login.",
         "compose": {
           "plugin": {
             "name": "@hypaware/codex-cloud",

@@ -28,7 +28,7 @@
       {
         "name": "grok",
         "label": "Grok Build",
-        "summary": "Records Grok Build conversations. Setup adds a HypAware hook file.",
+        "summary": "Records your Grok Build chats. Setup adds a HypAware hook file.",
         "detect": {
           "settings_file": ".grok/config.toml"
         },

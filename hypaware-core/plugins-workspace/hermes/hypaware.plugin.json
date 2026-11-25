@@ -22,7 +22,7 @@
       {
         "name": "hermes",
         "label": "Hermes Agent",
-        "summary": "Records your Hermes Agent conversations.",
+        "summary": "Records your Hermes Agent chats.",
         "detect": { "settings_file": ".hermes/state.db" },
         "compose": {
           "plugin": { "name": "@hypaware/hermes" },

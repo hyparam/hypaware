@@ -56,7 +56,7 @@ test('mastracode contributes a picker row, a config section and a source, and no
   assert.deepEqual(manifest.contributes?.picker, [{
     name: 'mastracode',
     label: 'Mastra Code',
-    summary: 'Records your Mastra Code conversations. Makes no changes to Mastra Code.',
+    summary: 'Records your Mastra Code chats. Makes no changes to Mastra Code.',
     detect: { settings_file: '.local/share/mastracode/mastra.db' },
     compose: { plugin: { name: '@hypaware/mastracode' }, requires_gateway: true },
   }])
