@@ -3,7 +3,7 @@
 import path from 'node:path'
 import fs from 'node:fs/promises'
 
-import { scopeGovernance } from '../usage-policy/matcher.js'
+import { isUnanswered, scopeGovernance } from '../usage-policy/matcher.js'
 import { discoverCachePartitions, isPartitionMutationBusy, PARTITION_MUTATION_BUSY_ERROR_KIND, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
 import { deleteMatchingRows, scanRowsFromTable } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
@@ -309,7 +309,9 @@ function buildPredicate(target, purgedCwds, retainedAliases, deps) {
         columns: ['cwd'],
         predicate: (row) => {
           if (typeof row.cwd !== 'string' || row.cwd === '') return false
-          if (resolver.resolve(row.cwd).class !== 'ignore') return false
+          const verdict = resolver.resolve(row.cwd)
+          // @ref LLP 0622#still-unmarked [implements]: only a folder someone marked ignore is purged, never one still waiting for an answer
+          if (verdict.class !== 'ignore' || isUnanswered(verdict)) return false
           noteCwd(row)
           return true
         },

@@ -516,7 +516,8 @@ function renderSharingNotices(report, stdout, indent = '  ') {
     stdout.write(
       report.usagePolicy.folderAsk === 'sync'
         ? `${indent}new folders:     sync without asking (\`hyp privacy folders ask\` to be asked instead)\n`
-        : `${indent}new folders:     asked about once each (\`hyp privacy folders sync\` to stop asking)\n`
+        // @ref LLP 0622#copy [implements]: status names what the ask does to collection, not only that it asks
+        : `${indent}new folders:     not collected until you answer (\`hyp privacy folders sync\` to collect without asking)\n`
     )
   }
 

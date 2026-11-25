@@ -1,5 +1,6 @@
 // @ts-check
 
+import os from 'node:os'
 import path from 'node:path'
 
 import { defaultConfigPath } from '../config/schema.js'
@@ -7,8 +8,8 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { syncDestinationName } from '../remote/builtin_remotes.js'
 import { readSinkOrigins } from '../remote/gateway_seed.js'
 import { createUsagePolicyResolver } from './matcher.js'
-import { localOnlyListPath } from './local_only.js'
-import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe } from './folder_ask.js'
+import { localOnlyListPath, readLocalOnlyEntries, writeLocalOnlyEntries } from './local_only.js'
+import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe, writeFolderAskMode } from './folder_ask.js'
 
 /**
  * Session-start classification (LLP 0106): on a machine that forwards, an
@@ -58,7 +59,10 @@ export const CLASSIFICATION_CHOICES = [
     class: 'full',
     token: 'sync',
     label: 'sync',
-    blurb: (destination) => `this folder's sessions sync to ${destination} (the current default)`,
+    // No "(the current default)": the question is only asked with the ask on,
+    // where the default for an unmarked folder is that nothing is collected.
+    // @ref LLP 0622#copy [implements]: the sync choice no longer calls itself the default
+    blurb: (destination) => `record this folder's sessions and sync them to ${destination}`,
   },
   {
     class: 'local-only',
@@ -120,10 +124,11 @@ export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
   const destination = syncDestinationName(origins)
   const lines = [
     enrolled
-      ? 'This machine is enrolled, so by default the AI coding sessions you run here'
-      : 'This machine is set up to forward, so by default the AI coding sessions you run here',
-    `are recorded and forwarded to ${destination}.`,
-    `The folder ${cwd} has not been classified yet, so it would sync by default.`,
+      ? 'This machine is enrolled, so the AI coding sessions you run here'
+      : 'This machine is set up to forward, so the AI coding sessions you run here',
+    `can be recorded and forwarded to ${destination}.`,
+    // @ref LLP 0622#copy [implements]: the question states the rule in force while it is asked, not the default it replaced
+    `The folder ${cwd} has not been classified yet, so nothing from it is collected until the user chooses.`,
     '',
     'Before continuing, ask the user how this folder should be handled, then run',
     'the matching command once to record the answer (you will not be asked again',
@@ -288,4 +293,89 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     out.promptText = buildClassificationPrompt({ cwd, origins: destinations, enrolled })
   }
   return out
+}
+
+/**
+ * Set the folder-ask mode. Turning the ask on from `sync` first marks the
+ * folders this machine already records as `sync`, so the switch changes
+ * what happens to *new* folders and nothing the user already works in goes
+ * dark (LLP 0622 #rule would otherwise stop collecting all of them).
+ *
+ * The markings are written before the mode. If either the listing or the
+ * list write fails this throws and the mode is left as it was: a mode
+ * written without the markings is exactly the surprise this exists to
+ * prevent. Markings without the mode are harmless, they say what was
+ * already true.
+ *
+ * Cost is paid once, when a person changes a setting: one resolve per
+ * distinct recorded folder and one list write. Nothing here is on the
+ * capture or export path.
+ *
+ * @ref LLP 0623#rule [implements]: sync -> ask marks every recorded, ungoverned folder as an explicit `full` entry
+ * @ref LLP 0623#only-on-transition [implements]: ask -> ask and anything -> sync write the mode alone
+ * @ref LLP 0623#fail-closed [implements]: a failed listing or list write leaves the mode unchanged
+ * @param {object} args
+ * @param {string} args.stateDir
+ * @param {FolderAskMode} args.mode
+ * @param {() => Promise<ReadonlyArray<unknown>>} args.recordedFolders every folder the cache holds rows for
+ * @param {string} [args.homeDir] injected for tests; defaults to `os.homedir()`
+ * @returns {Promise<{ mode: FolderAskMode, marked: number }>}
+ */
+export async function switchFolderAskMode({ stateDir, mode, recordedFolders, homeDir = os.homedir() }) {
+  let marked = 0
+  if (mode === 'ask' && (await readFolderAskModeSafe({ stateDir })) === 'sync') {
+    const keep = foldersToKeep(await recordedFolders(), { listPath: localOnlyListPath(stateDir), homeDir })
+    if (keep.length > 0) {
+      const entries = await readLocalOnlyEntries({ stateDir })
+      await writeLocalOnlyEntries({
+        stateDir,
+        entries: [...entries, ...keep.map((dir) => ({ dir, class: /** @type {const} */ ('full') }))],
+      })
+      marked = keep.length
+    }
+  }
+  await writeFolderAskMode({ stateDir, mode })
+  return { mode, marked }
+}
+
+/**
+ * The recorded folders the switch should mark: those nothing governs yet,
+ * with a folder dropped when one of its ancestors is already being marked
+ * (an entry governs everything beneath it, so the child entry adds nothing).
+ *
+ * The home directory and everything above it are never marked. An entry
+ * there would answer "sync" for every folder the user ever creates, which
+ * is the opposite of what turning the ask on means.
+ *
+ * @ref LLP 0623#explicit-wins [implements]: a folder a dotfile or an entry already governs is left alone
+ * @ref LLP 0623#not-home [implements]: home and its ancestors stay unanswered, so the ask still means something
+ * @param {ReadonlyArray<unknown>} folders
+ * @param {{ listPath: string, homeDir: string }} opts
+ * @returns {string[]}
+ */
+function foldersToKeep(folders, { listPath, homeDir }) {
+  const resolver = createUsagePolicyResolver({ localOnlyListPath: listPath })
+  const home = path.resolve(homeDir)
+  /** @type {Set<string>} */
+  const candidates = new Set()
+  for (const folder of folders) {
+    if (typeof folder !== 'string' || !path.isAbsolute(folder)) continue
+    const dir = path.resolve(folder)
+    if (dir === home || home.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep)) continue
+    if (resolver.resolve(dir).governedBy !== null) continue
+    candidates.add(dir)
+  }
+  // Shortest first, so an ancestor is kept before its descendants are seen.
+  // Each folder then checks only its own ancestor chain: n * depth, not n * n.
+  /** @type {Set<string>} */
+  const kept = new Set()
+  for (const dir of [...candidates].sort((a, b) => a.length - b.length)) {
+    let covered = false
+    for (let up = path.dirname(dir); ; up = path.dirname(up)) {
+      if (kept.has(up)) { covered = true; break }
+      if (path.dirname(up) === up) break
+    }
+    if (!covered) kept.add(dir)
+  }
+  return [...kept]
 }

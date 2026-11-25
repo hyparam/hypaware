@@ -175,16 +175,33 @@ There are two authoring surfaces for the same classes:
   ```
 
 On a host connected to HypAware Cloud, folders you have not marked sync
-without asking. You can instead be asked, once per new folder, how to
-handle it, at the moment you open a session there:
+without asking. You can instead make new folders wait for your answer:
 
 ```sh
-hyp privacy folders ask    # ask once per new folder
+hyp privacy folders ask    # collect nothing from a new folder until you answer
 hyp privacy folders sync   # back to syncing without asking (the default)
 hyp privacy folders        # report which is in force
 ```
 
-This gates the question only. In either setting, folders you already
+With `ask` on, nothing is collected from a folder you have not marked, in
+any client, until you mark it. Claude Code asks you the first time you open
+a session there. Other clients do not ask, so answer for a folder yourself:
+
+```sh
+hyp privacy set <path> sync          # or local-only, or ignore
+```
+
+Answering `sync` or `local-only` also imports that folder's saved history in
+the background, so sessions from before your answer are not lost. Sources
+that keep no history on disk cannot be caught up. A chat that records no
+folder is not covered by `ask` and is recorded as before.
+
+Turning `ask` on keeps the folders this host already records: each is
+marked `sync` at that moment, and `hyp privacy list` shows them. Your home
+directory is never marked this way, so folders you create later still wait
+for an answer.
+
+In either setting, folders you already
 marked keep their class, `.hypignore` files are unaffected, and nothing
 already local-only or ignored starts syncing. The setting is host-local
 and reversible, `hyp setup` asks for it in its own step (unattended:

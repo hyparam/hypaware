@@ -184,6 +184,12 @@ export interface RunWizardFolderAskOptions {
    * already answered this lane, so it narrates and records the default.
    */
   autoAccept?: boolean
+  /**
+   * Every folder the cache holds rows for. Turning the ask on marks them
+   * `sync` first, so folders the user already works in keep being
+   * collected (LLP 0623). Absent means there is no cache to read.
+   */
+  recordedFolders?: () => Promise<ReadonlyArray<unknown>>
 }
 
 /**

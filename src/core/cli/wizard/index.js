@@ -46,6 +46,7 @@ import { useColor } from '../stdio.js'
 import { ensureDurableBin } from '../global_install.js'
 import { platformIsSupported, setupUnsupportedNote } from '../../daemon/platform.js'
 import { friendlyClientLabel } from '../../commands/ask.js'
+import { listRecordedFolders } from '../../commands/clients.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { anyClientLaunchable, recordedAskClientLaunchable, runWizardSuggestSkill, usageSessionsRecorded } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
@@ -814,6 +815,7 @@ async function runGuardedInitWizard(opts, guard) {
             ...(foldersProgress ? { progress: foldersProgress } : {}),
             ...(opts.confirm ? { confirm: opts.confirm } : {}),
             ...(express ? { autoAccept: true } : {}),
+            recordedFolders: () => listRecordedFolders(opts.ctx),
             // The picker is always behind this one.
             allowBack: true,
           })
@@ -885,7 +887,7 @@ async function runGuardedInitWizard(opts, guard) {
     return { exitCode: 1, ...(pathway ? { pathway } : {}) }
   }
   if (folderAskPending && folderAsk) {
-    await commitWizardFolderAsk({ env: opts.env, stderr: opts.stderr, mode: folderAsk })
+    await commitWizardFolderAsk({ env: opts.env, stderr: opts.stderr, mode: folderAsk, recordedFolders: () => listRecordedFolders(opts.ctx) })
   }
   const dryRun = opts.finale?.dryRun === true
   if (picked.configPending) {

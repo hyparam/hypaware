@@ -38,12 +38,13 @@ import { probeAttachedClients, probeClientAttachFromDescriptor, resolveLiveGatew
 import { askYesNo } from '../cli/confirm.js'
 import { isTty } from '../cli/stdio.js'
 import { defaultBackfillConsentPromptFactory, describeBackfillResult, resolveSingleSourceEnablement } from '../cli/walkthrough.js'
-import { resolveRetentionDays, runBackfillProvider } from './backfill.js'
+import { resolveRetentionDays, runBackfillProvider, startFolderImport as defaultStartFolderImport } from './backfill.js'
 import {
   CLASS_RANK,
   createUsagePolicyResolver,
   findRepoRoot,
   governingListEntry,
+  isUnanswered,
   localOnlyListPath,
   sameDirectory,
   scopeGoverns,
@@ -2485,10 +2486,11 @@ const INTERNAL_VOCABULARY = {
  *
  * @ref LLP 0103#cli [implements]: machine-local class-per-entry marking
  * @ref LLP 0111#surface [implements]: the implementation behind `policy set`; the `component` attribute names the dispatching verb and `vocabulary` picks that verb's human wording
- * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass, component: string, vocabulary?: PolicyHumanVocabulary }} args
+ * @ref LLP 0624#one-trigger [implements]: the import starts here, the one verb every writer of an answer goes through
+ * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass, component: string, vocabulary?: PolicyHumanVocabulary, startFolderImport?: typeof defaultStartFolderImport }} args
  * @returns {Promise<number>}
  */
-export async function runMarkMachineLocal({ targetDir, ctx, targetClass, component, vocabulary = INTERNAL_VOCABULARY }) {
+export async function runMarkMachineLocal({ targetDir, ctx, targetClass, component, vocabulary = INTERNAL_VOCABULARY, startFolderImport = defaultStartFolderImport }) {
   const resolvedTarget = path.resolve(targetDir)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
@@ -2497,7 +2499,8 @@ export async function runMarkMachineLocal({ targetDir, ctx, targetClass, compone
   const alreadyMarked =
     targetClass === 'full'
       ? existing.governedBy === listPath && existing.class === 'full'
-      : CLASS_RANK[existing.class] >= CLASS_RANK[targetClass]
+      // @ref LLP 0622#still-unmarked [implements]: a folder waiting for an answer is uncollected, not marked, so a first marking is never "already ignore"
+      : !isUnanswered(existing) && CLASS_RANK[existing.class] >= CLASS_RANK[targetClass]
   if (alreadyMarked) {
     const governor = existing.governedBy ? vocabulary.governor(existing.governedBy, listPath) : '(implicit default)'
     ctx.stdout.write(`already ${vocabulary.className(existing.class)} (governed by ${governor})\n`)
@@ -2523,6 +2526,27 @@ export async function runMarkMachineLocal({ targetDir, ctx, targetClass, compone
   // picks this up within the matcher's cache TTL, not instantly.
   ctx.stdout.write(`marked ${resolvedTarget} as ${vocabulary.className(targetClass)}${vocabulary.storeSuffix(listPath)}\n`)
   if (targetClass === 'ignore') ctx.stdout.write(`${FOLDER_PURGE_NOTE}\n`)
+  // The folder was waiting for an answer and the answer collects it: nothing
+  // from it was collected until now, so its saved history is imported at
+  // once instead of being left to a sweep that already skipped it. Only this
+  // transition does it. A folder whose explicit `ignore` is lifted was
+  // excluded on purpose, and in the default mode nothing was held back.
+  // @ref LLP 0624#rule [implements]: answering a waiting folder sync or local-only starts its history import
+  // @ref LLP 0624#not-these [implements]: an ignore answer, a lifted ignore, and the default mode start nothing
+  if (isUnanswered(existing) && targetClass !== 'ignore') {
+    const started = startFolderImport({ folder: resolvedTarget, env: ctx.env })
+    getLogger('usage-policy').info('usage_policy.folder_import_start', {
+      [Attr.COMPONENT]: component,
+      [Attr.OPERATION]: 'usage_policy.folder_import_start',
+      status: started ? 'ok' : 'failed',
+    })
+    // The marking stands either way: it is the answer.
+    ctx.stdout.write(
+      started
+        ? "importing this folder's saved history in the background\n"
+        : `could not start the history import; run 'hyp backfill --folder ${resolvedTarget}' to import it\n`
+    )
+  }
   return 0
 }
 
@@ -2640,7 +2664,10 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
   // machine-local mark and a committed dotfile read differently even though
   // both resolve through the same `resolve()` call.
   const source = !result.governedBy ? 'none' : result.governedBy === listPath ? 'machine-local' : 'dotfile'
-  const purgeHint = residual ? ` (use 'hyp purge' to remove them)` : ''
+  // A folder waiting for an answer holds rows from before the ask was on;
+  // they are not rows of an ignored folder, so nothing invites a purge.
+  const waiting = isUnanswered(result)
+  const purgeHint = residual && !waiting ? ` (use 'hyp purge' to remove them)` : ''
 
   if (json) {
     ctx.stdout.write(
@@ -2664,7 +2691,12 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
   // whether a directory has already been classified, so the implicit case
   // must say so; direct internal callers may omit the optional suffix.
   // @ref LLP 0111#show [implements]: the implicit-default class label is unmistakable, never confusable with an explicit user classification
-  const implicitSuffix = result.governedBy ? '' : (vocabulary.implicitSuffix ?? (() => ''))()
+  // @ref LLP 0622#copy [implements]: `show` says a waiting folder is uncollected because nobody answered, not because it was ignored
+  const implicitSuffix = result.governedBy
+    ? ''
+    : waiting
+      ? ' (not yet classified, so not collected: new folders ask first)'
+      : (vocabulary.implicitSuffix ?? (() => ''))()
   ctx.stdout.write(`path: ${targetDir}\n`)
   ctx.stdout.write(`ignored: ${ignored ? 'yes' : 'no'}\n`)
   ctx.stdout.write(`class: ${vocabulary.className(result.class)}${implicitSuffix}\n`)
@@ -2748,6 +2780,39 @@ async function countResidualCachedRows(scopeDir, ctx) {
   } catch {
     return null
   }
+}
+
+/**
+ * Every folder the cache holds chat rows for, for the folder-ask switch
+ * (LLP 0623). An install that has never recorded a chat has no such dataset
+ * and so no folders: that is an answer, not a failure. Any other failure
+ * throws, because the caller must not turn the ask on over a list it could
+ * not read.
+ *
+ * Aggregated in the query engine, so what comes back is one row per folder,
+ * not one per message. Only folder paths reach the caller, never content, so
+ * the LLP 0105 visibility filter is bypassed as it is for the residual count.
+ *
+ * @ref LLP 0623#rule [implements]: "already recorded" is read from the cache, the one record of what was collected
+ * @param {Pick<CommandRunContext, 'query' | 'storage' | 'config'>} ctx
+ * @returns {Promise<string[]>}
+ */
+export async function listRecordedFolders(ctx) {
+  if (!ctx.query?.getDataset('ai_gateway_messages')) return []
+  const out = await executeQuerySql({
+    query: 'SELECT cwd FROM ai_gateway_messages GROUP BY cwd',
+    registry: ctx.query,
+    storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+    refresh: 'never',
+    config: ctx.config,
+    includeLocalOnly: true,
+  })
+  /** @type {string[]} */
+  const folders = []
+  for (const row of out.rows ?? []) {
+    if (typeof row.cwd === 'string' && row.cwd !== '') folders.push(row.cwd)
+  }
+  return folders
 }
 
 /**

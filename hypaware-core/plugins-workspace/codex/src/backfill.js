@@ -7,7 +7,7 @@ import path from 'node:path'
 import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
 import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.js'
-import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import { createUsagePolicyResolver, isEqualOrDescendant } from '../../../../src/core/usage-policy/index.js'
 import {
   AI_GATEWAY_MESSAGES_DATASET,
   errMessage,
@@ -434,6 +434,8 @@ async function* runCodexBackfill(args) {
           })
           continue
         }
+        // @ref LLP 0624#scoped [implements]: a folder-limited import skips another folder's session before projecting it
+        if (ctx.folder && !(session.cwd && isEqualOrDescendant(path.resolve(session.cwd), ctx.folder))) continue
         if (parsed.deferred) fileDeferred = 1
         // Counted only for sessions the scan keeps, so an ignored session
         // leaves no trace of what it held.

@@ -9,6 +9,7 @@ import { getLogger } from '../observability/logger.js'
 
 import { canonicalSpellings } from './canonical.js'
 import { createVolumeCaseProbe, foldPath, hashPath, sameDirectoryOnDisk } from './fold.js'
+import { folderAskModeFromRaw, folderAskPathBeside } from './folder_ask.js'
 import { parseHypignore } from './format.js'
 import { LocalOnlyListUnreadableError } from './local_only.js'
 
@@ -36,6 +37,28 @@ const CACHE_TTL_MS = 5_000
 // there is exactly one ordering in the codebase.
 // @ref LLP 0070#resolver [implements]: most-restrictive-wins ordering
 export const CLASS_RANK = { ignore: 2, 'local-only': 1, full: 0 }
+
+/**
+ * What a folder nothing governs resolves to while the folder-ask mode is
+ * `ask`: not collected, and governed by nothing. One frozen object, so the
+ * rule allocates nothing per folder.
+ *
+ * @type {ResolveResult}
+ */
+const UNANSWERED = Object.freeze({ class: 'ignore', governedBy: null, declared: null })
+
+/**
+ * True for a folder that is waiting for an answer: uncollected because the
+ * ask is on, not because anyone marked it `ignore`. Callers that act on an
+ * *explicit* ignore (purge, "already marked") must tell the two apart.
+ *
+ * @ref LLP 0622#still-unmarked [implements]: the one test for "ignored by the ask, not by a marking"
+ * @param {ResolveResult} result
+ * @returns {boolean}
+ */
+export function isUnanswered(result) {
+  return result.class === 'ignore' && result.governedBy === null
+}
 
 // LLP 0103's on-disk list version. Kept in sync with local_only.js's private
 // constant of the same value; a version mismatch (neither 1 nor 2) is
@@ -137,6 +160,13 @@ export function createUsagePolicyResolver({
   // `null` until this resolver has read the list once.
   /** @type {string | null} */
   let listBytes = null
+  // The folder-ask preference beside the list (LLP 0622). No list configured
+  // means no machine-local state at all, so no mode either.
+  const folderAskFile = localOnlyListPath ? folderAskPathBeside(localOnlyListPath) : null
+  /** @type {{ on: boolean, expiresAt: number } | null} */
+  let askCache = null
+  /** @type {boolean | null} */
+  let askSeen = null
   const emit = logEvent ?? emitDebug
   const probeVolume = caseInsensitiveVolume ?? createVolumeCaseProbe({ logSkip: emit })
 
@@ -166,8 +196,48 @@ export function createUsagePolicyResolver({
       const merged = mostRestrictive(dotfileResult, listResult)
       result = result === null ? merged : mostRestrictive(result, merged)
     }
+    // @ref LLP 0622#rule [implements]: with the ask on, a folder nothing governs is not collected
+    // @ref LLP 0622#still-unmarked [implements]: it still names no governor, so the hook asks and purge leaves it alone
+    if (/** @type {ResolveResult} */ (result).governedBy === null && askOn(at)) result = UNANSWERED
     cache.set(key, { result: /** @type {ResolveResult} */ (result), expiresAt: at + ttlMs })
     return /** @type {ResolveResult} */ (result)
+  }
+
+  /**
+   * Whether the folder-ask mode is `ask`, re-read at most once per `ttlMs`
+   * window however many folders are resolved in it, so the capture hot path
+   * pays one small file read per window and nothing per exchange.
+   *
+   * @param {number} at
+   * @returns {boolean}
+   */
+  function askOn(at) {
+    if (askCache && askCache.expiresAt > at) return askCache.on
+    const on = readAskOn()
+    askCache = { on, expiresAt: at + ttlMs }
+    return on
+  }
+
+  /**
+   * Read the mode from disk. Absent is the default (`sync`); a present file
+   * that cannot be read or parsed is `ask`. A mode this resolver has just
+   * seen change drops the per-folder memo, the same rule {@link noteListBytes}
+   * applies to the list: a verdict never outlives the setting that made it.
+   *
+   * @ref LLP 0622#fail-safe [implements]: unreadable resolves toward not collecting
+   * @returns {boolean}
+   */
+  function readAskOn() {
+    if (!folderAskFile) return false
+    let on
+    try {
+      on = existsSync(folderAskFile) && folderAskModeFromRaw(String(readFileSync(folderAskFile, 'utf8'))) === 'ask'
+    } catch {
+      on = true
+    }
+    if (askSeen !== null && askSeen !== on) cache.clear()
+    askSeen = on
+    return on
   }
 
   /**
@@ -422,11 +492,18 @@ export function createUsagePolicyResolver({
    */
   function fingerprint() {
     if (!localOnlyListPath) return 'no-list'
-    if (!existsSync(localOnlyListPath)) return noteListBytes('absent')
+    // The mode changes verdicts as surely as the list does, so it is part of
+    // the digest. Read fresh, like the list bytes below, and suffixed only
+    // when on, so a machine on the default keeps the digest it always had.
+    // @ref LLP 0622#rule [implements]: turning the ask on or off reads as a policy change at the export seam
+    const on = readAskOn()
+    askCache = { on, expiresAt: now() + ttlMs }
+    const ask = on ? '+ask' : ''
+    if (!existsSync(localOnlyListPath)) return noteListBytes('absent') + ask
     try {
-      return noteListBytes(listDigest(String(readFileSync(localOnlyListPath, 'utf8'))))
+      return noteListBytes(listDigest(String(readFileSync(localOnlyListPath, 'utf8')))) + ask
     } catch {
-      return noteListBytes('unreadable')
+      return noteListBytes('unreadable') + ask
     }
   }
 

@@ -89,6 +89,10 @@ fold can only ever make the verdict more restrictive.
 The class set is **extensible**: adding `local-only` (or future classes like
 `redact`) is additive to this spec and the file format, not a rewrite.
 
+**Extended-by: [LLP 0622](./0622-ask-mode-collects-nothing-from-an-unmarked-folder.decision.md)** -
+the implicit default is `full` only while the folder-ask mode is `sync`. With
+the mode on `ask`, a folder nothing governs is not collected until it is marked.
+
 **Extended-by: [LLP 0103](./0103-machine-local-policy-classes.decision.md)** -
 the `ignore` class gains a second authoring source, an entry in the
 machine-local list (private, per-machine, no repo dotfile), and an explicit

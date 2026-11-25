@@ -28,7 +28,10 @@ export interface ParseResult {
 // (LLP 0050/0070): the nearest governing `.hypignore`, and, when the
 // resolver was constructed with `localOnlyListPath`, the machine-local
 // `local-only` list (LLP 0071), whichever verdict is more restrictive.
-// `class` is the resolved, implemented class (`full` when nothing governs);
+// `class` is the resolved, implemented class (`full` when nothing governs,
+// or `ignore` when nothing governs and the folder-ask mode is `ask`, LLP
+// 0622: that pairing, `ignore` with a null `governedBy`, is a folder
+// waiting for an answer, which `isUnanswered` tests for);
 // `governedBy` is the absolute path of the governing source (a `.hypignore`
 // file, the `local-only` list file, or null when nothing governs); `declared`
 // is the raw token before fail-safe (`'local-only'` for a list-governed

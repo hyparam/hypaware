@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-07
 **Related:** LLP 0106 (the session-start classification hook this makes opt-in), LLP 0103 (the machine-local class store, untouched), LLP 0105 (#unknown: the query-seam backstop, untouched), LLP 0111 (the `policy` verb surface this extends), LLP 0113 (the ask's menu presentation), LLP 0188 (#opt-out: the sibling per-client preference), LLP 0190 (#sync-gate: the neighbouring wizard step), LLP 0201 (the express gate that can answer this step), LLP 0341 (the run-level rule when the wizard's output stream dies)
+**Extended-by:** [LLP 0622](./0622-ask-mode-collects-nothing-from-an-unmarked-folder.decision.md) (#store: with the mode on `ask`, an unmarked folder is not collected until it is marked, so the ask is no longer only a prompt; the `sync` mode and #default are unchanged); [LLP 0623](./0623-turning-the-folder-ask-on-keeps-recorded-folders.decision.md) (switching from `sync` to `ask` marks the folders already recorded as `sync`)
 
 > Extends [LLP 0106](./0106-session-start-classification-hook.decision.md).
 > The hook, its copy, its enrolled-and-interactive gating, and the store its

@@ -83,9 +83,10 @@ async function remainingRows(cacheRoot) {
  * @param {(cwd: string) => import('../../src/core/usage-policy/types.js').UsageClass} classOf
  * @returns {UsagePolicyResolver}
  */
-function stubResolver(classOf) {
+function stubResolver(classOf, governedBy = (cls) => (cls === 'full' ? null : '/stub/.hypignore')) {
   return {
-    resolve: (cwd) => ({ class: classOf(cwd), governedBy: null, declared: null }),
+    // A marked folder names its governor; only the implicit default has none.
+    resolve: (cwd) => ({ class: classOf(cwd), governedBy: governedBy(classOf(cwd)), declared: null }),
     isIgnored: (cwd) => classOf(cwd) === 'ignore',
   }
 }
@@ -180,6 +181,22 @@ test('purge --ignored deletes only rows whose cwd resolves ignore', async () => 
     const rows = await remainingRows(cacheRoot)
     assert.ok(!rows.some((r) => r.cwd === SECRET))
     assert.equal(rows.length, 3)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('purge --ignored leaves a folder that is only waiting for an answer', async () => {
+  // LLP 0622 #still-unmarked: with the folder ask on, an unmarked folder
+  // resolves `ignore` with no governor. Nobody marked it, so its history
+  // must survive a purge of ignored folders.
+  const cacheRoot = await makeTmpDir('unanswered')
+  try {
+    await seed(cacheRoot)
+    const resolver = stubResolver(() => 'ignore', () => null)
+    const summary = await purgeCache({ cacheRoot, target: { kind: 'ignored', resolver } })
+    assert.equal(summary.rowsDeleted, 0)
+    assert.equal((await remainingRows(cacheRoot)).length, 4)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

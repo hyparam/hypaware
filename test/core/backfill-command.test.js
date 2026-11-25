@@ -232,6 +232,55 @@ test('runBackfill materializes rows, appends to the dataset path, and flushes', 
   assert.equal(flushed[0].tablePath, '/tmp/fake-cache/datasets/ds/backfill')
 })
 
+// LLP 0624 #scoped: `--folder` limits an import to one folder's sessions.
+
+test('parseRunArgv takes --folder and rejects an empty one', () => {
+  assert.equal(/** @type {any} */ (parseRunArgv(['--folder', '/work/app'])).folder, '/work/app')
+  assert.equal(/** @type {any} */ (parseRunArgv(['--folder=/work/app'])).folder, '/work/app')
+  assert.equal(/** @type {any} */ (parseRunArgv([])).folder, undefined)
+  assert.ok(/** @type {any} */ (parseRunArgv(['--folder='])).error)
+})
+
+test('runBackfill --folder writes a session recorded in the folder or beneath it, whole', async () => {
+  // One row in scope carries the session: it is taken whole, never split.
+  const rows = [{ a: 1, cwd: '/work/app/packages/x' }, { a: 2, cwd: '/elsewhere' }]
+  const { ctx, appended, runContexts } = makeCtx({ materializeRows: rows })
+  assert.equal(await runBackfill(['tester', '--folder', '/work/app'], ctx), 0)
+  assert.deepEqual(appended.map((entry) => entry.rows), [rows])
+  // Providers are told the folder too, so they can skip before projecting.
+  assert.equal(runContexts[0].folder, '/work/app')
+})
+
+test('runBackfill --folder leaves sessions from other folders, lookalike names included', async () => {
+  for (const cwd of ['/work/other', '/work/app-two', '/work']) {
+    const { ctx, appended, out } = makeCtx({ materializeRows: [{ a: 1, cwd }] })
+    assert.equal(await runBackfill(['tester', '--folder', '/work/app', '--json'], ctx), 0)
+    assert.equal(appended.length, 0, `${cwd} is not inside /work/app`)
+    assert.equal(JSON.parse(out.join('')).providers[0].rows_written, 0)
+  }
+})
+
+test('runBackfill --folder leaves a session that records no folder at all', async () => {
+  const { ctx, appended } = makeCtx({ materializeRows: [{ a: 1 }, { a: 2, cwd: '' }, { a: 3, cwd: null }] })
+  assert.equal(await runBackfill(['tester', '--folder', '/work/app'], ctx), 0)
+  assert.equal(appended.length, 0)
+})
+
+test('runBackfill --folder resolves a relative path against the command cwd', async () => {
+  const { ctx, appended, runContexts } = makeCtx({ materializeRows: [{ a: 1, cwd: '/work/app' }] })
+  ;/** @type {any} */ (ctx).cwd = '/work'
+  assert.equal(await runBackfill(['tester', '--folder', 'app'], ctx), 0)
+  assert.equal(runContexts[0].folder, '/work/app')
+  assert.equal(appended.length, 1)
+})
+
+test('without --folder the run context carries no folder and every session is written', async () => {
+  const { ctx, appended, runContexts } = makeCtx({ materializeRows: [{ a: 1, cwd: '/anywhere' }] })
+  assert.equal(await runBackfill(['tester'], ctx), 0)
+  assert.equal('folder' in runContexts[0], false)
+  assert.equal(appended.length, 1)
+})
+
 test('runBackfill --dry-run scans without appending or flushing any rows', async () => {
   const { ctx, appended, flushed } = makeCtx()
   const code = await runBackfill(['tester', '--dry-run'], ctx)

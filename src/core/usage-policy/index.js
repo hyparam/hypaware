@@ -9,6 +9,7 @@ export {
   createUsagePolicyResolver,
   governingListEntry,
   isEqualOrDescendant,
+  isUnanswered,
   sameDirectory,
   scopeGovernance,
   scopeGoverns,

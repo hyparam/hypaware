@@ -1,6 +1,7 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
+import path from 'node:path'
 
 import { atomicWriteJson, readFileIfExists } from '../util/fs_atomic.js'
 import { usagePolicyPath } from '../runtime/paths.js'
@@ -67,6 +68,37 @@ export class FolderAskUnreadableError extends Error {
 export function folderAskPath(stateDir) {
   if (!stateDir) throw new Error('folderAskPath: stateDir is required')
   return usagePolicyPath(stateDir, 'folder-ask')
+}
+
+/**
+ * The folder-ask preference that sits beside a machine-local list file. The
+ * usage-policy resolver is handed the list's path and nothing else, and both
+ * stores live in one directory ({@link usagePolicyPath}), so the sibling is
+ * how it finds the mode without every caller threading a second path.
+ *
+ * @ref LLP 0622#one-place [implements]: the resolver finds the mode from the list path it already holds
+ * @param {string} listPath `localOnlyListPath(stateDir)`
+ * @returns {string}
+ */
+export function folderAskPathBeside(listPath) {
+  return path.join(path.dirname(listPath), path.basename(usagePolicyPath('.', 'folder-ask')))
+}
+
+/**
+ * The mode a present preference file's bytes declare, for the resolver's
+ * synchronous read. Never throws: bytes that do not parse to a known mode
+ * read as `'ask'`, the direction that collects less.
+ *
+ * @ref LLP 0622#fail-safe [implements]: an unreadable preference means not collected, never collected by accident
+ * @param {string} raw
+ * @returns {FolderAskMode}
+ */
+export function folderAskModeFromRaw(raw) {
+  try {
+    return parseFileShape(JSON.parse(raw)) ?? 'ask'
+  } catch {
+    return 'ask'
+  }
 }
 
 /**

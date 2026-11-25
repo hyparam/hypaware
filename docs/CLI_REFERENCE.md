@@ -1332,11 +1332,13 @@ Preview a scan with `hyp backfill <provider> --dry-run`.
 ### `hyp backfill`
 
 ```text
-hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]
+hyp backfill [provider...] [--since <iso>] [--until <iso>] [--folder <path>] [--retention-days <n>] [--dry-run] [--json]
 ```
 
 Scans selected providers, materializes records into live datasets, appends
 rows, and flushes the cache. Provider failures don't stop sibling providers.
+`--folder <path>` limits the import to sessions recorded in that folder or
+beneath it.
 `--dry-run` runs the same full scan and projection and writes no row, so it
 reports what an import would take at nearly the cost of one: only
 materialization, the row write, and the cache flush are skipped.
@@ -1656,8 +1658,12 @@ hyp privacy client codex local-only
 hyp privacy folders [ask|sync] [--json]
 ```
 
-Reports or changes whether unclassified folders sync by default or prompt once
-for classification. Existing markings and `.hypignore` files don't change.
+Reports or changes whether unclassified folders sync by default, or wait for an
+answer. With `ask`, nothing is collected from a folder you have not marked
+until you mark it with `hyp privacy set`; Claude Code asks once when you open a
+session there. Turning `ask` on marks the folders this host already records as
+`sync`, so they keep being collected. Existing markings and `.hypignore` files
+don't change.
 
 ```sh
 hyp privacy folders ask
