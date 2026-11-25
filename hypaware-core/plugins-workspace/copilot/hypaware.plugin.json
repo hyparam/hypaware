@@ -27,7 +27,7 @@
       {
         "name": "copilot",
         "label": "VS Code GitHub Copilot",
-        "summary": "Records your VS Code Copilot chats. Reload VS Code after setup.",
+        "summary": "Records your VS Code Copilot chats. Setup edits VS Code's settings; reload VS Code after setup.",
         "detect": {
           "vscode_extension": "github.copilot-chat"
         },

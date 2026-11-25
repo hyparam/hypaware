@@ -71,6 +71,20 @@ test('cursor picker summary discloses that file contents and command output are 
   assert.match(summary, /command output/i)
 })
 
+// @ref LLP 0627#one-line [tests]: a row names what setup changes on the
+// machine. Codex attach rewrites ~/.codex/config.toml (codex/src/settings.js),
+// Copilot attach edits VS Code's User/settings.json (copilot/src/attach.js),
+// and Cursor attach writes ~/.cursor/hooks.json, installs skills and listens
+// on a local port (cursor/src/attach.js, index.js, listener.js).
+test('codex, copilot and cursor picker summaries name the files setup edits', async () => {
+  assert.match(await pickerSummary('codex', 'codex'), /edits Codex's config/i)
+  assert.match(await pickerSummary('copilot', 'copilot'), /edits VS Code's settings/i)
+  const cursor = await pickerSummary('cursor', 'cursor')
+  assert.match(cursor, /adds Cursor hooks/i)
+  assert.match(cursor, /skills/i)
+  assert.match(cursor, /local port/i)
+})
+
 test('otel picker summary discloses that a local port is opened', async () => {
   const summary = await pickerSummary('otel', 'otel')
   assert.match(summary, /opens a local port/i)
