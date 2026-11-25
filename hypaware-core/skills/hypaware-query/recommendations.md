@@ -58,6 +58,8 @@ behavior and its consequence for someone unfamiliar with the work. The fix names
 the concrete change and its target; tests confirm the correction rather than
 replace it. Use **Next action:** instead of **Fix:** only when choosing the remedy
 genuinely requires investigation. Titles, when present, name the action and target.
+Each recommendation covers one fix. When there are several fixes, write a
+separate recommendation for each.
 
 Keep the opening near 100 words or fewer without padding a shorter explanation.
 Preserve uncertainty that could change the decision. Put supporting measurements,
