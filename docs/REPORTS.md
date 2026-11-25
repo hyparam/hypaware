@@ -84,9 +84,9 @@ and tables. The remote renders uploaded Markdown; no local render step is needed
 
 Publishing makes the report appear in your organization's
 [HypAware Cloud dashboard](https://app.hypaware.ai/), where your team can read it.
-On HypAware Cloud it also notifies the organization's members: by email, or,
-where the organization has connected Slack, by a post to its Slack channel
-instead of email by default. Each member's own email setting still applies.
+On HypAware Cloud it also emails the organization's members, following the
+organization's and each member's email settings. A report kept private to the
+member who made it is never announced. See [Notifications](NOTIFICATIONS.md).
 
 To share the generated report with your organization, replace `REPORT_NAME`
 with the saved name printed by `hyp report save` (a path to a folder works
