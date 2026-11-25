@@ -407,7 +407,9 @@ hyp query graph src/app.js --type File --depth 2 --direction in
 
 This command is read-only and supports remote execution. An unresolved or
 ambiguous seed returns `1`; invalid arguments return `2`. If the graph is
-empty, build it with `hyp graph project`.
+empty, build it with `hyp graph project`. If its nodes are there but their
+names are blank after an upgrade from an earlier release, run
+`hyp graph project --refresh` once.
 
 ### `hyp query vector`
 
@@ -2352,6 +2354,11 @@ recordings show now. One exception: a session's skill evidence edge (`ran` to a
 ones it had. `--source` limits projection to one source dataset, and
 `--dry-run` writes nothing. An empty successful result means that no
 eligible recordings exist.
+
+`--refresh` is also what an install upgraded from an earlier release needs
+once: it records the folders each graph row was built from, and until it runs
+every graph name stays blank. Rows whose recordings have since been deleted
+are not replaced, and stay blank.
 
 ```sh
 hyp graph project --dry-run

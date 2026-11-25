@@ -6,6 +6,7 @@ import { compareStrings } from 'hypaware/core/util'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
+import { parseSourceCwds } from '../../../../src/core/query/visibility.js'
 
 import {
   EDGE_COLUMNS,
@@ -19,7 +20,7 @@ import {
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { ExecuteSqlOptions, ExecuteSqlResult } from '../../../../src/core/query/types.js'
- * @import { Contract, ContractRule, GraphRow, RulePredicate } from './types.js'
+ * @import { Contract, ContractRule, GraphRow, RulePredicate, SourceProvenance } from './types.js'
  */
 
 /** The longest the rule loop runs before letting the event loop turn. */
@@ -123,13 +124,15 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
        *
        * @param {Record<string, unknown>} row
        * @param {ContractRule[]} rules
+       * @param {string | null} contribution the row's `source_cwds` contribution
        */
-      const applyRules = (row, rules) => {
+      const applyRules = (row, rules, contribution) => {
         for (const rule of rules) {
           if (rule.where && !matchesPredicate(rule.where, row)) continue
           const built = rule.toRows ? rule.toRows(row) : rule.toRow(row)
           if (!built) continue
           for (const item of Array.isArray(built) ? built : [built]) {
+            item.source_cwds = contribution
             const target = rule.kind === 'node' ? nodes : edges
             const idKey = rule.kind === 'node' ? 'node_id' : 'edge_id'
             const id = /** @type {string} */ (item[idKey])
@@ -138,6 +141,32 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
             else target.set(id, item)
           }
         }
+      }
+
+      // One encoded contribution per distinct folder, so rows from the same
+      // folder share a string and merging them is a reference compare.
+      /** @type {Map<string, string>} */
+      const folderContributions = new Map()
+      /**
+       * The `source_cwds` a source row contributes, from its dataset's kind
+       * and whether the scan's output carries `cwd` at all.
+       *
+       * @param {Record<string, unknown>} row
+       * @param {SourceProvenance} kind
+       * @returns {string | null}
+       */
+      const contributionOf = (row, kind) => {
+        if (kind === 'unknown') return null
+        if (kind === 'folderless') return FOLDERLESS
+        if (!('cwd' in row)) return null
+        const cwd = row.cwd
+        if (typeof cwd !== 'string' || cwd === '') return FOLDERLESS
+        let encoded = folderContributions.get(cwd)
+        if (encoded === undefined) {
+          encoded = JSON.stringify([cwd])
+          folderContributions.set(cwd, encoded)
+        }
+        return encoded
       }
 
       // A scan's rows arrive fully materialized, so the rule loop over them
@@ -156,6 +185,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
       let scanCount = 0
       for (const contract of contracts) {
         const keep = contract.rowFilter?.keep
+        const provenance = sourceProvenance(query, contract.sourceDataset)
         // A filter with a SQL form runs inside the shared scan, so its
         // columns (the gateway's `attributes`, which holds whole tool
         // outputs) are never materialized for every source row.
@@ -178,6 +208,8 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
             for (const col of predicateColumns(rule.where)) columns.add(col)
           }
           if (!pushed) for (const col of contract.rowFilter?.columns ?? []) columns.add(col)
+          // @ref LLP 0616#contribution [implements]: a cwd dataset's shared scan always reads cwd, so its rows contribute their folder
+          if (provenance === 'cwd') columns.add('cwd')
           // Cache-to-cache read: the projection's output stays in the local
           // cache, so the LLP 0105 visibility filter is bypassed here (else a
           // daemon-context projection would silently drop local-only sessions
@@ -200,7 +232,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
             if (yieldDue(i)) await yieldNow()
             const row = result.rows[i]
             if (keep && !pushed && !keep(row)) continue
-            applyRules(row, declarative)
+            applyRules(row, declarative, contributionOf(row, provenance))
           }
         }
 
@@ -233,7 +265,8 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
             if (yieldDue(i)) await yieldNow()
             const row = result.rows[i]
             if (keep && !keep(row)) continue
-            applyRules(row, rules)
+            // @ref LLP 0616#contribution [implements]: a raw-SQL rule that does not select cwd contributes unknown
+            applyRules(row, rules, contributionOf(row, provenance))
           }
         }
       }
@@ -292,6 +325,30 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
     },
     { component: 'plugin' }
   )
+}
+
+/** The encoded contribution of a source whose rows every caller can read raw. */
+const FOLDERLESS = '[]'
+
+/**
+ * What a source dataset's rows contribute to `source_cwds`, from its
+ * registration: `unknown` when it declares local-only content (its own
+ * content is suppressed raw) or is not registered, `cwd` when its rows carry
+ * a folder, and `folderless` when neither applies (every caller already
+ * reads those rows raw).
+ *
+ * @param {QueryRegistry} query
+ * @param {string} dataset
+ * @returns {SourceProvenance}
+ * @ref LLP 0616#contribution [implements]: a graph row inherits per contribution the visibility the raw seam gives its source row
+ */
+function sourceProvenance(query, dataset) {
+  // A bare registry double without lookup reads as unknown: fail closed.
+  const registration = query.getDataset?.(dataset)
+  if (!registration) return 'unknown'
+  if ((registration.localOnlyContentColumns?.length ?? 0) > 0) return 'unknown'
+  if (registration.schema?.columns?.some((column) => column.name === 'cwd')) return 'cwd'
+  return 'folderless'
 }
 
 /**
@@ -484,6 +541,59 @@ export function mergeRow(existing, incoming) {
   if (incomingTime !== undefined && (existingTime === undefined || incomingTime < existingTime)) {
     existing.first_seen = incoming.first_seen
   }
+  mergeSourceCwds(existing, incoming)
+}
+
+/**
+ * The accumulated row's folder set, kept beside the string it was decoded
+ * from so a long run of merges into one id decodes it once. Out-of-band like
+ * `propsProvenance`, so merged rows stay plain GraphRows.
+ *
+ * @type {WeakMap<GraphRow, { encoded: string, folders: Set<string> }>}
+ */
+const cwdsProvenance = new WeakMap()
+
+/**
+ * Union `incoming.source_cwds` into `existing.source_cwds`. Unknown (null,
+ * absent, or unreadable) absorbs: the union of unknown with anything is
+ * unknown. Otherwise the result is the sorted distinct folders of both, so
+ * the union is commutative and idempotent and merge order stays irrelevant.
+ * It never drops a folder, so no merge can make a row more visible.
+ *
+ * @param {GraphRow} existing
+ * @param {GraphRow} incoming
+ * @ref LLP 0616#merge [implements]: union of contributions; unknown absorbs; commutative and idempotent
+ */
+function mergeSourceCwds(existing, incoming) {
+  const current = existing.source_cwds
+  const added = incoming.source_cwds
+  if (current === added && typeof current === 'string') return
+  const addedFolders = typeof current === 'string' ? parseSourceCwds(added) : null
+  if (!addedFolders) {
+    existing.source_cwds = null
+    cwdsProvenance.delete(existing)
+    return
+  }
+  let entry = cwdsProvenance.get(existing)
+  if (!entry || entry.encoded !== current) {
+    const folders = parseSourceCwds(current)
+    if (!folders) {
+      existing.source_cwds = null
+      cwdsProvenance.delete(existing)
+      return
+    }
+    entry = { encoded: /** @type {string} */ (current), folders: new Set(folders) }
+    cwdsProvenance.set(existing, entry)
+  }
+  let grew = false
+  for (const folder of addedFolders) {
+    if (entry.folders.has(folder)) continue
+    entry.folders.add(folder)
+    grew = true
+  }
+  if (!grew) return
+  entry.encoded = JSON.stringify([...entry.folders].sort(compareStrings))
+  existing.source_cwds = entry.encoded
 }
 
 /**

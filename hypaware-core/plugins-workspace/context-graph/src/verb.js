@@ -153,16 +153,24 @@ export const graphNeighborsVerb = {
 
 /**
  * Stderr note when the LLP 0105 filter hid graph content from this caller.
+ * Suppression is split: rows a local-only or ignored folder contributed to need no
+ * action, while rows with no recorded provenance can be re-derived.
  *
  * @param {LocalOnlyVisibilityReport | undefined} localOnly
  * @returns {string}
+ * @ref LLP 0616#notice [implements]: hidden by a local-only or ignored folder versus no recorded provenance, the latter naming the refresh
  */
 function localOnlyNotice(localOnly) {
   if (!localOnly || (localOnly.withheldRows === 0 && localOnly.suppressedRows === 0)) return ''
   const parts = []
   if (localOnly.withheldRows > 0) parts.push(`withheld ${localOnly.withheldRows} row(s)`)
-  if (localOnly.suppressedRows > 0) {
-    parts.push(`suppressed content (labels/keys) on ${localOnly.suppressedRows} row(s) without per-row provenance`)
+  const folderHidden = localOnly.suppressedRows - localOnly.unprovenancedRows
+  if (folderHidden > 0) {
+    parts.push(`suppressed content (labels/keys) on ${folderHidden} row(s) drawn from a local-only or ignored folder`)
+  }
+  if (localOnly.unprovenancedRows > 0) {
+    parts.push(`suppressed content (labels/keys) on ${localOnly.unprovenancedRows} row(s) with no recorded provenance` +
+      ' (`hyp graph project --refresh` re-derives those whose sources are still recorded)')
   }
   return `local-only: ${parts.join('; ')} for this ${localOnly.callerClass === 'unknown' ? 'unknown-context' : localOnly.callerClass} caller ` +
     `(rerun with --include-local-only to include them; a captured session's transcript would then carry that content)\n`

@@ -4,6 +4,12 @@
 export type GraphRow = Record<string, unknown>
 
 /**
+ * What a source dataset's rows contribute to a graph row's `source_cwds`
+ * (LLP 0616 #contribution): their own `cwd`, nothing (`[]`), or unknown.
+ */
+export type SourceProvenance = 'cwd' | 'folderless' | 'unknown'
+
+/**
  * A partition the dedup compaction refused to rewrite, with the reason:
  * `unreadable-cursor` (cursor.json missing/corrupt, never treat as a
  * synthetic default when about to retire a generation), `unexpected-layout`

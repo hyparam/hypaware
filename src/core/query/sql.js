@@ -487,7 +487,7 @@ export async function* streamQuerySql(args) {
               rows: listed,
               datasets: [],
               freshnessMessages: [],
-              localOnly: { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 },
+              localOnly: { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0, unprovenancedRows: 0 },
             }
           } finally {
             args.signal?.throwIfAborted()
@@ -517,7 +517,7 @@ export async function* streamQuerySql(args) {
         // @ref LLP 0322#degrade-reaches-the-signals [implements]: a degraded run is not recorded as an ok run
         let refreshDegraded = false
         /** @type {LocalOnlyVisibilityReport} */
-        const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
+        const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0, unprovenancedRows: 0 }
 
         for (const name of tableNames) {
           const dataset = registry.getDataset(name)
@@ -748,6 +748,7 @@ export async function* streamQuerySql(args) {
               span.setAttribute('caller_usage_class', localOnly.callerClass)
               span.setAttribute('local_only_withheld_rows', localOnly.withheldRows)
               span.setAttribute('local_only_suppressed_rows', localOnly.suppressedRows)
+              span.setAttribute('local_only_unprovenanced_rows', localOnly.unprovenancedRows)
               // Counts only, never content or raw paths, matching the export
               // seam's `usage_policy.export_drop` discipline (LLP 0080 #telemetry).
               if (localOnly.withheldRows > 0 || localOnly.suppressedRows > 0) {
@@ -756,6 +757,8 @@ export async function* streamQuerySql(args) {
                   caller_usage_class: localOnly.callerClass,
                   withheld_row_count: localOnly.withheldRows,
                   suppressed_row_count: localOnly.suppressedRows,
+                  // @ref LLP 0616#notice [implements]: the split is counts only, never a path
+                  unprovenanced_row_count: localOnly.unprovenancedRows,
                 })
               }
 
