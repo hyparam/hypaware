@@ -10,7 +10,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/schema.js'
 
 /**
- * @import { HypError } from '../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, HypError } from '../../hypaware-plugin-kernel-types.js'
  * @import { Schema } from 'icebird/src/types.js'
  */
 
@@ -33,7 +33,7 @@ test('icebergSchemaForColumns maps every kernel basic type', () => {
     ['d', 'double', false, 4],
     ['b', 'boolean', true, 5],
     ['ts', 'timestamptz', true, 6],
-    ['j', 'string', false, 7],
+    ['j', 'variant', false, 7],
   ])
 })
 
@@ -138,15 +138,18 @@ test('mergeFieldIdsFromTable rejects nullable → required tightening', () => {
 })
 
 test('rowsToIcebergRecords coerces numeric strings and BigInt for INT64', () => {
+  /** @type {ColumnSpec[]} */
+  const columns = [
+    { name: 'id', type: 'INT64', nullable: false },
+    { name: 'tag', type: 'STRING', nullable: false },
+  ]
   const records = rowsToIcebergRecords(
-    [
-      { name: 'id', type: 'INT64', nullable: false },
-      { name: 'tag', type: 'STRING', nullable: false },
-    ],
+    columns,
     [
       { id: '42', tag: 'a' },
       { id: 7n, tag: 'b' },
-    ]
+    ],
+    icebergSchemaForColumns(columns)
   )
   assert.deepEqual(records, [
     { id: 42n, tag: 'a' },
@@ -159,16 +162,40 @@ test('rowsToIcebergRecords throws iceberg_data_write_failed on required nulls', 
     () =>
       rowsToIcebergRecords(
         [{ name: 'id', type: 'INT64', nullable: false }],
-        [{ id: null }]
+        [{ id: null }],
+        icebergSchemaForColumns([{ name: 'id', type: 'INT64', nullable: false }])
       ),
     (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_data_write_failed'
   )
 })
 
-test('rowsToIcebergRecords canonicalizes JSON objects to strings', () => {
+// @ref LLP 0618#variant [tests]: a variant column takes the value as given
+test('rowsToIcebergRecords passes JSON values through to a variant column', () => {
+  /** @type {ColumnSpec[]} */
+  const columns = [{ name: 'payload', type: 'JSON', nullable: true }]
   const records = rowsToIcebergRecords(
-    [{ name: 'payload', type: 'JSON', nullable: true }],
-    [{ payload: { a: 1 } }, { payload: '["already-json"]' }]
+    columns,
+    [{ payload: { a: 1 } }, { payload: 'text' }],
+    icebergSchemaForColumns(columns)
+  )
+  assert.deepEqual(records, [
+    { payload: { a: 1 } },
+    { payload: 'text' },
+  ])
+})
+
+// @ref LLP 0618#legacy-tables [tests]: a legacy string JSON column keeps the id and type and takes JSON text
+test('a legacy string JSON column keeps its type and receives JSON text', () => {
+  /** @type {ColumnSpec[]} */
+  const columns = [{ name: 'payload', type: 'JSON', nullable: true }]
+  /** @type {Schema} */
+  const existing = { type: 'struct', 'schema-id': 0, fields: [{ id: 1, name: 'payload', required: false, type: 'string' }] }
+  const schema = mergeFieldIdsFromTable(columns, existing)
+  assert.deepEqual(schema.fields, existing.fields)
+  const records = rowsToIcebergRecords(
+    columns,
+    [{ payload: { a: 1 } }, { payload: '["already-json"]' }],
+    schema
   )
   assert.deepEqual(records, [
     { payload: '{"a":1}' },
