@@ -412,3 +412,15 @@ export interface ClientAssetLedgerRecord {
    */
   digest?: string
 }
+
+/**
+ * The local config's `entrypoint` key: the copy of the CLI that owns this
+ * machine. `bin` is its `bin/hypaware.js`; `node` the runtime to start it with
+ * when it is not the invoking one (a native app's bundled node); `owner` a
+ * label for messages, such as `HypAware.app`.
+ */
+export interface EntrypointRecord {
+  bin: string
+  node?: string
+  owner?: string
+}

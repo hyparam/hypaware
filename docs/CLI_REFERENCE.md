@@ -2486,6 +2486,21 @@ self-update. Failures return `1` with a reason and repair guidance.
 
 See [updating and recovery](CLI.md#update-hypaware).
 
+### `hyp entrypoint`
+
+```text
+hyp entrypoint [show|claim|release] [--node <path>] [--owner <label>] [--force] [--json]
+```
+
+Shows or sets which copy of `hyp` owns this machine, recorded as the
+`entrypoint` key in the local config. When it names another copy that still
+exists, every command run from this copy runs there instead, so the service,
+the client hooks, and updates come from one place. An installer that bundles
+its own copy (the native app, an MDM package) runs `claim` through that copy;
+`--node` names the runtime to start it with. `release` clears it, from the
+owner or with `--force`. With nothing set, each copy runs its own commands.
+`HYP_NO_HANDOFF=1` runs the invoked copy regardless.
+
 ## Control product telemetry
 
 ### `hyp telemetry`

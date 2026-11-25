@@ -22,6 +22,12 @@ setting is organization policy only: `false` in the organization's config turns 
 [first-upload review](TEAM_SETUP.md#review-before-the-first-upload), and a local value has no effect. Each plugin owns its own `config` block. Use
 `hyp plugin info PLUGIN` to inspect an installed plugin's manifest.
 
+The top-level `entrypoint` setting names the copy of `hyp` that owns this
+machine, as `{ "bin": "<path to bin/hypaware.js>", "node": "<runtime>", "owner": "<label>" }`.
+An installer that bundles its own copy sets it with `hyp entrypoint claim`;
+every other copy then runs its commands there. It is local only: an
+organization's config cannot set it. See [`hyp entrypoint`](CLI_REFERENCE.md#hyp-entrypoint).
+
 On an enrolled host, a separate central layer under `config-control/` is
 authoritative. Local settings are additive and cannot override central locks.
 `hyp status --verbose` identifies each layer and any rejected local entries.

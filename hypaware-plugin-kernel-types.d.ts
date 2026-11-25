@@ -833,6 +833,13 @@ export interface HypAwareV2Config {
   first_sync_hold?: boolean
   /** Built-in export redaction is always applied; custom patterns add to it. */
   redaction?: ExportRedactionConfig
+  /**
+   * The copy of the CLI that owns this machine (LLP 0621): `bin` is its
+   * `bin/hypaware.js`, `node` the runtime to start it with, `owner` a label.
+   * Other copies hand their commands to it. Local only; a central value is
+   * ignored, because it names a path on one machine.
+   */
+  entrypoint?: { bin: string, node?: string, owner?: string }
 }
 
 export interface ExportRedactionConfig {

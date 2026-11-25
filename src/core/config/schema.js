@@ -8,6 +8,7 @@ import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
 import { BUILTIN_REMOTE_ALIASES, BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
 import { parseRedactionConfig } from '../sinks/redaction.js'
+import { parseEntrypoint } from '../runtime/entrypoint.js'
 
 /**
  * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../hypaware-plugin-kernel-types.js'
@@ -18,6 +19,7 @@ import { parseRedactionConfig } from '../sinks/redaction.js'
  *   LoadConfigResult,
  *   LocalConfigWriteGuard,
  * } from '../../../src/core/config/types.js'
+ * @import { EntrypointRecord } from '../../../src/core/runtime/types.js'
  */
 
 /**
@@ -377,6 +379,16 @@ export function parseConfigShape(value, { allowUnknownKeys = false } = {}) {
 
   const redaction = parseRedactionConfig(root.redaction, errors)
 
+  // @ref LLP 0621#config-key [implements]: which copy of the CLI owns this machine; written by `hyp entrypoint claim`
+  /** @type {EntrypointRecord|undefined} */
+  let entrypoint
+  if (root.entrypoint !== undefined) {
+    entrypoint = parseEntrypoint(root.entrypoint)
+    if (!entrypoint) {
+      errors.push({ pointer: '/entrypoint', message: 'entrypoint must be an object with an absolute bin path' })
+    }
+  }
+
   const unknownKeys = Object.keys(root).filter((key) => !RECOGNIZED_TOP_KEYS.has(key))
   if (!allowUnknownKeys) {
     for (const key of unknownKeys) {
@@ -395,10 +407,11 @@ export function parseConfigShape(value, { allowUnknownKeys = false } = {}) {
   if (autoUpdate !== undefined) config.auto_update = autoUpdate
   if (firstSyncHold !== undefined) config.first_sync_hold = firstSyncHold
   if (redaction !== undefined) config.redaction = redaction
+  if (entrypoint !== undefined) config.entrypoint = entrypoint
   return unknownKeys.length > 0 ? { ok: true, config, unknownKeys } : { ok: true, config }
 }
 
-const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'first_sync_hold', 'redaction'])
+const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'first_sync_hold', 'redaction', 'entrypoint'])
 
 /**
  * Build the kernel `ConfigRegistry`. Plugins call `registerSection`
