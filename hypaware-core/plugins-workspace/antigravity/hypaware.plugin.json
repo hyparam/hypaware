@@ -32,7 +32,7 @@
       {
         "name": "antigravity",
         "label": "Antigravity CLI",
-        "summary": "Records your Antigravity CLI (agy) conversations from local transcripts and installs the HypAware query and privacy plugin.",
+        "summary": "Records your Antigravity CLI (agy) chats. Setup adds HypAware skills.",
         "detect": {
           "settings_file": ".gemini/antigravity-cli/settings.json"
         },

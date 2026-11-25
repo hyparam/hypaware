@@ -13,7 +13,9 @@ integration.
 ## What is recorded
 
 Prompts, responses, tool calls, and token counts from Codex's session files, with
-the working directory of each session. Codex does not report cost.
+the working directory of each session. Codex does not report cost. The session
+files do not hold full tool definitions, so they are not recorded; the gateway
+capture mode below records them.
 
 A remote compaction call's tokens are recorded on a row of their own: a
 `role = 'system'` status row with `provider_subtype = 'compaction.usage'` and
@@ -31,9 +33,9 @@ hyp attach codex
 hyp client status codex
 ```
 
-Attach covers both the CLI and the desktop app, installs HypAware's skills in
-`~/.codex/skills` and its `hypaware-analyst` agent in `~/.codex/agents`, and
-adds a hook that records each session's working directory.
+Attach covers both the CLI and the desktop app, and installs HypAware's skills
+in `~/.codex/skills` and its `hypaware-analyst` agent in `~/.codex/agents`.
+Each session's working directory comes from its session file.
 
 ## Import existing history
 

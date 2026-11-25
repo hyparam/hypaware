@@ -24,7 +24,7 @@
       {
         "name": "claude-desktop",
         "label": "Claude Desktop",
-        "summary": "Imports your Claude Desktop chats every five minutes; makes no changes to Claude Desktop and needs no sign-in or admin approval. Also records Claude Code: imports your Claude Code history and may edit its settings. Opens a local port.",
+        "summary": "Records your Claude Desktop and Claude Code chats. Setup edits Claude Code's settings and opens a local port.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
         "platforms": ["darwin"],
         "compose": {

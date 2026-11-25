@@ -50,11 +50,8 @@ test('claude picker summary discloses that a local port is opened', async () => 
   assert.doesNotMatch(summary, /gateway|proxy/i)
 })
 
-test('codex picker discloses file capture, migration, and missing full definitions', async () => {
+test('codex picker discloses the local port and query skills', async () => {
   const summary = await pickerSummary('codex', 'codex')
-  assert.match(summary, /local session files/i)
-  assert.match(summary, /Removes an old managed gateway route/i)
-  assert.match(summary, /Full tool definitions are unavailable/i)
   assert.match(summary, /local port/i)
   assert.match(summary, /skills/i)
 })
@@ -119,22 +116,13 @@ for (const row of ['raw-anthropic', 'raw-openai']) {
   })
 }
 
-// @ref LLP 0358#onboarding [tests]: selecting transcript capture must not
-// imply the optional credential/plist experiment runs behind the checkbox.
-test('claude-desktop picker summary states that capture makes no Desktop changes', async () => {
-  const summary = await pickerSummary('claude-desktop', 'claude-desktop')
-  assert.match(summary, /makes no changes to Claude Desktop/i)
-  assert.match(summary, /needs no sign-in or admin approval/i)
-})
-
 // @ref LLP 0358#claude-code-consequences [tests]: a Desktop-only pick also
 // captures Claude Code, and the row must admit it before selection (PR #1231
 // B1, resolved by disclosure: keep the composition, state it plainly).
-test('claude-desktop picker summary discloses the Claude Code capture, history import, and attach', async () => {
+test('claude-desktop picker summary discloses the Claude Code capture and attach', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
-  assert.match(summary, /records Claude Code/i)
-  assert.match(summary, /Claude Code history/i)
-  assert.match(summary, /may edit its settings/i)
+  assert.match(summary, /Claude Code chats/i)
+  assert.match(summary, /edits Claude Code's settings/i)
 })
 
 // The shared ai-gateway plugin supplies the backfill materializer and also

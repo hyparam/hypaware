@@ -7,6 +7,7 @@
 **Date:** 2026-09-08
 **Related:** LLP 0180 (extended here: the finale's sweep disclosure), LLP 0174 (the manual path's disclosure, unchanged), LLP 0170 (the sweep itself), LLP 0341 (the dead-surface and decline notices this line sits beside), LLP 0021 (observability)
 **Tracker:** hyparam/hypaware#1479
+**Extended-by:** LLP 0627 (#no-history: the OpenClaw picker row no longer states the recurring import)
 
 > Every setup run printed a scan report per backfill provider, and a
 > sweep-backed provider printed a disclosure line above it as well. On the

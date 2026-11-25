@@ -28,7 +28,7 @@
       {
         "name": "droid",
         "label": "Factory Droid",
-        "summary": "Records Factory Droid conversations and imports recent history. Setup adds HypAware hooks.",
+        "summary": "Records your Factory Droid chats. Setup adds HypAware hooks.",
         "detect": {
           "settings_file": ".factory/settings.json"
         },
